@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "warehouse-system": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "warehouse_mcp"]
+    }
+  }
+}

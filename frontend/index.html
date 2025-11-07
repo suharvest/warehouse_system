@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>仓库管理系统 - 仪表盘</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>仓库管理系统</h1>
+            <button class="refresh-btn" onclick="refreshData()">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                </svg>
+                刷新
+            </button>
+        </header>
+
+        <div class="subtitle">访问统计概览</div>
+
+        <!-- 统计卡片 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <div class="stat-label">库存总量</div>
+                    <div class="stat-value" id="total-stock">-</div>
+                    <div class="stat-subtitle">个/件</div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 4 23 10 17 10"></polyline>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <div class="stat-label">今日入库</div>
+                    <div class="stat-value" id="today-in">-</div>
+                    <div class="stat-change positive" id="in-change">+0%</div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="1 4 1 10 7 10"></polyline>
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <div class="stat-label">今日出库</div>
+                    <div class="stat-value" id="today-out">-</div>
+                    <div class="stat-change positive" id="out-change">+0%</div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                        <line x1="12" y1="9" x2="12" y2="13"></line>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <div class="stat-label">库存预警</div>
+                    <div class="stat-value" id="low-stock-count">-</div>
+                    <div class="stat-subtitle">种物料</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 图表区域 -->
+        <div class="charts-container">
+            <div class="chart-wrapper">
+                <div class="chart-title">近7天出入库趋势</div>
+                <div id="trend-chart" class="chart"></div>
+            </div>
+
+            <div class="chart-wrapper">
+                <div class="chart-title">库存类型分布</div>
+                <div id="category-chart" class="chart"></div>
+            </div>
+        </div>
+
+        <!-- 库存列表 -->
+        <div class="alert-section">
+            <div class="section-header">
+                <div class="section-title">库存列表</div>
+                <div class="filter-controls">
+                    <input type="text" id="search-input" class="search-input" placeholder="搜索产品名称...">
+                    <span class="update-info">自动更新: <span id="countdown">3</span>秒</span>
+                </div>
+            </div>
+            <div class="table-container">
+                <table id="inventory-table">
+                    <thead>
+                        <tr>
+                            <th>物料名称</th>
+                            <th>物料编码</th>
+                            <th>类型</th>
+                            <th>当前库存</th>
+                            <th>单位</th>
+                            <th>安全库存</th>
+                            <th>状态</th>
+                            <th>存放位置</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inventory-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="chart-wrapper full-width">
+            <div class="chart-title">库存TOP10</div>
+            <div id="top-stock-chart" class="chart"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
