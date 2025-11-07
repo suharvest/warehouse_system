@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import sqlite3
@@ -278,6 +278,211 @@ def get_all_materials():
 
     conn.close()
     return jsonify(data)
+
+
+@app.route('/api/materials/product-stats', methods=['GET'])
+def get_product_stats():
+    """获取单个产品的统计数据"""
+    product_name = request.args.get('name', '')
+
+    if not product_name:
+        return jsonify({'error': '缺少产品名称参数'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 查询产品基本信息
+    cursor.execute('''
+        SELECT id, name, sku, quantity, unit, safe_stock, location
+        FROM materials
+        WHERE name = ?
+    ''', (product_name,))
+
+    product = cursor.fetchone()
+    if not product:
+        conn.close()
+        return jsonify({'error': '产品不存在'}), 404
+
+    material_id = product['id']
+    current_stock = product['quantity']
+    unit = product['unit']
+    safe_stock = product['safe_stock']
+
+    # 获取今天的日期
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime('%Y-%m-%d')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+
+    # 查询今日入库
+    cursor.execute('''
+        SELECT COALESCE(SUM(quantity), 0) as total
+        FROM inventory_records
+        WHERE material_id = ? AND type = 'in' AND DATE(created_at) = ?
+    ''', (material_id, today))
+    today_in = cursor.fetchone()['total']
+
+    # 查询昨日入库
+    cursor.execute('''
+        SELECT COALESCE(SUM(quantity), 0) as total
+        FROM inventory_records
+        WHERE material_id = ? AND type = 'in' AND DATE(created_at) = ?
+    ''', (material_id, yesterday))
+    yesterday_in = cursor.fetchone()['total']
+
+    # 查询今日出库
+    cursor.execute('''
+        SELECT COALESCE(SUM(quantity), 0) as total
+        FROM inventory_records
+        WHERE material_id = ? AND type = 'out' AND DATE(created_at) = ?
+    ''', (material_id, today))
+    today_out = cursor.fetchone()['total']
+
+    # 查询昨日出库
+    cursor.execute('''
+        SELECT COALESCE(SUM(quantity), 0) as total
+        FROM inventory_records
+        WHERE material_id = ? AND type = 'out' AND DATE(created_at) = ?
+    ''', (material_id, yesterday))
+    yesterday_out = cursor.fetchone()['total']
+
+    # 查询总入库和总出库（用于饼图）
+    cursor.execute('''
+        SELECT COALESCE(SUM(quantity), 0) as total
+        FROM inventory_records
+        WHERE material_id = ? AND type = 'in'
+    ''', (material_id,))
+    total_in = cursor.fetchone()['total']
+
+    cursor.execute('''
+        SELECT COALESCE(SUM(quantity), 0) as total
+        FROM inventory_records
+        WHERE material_id = ? AND type = 'out'
+    ''', (material_id,))
+    total_out = cursor.fetchone()['total']
+
+    conn.close()
+
+    # 计算变化百分比
+    in_change = ((today_in - yesterday_in) / yesterday_in * 100) if yesterday_in > 0 else 0
+    out_change = ((today_out - yesterday_out) / yesterday_out * 100) if yesterday_out > 0 else 0
+
+    return jsonify({
+        'name': product_name,
+        'sku': product['sku'],
+        'current_stock': current_stock,
+        'unit': unit,
+        'safe_stock': safe_stock,
+        'location': product['location'],
+        'today_in': today_in,
+        'today_out': today_out,
+        'in_change': round(in_change, 1),
+        'out_change': round(out_change, 1),
+        'total_in': total_in,
+        'total_out': total_out
+    })
+
+
+@app.route('/api/materials/product-trend', methods=['GET'])
+def get_product_trend():
+    """获取单个产品的近7天趋势"""
+    product_name = request.args.get('name', '')
+
+    if not product_name:
+        return jsonify({'error': '缺少产品名称参数'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 查询产品ID
+    cursor.execute('SELECT id FROM materials WHERE name = ?', (product_name,))
+    product = cursor.fetchone()
+    if not product:
+        conn.close()
+        return jsonify({'error': '产品不存在'}), 404
+
+    material_id = product['id']
+
+    # 获取近7天的日期
+    from datetime import datetime, timedelta
+    dates = []
+    for i in range(6, -1, -1):
+        date = (datetime.now() - timedelta(days=i)).strftime('%m-%d')
+        dates.append(date)
+
+    # 查询每天的入库和出库数据
+    in_data = []
+    out_data = []
+
+    for i in range(6, -1, -1):
+        date = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
+
+        # 查询当天入库
+        cursor.execute('''
+            SELECT COALESCE(SUM(quantity), 0) as total
+            FROM inventory_records
+            WHERE material_id = ? AND type = 'in' AND DATE(created_at) = ?
+        ''', (material_id, date))
+        in_data.append(cursor.fetchone()['total'])
+
+        # 查询当天出库
+        cursor.execute('''
+            SELECT COALESCE(SUM(quantity), 0) as total
+            FROM inventory_records
+            WHERE material_id = ? AND type = 'out' AND DATE(created_at) = ?
+        ''', (material_id, date))
+        out_data.append(cursor.fetchone()['total'])
+
+    conn.close()
+
+    return jsonify({
+        'dates': dates,
+        'in_data': in_data,
+        'out_data': out_data
+    })
+
+
+@app.route('/api/materials/product-records', methods=['GET'])
+def get_product_records():
+    """获取单个产品的出入库记录"""
+    product_name = request.args.get('name', '')
+
+    if not product_name:
+        return jsonify({'error': '缺少产品名称参数'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 查询产品ID
+    cursor.execute('SELECT id FROM materials WHERE name = ?', (product_name,))
+    product = cursor.fetchone()
+    if not product:
+        conn.close()
+        return jsonify({'error': '产品不存在'}), 404
+
+    material_id = product['id']
+
+    # 查询最近30条记录
+    cursor.execute('''
+        SELECT type, quantity, operator, reason, created_at
+        FROM inventory_records
+        WHERE material_id = ?
+        ORDER BY created_at DESC
+        LIMIT 30
+    ''', (material_id,))
+
+    records = []
+    for row in cursor.fetchall():
+        records.append({
+            'type': row['type'],
+            'quantity': row['quantity'],
+            'operator': row['operator'],
+            'reason': row['reason'],
+            'created_at': row['created_at']
+        })
+
+    conn.close()
+    return jsonify(records)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=2124, debug=False)

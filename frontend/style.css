@@ -275,6 +275,57 @@ tbody tr:hover {
     background: #fff2f0;
 }
 
+/* 可点击行 */
+tbody tr.clickable {
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+tbody tr.clickable:hover {
+    background: #e6f7ff !important;
+    transform: translateX(2px);
+}
+
+/* 返回按钮 */
+.back-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 8px 16px;
+    background: #fff;
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    color: #595959;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.back-btn:hover {
+    color: #1890ff;
+    border-color: #1890ff;
+    background: #f0f8ff;
+}
+
+/* 出入库类型标签 */
+.type-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.type-in {
+    color: #52c41a;
+    background: #f6ffed;
+}
+
+.type-out {
+    color: #ff4d4f;
+    background: #fff2f0;
+}
+
 /* 响应式 */
 @media (max-width: 768px) {
     .stats-grid {

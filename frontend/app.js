@@ -401,6 +401,7 @@ function renderInventoryTable(data) {
 
     data.forEach(item => {
         const tr = document.createElement('tr');
+        tr.className = 'clickable';
 
         let statusBadge = '';
         if (item.status === 'normal') {
@@ -421,6 +422,12 @@ function renderInventoryTable(data) {
             <td>${statusBadge}</td>
             <td>${item.location}</td>
         `;
+
+        // 添加点击事件，跳转到产品详情页
+        tr.addEventListener('click', function() {
+            window.location.href = `product_detail.html?product=${encodeURIComponent(item.name)}`;
+        });
+
         tbody.appendChild(tr);
     });
 }
