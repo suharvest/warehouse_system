@@ -168,6 +168,7 @@ header h1 {
     border-radius: 12px;
     padding: 24px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    margin-bottom: 20px;
 }
 
 .section-header {
@@ -324,6 +325,80 @@ tbody tr.clickable:hover {
 .type-out {
     color: #ff4d4f;
     background: #fff2f0;
+}
+
+/* 头部操作区域 */
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* 语言切换下拉菜单 */
+.lang-dropdown {
+    position: relative;
+}
+
+.lang-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: #fff;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #333;
+    transition: all 0.3s;
+}
+
+.lang-btn:hover {
+    background: #f6f8fa;
+    border-color: #d0d7de;
+}
+
+.lang-dropdown-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: #fff;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    min-width: 120px;
+    z-index: 1000;
+    display: none;
+}
+
+.lang-dropdown-menu.show {
+    display: block;
+}
+
+.lang-option {
+    padding: 10px 16px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #333;
+    transition: background 0.2s;
+}
+
+.lang-option:first-child {
+    border-radius: 6px 6px 0 0;
+}
+
+.lang-option:last-child {
+    border-radius: 0 0 6px 6px;
+}
+
+.lang-option:hover {
+    background: #f6f8fa;
+}
+
+.lang-option.active {
+    color: #667eea;
+    background: #f0f4ff;
 }
 
 /* 响应式 */

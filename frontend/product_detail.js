@@ -4,6 +4,11 @@ const API_BASE_URL = 'http://localhost:2124/api';
 let trendChart, pieChart;
 let productName = '';
 
+// 保存产品统计数据用于语言切换
+let lastProductStats = null;
+// 保存记录数据用于语言切换
+let lastRecords = [];
+
 // 页面加载完成后初始化
 document.addEventListener('DOMContentLoaded', function() {
     // 从URL参数获取产品名称
@@ -11,7 +16,7 @@ document.addEventListener('DOMContentLoaded', function() {
     productName = urlParams.get('product') || '';
 
     if (!productName) {
-        alert('未指定产品');
+        alert(t('productNotFound'));
         goBack();
         return;
     }
@@ -21,6 +26,38 @@ document.addEventListener('DOMContentLoaded', function() {
     initCharts();
     loadProductData();
 });
+
+// 语言变更回调
+function onLanguageChange() {
+    document.title = t('detailPageTitle');
+    // 重新渲染需要翻译的动态内容
+    if (lastProductStats) {
+        updateStockStatus(lastProductStats);
+    }
+    if (lastRecords.length > 0) {
+        renderRecordsTable(lastRecords);
+    }
+    // 重新加载图表以更新图例
+    loadProductTrend();
+    if (lastProductStats) {
+        loadPieChart(lastProductStats.total_in, lastProductStats.total_out);
+    }
+}
+
+// 更新库存状态显示
+function updateStockStatus(data) {
+    const statusElem = document.getElementById('stock-status');
+    if (data.current_stock >= data.safe_stock) {
+        statusElem.textContent = t('statusNormal');
+        statusElem.style.color = '#52c41a';
+    } else if (data.current_stock >= data.safe_stock * 0.5) {
+        statusElem.textContent = t('statusWarning');
+        statusElem.style.color = '#faad14';
+    } else {
+        statusElem.textContent = t('statusDanger');
+        statusElem.style.color = '#f5222d';
+    }
+}
 
 // 返回首页
 function goBack() {
@@ -49,7 +86,7 @@ async function loadProductData() {
         ]);
     } catch (error) {
         console.error('加载数据失败:', error);
-        alert('加载数据失败，请检查后端服务是否启动');
+        alert(t('loadError'));
     }
 }
 
@@ -63,6 +100,9 @@ async function loadProductStats() {
         goBack();
         return;
     }
+
+    // 保存数据用于语言切换
+    lastProductStats = data;
 
     // 更新统计卡片
     document.getElementById('current-stock').textContent = data.current_stock.toLocaleString();
@@ -81,17 +121,7 @@ async function loadProductStats() {
     outChange.className = data.out_change >= 0 ? 'stat-change positive' : 'stat-change negative';
 
     // 更新库存状态
-    const statusElem = document.getElementById('stock-status');
-    if (data.current_stock >= data.safe_stock) {
-        statusElem.textContent = '正常';
-        statusElem.style.color = '#52c41a';
-    } else if (data.current_stock >= data.safe_stock * 0.5) {
-        statusElem.textContent = '偏低';
-        statusElem.style.color = '#faad14';
-    } else {
-        statusElem.textContent = '告急';
-        statusElem.style.color = '#f5222d';
-    }
+    updateStockStatus(data);
 
     // 更新饼图
     loadPieChart(data.total_in, data.total_out);
@@ -110,7 +140,7 @@ async function loadProductTrend() {
             }
         },
         legend: {
-            data: ['入库', '出库'],
+            data: [t('inbound'), t('outbound')],
             textStyle: {
                 fontSize: 12
             }
@@ -152,7 +182,7 @@ async function loadProductTrend() {
         },
         series: [
             {
-                name: '入库',
+                name: t('inbound'),
                 type: 'line',
                 smooth: true,
                 data: data.in_data,
@@ -180,7 +210,7 @@ async function loadProductTrend() {
                 }
             },
             {
-                name: '出库',
+                name: t('outbound'),
                 type: 'line',
                 smooth: true,
                 data: data.out_data,
@@ -210,7 +240,7 @@ async function loadProductTrend() {
         ]
     };
 
-    trendChart.setOption(option);
+    trendChart.setOption(option, true);
 }
 
 // 加载饼图
@@ -230,7 +260,7 @@ function loadPieChart(totalIn, totalOut) {
         },
         series: [
             {
-                name: '出入库',
+                name: t('inOutRatio'),
                 type: 'pie',
                 radius: ['40%', '70%'],
                 avoidLabelOverlap: false,
@@ -253,20 +283,23 @@ function loadPieChart(totalIn, totalOut) {
                     show: false
                 },
                 data: [
-                    { value: totalIn, name: '入库', itemStyle: { color: '#5470c6' } },
-                    { value: totalOut, name: '出库', itemStyle: { color: '#ee6666' } }
+                    { value: totalIn, name: t('inbound'), itemStyle: { color: '#5470c6' } },
+                    { value: totalOut, name: t('outbound'), itemStyle: { color: '#ee6666' } }
                 ]
             }
         ]
     };
 
-    pieChart.setOption(option);
+    pieChart.setOption(option, true);
 }
 
 // 加载出入库记录
 async function loadProductRecords() {
     const response = await fetch(`${API_BASE_URL}/materials/product-records?name=${encodeURIComponent(productName)}`);
     const data = await response.json();
+
+    // 保存记录数据用于语言切换
+    lastRecords = data;
 
     renderRecordsTable(data);
 }
@@ -277,14 +310,14 @@ function renderRecordsTable(records) {
     tbody.innerHTML = '';
 
     if (records.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #999;">暂无记录</td></tr>';
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
     records.forEach(record => {
         const tr = document.createElement('tr');
 
-        const typeText = record.type === 'in' ? '入库' : '出库';
+        const typeText = record.type === 'in' ? t('inbound') : t('outbound');
         const typeClass = record.type === 'in' ? 'type-in' : 'type-out';
 
         tr.innerHTML = `

@@ -6,21 +6,41 @@
     <title>仓库管理系统 - 仪表盘</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="i18n.js"></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>仓库管理系统</h1>
-            <button class="refresh-btn" onclick="refreshData()">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                </svg>
-                刷新
-            </button>
+            <h1 data-i18n="systemTitle">仓库管理系统</h1>
+            <div class="header-actions">
+                <div class="lang-dropdown">
+                    <button class="lang-btn" onclick="toggleLangDropdown()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="2" y1="12" x2="22" y2="12"></line>
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                        </svg>
+                        <span id="current-lang-text">中文简体</span>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="6 9 12 15 18 9"></polyline>
+                        </svg>
+                    </button>
+                    <div class="lang-dropdown-menu" id="lang-dropdown-menu">
+                        <div class="lang-option" onclick="selectLanguage('zh')">中文简体</div>
+                        <div class="lang-option" onclick="selectLanguage('en')">English</div>
+                    </div>
+                </div>
+                <button class="refresh-btn" onclick="refreshData()">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                    </svg>
+                    <span data-i18n="refresh">刷新</span>
+                </button>
+            </div>
         </header>
 
-        <div class="subtitle">访问统计概览</div>
+        <div class="subtitle" data-i18n="subtitle">访问统计概览</div>
 
         <!-- 统计卡片 -->
         <div class="stats-grid">
@@ -33,9 +53,9 @@
                     </svg>
                 </div>
                 <div class="stat-content">
-                    <div class="stat-label">库存总量</div>
+                    <div class="stat-label" data-i18n="totalStock">库存总量</div>
                     <div class="stat-value" id="total-stock">-</div>
-                    <div class="stat-subtitle">个/件</div>
+                    <div class="stat-subtitle" data-i18n="unit">个/件</div>
                 </div>
             </div>
 
@@ -47,7 +67,7 @@
                     </svg>
                 </div>
                 <div class="stat-content">
-                    <div class="stat-label">今日入库</div>
+                    <div class="stat-label" data-i18n="todayIn">今日入库</div>
                     <div class="stat-value" id="today-in">-</div>
                     <div class="stat-change positive" id="in-change">+0%</div>
                 </div>
@@ -61,7 +81,7 @@
                     </svg>
                 </div>
                 <div class="stat-content">
-                    <div class="stat-label">今日出库</div>
+                    <div class="stat-label" data-i18n="todayOut">今日出库</div>
                     <div class="stat-value" id="today-out">-</div>
                     <div class="stat-change positive" id="out-change">+0%</div>
                 </div>
@@ -76,9 +96,9 @@
                     </svg>
                 </div>
                 <div class="stat-content">
-                    <div class="stat-label">库存预警</div>
+                    <div class="stat-label" data-i18n="lowStockAlert">库存预警</div>
                     <div class="stat-value" id="low-stock-count">-</div>
-                    <div class="stat-subtitle">种物料</div>
+                    <div class="stat-subtitle" data-i18n="materialTypes">种物料</div>
                 </div>
             </div>
         </div>
@@ -86,12 +106,12 @@
         <!-- 图表区域 -->
         <div class="charts-container">
             <div class="chart-wrapper">
-                <div class="chart-title">近7天出入库趋势</div>
+                <div class="chart-title" data-i18n="weeklyTrend">近7天出入库趋势</div>
                 <div id="trend-chart" class="chart"></div>
             </div>
 
             <div class="chart-wrapper">
-                <div class="chart-title">库存类型分布</div>
+                <div class="chart-title" data-i18n="categoryDistribution">库存类型分布</div>
                 <div id="category-chart" class="chart"></div>
             </div>
         </div>
@@ -99,24 +119,24 @@
         <!-- 库存列表 -->
         <div class="alert-section">
             <div class="section-header">
-                <div class="section-title">库存列表</div>
+                <div class="section-title" data-i18n="inventoryList">库存列表</div>
                 <div class="filter-controls">
-                    <input type="text" id="search-input" class="search-input" placeholder="搜索产品名称...">
-                    <span class="update-info">自动更新: <span id="countdown">3</span>秒</span>
+                    <input type="text" id="search-input" class="search-input" data-i18n="searchPlaceholder" placeholder="搜索产品名称...">
+                    <span class="update-info"><span data-i18n="autoUpdate">自动更新:</span> <span id="countdown">3</span><span data-i18n="seconds">秒</span></span>
                 </div>
             </div>
             <div class="table-container">
                 <table id="inventory-table">
                     <thead>
                         <tr>
-                            <th>物料名称</th>
-                            <th>物料编码</th>
-                            <th>类型</th>
-                            <th>当前库存</th>
-                            <th>单位</th>
-                            <th>安全库存</th>
-                            <th>状态</th>
-                            <th>存放位置</th>
+                            <th data-i18n="materialName">物料名称</th>
+                            <th data-i18n="materialCode">物料编码</th>
+                            <th data-i18n="type">类型</th>
+                            <th data-i18n="currentStockCol">当前库存</th>
+                            <th data-i18n="unitCol">单位</th>
+                            <th data-i18n="safeStockCol">安全库存</th>
+                            <th data-i18n="status">状态</th>
+                            <th data-i18n="location">存放位置</th>
                         </tr>
                     </thead>
                     <tbody id="inventory-tbody">
@@ -126,7 +146,7 @@
         </div>
 
         <div class="chart-wrapper full-width">
-            <div class="chart-title">库存TOP10</div>
+            <div class="chart-title" data-i18n="topStock">库存TOP10</div>
             <div id="top-stock-chart" class="chart"></div>
         </div>
     </div>

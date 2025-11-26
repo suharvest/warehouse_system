@@ -53,6 +53,23 @@ function refreshData() {
     resetCountdown();
 }
 
+// 语言变更回调
+function onLanguageChange() {
+    document.title = t('pageTitle');
+    // 重新渲染表格以更新状态文本
+    if (allMaterials.length > 0) {
+        const searchInput = document.getElementById('search-input');
+        const keyword = searchInput ? searchInput.value.toLowerCase().trim() : '';
+        if (keyword) {
+            filterMaterials(keyword);
+        } else {
+            renderInventoryTable(allMaterials);
+        }
+    }
+    // 重新加载图表以更新图例
+    loadWeeklyTrend();
+}
+
 // 初始化搜索过滤
 function initSearchFilter() {
     const searchInput = document.getElementById('search-input');
@@ -185,7 +202,7 @@ async function loadWeeklyTrend() {
             }
         },
         legend: {
-            data: ['入库', '出库'],
+            data: [t('inbound'), t('outbound')],
             textStyle: {
                 fontSize: 12
             }
@@ -227,7 +244,7 @@ async function loadWeeklyTrend() {
         },
         series: [
             {
-                name: '入库',
+                name: t('inbound'),
                 type: 'line',
                 smooth: true,
                 data: data.in_data,
@@ -255,7 +272,7 @@ async function loadWeeklyTrend() {
                 }
             },
             {
-                name: '出库',
+                name: t('outbound'),
                 type: 'line',
                 smooth: true,
                 data: data.out_data,
@@ -285,7 +302,7 @@ async function loadWeeklyTrend() {
         ]
     };
 
-    trendChart.setOption(option);
+    trendChart.setOption(option, true);
 }
 
 // 加载库存TOP10
@@ -395,7 +412,7 @@ function renderInventoryTable(data) {
     tbody.innerHTML = '';
 
     if (data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #999;">暂无数据</td></tr>';
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: #999;">${t('noData')}</td></tr>`;
         return;
     }
 
@@ -403,14 +420,20 @@ function renderInventoryTable(data) {
         const tr = document.createElement('tr');
         tr.className = 'clickable';
 
-        let statusBadge = '';
+        // 根据状态码获取翻译后的状态文本
+        let statusText = '';
+        let statusClass = '';
         if (item.status === 'normal') {
-            statusBadge = `<span class="status-badge status-normal">${item.status_text}</span>`;
+            statusText = t('statusNormal');
+            statusClass = 'status-normal';
         } else if (item.status === 'warning') {
-            statusBadge = `<span class="status-badge status-warning">${item.status_text}</span>`;
+            statusText = t('statusWarning');
+            statusClass = 'status-warning';
         } else {
-            statusBadge = `<span class="status-badge status-danger">${item.status_text}</span>`;
+            statusText = t('statusDanger');
+            statusClass = 'status-danger';
         }
+        const statusBadge = `<span class="status-badge ${statusClass}">${statusText}</span>`;
 
         tr.innerHTML = `
             <td>${item.name}</td>
