@@ -14,8 +14,12 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
         super().end_headers()
 
+# 允许端口重用，解决 "Address already in use" 问题
+class ReuseAddrTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
 if __name__ == '__main__':
-    with socketserver.TCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
+    with ReuseAddrTCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
         print(f"前端服务运行在 http://localhost:{PORT}")
         print("按 Ctrl+C 停止服务")
         try:

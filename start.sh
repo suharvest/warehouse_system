@@ -27,9 +27,41 @@ else
     echo "数据库已存在，跳过初始化"
 fi
 
+# 清理函数 - 确保所有子进程都被终止
+cleanup() {
+    echo ''
+    echo '正在停止服务...'
+
+    # 终止已知的 PID
+    [ -n "$BACKEND_PID" ] && kill $BACKEND_PID 2>/dev/null
+    [ -n "$FRONTEND_PID" ] && kill $FRONTEND_PID 2>/dev/null
+
+    # 等待一下让进程正常退出
+    sleep 1
+
+    # 强制终止可能残留的进程（按端口）
+    lsof -ti:2124 | xargs kill -9 2>/dev/null
+    lsof -ti:2125 | xargs kill -9 2>/dev/null
+
+    # 强制终止可能残留的进程（按名称）
+    pkill -9 -f "run_backend.py" 2>/dev/null
+    pkill -9 -f "frontend/server.py" 2>/dev/null
+
+    echo '所有服务已停止'
+    exit 0
+}
+
+# 在启动服务前设置信号处理
+trap cleanup INT TERM EXIT
+
 echo ""
 echo "启动服务..."
 echo ""
+
+# 先清理可能残留的进程
+lsof -ti:2124 | xargs kill -9 2>/dev/null
+lsof -ti:2125 | xargs kill -9 2>/dev/null
+sleep 1
 
 # 启动后端服务
 echo "启动后端服务 (端口 2124)..."
@@ -45,30 +77,21 @@ FRONTEND_PID=$!
 
 sleep 2
 
-# 启动 MCP 服务
-echo "启动 MCP 服务..."
-cd mcp
-uv run python mcp_pipe.py warehouse_mcp.py &
-MCP_PID=$!
-cd ..
-
-sleep 1
-
 echo ""
 echo "================================"
 echo "  服务启动成功！"
 echo "================================"
 echo ""
 echo "后端 API: http://localhost:2124"
+echo "API 文档: http://localhost:2124/docs"
 echo "前端页面: http://localhost:2125"
-echo "MCP 服务: 已启动"
 echo ""
 echo "请在浏览器中打开: http://localhost:2125"
+echo ""
+echo "如需启动 MCP 服务，请运行: cd mcp && ./start_mcp.sh"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
 echo ""
 
-# 等待中断信号
-trap "echo ''; echo '正在停止服务...'; kill $BACKEND_PID $FRONTEND_PID $MCP_PID 2>/dev/null; exit" INT TERM
-
+# 等待子进程
 wait

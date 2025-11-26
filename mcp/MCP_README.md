@@ -317,9 +317,12 @@ MCP 操作完成后，前端界面（http://localhost:2125）会在3秒内自动
 
 ### 更新机制
 
-1. MCP 工具直接修改数据库
-2. 前端每3秒自动刷新库存列表
-3. 无需手动刷新页面即可看到变化
+1. MCP 工具通过 HTTP API 调用后端服务
+2. 后端服务修改数据库
+3. 前端每3秒自动刷新库存列表
+4. 无需手动刷新页面即可看到变化
+
+**注意**：使用 MCP 服务前，请确保后端服务（端口 2124）已启动。
 
 ### 验证更新
 
@@ -373,6 +376,38 @@ MCP 操作完成后，前端界面（http://localhost:2125）会在3秒内自动
    }
    ```
 
+## 启动 MCP 服务
+
+### 使用独立启动脚本
+
+MCP 服务已独立为单独的启动脚本，需要在脚本中配置 `MCP_ENDPOINT`。
+
+**macOS/Linux:**
+```bash
+cd mcp
+# 编辑 start_mcp.sh，设置 MCP_ENDPOINT
+./start_mcp.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+cd mcp
+# 编辑 start_mcp.ps1，设置 MCP_ENDPOINT
+.\start_mcp.ps1
+```
+
+### 配置说明
+
+在启动脚本中找到以下配置项并修改：
+
+```bash
+# macOS/Linux (start_mcp.sh)
+export MCP_ENDPOINT="ws://localhost:8080/mcp"
+
+# Windows (start_mcp.ps1)
+$env:MCP_ENDPOINT = "ws://localhost:8080/mcp"
+```
+
 ## 测试 MCP 服务器
 
 ### 方法 1：使用测试脚本
@@ -389,14 +424,14 @@ python3 test_mcp.py
 ### 方法 2：使用 MCP Inspector
 
 ```bash
-cd /Users/harvest/project/test_dataset/warehouse_system/mcp
+cd mcp
 npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py
 ```
 
 ### 方法 3：直接运行
 
 ```bash
-cd /Users/harvest/project/test_dataset/warehouse_system/mcp
+cd mcp
 uv run python warehouse_mcp.py
 ```
 
@@ -410,18 +445,21 @@ MCP 服务器会记录所有操作日志，包括：
 
 ## 安全注意事项
 
-1. MCP 工具直接操作数据库，请谨慎使用
+1. MCP 工具通过 API 操作数据库，请谨慎使用
 2. 建议定期备份数据库文件 `backend/warehouse.db`
 3. 出库操作会自动检查库存是否足够
 4. 入库/出库数量必须大于0
+5. 使用 MCP 前需确保后端服务已启动
 
 ## 技术细节
 
-- **使用框架**: FastMCP
+- **MCP 框架**: FastMCP
 - **传输方式**: stdio
+- **后端框架**: FastAPI
 - **数据库**: SQLite
 - **Python 版本**: 3.12+
-- **依赖**: fastmcp, mcp
+- **依赖**: fastmcp, mcp, requests
+- **架构**: MCP → HTTP API → 数据库（单一数据访问层）
 
 ## 故障排除
 
@@ -440,10 +478,11 @@ MCP 服务器会记录所有操作日志，包括：
 
 ### 操作失败
 
-1. 检查产品名称是否正确（区分大小写）
-2. 确认数量是否大于0
-3. 出库时检查库存是否足够
-4. 查看 MCP 返回的错误信息
+1. 确认后端服务是否正在运行（端口 2124）
+2. 检查产品名称是否正确（区分大小写）
+3. 确认数量是否大于0
+4. 出库时检查库存是否足够
+5. 查看 MCP 返回的错误信息
 
 ## 联系与支持
 

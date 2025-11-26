@@ -7,12 +7,15 @@
 - 入库操作
 - 出库操作
 - 查询当天统计数据（入库、出库、库存总量）
+
+注意：本服务通过调用后端 API 实现所有操作，不直接操作数据库。
+确保后端服务（端口 2124）已启动后再使用 MCP 服务。
 """
 
 from fastmcp import FastMCP
 import sys
 import logging
-import os
+import requests
 
 # 配置日志
 logger = logging.getLogger('WarehouseMCP')
@@ -22,45 +25,49 @@ if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8')
     sys.stdout.reconfigure(encoding='utf-8')
 
-# 导入数据库操作
-# 获取项目根目录（mcp的父目录）
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-backend_dir = os.path.join(project_root, 'backend')
-sys.path.insert(0, backend_dir)
-# 切换到backend目录，确保数据库路径正确
-os.chdir(backend_dir)
-from database import get_db_connection
+# 后端 API 地址
+API_BASE_URL = "http://localhost:2124/api"
 
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
 
 
-def get_xiaozhi_materials():
-    """获取所有 watcher-xiaozhi 相关物料"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def api_get(endpoint: str, params: dict = None) -> dict:
+    """发送 GET 请求到后端 API"""
+    try:
+        response = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=10)
+        return response.json()
+    except requests.exceptions.ConnectionError:
+        return {
+            "success": False,
+            "error": "无法连接到后端服务",
+            "message": "请确保后端服务（端口 2124）已启动"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"API 请求失败: {str(e)}"
+        }
 
-    cursor.execute('''
-        SELECT id, name, sku, quantity, unit, safe_stock, location
-        FROM materials
-        WHERE name LIKE '%xiaozhi%' OR name LIKE '%watcher%'
-        ORDER BY name
-    ''')
 
-    materials = []
-    for row in cursor.fetchall():
-        materials.append({
-            'id': row['id'],
-            'name': row['name'],
-            'sku': row['sku'],
-            'quantity': row['quantity'],
-            'unit': row['unit'],
-            'safe_stock': row['safe_stock'],
-            'location': row['location']
-        })
-
-    conn.close()
-    return materials
+def api_post(endpoint: str, data: dict) -> dict:
+    """发送 POST 请求到后端 API"""
+    try:
+        response = requests.post(f"{API_BASE_URL}{endpoint}", json=data, timeout=10)
+        return response.json()
+    except requests.exceptions.ConnectionError:
+        return {
+            "success": False,
+            "error": "无法连接到后端服务",
+            "message": "请确保后端服务（端口 2124）已启动"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"API 请求失败: {str(e)}"
+        }
 
 
 @mcp.tool()
@@ -83,60 +90,52 @@ def query_xiaozhi_stock(product_name: str = "watcher-xiaozhi(标准版)") -> dic
         包含库存信息的字典
     """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        # 调用后端 API 获取产品统计数据
+        data = api_get("/materials/product-stats", params={"name": product_name})
 
-        cursor.execute('''
-            SELECT id, name, sku, quantity, unit, safe_stock, location, created_at
-            FROM materials
-            WHERE name = ?
-        ''', (product_name,))
-
-        row = cursor.fetchone()
-        conn.close()
-
-        if row:
-            quantity = row['quantity']
-            safe_stock = row['safe_stock']
-
-            # 判断库存状态
-            if quantity >= safe_stock:
-                status = "正常"
-            elif quantity >= safe_stock * 0.5:
-                status = "偏低"
-            else:
-                status = "告急"
-
-            result = {
-                'success': True,
-                'product': {
-                    'name': row['name'],
-                    'sku': row['sku'],
-                    'quantity': quantity,
-                    'unit': row['unit'],
-                    'safe_stock': safe_stock,
-                    'location': row['location'],
-                    'status': status
-                },
-                'message': f"查询成功：{row['name']} 当前库存 {quantity} {row['unit']}"
-            }
-
-            logger.info(f"查询库存: {product_name}, 数量: {quantity}")
-            return result
-        else:
+        # 检查是否有错误
+        if "error" in data:
             logger.warning(f"产品不存在: {product_name}")
             return {
-                'success': False,
-                'error': f"未找到产品: {product_name}",
-                'message': f"产品 '{product_name}' 不存在，请检查产品名称"
+                "success": False,
+                "error": data["error"],
+                "message": f"产品 '{product_name}' 不存在，请检查产品名称"
             }
+
+        # 判断库存状态
+        quantity = data["current_stock"]
+        safe_stock = data["safe_stock"]
+
+        if quantity >= safe_stock:
+            status = "正常"
+        elif quantity >= safe_stock * 0.5:
+            status = "偏低"
+        else:
+            status = "告急"
+
+        result = {
+            "success": True,
+            "product": {
+                "name": data["name"],
+                "sku": data["sku"],
+                "quantity": quantity,
+                "unit": data["unit"],
+                "safe_stock": safe_stock,
+                "location": data["location"],
+                "status": status
+            },
+            "message": f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}"
+        }
+
+        logger.info(f"查询库存: {product_name}, 数量: {quantity}")
+        return result
 
     except Exception as e:
         logger.error(f"查询库存失败: {str(e)}")
         return {
-            'success': False,
-            'error': str(e),
-            'message': f"查询失败: {str(e)}"
+            "success": False,
+            "error": str(e),
+            "message": f"查询失败: {str(e)}"
         }
 
 
@@ -155,72 +154,27 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库", ope
         包含操作结果的字典
     """
     try:
-        if quantity <= 0:
-            return {
-                'success': False,
-                'error': '入库数量必须大于0',
-                'message': f"入库失败：数量 {quantity} 无效"
-            }
+        # 调用后端 API 执行入库
+        result = api_post("/materials/stock-in", {
+            "product_name": product_name,
+            "quantity": quantity,
+            "reason": reason,
+            "operator": operator
+        })
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        if result.get("success"):
+            logger.info(f"入库操作: {product_name}, 数量: {quantity}, 操作人: {operator}")
+        else:
+            logger.warning(f"入库失败: {result.get('error')}")
 
-        # 查询产品
-        cursor.execute('SELECT id, name, quantity, unit FROM materials WHERE name = ?', (product_name,))
-        row = cursor.fetchone()
-
-        if not row:
-            conn.close()
-            return {
-                'success': False,
-                'error': f"产品不存在: {product_name}",
-                'message': f"入库失败：未找到产品 '{product_name}'"
-            }
-
-        material_id = row['id']
-        old_quantity = row['quantity']
-        unit = row['unit']
-        new_quantity = old_quantity + quantity
-
-        # 更新库存
-        cursor.execute('''
-            UPDATE materials
-            SET quantity = ?
-            WHERE id = ?
-        ''', (new_quantity, material_id))
-
-        # 记录入库
-        from datetime import datetime
-        cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-            VALUES (?, 'in', ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-
-        conn.commit()
-        conn.close()
-
-        result = {
-            'success': True,
-            'operation': 'stock_in',
-            'product': {
-                'name': product_name,
-                'old_quantity': old_quantity,
-                'in_quantity': quantity,
-                'new_quantity': new_quantity,
-                'unit': unit
-            },
-            'message': f"入库成功：{product_name} 入库 {quantity} {unit}，库存从 {old_quantity} 更新到 {new_quantity} {unit}"
-        }
-
-        logger.info(f"入库操作: {product_name}, 数量: {quantity}, 操作人: {operator}")
         return result
 
     except Exception as e:
         logger.error(f"入库失败: {str(e)}")
         return {
-            'success': False,
-            'error': str(e),
-            'message': f"入库失败: {str(e)}"
+            "success": False,
+            "error": str(e),
+            "message": f"入库失败: {str(e)}"
         }
 
 
@@ -239,93 +193,28 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库", op
         包含操作结果的字典
     """
     try:
-        if quantity <= 0:
-            return {
-                'success': False,
-                'error': '出库数量必须大于0',
-                'message': f"出库失败：数量 {quantity} 无效"
-            }
+        # 调用后端 API 执行出库
+        result = api_post("/materials/stock-out", {
+            "product_name": product_name,
+            "quantity": quantity,
+            "reason": reason,
+            "operator": operator
+        })
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        if result.get("success"):
+            product = result.get("product", {})
+            logger.info(f"出库操作: {product_name}, 数量: {quantity}, 操作人: {operator}, 剩余: {product.get('new_quantity')}")
+        else:
+            logger.warning(f"出库失败: {result.get('error')}")
 
-        # 查询产品
-        cursor.execute('SELECT id, name, quantity, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
-        row = cursor.fetchone()
-
-        if not row:
-            conn.close()
-            return {
-                'success': False,
-                'error': f"产品不存在: {product_name}",
-                'message': f"出库失败：未找到产品 '{product_name}'"
-            }
-
-        material_id = row['id']
-        old_quantity = row['quantity']
-        unit = row['unit']
-        safe_stock = row['safe_stock']
-
-        # 检查库存是否足够
-        if old_quantity < quantity:
-            conn.close()
-            return {
-                'success': False,
-                'error': '库存不足',
-                'message': f"出库失败：{product_name} 库存不足，当前库存 {old_quantity} {unit}，需要出库 {quantity} {unit}"
-            }
-
-        new_quantity = old_quantity - quantity
-
-        # 更新库存
-        cursor.execute('''
-            UPDATE materials
-            SET quantity = ?
-            WHERE id = ?
-        ''', (new_quantity, material_id))
-
-        # 记录出库
-        from datetime import datetime
-        cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-            VALUES (?, 'out', ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-
-        conn.commit()
-        conn.close()
-
-        # 检查是否低于安全库存
-        warning = ""
-        if new_quantity < safe_stock:
-            if new_quantity < safe_stock * 0.5:
-                warning = f"⚠️ 警告：库存告急！当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit} 的50%"
-            else:
-                warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
-
-        result = {
-            'success': True,
-            'operation': 'stock_out',
-            'product': {
-                'name': product_name,
-                'old_quantity': old_quantity,
-                'out_quantity': quantity,
-                'new_quantity': new_quantity,
-                'unit': unit,
-                'safe_stock': safe_stock
-            },
-            'message': f"出库成功：{product_name} 出库 {quantity} {unit}，库存从 {old_quantity} 更新到 {new_quantity} {unit}",
-            'warning': warning
-        }
-
-        logger.info(f"出库操作: {product_name}, 数量: {quantity}, 操作人: {operator}, 剩余: {new_quantity}")
         return result
 
     except Exception as e:
         logger.error(f"出库失败: {str(e)}")
         return {
-            'success': False,
-            'error': str(e),
-            'message': f"出库失败: {str(e)}"
+            "success": False,
+            "error": str(e),
+            "message": f"出库失败: {str(e)}"
         }
 
 
@@ -338,24 +227,37 @@ def list_xiaozhi_products() -> dict:
         包含所有产品列表的字典
     """
     try:
-        materials = get_xiaozhi_materials()
+        # 调用后端 API 获取产品列表
+        data = api_get("/materials/xiaozhi")
 
-        result = {
-            'success': True,
-            'count': len(materials),
-            'products': materials,
-            'message': f"查询成功，共找到 {len(materials)} 种 watcher-xiaozhi 相关产品"
-        }
+        # 检查是否有错误
+        if isinstance(data, dict) and "error" in data:
+            return data
 
-        logger.info(f"列出所有产品，共 {len(materials)} 种")
-        return result
+        # 处理返回的数组数据
+        if isinstance(data, list):
+            result = {
+                "success": True,
+                "count": len(data),
+                "products": data,
+                "message": f"查询成功，共找到 {len(data)} 种 watcher-xiaozhi 相关产品"
+            }
+
+            logger.info(f"列出所有产品，共 {len(data)} 种")
+            return result
+        else:
+            return {
+                "success": False,
+                "error": "API 返回格式错误",
+                "message": "无法解析产品列表"
+            }
 
     except Exception as e:
         logger.error(f"查询产品列表失败: {str(e)}")
         return {
-            'success': False,
-            'error': str(e),
-            'message': f"查询失败: {str(e)}"
+            "success": False,
+            "error": str(e),
+            "message": f"查询失败: {str(e)}"
         }
 
 
@@ -370,67 +272,42 @@ def get_today_statistics() -> dict:
     try:
         from datetime import datetime
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        # 调用后端 API 获取仪表盘统计数据
+        data = api_get("/dashboard/stats")
+
+        # 检查是否有错误
+        if isinstance(data, dict) and "error" in data:
+            return {
+                "success": False,
+                "error": data["error"],
+                "message": f"查询统计数据失败: {data['error']}"
+            }
 
         # 获取今天的日期
         today = datetime.now().strftime('%Y-%m-%d')
 
-        # 查询今日入库总数
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total_in
-            FROM inventory_records
-            WHERE type = 'in' AND DATE(created_at) = ?
-        ''', (today,))
-        today_in = cursor.fetchone()['total_in']
-
-        # 查询今日出库总数
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total_out
-            FROM inventory_records
-            WHERE type = 'out' AND DATE(created_at) = ?
-        ''', (today,))
-        today_out = cursor.fetchone()['total_out']
-
-        # 查询当前库存总量
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total_stock
-            FROM materials
-        ''')
-        total_stock = cursor.fetchone()['total_stock']
-
-        # 查询库存预警数量
-        cursor.execute('''
-            SELECT COUNT(*) as low_stock_count
-            FROM materials
-            WHERE quantity < safe_stock
-        ''')
-        low_stock_count = cursor.fetchone()['low_stock_count']
-
-        conn.close()
-
         result = {
-            'success': True,
-            'date': today,
-            'statistics': {
-                'today_in': today_in,
-                'today_out': today_out,
-                'total_stock': total_stock,
-                'low_stock_count': low_stock_count,
-                'net_change': today_in - today_out
+            "success": True,
+            "date": today,
+            "statistics": {
+                "today_in": data.get("today_in", 0),
+                "today_out": data.get("today_out", 0),
+                "total_stock": data.get("total_stock", 0),
+                "low_stock_count": data.get("low_stock_count", 0),
+                "net_change": data.get("today_in", 0) - data.get("today_out", 0)
             },
-            'message': f"查询成功：{today} 入库 {today_in} 件，出库 {today_out} 件，当前库存总量 {total_stock} 件"
+            "message": f"查询成功：{today} 入库 {data.get('today_in', 0)} 件，出库 {data.get('today_out', 0)} 件，当前库存总量 {data.get('total_stock', 0)} 件"
         }
 
-        logger.info(f"查询今日统计: 入库 {today_in}, 出库 {today_out}, 库存 {total_stock}")
+        logger.info(f"查询今日统计: 入库 {data.get('today_in', 0)}, 出库 {data.get('today_out', 0)}, 库存 {data.get('total_stock', 0)}")
         return result
 
     except Exception as e:
         logger.error(f"查询统计数据失败: {str(e)}")
         return {
-            'success': False,
-            'error': str(e),
-            'message': f"查询统计数据失败: {str(e)}"
+            "success": False,
+            "error": str(e),
+            "message": f"查询统计数据失败: {str(e)}"
         }
 
 

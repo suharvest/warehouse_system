@@ -2,7 +2,7 @@
 
 [English](README_EN.md) | 中文
 
-一个基于 Python Flask + SQLite 的智能硬件仓库管理系统仪表盘。
+一个基于 Python FastAPI + SQLite 的智能硬件仓库管理系统仪表盘。
 
 ## 功能特性
 
@@ -14,24 +14,33 @@
 - 🌐 **多语言支持**：支持中英文切换
 - 📱 **响应式设计**：适配不同屏幕尺寸
 
-## 最新更新 (v1.1.0)
+## 最新更新 (v2.0.0)
 
-### 新增功能
-- **多语言支持**：新增中英文切换功能
-  - 右上角语言下拉菜单
-  - 支持即时切换，无需刷新页面
-  - 语言偏好保存在本地存储
-  - 主页和产品详情页同步支持
+### 架构升级
+- **后端迁移至 FastAPI**：从 Flask 迁移到 FastAPI 框架
+  - 自动生成 API 文档（Swagger UI: `/docs`）
+  - Pydantic 响应模型，提供类型验证
+  - 更现代的异步架构支持
 
-### 界面优化
+### 新增 API
+- **入库接口**: `POST /api/materials/stock-in`
+- **出库接口**: `POST /api/materials/stock-out`
+
+### MCP 架构优化
+- MCP 服务改为通过 HTTP API 调用后端，而非直接操作数据库
+- 单一数据访问层，便于维护和扩展
+
+### v1.1.0 功能
+- **多语言支持**：中英文切换功能
 - 修复库存列表与 TOP10 图表间距问题
-- 优化头部布局，语言切换按钮位于刷新按钮左侧
 
 ## 技术栈
 
 ### 后端
 - Python 3.12
-- Flask (Web框架)
+- FastAPI (Web框架)
+- Uvicorn (ASGI服务器)
+- Pydantic (数据验证)
 - SQLite (数据库)
 - uv (包管理工具)
 
@@ -45,13 +54,39 @@
 
 ### 1. 一键启动
 
+**macOS/Linux:**
 ```bash
 ./start.sh
 ```
 
-启动后访问：http://localhost:2125
+**Windows (PowerShell):**
+```powershell
+.\start.ps1
+```
 
-### 2. 手动启动
+启动后访问：
+- 前端页面：http://localhost:2125
+- API 文档：http://localhost:2124/docs
+
+### 2. 启动 MCP 服务（可选）
+
+MCP 服务已独立为单独的启动脚本，需要配置 `MCP_ENDPOINT` 环境变量。
+
+**macOS/Linux:**
+```bash
+cd mcp
+# 编辑 start_mcp.sh 配置 MCP_ENDPOINT
+./start_mcp.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+cd mcp
+# 编辑 start_mcp.ps1 配置 MCP_ENDPOINT
+.\start_mcp.ps1
+```
+
+### 3. 手动启动
 
 #### 初始化数据库
 ```bash
@@ -61,8 +96,7 @@ uv run python database.py
 
 #### 启动后端服务（端口 2124）
 ```bash
-cd backend
-uv run python app.py
+uv run python run_backend.py
 ```
 
 #### 启动前端服务（端口 2125）
@@ -76,7 +110,8 @@ python3 server.py
 ```
 warehouse_system/
 ├── backend/              # 后端代码
-│   ├── app.py           # Flask 应用主文件
+│   ├── app.py           # FastAPI 应用主文件
+│   ├── models.py        # Pydantic 响应模型
 │   ├── database.py      # 数据库初始化和数据生成
 │   └── warehouse.db     # SQLite 数据库文件（运行后生成）
 ├── frontend/            # 前端代码
@@ -91,13 +126,16 @@ warehouse_system/
 │   ├── warehouse_mcp.py # MCP 服务器
 │   ├── mcp_config.json  # MCP 配置
 │   ├── mcp_pipe.py      # MCP 管道
+│   ├── start_mcp.sh     # MCP 启动脚本 (macOS/Linux)
+│   ├── start_mcp.ps1    # MCP 启动脚本 (Windows)
 │   └── MCP_README.md    # MCP 文档
 ├── test/                # 测试文件
 │   ├── test_mcp.py      # MCP 测试
 │   ├── test_api.py      # API 测试
 │   ├── run_all_tests.sh # 测试脚本
 │   └── README.md        # 测试文档
-├── start.sh             # 启动脚本
+├── start.sh             # 启动脚本 (macOS/Linux)
+├── start.ps1            # 启动脚本 (Windows)
 ├── README.md            # 项目说明（中文）
 └── README_EN.md         # 项目说明（英文）
 ```
@@ -186,6 +224,32 @@ GET /api/materials/product-records?name=产品名称
 ### 获取watcher-xiaozhi相关库存
 ```
 GET /api/materials/xiaozhi
+```
+
+### 入库操作
+```
+POST /api/materials/stock-in
+Content-Type: application/json
+
+{
+  "product_name": "产品名称",
+  "quantity": 10,
+  "reason": "入库原因",
+  "operator": "操作人"
+}
+```
+
+### 出库操作
+```
+POST /api/materials/stock-out
+Content-Type: application/json
+
+{
+  "product_name": "产品名称",
+  "quantity": 5,
+  "reason": "出库原因",
+  "operator": "操作人"
+}
 ```
 
 ## 停止服务

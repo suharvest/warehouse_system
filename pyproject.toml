@@ -5,8 +5,8 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=2.13.0.2",
-    "flask>=3.1.2",
-    "flask-cors>=6.0.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
     "mcp>=1.21.0",
     "requests>=2.32.5",
 ]

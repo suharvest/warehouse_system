@@ -2,7 +2,7 @@
 
 English | [中文](README.md)
 
-A smart hardware warehouse management dashboard based on Python Flask + SQLite.
+A smart hardware warehouse management dashboard based on Python FastAPI + SQLite.
 
 ## Features
 
@@ -14,24 +14,33 @@ A smart hardware warehouse management dashboard based on Python Flask + SQLite.
 - 🌐 **Multi-language Support**: Chinese/English switching
 - 📱 **Responsive Design**: Adapts to different screen sizes
 
-## Latest Updates (v1.1.0)
+## Latest Updates (v2.0.0)
 
-### New Features
-- **Multi-language Support**: Added Chinese/English switching
-  - Language dropdown in the top-right corner
-  - Instant switching without page refresh
-  - Language preference saved in local storage
-  - Supported on both main page and product detail page
+### Architecture Upgrade
+- **Backend migrated to FastAPI**: Migrated from Flask to FastAPI framework
+  - Auto-generated API documentation (Swagger UI: `/docs`)
+  - Pydantic response models with type validation
+  - Modern async architecture support
 
-### UI Improvements
+### New APIs
+- **Stock In**: `POST /api/materials/stock-in`
+- **Stock Out**: `POST /api/materials/stock-out`
+
+### MCP Architecture Optimization
+- MCP service now calls backend via HTTP API instead of direct database operations
+- Single data access layer for easier maintenance and extensibility
+
+### v1.1.0 Features
+- **Multi-language Support**: Chinese/English switching
 - Fixed spacing issue between inventory list and Top 10 chart
-- Optimized header layout with language selector on the left of refresh button
 
 ## Tech Stack
 
 ### Backend
 - Python 3.12
-- Flask (Web Framework)
+- FastAPI (Web Framework)
+- Uvicorn (ASGI Server)
+- Pydantic (Data Validation)
 - SQLite (Database)
 - uv (Package Manager)
 
@@ -45,13 +54,39 @@ A smart hardware warehouse management dashboard based on Python Flask + SQLite.
 
 ### 1. One-click Start
 
+**macOS/Linux:**
 ```bash
 ./start.sh
 ```
 
-After starting, visit: http://localhost:2125
+**Windows (PowerShell):**
+```powershell
+.\start.ps1
+```
 
-### 2. Manual Start
+After starting, visit:
+- Frontend: http://localhost:2125
+- API Docs: http://localhost:2124/docs
+
+### 2. Start MCP Service (Optional)
+
+MCP service has been separated into standalone scripts. Configure `MCP_ENDPOINT` environment variable before starting.
+
+**macOS/Linux:**
+```bash
+cd mcp
+# Edit start_mcp.sh to configure MCP_ENDPOINT
+./start_mcp.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+cd mcp
+# Edit start_mcp.ps1 to configure MCP_ENDPOINT
+.\start_mcp.ps1
+```
+
+### 3. Manual Start
 
 #### Initialize Database
 ```bash
@@ -61,8 +96,7 @@ uv run python database.py
 
 #### Start Backend Service (Port 2124)
 ```bash
-cd backend
-uv run python app.py
+uv run python run_backend.py
 ```
 
 #### Start Frontend Service (Port 2125)
@@ -76,7 +110,8 @@ python3 server.py
 ```
 warehouse_system/
 ├── backend/              # Backend code
-│   ├── app.py           # Flask main application
+│   ├── app.py           # FastAPI main application
+│   ├── models.py        # Pydantic response models
 │   ├── database.py      # Database initialization and data generation
 │   └── warehouse.db     # SQLite database file (generated after running)
 ├── frontend/            # Frontend code
@@ -91,13 +126,16 @@ warehouse_system/
 │   ├── warehouse_mcp.py # MCP server
 │   ├── mcp_config.json  # MCP configuration
 │   ├── mcp_pipe.py      # MCP pipe
+│   ├── start_mcp.sh     # MCP startup script (macOS/Linux)
+│   ├── start_mcp.ps1    # MCP startup script (Windows)
 │   └── MCP_README.md    # MCP documentation
 ├── test/                # Test files
 │   ├── test_mcp.py      # MCP tests
 │   ├── test_api.py      # API tests
 │   ├── run_all_tests.sh # Test script
 │   └── README.md        # Test documentation
-├── start.sh             # Startup script
+├── start.sh             # Startup script (macOS/Linux)
+├── start.ps1            # Startup script (Windows)
 ├── README.md            # Project documentation (Chinese)
 └── README_EN.md         # Project documentation (English)
 ```
@@ -186,6 +224,32 @@ GET /api/materials/product-records?name=product_name
 ### Get watcher-xiaozhi Related Stock
 ```
 GET /api/materials/xiaozhi
+```
+
+### Stock In Operation
+```
+POST /api/materials/stock-in
+Content-Type: application/json
+
+{
+  "product_name": "product_name",
+  "quantity": 10,
+  "reason": "inbound_reason",
+  "operator": "operator_name"
+}
+```
+
+### Stock Out Operation
+```
+POST /api/materials/stock-out
+Content-Type: application/json
+
+{
+  "product_name": "product_name",
+  "quantity": 5,
+  "reason": "outbound_reason",
+  "operator": "operator_name"
+}
 ```
 
 ## Stop Services

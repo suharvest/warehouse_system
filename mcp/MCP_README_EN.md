@@ -317,9 +317,12 @@ The frontend interface supports Chinese/English switching:
 
 ### Update Mechanism
 
-1. MCP tools directly modify the database
-2. Frontend automatically refreshes stock list every 3 seconds
-3. No manual page refresh needed to see changes
+1. MCP tools call backend service via HTTP API
+2. Backend service modifies the database
+3. Frontend automatically refreshes stock list every 3 seconds
+4. No manual page refresh needed to see changes
+
+**Note**: Ensure the backend service (port 2124) is running before using MCP service.
 
 ### Verify Updates
 
@@ -373,6 +376,38 @@ Follow these steps to verify:
    }
    ```
 
+## Starting MCP Service
+
+### Using Standalone Startup Scripts
+
+MCP service has been separated into standalone scripts. Configure `MCP_ENDPOINT` in the script before starting.
+
+**macOS/Linux:**
+```bash
+cd mcp
+# Edit start_mcp.sh to set MCP_ENDPOINT
+./start_mcp.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+cd mcp
+# Edit start_mcp.ps1 to set MCP_ENDPOINT
+.\start_mcp.ps1
+```
+
+### Configuration
+
+Find and modify the following configuration in the startup script:
+
+```bash
+# macOS/Linux (start_mcp.sh)
+export MCP_ENDPOINT="ws://localhost:8080/mcp"
+
+# Windows (start_mcp.ps1)
+$env:MCP_ENDPOINT = "ws://localhost:8080/mcp"
+```
+
 ## Testing MCP Server
 
 ### Method 1: Use Test Script
@@ -389,14 +424,14 @@ python3 test_mcp.py
 ### Method 2: Use MCP Inspector
 
 ```bash
-cd /Users/harvest/project/test_dataset/warehouse_system/mcp
+cd mcp
 npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py
 ```
 
 ### Method 3: Run Directly
 
 ```bash
-cd /Users/harvest/project/test_dataset/warehouse_system/mcp
+cd mcp
 uv run python warehouse_mcp.py
 ```
 
@@ -410,18 +445,21 @@ The MCP server logs all operations, including:
 
 ## Security Notes
 
-1. MCP tools directly operate on the database, use with caution
+1. MCP tools operate on database via API, use with caution
 2. Recommend regular backups of database file `backend/warehouse.db`
 3. Outbound operations automatically check if stock is sufficient
 4. Inbound/outbound quantities must be greater than 0
+5. Ensure backend service is running before using MCP
 
 ## Technical Details
 
-- **Framework**: FastMCP
+- **MCP Framework**: FastMCP
 - **Transport**: stdio
+- **Backend Framework**: FastAPI
 - **Database**: SQLite
 - **Python Version**: 3.12+
-- **Dependencies**: fastmcp, mcp
+- **Dependencies**: fastmcp, mcp, requests
+- **Architecture**: MCP → HTTP API → Database (Single data access layer)
 
 ## Troubleshooting
 
@@ -440,10 +478,11 @@ The MCP server logs all operations, including:
 
 ### Operation Failed
 
-1. Check if product name is correct (case-sensitive)
-2. Confirm quantity is greater than 0
-3. Check if stock is sufficient for outbound operations
-4. Review MCP error messages
+1. Confirm backend service is running (port 2124)
+2. Check if product name is correct (case-sensitive)
+3. Confirm quantity is greater than 0
+4. Check if stock is sufficient for outbound operations
+5. Review MCP error messages
 
 ## Contact & Support
 
