@@ -1,0 +1,241 @@
+# Warehouse Management System
+
+English | [中文](README.md)
+
+A smart hardware warehouse management dashboard based on Python Flask + SQLite.
+
+## Features
+
+- 📊 **Real-time Statistics**: Total stock, daily in/out, low stock alerts
+- 📈 **Trend Analysis**: 7-day in/out trend visualization
+- 🥧 **Category Distribution**: Stock distribution pie chart
+- 📋 **Top 10 Display**: Top materials by stock quantity
+- ⚠️ **Alert List**: Low stock material warnings
+- 🌐 **Multi-language Support**: Chinese/English switching
+- 📱 **Responsive Design**: Adapts to different screen sizes
+
+## Latest Updates (v1.1.0)
+
+### New Features
+- **Multi-language Support**: Added Chinese/English switching
+  - Language dropdown in the top-right corner
+  - Instant switching without page refresh
+  - Language preference saved in local storage
+  - Supported on both main page and product detail page
+
+### UI Improvements
+- Fixed spacing issue between inventory list and Top 10 chart
+- Optimized header layout with language selector on the left of refresh button
+
+## Tech Stack
+
+### Backend
+- Python 3.12
+- Flask (Web Framework)
+- SQLite (Database)
+- uv (Package Manager)
+
+### Frontend
+- Native HTML/CSS/JavaScript
+- ECharts (Charting Library)
+- i18n.js (Internationalization)
+- Responsive Design
+
+## Quick Start
+
+### 1. One-click Start
+
+```bash
+./start.sh
+```
+
+After starting, visit: http://localhost:2125
+
+### 2. Manual Start
+
+#### Initialize Database
+```bash
+cd backend
+uv run python database.py
+```
+
+#### Start Backend Service (Port 2124)
+```bash
+cd backend
+uv run python app.py
+```
+
+#### Start Frontend Service (Port 2125)
+```bash
+cd frontend
+python3 server.py
+```
+
+## Project Structure
+
+```
+warehouse_system/
+├── backend/              # Backend code
+│   ├── app.py           # Flask main application
+│   ├── database.py      # Database initialization and data generation
+│   └── warehouse.db     # SQLite database file (generated after running)
+├── frontend/            # Frontend code
+│   ├── index.html       # Main page
+│   ├── product_detail.html  # Product detail page
+│   ├── style.css        # Stylesheet
+│   ├── app.js           # Main page JavaScript logic
+│   ├── product_detail.js    # Detail page JavaScript logic
+│   ├── i18n.js          # Internationalization config
+│   └── server.py        # Static file server
+├── mcp/                 # MCP service
+│   ├── warehouse_mcp.py # MCP server
+│   ├── mcp_config.json  # MCP configuration
+│   ├── mcp_pipe.py      # MCP pipe
+│   └── MCP_README.md    # MCP documentation
+├── test/                # Test files
+│   ├── test_mcp.py      # MCP tests
+│   ├── test_api.py      # API tests
+│   ├── run_all_tests.sh # Test script
+│   └── README.md        # Test documentation
+├── start.sh             # Startup script
+├── README.md            # Project documentation (Chinese)
+└── README_EN.md         # Project documentation (English)
+```
+
+## Multi-language Support
+
+The system supports Chinese/English switching:
+
+1. Click the language dropdown in the top-right corner
+2. Select "中文简体" or "English"
+3. Page content switches instantly without refresh
+
+Translated content includes:
+- Page titles and subtitles
+- Statistics card labels
+- Chart titles and legends
+- Table headers
+- Status text (Normal/Low/Critical)
+- Search box placeholder
+
+## Data Description
+
+### Material Categories
+- **Mainboard**: watcher-xiaozhi main board, expansion board, power management board, etc.
+- **Sensors**: Camera, microphone, PIR sensor, temperature/humidity sensor, etc.
+- **Enclosure Parts**: Enclosure, bracket, screws, etc.
+- **Cables**: USB cable, power cable, ribbon cable, etc.
+- **Packaging**: Packaging box, manual, warranty card, etc.
+- **Power**: Power adapter, lithium battery, etc.
+- **Auxiliary Materials**: Thermal silicone, insulation tape, etc.
+- **Finished Products**: watcher-xiaozhi complete units and variants
+
+### Initial Data
+- Material types: 37
+- Total stock: ~3000+ items
+- History records: ~100+ in/out records in the past 7 days
+- watcher-xiaozhi related stock: ~80-100 finished units + components
+
+## API Endpoints
+
+### Get Dashboard Statistics
+```
+GET /api/dashboard/stats
+```
+
+### Get Category Distribution
+```
+GET /api/dashboard/category-distribution
+```
+
+### Get 7-day Trend
+```
+GET /api/dashboard/weekly-trend
+```
+
+### Get Top 10 Stock
+```
+GET /api/dashboard/top-stock
+```
+
+### Get Low Stock Alerts
+```
+GET /api/dashboard/low-stock-alert
+```
+
+### Get All Materials
+```
+GET /api/materials/all
+```
+
+### Get Product Statistics
+```
+GET /api/materials/product-stats?name=product_name
+```
+
+### Get Product Trend
+```
+GET /api/materials/product-trend?name=product_name
+```
+
+### Get Product In/Out Records
+```
+GET /api/materials/product-records?name=product_name
+```
+
+### Get watcher-xiaozhi Related Stock
+```
+GET /api/materials/xiaozhi
+```
+
+## Stop Services
+
+If started with `start.sh`, press `Ctrl+C` to stop all services.
+
+If started manually, terminate backend and frontend processes separately.
+
+## Testing
+
+### Run All Tests
+```bash
+./test/run_all_tests.sh
+```
+
+### Individual Tests
+```bash
+# MCP tool tests
+python3 test/test_mcp.py
+
+# API endpoint tests
+python3 test/test_api.py
+```
+
+See `test/README.md` for details.
+
+## Notes
+
+1. Ensure ports 2124 and 2125 are not in use
+2. First run will automatically create database and initial data
+3. Database file is located at `backend/warehouse.db`
+4. To regenerate data, delete the database file and run again
+
+## Development
+
+### Reset Database
+```bash
+rm backend/warehouse.db
+cd backend
+uv run python database.py
+```
+
+### Add Dependencies
+```bash
+uv add <package_name>
+```
+
+### Add New Language
+Edit `frontend/i18n.js` and add new language translations to the `translations` object.
+
+## License
+
+MIT License

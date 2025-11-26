@@ -1,5 +1,7 @@
 # 仓库管理系统
 
+[English](README_EN.md) | 中文
+
 一个基于 Python Flask + SQLite 的智能硬件仓库管理系统仪表盘。
 
 ## 功能特性
@@ -9,6 +11,21 @@
 - 🥧 **分类分布**：库存类型占比饼图
 - 📋 **TOP10展示**：库存最多的物料排行
 - ⚠️ **预警列表**：低于安全库存的物料提醒
+- 🌐 **多语言支持**：支持中英文切换
+- 📱 **响应式设计**：适配不同屏幕尺寸
+
+## 最新更新 (v1.1.0)
+
+### 新增功能
+- **多语言支持**：新增中英文切换功能
+  - 右上角语言下拉菜单
+  - 支持即时切换，无需刷新页面
+  - 语言偏好保存在本地存储
+  - 主页和产品详情页同步支持
+
+### 界面优化
+- 修复库存列表与 TOP10 图表间距问题
+- 优化头部布局，语言切换按钮位于刷新按钮左侧
 
 ## 技术栈
 
@@ -21,6 +38,7 @@
 ### 前端
 - 原生 HTML/CSS/JavaScript
 - ECharts (图表库)
+- i18n.js (国际化)
 - 响应式设计
 
 ## 快速开始
@@ -63,21 +81,42 @@ warehouse_system/
 │   └── warehouse.db     # SQLite 数据库文件（运行后生成）
 ├── frontend/            # 前端代码
 │   ├── index.html       # 主页面
+│   ├── product_detail.html  # 产品详情页
 │   ├── style.css        # 样式文件
-│   ├── app.js           # JavaScript 逻辑
+│   ├── app.js           # 主页 JavaScript 逻辑
+│   ├── product_detail.js    # 详情页 JavaScript 逻辑
+│   ├── i18n.js          # 国际化配置
 │   └── server.py        # 静态文件服务器
 ├── mcp/                 # MCP 服务
 │   ├── warehouse_mcp.py # MCP 服务器
 │   ├── mcp_config.json  # MCP 配置
-│   └── mcp_pipe.py      # MCP 管道
+│   ├── mcp_pipe.py      # MCP 管道
+│   └── MCP_README.md    # MCP 文档
 ├── test/                # 测试文件
 │   ├── test_mcp.py      # MCP 测试
 │   ├── test_api.py      # API 测试
 │   ├── run_all_tests.sh # 测试脚本
 │   └── README.md        # 测试文档
 ├── start.sh             # 启动脚本
-└── README.md            # 项目说明
+├── README.md            # 项目说明（中文）
+└── README_EN.md         # 项目说明（英文）
 ```
+
+## 多语言支持
+
+系统支持中英文切换：
+
+1. 点击右上角的语言下拉菜单
+2. 选择 "中文简体" 或 "English"
+3. 页面内容即时切换，无需刷新
+
+支持翻译的内容：
+- 页面标题和副标题
+- 统计卡片标签
+- 图表标题和图例
+- 表格表头
+- 状态文本（正常/偏低/告急）
+- 搜索框占位符
 
 ## 数据说明
 
@@ -122,6 +161,26 @@ GET /api/dashboard/top-stock
 ### 获取库存预警
 ```
 GET /api/dashboard/low-stock-alert
+```
+
+### 获取所有物料
+```
+GET /api/materials/all
+```
+
+### 获取产品统计
+```
+GET /api/materials/product-stats?name=产品名称
+```
+
+### 获取产品趋势
+```
+GET /api/materials/product-trend?name=产品名称
+```
+
+### 获取产品出入库记录
+```
+GET /api/materials/product-records?name=产品名称
 ```
 
 ### 获取watcher-xiaozhi相关库存
@@ -173,6 +232,9 @@ uv run python database.py
 ```bash
 uv add <package_name>
 ```
+
+### 添加新语言
+编辑 `frontend/i18n.js`，在 `translations` 对象中添加新语言的翻译。
 
 ## 许可证
 
