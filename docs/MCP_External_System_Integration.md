@@ -68,6 +68,7 @@ The Watcher processes the voice command, calls the appropriate MCP tool, which t
 
 ### Hardware
 - SenseCAP Watcher device (configured with Xiaozhi AI)
+- A computer (Windows/macOS/Linux) to run the backend system and MCP server
 
 ### Software
 - Python 3.10 or higher
@@ -77,6 +78,16 @@ The Watcher processes the voice command, calls the appropriate MCP tool, which t
 ### Account
 - SenseCraft AI Platform account with MCP Endpoint access
 - Refer to [MCP Endpoint Guide](/mcp_endpoint) to obtain your MCP Endpoint address
+
+### Deployment Note
+
+The MCP server can run on the same machine as your backend system, or on a different machine. Simply configure the API endpoint URL in `mcp/warehouse_mcp.py`:
+
+```python
+# Backend API address - change this to your actual backend URL
+API_BASE_URL = "http://localhost:2124/api"  # Same machine
+# API_BASE_URL = "http://192.168.1.100:2124/api"  # Different machine
+```
 
 ## Part 1: Set Up the Demo Warehouse System
 
@@ -147,14 +158,14 @@ Expected response:
 
 You can also explore the interactive API documentation at: http://localhost:2124/docs
 
-<!-- TODO: Add screenshot of Swagger UI showing API endpoints -->
+<div style={{textAlign:'center'}}><img src="./assets/API_EndPoint.png" style={{width:800, height:'auto'}}/></div>
 
 ## Part 2: Wrapping APIs as MCP Tools
 
 The demo system already has REST APIs for warehouse operations. Now let's wrap them as MCP tools for voice control.
 
 :::tip
-**No coding experience?** You can explore all available APIs through the interactive documentation at http://localhost:2124/docs (Swagger UI). The complete MCP server code is at `mcp/warehouse_mcp.py` in the repository.
+After runing the beackend server, you can explore all available APIs through the interactive documentation at http://localhost:2124/docs (Swagger UI). The complete MCP server code is at `mcp/warehouse_mcp.py` in the repository.
 :::
 
 ### Core Concept: API to MCP Tool
@@ -243,7 +254,7 @@ if __name__ == "__main__":
 3. Open **Agent Configuration** → **MCP Setting**
 4. Click **Get MCP Endpoint** to obtain your unique endpoint address
 
-<!-- TODO: Add screenshot of MCP Endpoint configuration page -->
+<div style={{textAlign:'center'}}><img src="./assets/MCP_EndPoint.png" style={{width:400, height:'auto'}}/></div>
 
 :::warning
 Keep your MCP Endpoint address private. Do not share it publicly.
@@ -301,7 +312,7 @@ Go back to the SenseCraft AI Platform and check the MCP connection status. You s
 - **Connection Status**: Connected
 - **Enabled Services**: Warehouse System
 
-<!-- TODO: Add screenshot of MCP connection status showing "Connected" -->
+<div style={{textAlign:'center'}}><img src="./assets/MCP_connected.png" style={{width:400, height:'auto'}}/></div>
 
 ## Part 4: Test Voice Commands
 
@@ -326,7 +337,7 @@ Now you can test the integration using your Watcher device!
 **Stock In:**
 > "Successfully added 5 units of Watcher Xiaozhi Standard Version. Previous quantity was 150, new quantity is 155."
 
-<!-- TODO: Add screenshot of conversation log showing voice command and response -->
+<div style={{textAlign:'center'}}><img src="./assets/xiaozhi_stock_in.png" style={{width:800, height:'auto'}}/></div>
 
 ## Best Practices
 
