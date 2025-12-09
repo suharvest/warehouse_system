@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# 数据库文件（使用 volume 挂载）
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# 文档和资源（非必需）
+docs/
+assets/
+*.md
+CHANGELOG*.md
+
+# 测试文件
+test/
+
+# MCP 模块（如果不需要）
+# mcp/
+
+# 其他
+.DS_Store
+*.log

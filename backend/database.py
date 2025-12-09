@@ -1,8 +1,10 @@
 import sqlite3
+import os
 from datetime import datetime, timedelta
 import random
 
-DATABASE_PATH = 'warehouse.db'
+# 支持通过环境变量配置数据库路径，默认为当前目录下的 warehouse.db
+DATABASE_PATH = os.environ.get('DATABASE_PATH', 'warehouse.db')
 
 def get_db_connection():
     """获取数据库连接"""

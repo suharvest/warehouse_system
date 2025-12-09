@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: warehouse-backend
+    ports:
+      - "2124:2124"
+    volumes:
+      # 数据库文件挂载到宿主机，防止数据丢失
+      - ${DB_PATH:-./data}:/data
+    environment:
+      - DATABASE_PATH=/data/warehouse.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2124/api/dashboard/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: warehouse-frontend
+    ports:
+      - "2125:2125"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  default:
+    name: warehouse-network
