@@ -94,6 +94,7 @@ const translations = {
         exportInventory: '导出库存',
         importInventory: '导入库存',
         exportRecords: '导出记录',
+        backToInventory: '返回列表',
         addRecord: '新增记录',
         dropFileHere: '点击选择Excel文件',
         importPreview: '导入预览',

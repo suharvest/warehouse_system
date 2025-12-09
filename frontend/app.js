@@ -12,6 +12,10 @@ let detailTrendChart, detailPieChart;
 // 分类数据
 let allCategories = [];
 
+function goBackToInventory() {
+    switchTab('inventory');
+}
+
 // 库存列表分页状态
 let inventoryCurrentPage = 1;
 let inventoryPageSize = 20;
@@ -126,7 +130,9 @@ function applyRecordsFilters(filters) {
 function applyInventoryFilters(filters) {
     if (filters.name) document.getElementById('filter-inventory-name').value = filters.name;
     if (filters.category) document.getElementById('filter-inventory-category').value = filters.category;
-    if (filters.status) document.getElementById('filter-inventory-status').value = filters.status;
+    if (filters.status) {
+        resetDropdownSelection('filter-inventory-status-dropdown', filters.status.split(','));
+    }
 }
 
 // ============ Dashboard 卡片点击 ============
@@ -145,7 +151,8 @@ function onTodayOutClick() {
 }
 
 function onLowStockClick() {
-    switchTab('inventory', { status: 'warning' });
+    // 筛选所有库存偏低和告急的产品
+    switchTab('inventory', { status: 'warning,danger' });
 }
 
 // ============ 自动更新 ============
