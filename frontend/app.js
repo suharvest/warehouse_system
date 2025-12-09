@@ -88,6 +88,12 @@ function switchTab(tabId, filters = {}) {
     switch (tabId) {
         case 'dashboard':
             loadDashboardData();
+            // 切换回看板时，强制重绘图表以修正宽度
+            setTimeout(() => {
+                trendChart && trendChart.resize();
+                categoryChart && categoryChart.resize();
+                topStockChart && topStockChart.resize();
+            }, 100);
             break;
         case 'records':
             applyRecordsFilters(filters);
@@ -102,6 +108,11 @@ function switchTab(tabId, filters = {}) {
                 document.getElementById('product-selector').value = filters.product;
                 onProductSelect(filters.product);
             }
+            // 切换到详情页时，强制重绘图表
+            setTimeout(() => {
+                detailTrendChart && detailTrendChart.resize();
+                detailPieChart && detailPieChart.resize();
+            }, 100);
             break;
     }
 
