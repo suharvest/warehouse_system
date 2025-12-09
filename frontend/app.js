@@ -33,7 +33,7 @@ let lastProductStats = null;
 let allProducts = [];
 
 // ============ 页面初始化 ============
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     initCharts();
     loadCategories();
     loadAllProducts();
@@ -68,7 +68,7 @@ function switchTab(tabId, filters = {}) {
     currentTab = tabId;
 
     // 更新Tab按钮样式
-    document.querySelectorAll('.tab-btn').forEach(btn => {
+    document.querySelectorAll('.nav-item').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tab === tabId);
     });
 
@@ -152,7 +152,7 @@ function onLowStockClick() {
 function startAutoUpdate() {
     if (countdownInterval) clearInterval(countdownInterval);
 
-    countdownInterval = setInterval(function() {
+    countdownInterval = setInterval(function () {
         countdownSeconds--;
         const countdownEl = document.getElementById('countdown');
         if (countdownEl) countdownEl.textContent = countdownSeconds;
@@ -194,7 +194,7 @@ function initCharts() {
     categoryChart = echarts.init(document.getElementById('category-chart'));
     topStockChart = echarts.init(document.getElementById('top-stock-chart'));
 
-    window.addEventListener('resize', function() {
+    window.addEventListener('resize', function () {
         trendChart && trendChart.resize();
         categoryChart && categoryChart.resize();
         topStockChart && topStockChart.resize();
@@ -272,7 +272,7 @@ function resetDropdownSelection(dropdownId, defaultValues = ['normal', 'warning'
 }
 
 // 点击页面其他地方关闭下拉框
-document.addEventListener('click', function(e) {
+document.addEventListener('click', function (e) {
     if (!e.target.closest('.dropdown-multiselect')) {
         document.querySelectorAll('.dropdown-multiselect.open').forEach(d => {
             d.classList.remove('open');
@@ -469,7 +469,8 @@ async function loadWeeklyTrend() {
                 data: data.in_data,
                 itemStyle: { color: '#5470c6' },
                 areaStyle: {
-                    color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                    color: {
+                        type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
                         colorStops: [{ offset: 0, color: 'rgba(84, 112, 198, 0.3)' }, { offset: 1, color: 'rgba(84, 112, 198, 0.05)' }]
                     }
                 }
@@ -481,7 +482,8 @@ async function loadWeeklyTrend() {
                 data: data.out_data,
                 itemStyle: { color: '#ee6666' },
                 areaStyle: {
-                    color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                    color: {
+                        type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
                         colorStops: [{ offset: 0, color: 'rgba(238, 102, 102, 0.3)' }, { offset: 1, color: 'rgba(238, 102, 102, 0.05)' }]
                     }
                 }
@@ -500,7 +502,7 @@ async function loadTopStock() {
         tooltip: {
             trigger: 'axis',
             axisPointer: { type: 'shadow' },
-            formatter: function(params) {
+            formatter: function (params) {
                 const index = params[0].dataIndex;
                 return `${data.names[index]}<br/>类型: ${data.categories[index]}<br/>库存: ${params[0].value}`;
             }
@@ -522,7 +524,8 @@ async function loadTopStock() {
             type: 'bar',
             data: data.quantities,
             itemStyle: {
-                color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0,
+                color: {
+                    type: 'linear', x: 0, y: 0, x2: 1, y2: 0,
                     colorStops: [{ offset: 0, color: '#667eea' }, { offset: 1, color: '#764ba2' }]
                 },
                 borderRadius: [0, 4, 4, 0]
@@ -601,7 +604,7 @@ function renderInventoryTable(items) {
             <td>${item.location}</td>
         `;
 
-        tr.addEventListener('click', function() {
+        tr.addEventListener('click', function () {
             switchTab('detail', { product: item.name });
         });
 
@@ -624,9 +627,9 @@ function inventoryGoToPage(page) {
     loadInventory();
 }
 
-function inventoryChangePageSize(size) {
+function changeInventoryPageSize(size) {
     inventoryPageSize = parseInt(size);
-    inventoryCurrentPage = 1;
+    inventoryCurrentPage = 1; // Reset to first page
     loadInventory();
 }
 
@@ -736,7 +739,7 @@ function recordsGoToPage(page) {
     loadRecords();
 }
 
-function recordsChangePageSize(size) {
+function changeRecordsPageSize(size) {
     recordsPageSize = parseInt(size);
     recordsCurrentPage = 1;
     loadRecords();
@@ -860,7 +863,8 @@ async function loadProductTrend() {
                 data: data.in_data,
                 itemStyle: { color: '#5470c6' },
                 areaStyle: {
-                    color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                    color: {
+                        type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
                         colorStops: [{ offset: 0, color: 'rgba(84, 112, 198, 0.3)' }, { offset: 1, color: 'rgba(84, 112, 198, 0.05)' }]
                     }
                 }
@@ -872,7 +876,8 @@ async function loadProductTrend() {
                 data: data.out_data,
                 itemStyle: { color: '#ee6666' },
                 areaStyle: {
-                    color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                    color: {
+                        type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
                         colorStops: [{ offset: 0, color: 'rgba(238, 102, 102, 0.3)' }, { offset: 1, color: 'rgba(238, 102, 102, 0.05)' }]
                     }
                 }
@@ -962,7 +967,7 @@ function detailGoToPage(page) {
     loadProductRecords();
 }
 
-function detailChangePageSize(size) {
+function changeDetailPageSize(size) {
     detailPageSize = parseInt(size);
     detailCurrentPage = 1;
     loadProductRecords();

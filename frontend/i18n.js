@@ -83,8 +83,8 @@ const translations = {
         prevPage: '上一页',
         nextPage: '下一页',
         pageSize: '每页',
-        totalRecords: '共 {count} 条记录',
-        recordsUnit: '条',
+        totalRecords: '共',
+        recordsUnit: '条记录',
         pageInfo: '第 {page} 页 / 共 {total} 页',
 
         // 产品选择
@@ -214,7 +214,7 @@ const translations = {
         prevPage: 'Previous',
         nextPage: 'Next',
         pageSize: 'Per Page',
-        totalRecords: 'Total: {count} records',
+        totalRecords: 'Total:',
         recordsUnit: 'records',
         pageInfo: 'Page {page} of {total}',
 
@@ -337,7 +337,7 @@ function updateLangOptionActive() {
 }
 
 // 点击页面其他地方关闭下拉菜单
-document.addEventListener('click', function(e) {
+document.addEventListener('click', function (e) {
     if (!e.target.closest('.lang-dropdown')) {
         const menu = document.getElementById('lang-dropdown-menu');
         if (menu) {
@@ -347,7 +347,7 @@ document.addEventListener('click', function(e) {
 });
 
 // 页面加载时初始化
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     updatePageTexts();
     updateLangOptionActive();
 });
