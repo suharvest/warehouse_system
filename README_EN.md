@@ -14,6 +14,11 @@ A smart hardware warehouse management dashboard based on Python FastAPI + SQLite
 - 🌐 **Multi-language Support**: Chinese/English switching
 - 📱 **Responsive Design**: Adapts to different screen sizes
 
+## Demo Video
+
+[Watch Demo Video](assets/demo_video.mp4)
+
+
 ## Changelog
 
 [View Full Changelog](CHANGELOG_EN.md)
