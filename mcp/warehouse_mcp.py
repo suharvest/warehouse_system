@@ -219,6 +219,74 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库", op
 
 
 @mcp.tool()
+def search_materials(name: str = None, category: str = None, status: str = None) -> dict:
+    """
+    搜索库存物料（支持多条件筛选）
+
+    参数:
+        name: 物料名称或SKU关键词（模糊搜索）
+        category: 物料分类（精确匹配）
+        status: 库存状态（normal=正常, warning=偏低, danger=告急, disabled=禁用），多个状态用逗号分隔
+
+    返回:
+        符合条件的物料列表
+    """
+    try:
+        params = {}
+        if name:
+            params['name'] = name
+        if category:
+            params['category'] = category
+        if status:
+            params['status'] = status
+        
+        # 默认查询第一页，每页100条以获取足够多的结果
+        params['page'] = 1
+        params['page_size'] = 100
+
+        data = api_get("/materials/list", params=params)
+
+        if isinstance(data, dict) and "error" in data:
+            return {
+                "success": False,
+                "error": data["error"],
+                "message": f"搜索失败: {data['error']}"
+            }
+
+        items = data.get('items', [])
+        total = data.get('total', 0)
+
+        # 简化返回结果，只保留关键字段
+        simplified_items = []
+        for item in items:
+            simplified_items.append({
+                "name": item['name'],
+                "sku": item['sku'],
+                "category": item['category'],
+                "quantity": item['quantity'],
+                "unit": item['unit'],
+                "status": item['status_text'],  # 使用后端返回的中文状态
+                "location": item['location']
+            })
+
+        return {
+            "success": True,
+            "count": len(simplified_items),
+            "total": total,
+            "materials": simplified_items,
+            "message": f"搜索成功，找到 {len(simplified_items)} 条匹配记录"
+        }
+
+    except Exception as e:
+        logger.error(f"搜索物料失败: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"搜索失败: {str(e)}"
+        }
+
+
+@mcp.tool()
 def list_xiaozhi_products() -> dict:
     """
     列出所有 watcher-xiaozhi 相关产品
