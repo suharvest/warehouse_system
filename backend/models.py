@@ -166,6 +166,7 @@ class ExcelImportConfirm(BaseModel):
     operator: str
     reason: str
     confirm_new_skus: bool = False  # 是否确认创建新SKU
+    confirm_disable_missing_skus: bool = False  # 是否确认禁用导入文件以外的SKU
 
 
 class ExcelImportResponse(BaseModel):

@@ -1014,6 +1014,8 @@ function showImportModal() {
     document.getElementById('confirm-import-btn').disabled = true;
     importPreviewData = null;
     pendingNewSkus = [];
+    const disableCheckbox = document.getElementById('confirm-disable-missing');
+    if (disableCheckbox) disableCheckbox.checked = false;
 }
 
 function closeImportModal() {
@@ -1147,6 +1149,7 @@ async function confirmNewSkus() {
 async function executeImport(confirmNewSkus) {
     const operator = document.getElementById('import-operator').value.trim();
     const reason = document.getElementById('import-reason').value.trim();
+    const confirmDisableMissing = document.getElementById('confirm-disable-missing')?.checked || false;
 
     try {
         const response = await fetch(`${API_BASE_URL}/materials/import-excel/confirm`, {
@@ -1156,7 +1159,8 @@ async function executeImport(confirmNewSkus) {
                 changes: importPreviewData.preview,
                 operator: operator,
                 reason: reason,
-                confirm_new_skus: confirmNewSkus
+                confirm_new_skus: confirmNewSkus,
+                confirm_disable_missing_skus: confirmDisableMissing
             })
         });
 

@@ -690,6 +690,17 @@
                                     placeholder="请输入导入原因" required>
                             </div>
                         </div>
+                        <div class="form-row">
+                            <div class="form-group warning-box">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="confirm-disable-missing">
+                                    <span data-i18n="disableMissingSkus">禁用导入文件外的SKU</span>
+                                </label>
+                                <p class="form-hint" data-i18n="disableMissingSkusHint">
+                                    勾选后将把本次未出现的SKU标记为禁用，谨慎操作；不勾选则跳过禁用，其他变更照常执行。
+                                </p>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

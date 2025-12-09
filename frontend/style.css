@@ -1087,3 +1087,41 @@ tbody tr:hover {
     color: #f5222d;
     margin-left: 4px;
 }
+
+.form-hint {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    padding-left: 24px;
+    /* Align with text */
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.checkbox-label input[type="checkbox"] {
+    margin-right: 8px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--primary-color);
+}
+
+/* Warning box for dangerous options */
+.warning-box {
+    background-color: #fffbe6;
+    border: 1px solid #ffe58f;
+    padding: 12px;
+    border-radius: 8px;
+    margin-top: 16px;
+}
+
+.warning-box .checkbox-label {
+    margin-bottom: 4px;
+}
