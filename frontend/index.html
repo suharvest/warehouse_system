@@ -640,7 +640,7 @@
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label data-i18n="selectFile">选择Excel文件 <span class="required">*</span></label>
+                    <label><span data-i18n="selectFile">选择Excel文件</span> <span class="required">*</span></label>
                     <div class="upload-area" onclick="document.getElementById('excel-file').click()">
                         <input type="file" id="excel-file" accept=".xlsx, .xls" style="display: none;"
                             onchange="handleFileSelect(event)">
@@ -680,12 +680,12 @@
                     <div class="import-form">
                         <div class="form-row">
                             <div class="form-group">
-                                <label data-i18n="operator">操作人 <span class="required">*</span></label>
+                                <label><span data-i18n="operator">操作人</span> <span class="required">*</span></label>
                                 <input type="text" id="import-operator" data-i18n-placeholder="operatorPlaceholder"
                                     placeholder="请输入操作人" required>
                             </div>
                             <div class="form-group">
-                                <label data-i18n="reason">导入原因 <span class="required">*</span></label>
+                                <label><span data-i18n="reason">导入原因</span> <span class="required">*</span></label>
                                 <input type="text" id="import-reason" data-i18n-placeholder="reasonPlaceholder"
                                     placeholder="请输入导入原因" required>
                             </div>
@@ -729,7 +729,7 @@
             <div class="modal-body">
                 <form id="add-record-form">
                     <div class="form-group" id="record-product-group">
-                        <label data-i18n="selectProduct">选择产品 <span class="required">*</span></label>
+                        <label><span data-i18n="selectProduct">选择产品</span> <span class="required">*</span></label>
                         <select id="record-product" required>
                             <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
                         </select>
@@ -739,7 +739,7 @@
                         <input type="text" id="record-product-display" readonly disabled>
                     </div>
                     <div class="form-group">
-                        <label data-i18n="operationType">操作类型 <span class="required">*</span></label>
+                        <label><span data-i18n="operationType">操作类型</span> <span class="required">*</span></label>
                         <div class="radio-group">
                             <label class="radio-label">
                                 <input type="radio" name="record-type" value="in" checked>
@@ -752,15 +752,15 @@
                         </div>
                     </div>
                     <div class="form-group">
-                        <label data-i18n="quantity">数量 <span class="required">*</span></label>
+                        <label><span data-i18n="quantity">数量</span> <span class="required">*</span></label>
                         <input type="number" id="record-quantity" min="1" required>
                     </div>
                     <div class="form-group">
-                        <label data-i18n="operator">操作人 <span class="required">*</span></label>
+                        <label><span data-i18n="operator">操作人</span> <span class="required">*</span></label>
                         <input type="text" id="record-operator" required>
                     </div>
                     <div class="form-group">
-                        <label data-i18n="reason">原因 <span class="required">*</span></label>
+                        <label><span data-i18n="reason">原因</span> <span class="required">*</span></label>
                         <input type="text" id="record-reason" required>
                     </div>
                 </form>

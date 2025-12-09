@@ -1191,6 +1191,24 @@ def confirm_import_excel(request: ExcelImportConfirm):
                     continue
 
                 material_id = material['id']
+
+                # 无论是否有库存变动，都更新基本信息（安全库存、分类、单位、位置）
+                # 注意：这里我们信任导入文件中的信息为最新
+                cursor.execute('''
+                    UPDATE materials 
+                    SET safe_stock = ?, category = ?, unit = ?, location = ?
+                    WHERE id = ?
+                ''', (
+                    item.safe_stock if item.safe_stock is not None else 20,
+                    item.category or '未分类',
+                    item.unit or '个',
+                    item.location or '',
+                    material_id
+                ))
+
+                if item.operation == 'none':
+                    continue
+
                 abs_diff = abs(item.difference)
 
                 if item.operation == 'in':
