@@ -1082,3 +1082,8 @@ tbody tr:hover {
     background-color: var(--border-color);
     margin: 0 4px;
 }
+
+.required {
+    color: #f5222d;
+    margin-left: 4px;
+}

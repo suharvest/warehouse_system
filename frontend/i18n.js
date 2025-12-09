@@ -30,6 +30,7 @@ const translations = {
         // 图表标题
         weeklyTrend: '近7天出入库趋势',
         categoryDistribution: '库存类型分布',
+        categoryDist: '库存分类分布',
         topStock: '库存TOP10',
         inOutRatio: '出入库占比',
 
@@ -167,6 +168,7 @@ const translations = {
 
         weeklyTrend: '7-Day In/Out Trend',
         categoryDistribution: 'Category Distribution',
+        categoryDist: 'Category Distribution',
         topStock: 'Top 10 Stock',
         inOutRatio: 'In/Out Ratio',
 

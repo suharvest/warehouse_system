@@ -1100,7 +1100,7 @@ async function confirmImport() {
     const reason = document.getElementById('import-reason').value.trim();
 
     if (!operator || !reason) {
-        alert(t('fillOperatorAndReason'));
+        alert(t('fillAllFields'));
         return;
     }
 
@@ -1208,17 +1208,18 @@ async function submitAddRecord() {
     const productName = addRecordForProduct
         ? currentProductName
         : document.getElementById('record-product').value;
-    const type = document.querySelector('input[name="record-type"]:checked').value;
+    const type = document.querySelector('input[name="record-type"]:checked')?.value;
     const quantity = parseInt(document.getElementById('record-quantity').value);
     const operator = document.getElementById('record-operator').value.trim();
     const reason = document.getElementById('record-reason').value.trim();
 
-    if (!productName || !quantity || !operator || !reason) {
-        alert(t('fillAllFields'));
+    // 必填项校验
+    if (!productName || !type || !document.getElementById('record-quantity').value || !operator || !reason) {
+        alert(t('fillAllFields')); // 请填写所有必填项
         return;
     }
 
-    if (quantity <= 0) {
+    if (isNaN(quantity) || quantity <= 0) {
         alert(t('quantityMustBePositive'));
         return;
     }
