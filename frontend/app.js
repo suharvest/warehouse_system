@@ -982,18 +982,38 @@ function changeDetailPageSize(size) {
 
 // ============ 导出功能 ============
 function exportInventory() {
-    window.location.href = `${API_BASE_URL}/materials/export-excel`;
+    const name = document.getElementById('filter-product').value.trim();
+    const category = document.getElementById('filter-category').value;
+
+    // 获取选中的状态
+    const statusContainer = document.getElementById('filter-inventory-status-dropdown');
+    const selectedStatuses = [];
+    if (statusContainer) {
+        statusContainer.querySelectorAll('.dropdown-item.selected').forEach(item => {
+            const value = item.getAttribute('data-value');
+            if (value) selectedStatuses.push(value);
+        });
+    }
+
+    const params = new URLSearchParams();
+    if (name) params.set('name', name);
+    if (category) params.set('category', category);
+    if (selectedStatuses.length > 0) params.set('status', selectedStatuses.join(','));
+
+    window.location.href = `${API_BASE_URL}/materials/export-excel?${params}`;
 }
 
 function exportRecords() {
     const startDate = document.getElementById('filter-start-date').value;
     const endDate = document.getElementById('filter-end-date').value;
     const productName = document.getElementById('filter-records-product').value.trim();
+    const type = document.getElementById('filter-record-type').value;
 
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
     if (endDate) params.set('end_date', endDate);
     if (productName) params.set('product_name', productName);
+    if (type) params.set('record_type', type);
 
     window.location.href = `${API_BASE_URL}/inventory/export-excel?${params}`;
 }

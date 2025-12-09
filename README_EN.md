@@ -14,25 +14,10 @@ A smart hardware warehouse management dashboard based on Python FastAPI + SQLite
 - 🌐 **Multi-language Support**: Chinese/English switching
 - 📱 **Responsive Design**: Adapts to different screen sizes
 
-## Latest Updates (v2.0.0)
+## Changelog
 
-### Architecture Upgrade
-- **Backend migrated to FastAPI**: Migrated from Flask to FastAPI framework
-  - Auto-generated API documentation (Swagger UI: `/docs`)
-  - Pydantic response models with type validation
-  - Modern async architecture support
+[View Full Changelog](CHANGELOG_EN.md)
 
-### New APIs
-- **Stock In**: `POST /api/materials/stock-in`
-- **Stock Out**: `POST /api/materials/stock-out`
-
-### MCP Architecture Optimization
-- MCP service now calls backend via HTTP API instead of direct database operations
-- Single data access layer for easier maintenance and extensibility
-
-### v1.1.0 Features
-- **Multi-language Support**: Chinese/English switching
-- Fixed spacing issue between inventory list and Top 10 chart
 
 ## Tech Stack
 
