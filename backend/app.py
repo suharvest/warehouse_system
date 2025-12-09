@@ -1326,16 +1326,16 @@ def confirm_import_excel(request: ExcelImportConfirm):
                 if item.operation == 'none':
                     continue
 
-                    abs_diff = abs(item.difference)
+                abs_diff = abs(item.difference)
 
-                    if item.operation == 'in':
-                        # 入库
-                        new_qty = current_qty + abs_diff
-                        cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
-                                     (new_qty, material_id))
-                        cursor.execute('''
-                            INSERT INTO inventory_records
-                            (material_id, type, quantity, operator, reason, created_at)
+                if item.operation == 'in':
+                    # 入库
+                    new_qty = current_qty + abs_diff
+                    cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
+                                 (new_qty, material_id))
+                    cursor.execute('''
+                        INSERT INTO inventory_records
+                        (material_id, type, quantity, operator, reason, created_at)
                         VALUES (?, 'in', ?, ?, ?, ?)
                     ''', (
                         material_id,
@@ -1347,24 +1347,24 @@ def confirm_import_excel(request: ExcelImportConfirm):
                     in_count += 1
                     records_created += 1
 
-                    elif item.operation == 'out':
-                        # 出库（不允许负库存）
-                        if current_qty - abs_diff < 0:
-                            return ExcelImportResponse(
-                                success=False,
-                                in_count=in_count,
-                                out_count=out_count,
-                                new_count=new_count,
-                                records_created=records_created,
-                                message=f"出库失败：SKU {item.sku} 出库 {abs_diff} 超过当前库存 {current_qty}，已终止导入。"
-                            )
+                elif item.operation == 'out':
+                    # 出库（不允许负库存）
+                    if current_qty - abs_diff < 0:
+                        return ExcelImportResponse(
+                            success=False,
+                            in_count=in_count,
+                            out_count=out_count,
+                            new_count=new_count,
+                            records_created=records_created,
+                            message=f"出库失败：SKU {item.sku} 出库 {abs_diff} 超过当前库存 {current_qty}，已终止导入。"
+                        )
 
-                        new_qty = current_qty - abs_diff
-                        cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
-                                     (new_qty, material_id))
-                        cursor.execute('''
-                            INSERT INTO inventory_records
-                            (material_id, type, quantity, operator, reason, created_at)
+                    new_qty = current_qty - abs_diff
+                    cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
+                                 (new_qty, material_id))
+                    cursor.execute('''
+                        INSERT INTO inventory_records
+                        (material_id, type, quantity, operator, reason, created_at)
                         VALUES (?, 'out', ?, ?, ?, ?)
                     ''', (
                         material_id,
