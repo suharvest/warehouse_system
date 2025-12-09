@@ -15,8 +15,11 @@ from models import (
     MaterialItem, XiaozhiItem, ProductStats, ProductRecord,
     StockOperationRequest, StockOperationResponse, StockOperationProduct,
     ImportPreviewItem, ExcelImportPreviewResponse, ExcelImportConfirm,
-    ExcelImportResponse, ManualRecordRequest
+    ExcelImportResponse, ManualRecordRequest,
+    PaginatedMaterialsResponse, PaginatedRecordsResponse, MaterialItemWithDisabled,
+    InventoryRecordItem, PaginatedProductRecordsResponse
 )
+import math
 
 # Excel处理
 from openpyxl import Workbook, load_workbook
@@ -65,41 +68,43 @@ async def http_exception_handler(request, exc):
 
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
 def get_dashboard_stats():
-    """获取仪表盘统计数据"""
+    """获取仪表盘统计数据（排除禁用物料）"""
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 库存总量
-        cursor.execute('SELECT SUM(quantity) as total FROM materials')
+        # 库存总量（排除禁用）
+        cursor.execute('SELECT SUM(quantity) as total FROM materials WHERE is_disabled = 0')
         total_stock = cursor.fetchone()['total'] or 0
 
-        # 今日入库量
+        # 今日入库量（排除禁用物料的记录）
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         cursor.execute('''
-            SELECT SUM(quantity) as total
-            FROM inventory_records
-            WHERE type = 'in' AND created_at >= ?
+            SELECT SUM(r.quantity) as total
+            FROM inventory_records r
+            JOIN materials m ON r.material_id = m.id
+            WHERE r.type = 'in' AND r.created_at >= ? AND m.is_disabled = 0
         ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),))
         today_in = cursor.fetchone()['total'] or 0
 
-        # 今日出库量
+        # 今日出库量（排除禁用物料的记录）
         cursor.execute('''
-            SELECT SUM(quantity) as total
-            FROM inventory_records
-            WHERE type = 'out' AND created_at >= ?
+            SELECT SUM(r.quantity) as total
+            FROM inventory_records r
+            JOIN materials m ON r.material_id = m.id
+            WHERE r.type = 'out' AND r.created_at >= ? AND m.is_disabled = 0
         ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),))
         today_out = cursor.fetchone()['total'] or 0
 
-        # 库存预警（低于安全库存）
+        # 库存预警（低于安全库存，排除禁用）
         cursor.execute('''
             SELECT COUNT(*) as count
             FROM materials
-            WHERE quantity < safe_stock
+            WHERE quantity < safe_stock AND is_disabled = 0
         ''')
         low_stock_count = cursor.fetchone()['count']
 
-        # 物料种类数
-        cursor.execute('SELECT COUNT(*) as count FROM materials')
+        # 物料种类数（排除禁用）
+        cursor.execute('SELECT COUNT(*) as count FROM materials WHERE is_disabled = 0')
         material_types = cursor.fetchone()['count']
 
         # 计算昨日数据用于百分比变化
@@ -275,13 +280,14 @@ def get_xiaozhi_stock():
 
 @app.get("/api/materials/all", response_model=List[MaterialItem])
 def get_all_materials():
-    """获取所有库存"""
+    """获取所有库存（兼容旧API）"""
     with get_db() as conn:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT name, sku, category, quantity, unit, safe_stock, location
+            SELECT name, sku, category, quantity, unit, safe_stock, location, is_disabled
             FROM materials
+            WHERE is_disabled = 0
             ORDER BY name ASC
         ''')
 
@@ -314,6 +320,141 @@ def get_all_materials():
             ))
 
         return result
+
+
+@app.get("/api/materials/list", response_model=PaginatedMaterialsResponse)
+def get_materials_list(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=10, le=100, description="每页条数"),
+    name: Optional[str] = Query(None, description="名称/SKU模糊搜索"),
+    category: Optional[str] = Query(None, description="分类"),
+    status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)")
+):
+    """获取物料列表（分页+筛选）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 解析状态筛选
+        status_filter = status.split(',') if status else None
+
+        # 构建基础查询
+        base_query = '''
+            SELECT name, sku, category, quantity, unit, safe_stock, location, is_disabled
+            FROM materials
+            WHERE 1=1
+        '''
+        count_query = 'SELECT COUNT(*) as total FROM materials WHERE 1=1'
+        params = []
+
+        # 如果没有指定状态筛选，或者状态筛选中不包含disabled，则只查询未禁用的
+        if not status_filter or 'disabled' not in status_filter:
+            base_query += ' AND is_disabled = 0'
+            count_query += ' AND is_disabled = 0'
+
+        # 名称/SKU搜索
+        if name:
+            base_query += ' AND (name LIKE ? OR sku LIKE ?)'
+            count_query += ' AND (name LIKE ? OR sku LIKE ?)'
+            params.extend([f'%{name}%', f'%{name}%'])
+
+        # 分类筛选
+        if category:
+            base_query += ' AND category = ?'
+            count_query += ' AND category = ?'
+            params.append(category)
+
+        # 获取总数
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        # 排序和分页
+        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            quantity = row['quantity']
+            safe_stock = row['safe_stock']
+            is_disabled = bool(row['is_disabled'])
+
+            # 判断状态
+            if is_disabled:
+                item_status = 'disabled'
+                status_text = '禁用'
+            elif quantity >= safe_stock:
+                item_status = 'normal'
+                status_text = '正常'
+            elif quantity >= safe_stock * 0.5:
+                item_status = 'warning'
+                status_text = '偏低'
+            else:
+                item_status = 'danger'
+                status_text = '告急'
+
+            # 状态筛选
+            if status_filter and item_status not in status_filter:
+                continue
+
+            result.append(MaterialItemWithDisabled(
+                name=row['name'],
+                sku=row['sku'],
+                category=row['category'],
+                quantity=quantity,
+                unit=row['unit'],
+                safe_stock=safe_stock,
+                location=row['location'],
+                status=item_status,
+                status_text=status_text,
+                is_disabled=is_disabled
+            ))
+
+        # 如果有状态筛选，重新计算总数
+        if status_filter:
+            # 需要重新查询不带分页的结果来计算正确的总数
+            base_query_no_limit = base_query.replace(' LIMIT ? OFFSET ?', '')
+            cursor.execute(base_query_no_limit, params[:-2])
+            all_rows = cursor.fetchall()
+            filtered_count = 0
+            for row in all_rows:
+                quantity = row['quantity']
+                safe_stock = row['safe_stock']
+                is_disabled = bool(row['is_disabled'])
+
+                if is_disabled:
+                    item_status = 'disabled'
+                elif quantity >= safe_stock:
+                    item_status = 'normal'
+                elif quantity >= safe_stock * 0.5:
+                    item_status = 'warning'
+                else:
+                    item_status = 'danger'
+
+                if item_status in status_filter:
+                    filtered_count += 1
+            total = filtered_count
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+        return PaginatedMaterialsResponse(
+            items=result,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages
+        )
+
+
+@app.get("/api/materials/categories", response_model=List[str])
+def get_categories():
+    """获取所有物料分类"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT DISTINCT category FROM materials ORDER BY category')
+        return [row['category'] for row in cursor.fetchall()]
 
 
 @app.get("/api/materials/product-stats", response_model=ProductStats)
@@ -461,9 +602,13 @@ def get_product_trend(name: str = Query(..., description="产品名称")):
         return WeeklyTrend(dates=dates, in_data=in_data, out_data=out_data)
 
 
-@app.get("/api/materials/product-records", response_model=List[ProductRecord])
-def get_product_records(name: str = Query(..., description="产品名称")):
-    """获取单个产品的出入库记录"""
+@app.get("/api/materials/product-records", response_model=PaginatedProductRecordsResponse)
+def get_product_records(
+    name: str = Query(..., description="产品名称"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=10, le=100, description="每页条数")
+):
+    """获取单个产品的出入库记录（分页）"""
     if not name:
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
@@ -478,16 +623,21 @@ def get_product_records(name: str = Query(..., description="产品名称")):
 
         material_id = product['id']
 
-        # 查询最近30条记录
+        # 获取总数
+        cursor.execute('SELECT COUNT(*) as total FROM inventory_records WHERE material_id = ?', (material_id,))
+        total = cursor.fetchone()['total']
+
+        # 分页查询
+        offset = (page - 1) * page_size
         cursor.execute('''
             SELECT type, quantity, operator, reason, created_at
             FROM inventory_records
             WHERE material_id = ?
             ORDER BY created_at DESC
-            LIMIT 30
-        ''', (material_id,))
+            LIMIT ? OFFSET ?
+        ''', (material_id, page_size, offset))
 
-        return [
+        items = [
             ProductRecord(
                 type=row['type'],
                 quantity=row['quantity'],
@@ -497,6 +647,172 @@ def get_product_records(name: str = Query(..., description="产品名称")):
             )
             for row in cursor.fetchall()
         ]
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+        return PaginatedProductRecordsResponse(
+            items=items,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages
+        )
+
+
+@app.get("/api/inventory/records", response_model=PaginatedRecordsResponse)
+def get_inventory_records_paginated(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=10, le=100, description="每页条数"),
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    product_name: Optional[str] = Query(None, description="产品名称/SKU模糊搜索"),
+    record_type: Optional[str] = Query(None, description="类型: in/out"),
+    status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)")
+):
+    """获取所有进出库记录（分页+筛选）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 解析状态筛选
+        status_filter = status.split(',') if status else None
+
+        # 构建查询
+        base_query = '''
+            SELECT r.id, m.name as material_name, m.sku as material_sku, m.category,
+                   r.type, r.quantity, r.operator, r.reason, r.created_at,
+                   m.quantity as current_quantity, m.safe_stock, m.is_disabled
+            FROM inventory_records r
+            JOIN materials m ON r.material_id = m.id
+            WHERE 1=1
+        '''
+        count_query = '''
+            SELECT COUNT(*) as total
+            FROM inventory_records r
+            JOIN materials m ON r.material_id = m.id
+            WHERE 1=1
+        '''
+        params = []
+
+        # 时间范围筛选
+        if start_date:
+            base_query += ' AND DATE(r.created_at) >= ?'
+            count_query += ' AND DATE(r.created_at) >= ?'
+            params.append(start_date)
+        if end_date:
+            base_query += ' AND DATE(r.created_at) <= ?'
+            count_query += ' AND DATE(r.created_at) <= ?'
+            params.append(end_date)
+
+        # 产品名称/SKU搜索
+        if product_name:
+            base_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
+            count_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
+            params.extend([f'%{product_name}%', f'%{product_name}%'])
+
+        # 类型筛选
+        if record_type:
+            base_query += ' AND r.type = ?'
+            count_query += ' AND r.type = ?'
+            params.append(record_type)
+
+        # 获取总数
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        # 排序和分页
+        base_query += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?'
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        result = []
+        filtered_count = 0
+        for row in rows:
+            quantity = row['current_quantity']
+            safe_stock = row['safe_stock']
+            is_disabled = bool(row['is_disabled'])
+
+            # 计算物料当前状态
+            if is_disabled:
+                material_status = 'disabled'
+            elif quantity >= safe_stock:
+                material_status = 'normal'
+            elif quantity >= safe_stock * 0.5:
+                material_status = 'warning'
+            else:
+                material_status = 'danger'
+
+            # 状态筛选
+            if status_filter and material_status not in status_filter:
+                continue
+
+            result.append(InventoryRecordItem(
+                id=row['id'],
+                material_name=row['material_name'],
+                material_sku=row['material_sku'],
+                category=row['category'],
+                type=row['type'],
+                quantity=row['quantity'],
+                operator=row['operator'],
+                reason=row['reason'],
+                created_at=row['created_at'],
+                material_status=material_status,
+                is_disabled=is_disabled
+            ))
+            filtered_count += 1
+
+        # 如果有状态筛选，需要重新计算总数
+        if status_filter:
+            # 需要遍历所有数据来计算真实的筛选后总数
+            count_base_query = '''
+                SELECT m.quantity, m.safe_stock, m.is_disabled
+                FROM inventory_records r
+                JOIN materials m ON r.material_id = m.id
+                WHERE 1=1
+            '''
+            count_params = []
+            if start_date:
+                count_base_query += ' AND DATE(r.created_at) >= ?'
+                count_params.append(start_date)
+            if end_date:
+                count_base_query += ' AND DATE(r.created_at) <= ?'
+                count_params.append(end_date)
+            if product_name:
+                count_base_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
+                count_params.extend([f'%{product_name}%', f'%{product_name}%'])
+            if record_type:
+                count_base_query += ' AND r.type = ?'
+                count_params.append(record_type)
+
+            cursor.execute(count_base_query, count_params)
+            all_rows = cursor.fetchall()
+            total = 0
+            for r in all_rows:
+                qty = r['quantity']
+                ss = r['safe_stock']
+                dis = bool(r['is_disabled'])
+                if dis:
+                    s = 'disabled'
+                elif qty >= ss:
+                    s = 'normal'
+                elif qty >= ss * 0.5:
+                    s = 'warning'
+                else:
+                    s = 'danger'
+                if s in status_filter:
+                    total += 1
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+        return PaginatedRecordsResponse(
+            items=result,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages
+        )
 
 
 # ============ Stock Operation APIs (for MCP) ============
@@ -803,6 +1119,23 @@ def confirm_import_excel(request: ExcelImportConfirm):
 
     with get_db() as conn:
         cursor = conn.cursor()
+
+        # 收集导入文件中的所有SKU
+        import_skus = set(item.sku for item in request.changes)
+
+        # 将不在导入文件中的SKU标记为禁用
+        if import_skus:
+            placeholders = ','.join(['?' for _ in import_skus])
+            cursor.execute(f'''
+                UPDATE materials SET is_disabled = 1
+                WHERE sku NOT IN ({placeholders})
+            ''', list(import_skus))
+
+            # 将在导入文件中的SKU启用（取消禁用）
+            cursor.execute(f'''
+                UPDATE materials SET is_disabled = 0
+                WHERE sku IN ({placeholders})
+            ''', list(import_skus))
 
         for item in request.changes:
             if item.operation == 'none':

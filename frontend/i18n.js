@@ -11,6 +11,12 @@ const translations = {
         productDetail: '产品详情',
         productStockDetail: '产品库存详情',
 
+        // Tab 名称
+        tabDashboard: '看板',
+        tabRecords: '进出库记录',
+        tabInventory: '库存列表',
+        tabDetail: '产品详情',
+
         // 统计卡片
         totalStock: '库存总量',
         todayIn: '今日入库',
@@ -58,6 +64,31 @@ const translations = {
         statusNormal: '正常',
         statusWarning: '偏低',
         statusDanger: '告急',
+        statusDisabled: '禁用',
+
+        // 筛选
+        filterStartDate: '开始日期',
+        filterEndDate: '结束日期',
+        filterProduct: '名称/编码',
+        filterCategory: '分类',
+        filterType: '类型',
+        filterStatus: '状态',
+        filterBtn: '筛选',
+        resetBtn: '重置',
+        allTypes: '全部类型',
+        allCategories: '全部分类',
+        allStatuses: '全部状态',
+
+        // 分页
+        prevPage: '上一页',
+        nextPage: '下一页',
+        pageSize: '每页',
+        totalRecords: '共 {count} 条记录',
+        recordsUnit: '条',
+        pageInfo: '第 {page} 页 / 共 {total} 页',
+
+        // 产品选择
+        selectProductHint: '请选择产品查看详情',
 
         // Excel导入导出
         exportInventory: '导出库存',
@@ -118,6 +149,12 @@ const translations = {
         productDetail: 'Product Detail',
         productStockDetail: 'Product Stock Detail',
 
+        // Tab names
+        tabDashboard: 'Dashboard',
+        tabRecords: 'In/Out Records',
+        tabInventory: 'Inventory List',
+        tabDetail: 'Product Detail',
+
         totalStock: 'Total Stock',
         todayIn: 'Today In',
         todayOut: 'Today Out',
@@ -158,6 +195,31 @@ const translations = {
         statusNormal: 'Normal',
         statusWarning: 'Low',
         statusDanger: 'Critical',
+        statusDisabled: 'Disabled',
+
+        // Filtering
+        filterStartDate: 'Start Date',
+        filterEndDate: 'End Date',
+        filterProduct: 'Name/Code',
+        filterCategory: 'Category',
+        filterType: 'Type',
+        filterStatus: 'Status',
+        filterBtn: 'Filter',
+        resetBtn: 'Reset',
+        allTypes: 'All Types',
+        allCategories: 'All Categories',
+        allStatuses: 'All Statuses',
+
+        // Pagination
+        prevPage: 'Previous',
+        nextPage: 'Next',
+        pageSize: 'Per Page',
+        totalRecords: 'Total: {count} records',
+        recordsUnit: 'records',
+        pageInfo: 'Page {page} of {total}',
+
+        // Product selection
+        selectProductHint: 'Please select a product to view details',
 
         // Excel import/export
         exportInventory: 'Export Inventory',

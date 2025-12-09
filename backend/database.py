@@ -26,9 +26,16 @@ def init_database():
             unit TEXT DEFAULT '个',
             safe_stock INTEGER DEFAULT 20,
             location TEXT,
+            is_disabled INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    # 检查并添加 is_disabled 字段（用于已存在的数据库）
+    try:
+        cursor.execute('SELECT is_disabled FROM materials LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE materials ADD COLUMN is_disabled INTEGER DEFAULT 0')
 
     # 创建出入库记录表
     cursor.execute('''

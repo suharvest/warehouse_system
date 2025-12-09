@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>仓库管理系统 - 仪表盘</title>
+    <title>仓库管理系统 - 看板</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <script src="i18n.js"></script>
@@ -30,158 +30,469 @@
                         <div class="lang-option" onclick="selectLanguage('en')">English</div>
                     </div>
                 </div>
-                <button class="refresh-btn" onclick="refreshData()">
+                <button class="refresh-btn" onclick="refreshCurrentTab()">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                         <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
                         <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
                     </svg>
                     <span data-i18n="refresh">刷新</span>
                 </button>
+                <span class="update-info"><span data-i18n="autoUpdate">自动更新:</span> <span id="countdown">20</span><span data-i18n="seconds">秒</span></span>
             </div>
         </header>
 
-        <div class="subtitle" data-i18n="subtitle">访问统计概览</div>
+        <!-- Tab 导航 -->
+        <div class="tab-nav">
+            <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')" data-i18n="tabDashboard">看板</button>
+            <button class="tab-btn" data-tab="records" onclick="switchTab('records')" data-i18n="tabRecords">进出库记录</button>
+            <button class="tab-btn" data-tab="inventory" onclick="switchTab('inventory')" data-i18n="tabInventory">库存列表</button>
+            <button class="tab-btn" data-tab="detail" onclick="switchTab('detail')" data-i18n="tabDetail">产品详情</button>
+        </div>
 
-        <!-- 统计卡片 -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-icon" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <!-- Tab 内容区 -->
+        <div class="tab-content">
+            <!-- 看板 Tab -->
+            <div id="tab-dashboard" class="tab-pane active">
+                <div class="subtitle" data-i18n="subtitle">访问统计概览</div>
+
+                <!-- 统计卡片（可点击） -->
+                <div class="stats-grid">
+                    <div class="stat-card clickable" onclick="onTotalStockClick()">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                                <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                                <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label" data-i18n="totalStock">库存总量</div>
+                            <div class="stat-value" id="total-stock">-</div>
+                            <div class="stat-subtitle" data-i18n="unit">个/件</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card clickable" onclick="onTodayInClick()">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label" data-i18n="todayIn">今日入库</div>
+                            <div class="stat-value" id="today-in">-</div>
+                            <div class="stat-change positive" id="in-change">+0%</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card clickable" onclick="onTodayOutClick()">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="1 4 1 10 7 10"></polyline>
+                                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label" data-i18n="todayOut">今日出库</div>
+                            <div class="stat-value" id="today-out">-</div>
+                            <div class="stat-change positive" id="out-change">+0%</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card clickable" onclick="onLowStockClick()">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                                <line x1="12" y1="9" x2="12" y2="13"></line>
+                                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label" data-i18n="lowStockAlert">库存预警</div>
+                            <div class="stat-value" id="low-stock-count">-</div>
+                            <div class="stat-subtitle" data-i18n="materialTypes">种物料</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 图表区域 -->
+                <div class="charts-container">
+                    <div class="chart-wrapper">
+                        <div class="chart-title" data-i18n="weeklyTrend">近7天出入库趋势</div>
+                        <div id="trend-chart" class="chart"></div>
+                    </div>
+
+                    <div class="chart-wrapper">
+                        <div class="chart-title" data-i18n="categoryDistribution">库存类型分布</div>
+                        <div id="category-chart" class="chart"></div>
+                    </div>
+                </div>
+
+                <div class="chart-wrapper full-width">
+                    <div class="chart-title" data-i18n="topStock">库存TOP10</div>
+                    <div id="top-stock-chart" class="chart"></div>
+                </div>
+            </div>
+
+            <!-- 进出库记录 Tab -->
+            <div id="tab-records" class="tab-pane">
+                <!-- 筛选区域 -->
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label data-i18n="filterStartDate">开始日期</label>
+                        <input type="date" id="filter-start-date">
+                    </div>
+                    <div class="filter-group">
+                        <label data-i18n="filterEndDate">结束日期</label>
+                        <input type="date" id="filter-end-date">
+                    </div>
+                    <div class="filter-group">
+                        <label data-i18n="filterProduct">名称/编码</label>
+                        <input type="text" id="filter-records-product" data-i18n="filterProduct" placeholder="名称/编码">
+                    </div>
+                    <div class="filter-group">
+                        <label data-i18n="filterType">类型</label>
+                        <select id="filter-record-type">
+                            <option value="" data-i18n="allTypes">全部类型</option>
+                            <option value="in" data-i18n="inbound">入库</option>
+                            <option value="out" data-i18n="outbound">出库</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label data-i18n="filterStatus">状态</label>
+                        <div class="dropdown-multiselect" id="filter-record-status-dropdown">
+                            <div class="dropdown-trigger" onclick="toggleDropdown('filter-record-status-dropdown')">
+                                <span class="dropdown-text" data-i18n="allStatuses">全部状态</span>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"></polyline>
+                                </svg>
+                            </div>
+                            <div class="dropdown-menu">
+                                <div class="dropdown-item selected" data-value="normal" onclick="toggleDropdownItem(this)"><span data-i18n="statusNormal">正常</span></div>
+                                <div class="dropdown-item selected" data-value="warning" onclick="toggleDropdownItem(this)"><span data-i18n="statusWarning">偏低</span></div>
+                                <div class="dropdown-item selected" data-value="danger" onclick="toggleDropdownItem(this)"><span data-i18n="statusDanger">告急</span></div>
+                                <div class="dropdown-item" data-value="disabled" onclick="toggleDropdownItem(this)"><span data-i18n="statusDisabled">禁用</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="filter-actions">
+                        <button class="filter-btn primary" onclick="applyRecordsFilter()" data-i18n="filterBtn">筛选</button>
+                        <button class="filter-btn secondary" onclick="resetRecordsFilter()" data-i18n="resetBtn">重置</button>
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="section-header">
+                    <div class="section-title" data-i18n="tabRecords">进出库记录</div>
+                    <div class="action-buttons">
+                        <button class="action-btn add-btn" onclick="showAddRecordModal()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                            <span data-i18n="addRecord">新增记录</span>
+                        </button>
+                        <button class="action-btn record-btn" onclick="exportRecords()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            <span data-i18n="exportRecords">导出记录</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 记录表格 -->
+                <div class="table-container">
+                    <table id="records-table">
+                        <thead>
+                            <tr>
+                                <th data-i18n="time">时间</th>
+                                <th data-i18n="materialName">物料名称</th>
+                                <th data-i18n="materialCode">物料编码</th>
+                                <th data-i18n="type">类型</th>
+                                <th data-i18n="quantity">数量</th>
+                                <th data-i18n="operator">操作人</th>
+                                <th data-i18n="reason">原因</th>
+                                <th data-i18n="status">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody id="records-tbody">
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 分页控件 -->
+                <div class="pagination" id="records-pagination">
+                    <div class="pagination-info">
+                        <span data-i18n="totalRecords">共</span> <span id="records-total">0</span> <span data-i18n="recordsUnit">条记录</span>
+                    </div>
+                    <div class="pagination-controls">
+                        <button onclick="recordsGoToPage(recordsCurrentPage - 1)" id="records-prev-btn" disabled data-i18n="prevPage">上一页</button>
+                        <span class="page-info"><span id="records-current-page">1</span> / <span id="records-total-pages">1</span></span>
+                        <button onclick="recordsGoToPage(recordsCurrentPage + 1)" id="records-next-btn" disabled data-i18n="nextPage">下一页</button>
+                        <select id="records-page-size" onchange="recordsChangePageSize(this.value)">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                        <span data-i18n="pageSize">条/页</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 库存列表 Tab -->
+            <div id="tab-inventory" class="tab-pane">
+                <!-- 筛选区域 -->
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label data-i18n="filterProduct">名称/编码</label>
+                        <input type="text" id="filter-inventory-name" data-i18n="filterProduct" placeholder="名称/编码">
+                    </div>
+                    <div class="filter-group">
+                        <label data-i18n="filterCategory">分类</label>
+                        <select id="filter-inventory-category">
+                            <option value="" data-i18n="allCategories">全部分类</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label data-i18n="filterStatus">状态</label>
+                        <div class="dropdown-multiselect" id="filter-inventory-status-dropdown">
+                            <div class="dropdown-trigger" onclick="toggleDropdown('filter-inventory-status-dropdown')">
+                                <span class="dropdown-text" data-i18n="allStatuses">全部状态</span>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"></polyline>
+                                </svg>
+                            </div>
+                            <div class="dropdown-menu">
+                                <div class="dropdown-item selected" data-value="normal" onclick="toggleDropdownItem(this)"><span data-i18n="statusNormal">正常</span></div>
+                                <div class="dropdown-item selected" data-value="warning" onclick="toggleDropdownItem(this)"><span data-i18n="statusWarning">偏低</span></div>
+                                <div class="dropdown-item selected" data-value="danger" onclick="toggleDropdownItem(this)"><span data-i18n="statusDanger">告急</span></div>
+                                <div class="dropdown-item" data-value="disabled" onclick="toggleDropdownItem(this)"><span data-i18n="statusDisabled">禁用</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="filter-actions">
+                        <button class="filter-btn primary" onclick="applyInventoryFilter()" data-i18n="filterBtn">筛选</button>
+                        <button class="filter-btn secondary" onclick="resetInventoryFilter()" data-i18n="resetBtn">重置</button>
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="section-header">
+                    <div class="section-title" data-i18n="inventoryList">库存列表</div>
+                    <div class="action-buttons">
+                        <button class="action-btn import-btn" onclick="showImportModal()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="17 8 12 3 7 8"></polyline>
+                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                            </svg>
+                            <span data-i18n="importInventory">导入库存</span>
+                        </button>
+                        <button class="action-btn export-btn" onclick="exportInventory()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            <span data-i18n="exportInventory">导出库存</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 库存表格 -->
+                <div class="table-container">
+                    <table id="inventory-table">
+                        <thead>
+                            <tr>
+                                <th data-i18n="materialName">物料名称</th>
+                                <th data-i18n="materialCode">物料编码</th>
+                                <th data-i18n="type">类型</th>
+                                <th data-i18n="currentStockCol">当前库存</th>
+                                <th data-i18n="unitCol">单位</th>
+                                <th data-i18n="safeStockCol">安全库存</th>
+                                <th data-i18n="status">状态</th>
+                                <th data-i18n="location">存放位置</th>
+                            </tr>
+                        </thead>
+                        <tbody id="inventory-tbody">
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 分页控件 -->
+                <div class="pagination" id="inventory-pagination">
+                    <div class="pagination-info">
+                        <span data-i18n="totalRecords">共</span> <span id="inventory-total">0</span> <span data-i18n="recordsUnit">条记录</span>
+                    </div>
+                    <div class="pagination-controls">
+                        <button onclick="inventoryGoToPage(inventoryCurrentPage - 1)" id="inventory-prev-btn" disabled data-i18n="prevPage">上一页</button>
+                        <span class="page-info"><span id="inventory-current-page">1</span> / <span id="inventory-total-pages">1</span></span>
+                        <button onclick="inventoryGoToPage(inventoryCurrentPage + 1)" id="inventory-next-btn" disabled data-i18n="nextPage">下一页</button>
+                        <select id="inventory-page-size" onchange="inventoryChangePageSize(this.value)">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                        <span data-i18n="pageSize">条/页</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 产品详情 Tab -->
+            <div id="tab-detail" class="tab-pane">
+                <!-- 产品选择 -->
+                <div class="product-selector-bar">
+                    <label data-i18n="selectProduct">选择产品</label>
+                    <select id="product-selector" onchange="onProductSelect(this.value)">
+                        <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
+                    </select>
+                </div>
+
+                <!-- 产品详情内容（选择产品后显示） -->
+                <div id="product-detail-content" style="display: none;">
+                    <!-- 产品统计卡片 -->
+                    <div class="stats-grid detail-stats">
+                        <div class="stat-card">
+                            <div class="stat-icon" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                                </svg>
+                            </div>
+                            <div class="stat-content">
+                                <div class="stat-label" data-i18n="currentStock">当前库存</div>
+                                <div class="stat-value" id="detail-current-stock">-</div>
+                                <div class="stat-subtitle" id="detail-stock-unit">个</div>
+                            </div>
+                        </div>
+
+                        <div class="stat-card">
+                            <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                            </div>
+                            <div class="stat-content">
+                                <div class="stat-label" data-i18n="todayIn">今日入库</div>
+                                <div class="stat-value" id="detail-today-in">-</div>
+                                <div class="stat-change positive" id="detail-in-change">+0%</div>
+                            </div>
+                        </div>
+
+                        <div class="stat-card">
+                            <div class="stat-icon" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="1 4 1 10 7 10"></polyline>
+                                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                                </svg>
+                            </div>
+                            <div class="stat-content">
+                                <div class="stat-label" data-i18n="todayOut">今日出库</div>
+                                <div class="stat-value" id="detail-today-out">-</div>
+                                <div class="stat-change positive" id="detail-out-change">+0%</div>
+                            </div>
+                        </div>
+
+                        <div class="stat-card">
+                            <div class="stat-icon" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                                </svg>
+                            </div>
+                            <div class="stat-content">
+                                <div class="stat-label" data-i18n="safeStock">安全库存</div>
+                                <div class="stat-value" id="detail-safe-stock">-</div>
+                                <div class="stat-subtitle" id="detail-stock-status">正常</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 产品图表 -->
+                    <div class="charts-container">
+                        <div class="chart-wrapper">
+                            <div class="chart-title" data-i18n="weeklyTrend">近7天出入库趋势</div>
+                            <div id="detail-trend-chart" class="chart"></div>
+                        </div>
+
+                        <div class="chart-wrapper">
+                            <div class="chart-title" data-i18n="inOutRatio">出入库占比</div>
+                            <div id="detail-pie-chart" class="chart"></div>
+                        </div>
+                    </div>
+
+                    <!-- 操作按钮 -->
+                    <div class="section-header">
+                        <div class="section-title" data-i18n="inOutRecords">出入库记录</div>
+                        <div class="action-buttons">
+                            <button class="action-btn add-btn" onclick="showAddRecordModalForProduct()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                </svg>
+                                <span data-i18n="addRecord">新增记录</span>
+                            </button>
+                            <button class="action-btn record-btn" onclick="exportProductRecords()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                                <span data-i18n="exportRecords">导出记录</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 产品记录表格 -->
+                    <div class="table-container">
+                        <table id="detail-records-table">
+                            <thead>
+                                <tr>
+                                    <th data-i18n="time">时间</th>
+                                    <th data-i18n="type">类型</th>
+                                    <th data-i18n="quantity">数量</th>
+                                    <th data-i18n="operator">操作人</th>
+                                    <th data-i18n="reason">原因</th>
+                                </tr>
+                            </thead>
+                            <tbody id="detail-records-tbody">
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 分页控件 -->
+                    <div class="pagination" id="detail-pagination">
+                        <div class="pagination-info">
+                            <span data-i18n="totalRecords">共</span> <span id="detail-total">0</span> <span data-i18n="recordsUnit">条记录</span>
+                        </div>
+                        <div class="pagination-controls">
+                            <button onclick="detailGoToPage(detailCurrentPage - 1)" id="detail-prev-btn" disabled data-i18n="prevPage">上一页</button>
+                            <span class="page-info"><span id="detail-current-page">1</span> / <span id="detail-total-pages">1</span></span>
+                            <button onclick="detailGoToPage(detailCurrentPage + 1)" id="detail-next-btn" disabled data-i18n="nextPage">下一页</button>
+                            <select id="detail-page-size" onchange="detailChangePageSize(this.value)">
+                                <option value="10">10</option>
+                                <option value="20" selected>20</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                            <span data-i18n="pageSize">条/页</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 未选择产品提示 -->
+                <div id="no-product-selected" class="no-data-hint">
+                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1">
                         <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
                     </svg>
-                </div>
-                <div class="stat-content">
-                    <div class="stat-label" data-i18n="totalStock">库存总量</div>
-                    <div class="stat-value" id="total-stock">-</div>
-                    <div class="stat-subtitle" data-i18n="unit">个/件</div>
+                    <p data-i18n="selectProductHint">请从上方下拉框选择一个产品查看详情</p>
                 </div>
             </div>
-
-            <div class="stat-card">
-                <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="23 4 23 10 17 10"></polyline>
-                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-                    </svg>
-                </div>
-                <div class="stat-content">
-                    <div class="stat-label" data-i18n="todayIn">今日入库</div>
-                    <div class="stat-value" id="today-in">-</div>
-                    <div class="stat-change positive" id="in-change">+0%</div>
-                </div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-icon" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="1 4 1 10 7 10"></polyline>
-                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
-                    </svg>
-                </div>
-                <div class="stat-content">
-                    <div class="stat-label" data-i18n="todayOut">今日出库</div>
-                    <div class="stat-value" id="today-out">-</div>
-                    <div class="stat-change positive" id="out-change">+0%</div>
-                </div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-icon" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                        <line x1="12" y1="9" x2="12" y2="13"></line>
-                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                    </svg>
-                </div>
-                <div class="stat-content">
-                    <div class="stat-label" data-i18n="lowStockAlert">库存预警</div>
-                    <div class="stat-value" id="low-stock-count">-</div>
-                    <div class="stat-subtitle" data-i18n="materialTypes">种物料</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- 图表区域 -->
-        <div class="charts-container">
-            <div class="chart-wrapper">
-                <div class="chart-title" data-i18n="weeklyTrend">近7天出入库趋势</div>
-                <div id="trend-chart" class="chart"></div>
-            </div>
-
-            <div class="chart-wrapper">
-                <div class="chart-title" data-i18n="categoryDistribution">库存类型分布</div>
-                <div id="category-chart" class="chart"></div>
-            </div>
-        </div>
-
-        <!-- 库存列表 -->
-        <div class="alert-section">
-            <div class="section-header">
-                <div class="section-title" data-i18n="inventoryList">库存列表</div>
-                <div class="action-buttons">
-                    <button class="action-btn export-btn" onclick="exportInventory()">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="7 10 12 15 17 10"></polyline>
-                            <line x1="12" y1="15" x2="12" y2="3"></line>
-                        </svg>
-                        <span data-i18n="exportInventory">导出库存</span>
-                    </button>
-                    <button class="action-btn import-btn" onclick="showImportModal()">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="17 8 12 3 7 8"></polyline>
-                            <line x1="12" y1="3" x2="12" y2="15"></line>
-                        </svg>
-                        <span data-i18n="importInventory">导入库存</span>
-                    </button>
-                    <button class="action-btn record-btn" onclick="exportRecords()">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                            <line x1="16" y1="13" x2="8" y2="13"></line>
-                            <line x1="16" y1="17" x2="8" y2="17"></line>
-                        </svg>
-                        <span data-i18n="exportRecords">导出记录</span>
-                    </button>
-                    <button class="action-btn add-btn" onclick="showAddRecordModal()">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <line x1="12" y1="5" x2="12" y2="19"></line>
-                            <line x1="5" y1="12" x2="19" y2="12"></line>
-                        </svg>
-                        <span data-i18n="addRecord">新增记录</span>
-                    </button>
-                </div>
-                <div class="filter-controls">
-                    <input type="text" id="search-input" class="search-input" data-i18n="searchPlaceholder" placeholder="搜索产品名称...">
-                    <span class="update-info"><span data-i18n="autoUpdate">自动更新:</span> <span id="countdown">3</span><span data-i18n="seconds">秒</span></span>
-                </div>
-            </div>
-            <div class="table-container">
-                <table id="inventory-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="materialName">物料名称</th>
-                            <th data-i18n="materialCode">物料编码</th>
-                            <th data-i18n="type">类型</th>
-                            <th data-i18n="currentStockCol">当前库存</th>
-                            <th data-i18n="unitCol">单位</th>
-                            <th data-i18n="safeStockCol">安全库存</th>
-                            <th data-i18n="status">状态</th>
-                            <th data-i18n="location">存放位置</th>
-                        </tr>
-                    </thead>
-                    <tbody id="inventory-tbody">
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="chart-wrapper full-width">
-            <div class="chart-title" data-i18n="topStock">库存TOP10</div>
-            <div id="top-stock-chart" class="chart"></div>
         </div>
     </div>
 
@@ -273,11 +584,15 @@
             </div>
             <div class="modal-body">
                 <form id="add-record-form">
-                    <div class="form-group">
+                    <div class="form-group" id="record-product-group">
                         <label data-i18n="selectProduct">选择产品</label>
                         <select id="record-product" required>
                             <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
                         </select>
+                    </div>
+                    <div class="form-group" id="record-product-display-group" style="display: none;">
+                        <label data-i18n="productName">产品</label>
+                        <input type="text" id="record-product-display" disabled>
                     </div>
                     <div class="form-group">
                         <label data-i18n="operationType">操作类型</label>

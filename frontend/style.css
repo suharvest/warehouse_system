@@ -770,6 +770,405 @@ tbody tr.clickable:hover {
     font-size: 13px;
 }
 
+/* ============ Tab 导航 ============ */
+.tab-nav {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid #e1e4e8;
+    margin-bottom: 20px;
+    background: #fff;
+    border-radius: 8px 8px 0 0;
+    padding: 0 16px;
+}
+
+.tab-btn {
+    padding: 14px 24px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 14px;
+    color: #666;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s;
+    font-weight: 500;
+}
+
+.tab-btn:hover {
+    color: #667eea;
+    background: #f6f8fa;
+}
+
+.tab-btn.active {
+    color: #667eea;
+    border-bottom-color: #667eea;
+    font-weight: 600;
+}
+
+/* Tab 内容 */
+.tab-pane {
+    display: none;
+}
+
+.tab-pane.active {
+    display: block;
+}
+
+/* ============ 筛选栏 ============ */
+.filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 16px 20px;
+    background: #fff;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    align-items: flex-end;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.filter-group label {
+    font-size: 12px;
+    color: #666;
+    font-weight: 500;
+}
+
+.filter-group input,
+.filter-group select {
+    padding: 8px 12px;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    font-size: 13px;
+    min-width: 140px;
+    transition: all 0.2s;
+}
+
+.filter-group input:focus,
+.filter-group select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+/* 下拉多选框样式 */
+.dropdown-multiselect {
+    position: relative;
+    min-width: 140px;
+}
+
+.dropdown-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.dropdown-trigger:hover {
+    border-color: #c0c4cc;
+}
+
+.dropdown-multiselect.open .dropdown-trigger {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.dropdown-multiselect.open .dropdown-trigger svg {
+    transform: rotate(180deg);
+}
+
+.dropdown-trigger svg {
+    transition: transform 0.2s;
+    flex-shrink: 0;
+}
+
+.dropdown-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    min-width: 100%;
+    margin-top: 4px;
+    padding: 4px 0;
+    background: #fff;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    z-index: 100;
+}
+
+.dropdown-multiselect.open .dropdown-menu {
+    display: block;
+}
+
+.dropdown-item {
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+    white-space: nowrap;
+    border-radius: 4px;
+    margin: 2px 4px;
+    color: #666;
+}
+
+.dropdown-item:hover {
+    background: #f0f0f0;
+}
+
+.dropdown-item.selected {
+    background: #667eea;
+    color: #fff;
+}
+
+.dropdown-item.selected:hover {
+    background: #5a6fd6;
+}
+
+.filter-group.filter-checkbox {
+    flex-direction: row;
+    align-items: center;
+    padding-bottom: 8px;
+}
+
+.filter-group.filter-checkbox label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #333;
+}
+
+.filter-group.filter-checkbox input[type="checkbox"] {
+    min-width: auto;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.filter-actions {
+    display: flex;
+    gap: 8px;
+    padding-bottom: 0;
+}
+
+.filter-btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.filter-btn.primary {
+    background: #667eea;
+    color: #fff;
+    border: none;
+}
+
+.filter-btn.primary:hover {
+    background: #5a6fd6;
+}
+
+.filter-btn.secondary {
+    background: #fff;
+    color: #666;
+    border: 1px solid #e1e4e8;
+}
+
+.filter-btn.secondary:hover {
+    background: #f6f8fa;
+    border-color: #d0d7de;
+}
+
+/* ============ 分页控件 ============ */
+.pagination {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 0;
+    border-top: 1px solid #e1e4e8;
+    margin-top: 16px;
+}
+
+.pagination-info {
+    color: #666;
+    font-size: 13px;
+}
+
+.pagination-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.pagination-controls button {
+    padding: 6px 12px;
+    border: 1px solid #e1e4e8;
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #333;
+    transition: all 0.2s;
+}
+
+.pagination-controls button:hover:not(:disabled) {
+    background: #f6f8fa;
+    border-color: #667eea;
+    color: #667eea;
+}
+
+.pagination-controls button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.pagination-controls .page-info {
+    font-size: 13px;
+    color: #666;
+    padding: 0 8px;
+}
+
+.pagination-controls select {
+    padding: 6px 8px;
+    border: 1px solid #e1e4e8;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+/* ============ 可点击的统计卡片 ============ */
+.stat-card.clickable {
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card.clickable:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* ============ 禁用状态 ============ */
+.status-disabled {
+    color: #999;
+    background: #f5f5f5;
+}
+
+/* ============ 产品选择器 ============ */
+.product-selector-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    background: #fff;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.product-selector-bar label {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+}
+
+.product-selector-bar select {
+    flex: 1;
+    max-width: 400px;
+    padding: 10px 14px;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.product-selector-bar select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+/* ============ 无数据提示 ============ */
+.no-data-hint {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 20px;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.no-data-hint svg {
+    margin-bottom: 16px;
+    opacity: 0.5;
+}
+
+.no-data-hint p {
+    font-size: 14px;
+    color: #999;
+}
+
+/* ============ 产品详情统计卡片 ============ */
+.detail-stats {
+    margin-bottom: 20px;
+}
+
+/* ============ section-header for tables ============ */
+.alert-section,
+.tab-pane .section-header + .table-container {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    margin-bottom: 20px;
+}
+
+.tab-pane .table-container {
+    background: #fff;
+    border-radius: 0 0 12px 12px;
+    padding: 0 24px 24px;
+    margin-top: -16px;
+}
+
+.tab-pane .section-header {
+    background: #fff;
+    border-radius: 12px 12px 0 0;
+    padding: 24px 24px 16px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    margin-bottom: 0;
+}
+
+.tab-pane .pagination {
+    background: #fff;
+    padding: 16px 24px;
+    margin-top: 0;
+    border-radius: 0 0 12px 12px;
+}
+
 /* 响应式 */
 @media (max-width: 768px) {
     .stats-grid {
@@ -814,5 +1213,76 @@ tbody tr.clickable:hover {
     .modal-content {
         width: 95%;
         margin: 10px;
+    }
+
+    /* Tab 导航响应式 */
+    .tab-nav {
+        overflow-x: auto;
+        padding: 0 8px;
+    }
+
+    .tab-btn {
+        padding: 12px 16px;
+        font-size: 13px;
+        white-space: nowrap;
+    }
+
+    /* 筛选栏响应式 */
+    .filter-bar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .filter-group {
+        width: 100%;
+    }
+
+    .filter-group input,
+    .filter-group select {
+        width: 100%;
+        min-width: auto;
+    }
+
+    .filter-actions {
+        width: 100%;
+        justify-content: stretch;
+    }
+
+    .filter-btn {
+        flex: 1;
+    }
+
+    /* 分页响应式 */
+    .pagination {
+        flex-direction: column;
+        gap: 12px;
+        align-items: center;
+    }
+
+    .pagination-controls {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    /* 产品选择器响应式 */
+    .product-selector-bar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .product-selector-bar select {
+        max-width: none;
+    }
+
+    /* 头部操作区响应式 */
+    .header-actions {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .update-info {
+        order: -1;
+        width: 100%;
+        text-align: center;
     }
 }

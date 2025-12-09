@@ -2,7 +2,9 @@
 Pydantic models for API request/response validation
 """
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Generic, TypeVar
+
+T = TypeVar('T')
 
 
 # ============ Dashboard Models ============
@@ -183,3 +185,61 @@ class ManualRecordRequest(BaseModel):
     quantity: int
     operator: str
     reason: str
+
+
+# ============ Pagination Models ============
+
+class PaginatedMaterialsResponse(BaseModel):
+    """物料分页响应"""
+    items: List['MaterialItemWithDisabled']
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class PaginatedRecordsResponse(BaseModel):
+    """进出库记录分页响应"""
+    items: List['InventoryRecordItem']
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class MaterialItemWithDisabled(BaseModel):
+    """物料项（含禁用状态）"""
+    name: str
+    sku: str
+    category: str
+    quantity: int
+    unit: str
+    safe_stock: int
+    location: str
+    status: str  # 'normal' | 'warning' | 'danger' | 'disabled'
+    status_text: str
+    is_disabled: bool = False
+
+
+class InventoryRecordItem(BaseModel):
+    """进出库记录项"""
+    id: int
+    material_name: str
+    material_sku: str
+    category: str
+    type: str  # 'in' | 'out'
+    quantity: int
+    operator: str
+    reason: Optional[str]
+    created_at: str
+    material_status: str  # 物料当前状态
+    is_disabled: bool = False
+
+
+class PaginatedProductRecordsResponse(BaseModel):
+    """产品进出库记录分页响应"""
+    items: List[ProductRecord]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
