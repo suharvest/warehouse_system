@@ -128,3 +128,58 @@ class StockOperationResponse(BaseModel):
     message: str
     warning: Optional[str] = None
     error: Optional[str] = None
+
+
+# ============ Excel Import/Export Models ============
+
+class ImportPreviewItem(BaseModel):
+    """导入预览项"""
+    sku: str
+    name: str
+    category: Optional[str] = None
+    unit: Optional[str] = None
+    safe_stock: Optional[int] = None
+    location: Optional[str] = None
+    current_quantity: Optional[int] = None  # None表示新SKU
+    import_quantity: int
+    difference: int
+    operation: str  # 'in' | 'out' | 'none' | 'new'
+    is_new: bool = False
+
+
+class ExcelImportPreviewResponse(BaseModel):
+    """Excel导入预览响应"""
+    success: bool
+    preview: List[ImportPreviewItem]
+    new_skus: List[ImportPreviewItem]
+    total_in: int
+    total_out: int
+    total_new: int
+    message: str
+
+
+class ExcelImportConfirm(BaseModel):
+    """Excel导入确认请求"""
+    changes: List[ImportPreviewItem]
+    operator: str
+    reason: str
+    confirm_new_skus: bool = False  # 是否确认创建新SKU
+
+
+class ExcelImportResponse(BaseModel):
+    """Excel导入响应"""
+    success: bool
+    in_count: int
+    out_count: int
+    new_count: int
+    records_created: int
+    message: str
+
+
+class ManualRecordRequest(BaseModel):
+    """手动新增出入库记录请求"""
+    product_name: str
+    type: str  # 'in' | 'out'
+    quantity: int
+    operator: str
+    reason: str

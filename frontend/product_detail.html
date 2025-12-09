@@ -128,6 +128,15 @@
         <div class="alert-section">
             <div class="section-header">
                 <div class="section-title" data-i18n="inOutRecords">出入库记录</div>
+                <div class="action-buttons">
+                    <button class="action-btn add-btn" onclick="showAddRecordModal()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        <span data-i18n="addRecord">新增记录</span>
+                    </button>
+                </div>
             </div>
             <div class="table-container">
                 <table id="records-table">
@@ -143,6 +152,53 @@
                     <tbody id="records-tbody">
                     </tbody>
                 </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增记录模态框 -->
+    <div id="add-record-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="addInventoryRecord">新增出入库记录</h3>
+                <button class="close-btn" onclick="closeAddRecordModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="add-record-form">
+                    <div class="form-group">
+                        <label data-i18n="productName">产品</label>
+                        <input type="text" id="record-product-display" readonly disabled>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="operationType">操作类型</label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="record-type" value="in" checked>
+                                <span data-i18n="inbound">入库</span>
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="record-type" value="out">
+                                <span data-i18n="outbound">出库</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="quantity">数量</label>
+                        <input type="number" id="record-quantity" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="operator">操作人</label>
+                        <input type="text" id="record-operator" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="reason">原因</label>
+                        <input type="text" id="record-reason" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeAddRecordModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="submitAddRecord()" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>

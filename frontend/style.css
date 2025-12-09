@@ -401,6 +401,375 @@ tbody tr.clickable:hover {
     background: #f0f4ff;
 }
 
+/* ============ 操作按钮组 ============ */
+.action-buttons {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.action-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid;
+    transition: all 0.3s;
+    background: #fff;
+}
+
+.action-btn.export-btn {
+    border-color: #91d5ff;
+    color: #1890ff;
+}
+
+.action-btn.export-btn:hover {
+    background: #e6f7ff;
+}
+
+.action-btn.import-btn {
+    border-color: #b7eb8f;
+    color: #52c41a;
+}
+
+.action-btn.import-btn:hover {
+    background: #f6ffed;
+}
+
+.action-btn.record-btn {
+    border-color: #ffe58f;
+    color: #faad14;
+}
+
+.action-btn.record-btn:hover {
+    background: #fffbe6;
+}
+
+.action-btn.add-btn {
+    border-color: #d3adf7;
+    color: #722ed1;
+}
+
+.action-btn.add-btn:hover {
+    background: #f9f0ff;
+}
+
+/* ============ 模态框样式 ============ */
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal.show {
+    display: flex;
+}
+
+.modal-content {
+    background: #fff;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 90vh;
+    overflow: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+}
+
+.modal-content.modal-large {
+    max-width: 800px;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 24px;
+    border-bottom: 1px solid #e1e4e8;
+}
+
+.modal-header h3 {
+    font-size: 18px;
+    color: #2c3e50;
+    margin: 0;
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    color: #999;
+    line-height: 1;
+}
+
+.close-btn:hover {
+    color: #333;
+}
+
+.modal-body {
+    padding: 24px;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 16px 24px;
+    border-top: 1px solid #e1e4e8;
+}
+
+/* 上传区域 */
+.upload-area {
+    border: 2px dashed #d9d9d9;
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.upload-area:hover {
+    border-color: #1890ff;
+    background: #f6f8fa;
+}
+
+.upload-area p {
+    margin: 12px 0 4px;
+    color: #666;
+    font-size: 14px;
+}
+
+.upload-area .file-hint {
+    color: #999;
+    font-size: 12px;
+}
+
+/* 预览区域 */
+#preview-area h4 {
+    margin: 0 0 12px;
+    color: #2c3e50;
+    font-size: 15px;
+}
+
+.preview-summary {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #f6f8fa;
+    border-radius: 6px;
+    flex-wrap: wrap;
+}
+
+.summary-item {
+    font-size: 14px;
+    color: #666;
+}
+
+.summary-item.in span:last-child {
+    color: #52c41a;
+    font-weight: 600;
+}
+
+.summary-item.out span:last-child {
+    color: #ff4d4f;
+    font-weight: 600;
+}
+
+.summary-item.new span:last-child {
+    color: #722ed1;
+    font-weight: 600;
+}
+
+.preview-table-container {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: 16px;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+}
+
+#preview-table {
+    margin: 0;
+}
+
+#preview-table th,
+#preview-table td {
+    padding: 10px 12px;
+    font-size: 13px;
+}
+
+.diff-positive {
+    color: #52c41a;
+    font-weight: 600;
+}
+
+.diff-negative {
+    color: #ff4d4f;
+    font-weight: 600;
+}
+
+.type-new {
+    color: #722ed1;
+    background: #f9f0ff;
+}
+
+.type-none {
+    color: #999;
+    background: #f5f5f5;
+}
+
+/* 导入表单 */
+.import-form {
+    margin-top: 16px;
+}
+
+.form-row {
+    display: flex;
+    gap: 16px;
+}
+
+.form-row .form-group {
+    flex: 1;
+}
+
+/* 表单样式 */
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 14px;
+    color: #333;
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+.form-group input,
+.form-group select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.3s;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.form-group input:disabled {
+    background: #f5f5f5;
+    color: #666;
+}
+
+.radio-group {
+    display: flex;
+    gap: 20px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.radio-label input[type="radio"] {
+    width: auto;
+}
+
+/* 按钮样式 */
+.btn {
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    border: none;
+    transition: all 0.3s;
+}
+
+.btn.cancel-btn {
+    background: #f5f5f5;
+    color: #666;
+}
+
+.btn.cancel-btn:hover {
+    background: #e8e8e8;
+}
+
+.btn.confirm-btn {
+    background: #667eea;
+    color: #fff;
+}
+
+.btn.confirm-btn:hover {
+    background: #5a6fd6;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 新SKU确认模态框 */
+.warning-text {
+    color: #faad14;
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.new-sku-list {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+}
+
+.new-sku-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e1e4e8;
+}
+
+.new-sku-item:last-child {
+    border-bottom: none;
+}
+
+.new-sku-item .sku {
+    font-family: monospace;
+    color: #1890ff;
+    font-weight: 500;
+}
+
+.new-sku-item .name {
+    flex: 1;
+    color: #333;
+}
+
+.new-sku-item .qty {
+    color: #666;
+    font-size: 13px;
+}
+
 /* 响应式 */
 @media (max-width: 768px) {
     .stats-grid {
@@ -421,5 +790,29 @@ tbody tr.clickable:hover {
 
     .stat-value {
         font-size: 28px;
+    }
+
+    .section-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .action-buttons {
+        width: 100%;
+    }
+
+    .action-btn {
+        flex: 1;
+        justify-content: center;
+    }
+
+    .form-row {
+        flex-direction: column;
+        gap: 0;
+    }
+
+    .modal-content {
+        width: 95%;
+        margin: 10px;
     }
 }

@@ -454,3 +454,275 @@ function renderInventoryTable(data) {
         tbody.appendChild(tr);
     });
 }
+
+// ============ Excel导入导出功能 ============
+
+// 导出库存数据
+function exportInventory() {
+    window.location.href = `${API_BASE_URL}/materials/export-excel`;
+}
+
+// 导出出入库记录
+function exportRecords() {
+    window.location.href = `${API_BASE_URL}/inventory/export-excel`;
+}
+
+// 导入相关变量
+let importPreviewData = null;
+let pendingNewSkus = [];
+
+// 显示导入模态框
+function showImportModal() {
+    document.getElementById('import-modal').classList.add('show');
+    document.getElementById('preview-area').style.display = 'none';
+    document.getElementById('excel-file').value = '';
+    document.getElementById('confirm-import-btn').disabled = true;
+    importPreviewData = null;
+    pendingNewSkus = [];
+}
+
+// 关闭导入模态框
+function closeImportModal() {
+    document.getElementById('import-modal').classList.remove('show');
+    importPreviewData = null;
+    pendingNewSkus = [];
+}
+
+// 处理文件选择
+async function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/materials/import-excel/preview`, {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            importPreviewData = data;
+            pendingNewSkus = data.new_skus || [];
+            renderImportPreview(data);
+        } else {
+            alert(data.message || t('parseFileFailed'));
+        }
+    } catch (error) {
+        console.error('预览失败:', error);
+        alert(t('previewFailed'));
+    }
+}
+
+// 渲染导入预览
+function renderImportPreview(data) {
+    document.getElementById('preview-area').style.display = 'block';
+    document.getElementById('preview-in').textContent = data.total_in;
+    document.getElementById('preview-out').textContent = data.total_out;
+    document.getElementById('preview-new').textContent = data.total_new;
+
+    const tbody = document.getElementById('preview-tbody');
+    tbody.innerHTML = '';
+
+    data.preview.forEach(item => {
+        const tr = document.createElement('tr');
+
+        let opText = '';
+        let opClass = '';
+        if (item.operation === 'in') {
+            opText = t('inbound');
+            opClass = 'type-in';
+        } else if (item.operation === 'out') {
+            opText = t('outbound');
+            opClass = 'type-out';
+        } else if (item.operation === 'new') {
+            opText = t('newMaterial');
+            opClass = 'type-new';
+        } else {
+            opText = t('noChange');
+            opClass = 'type-none';
+        }
+
+        const currentQty = item.current_quantity !== null ? item.current_quantity : '-';
+        const diffDisplay = item.difference > 0 ? `+${item.difference}` : item.difference;
+
+        tr.innerHTML = `
+            <td>${item.sku}</td>
+            <td>${item.name}</td>
+            <td>${currentQty}</td>
+            <td>${item.import_quantity}</td>
+            <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>
+            <td><span class="type-badge ${opClass}">${opText}</span></td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    document.getElementById('confirm-import-btn').disabled = false;
+}
+
+// 确认导入
+async function confirmImport() {
+    if (!importPreviewData) return;
+
+    const operator = document.getElementById('import-operator').value.trim();
+    const reason = document.getElementById('import-reason').value.trim();
+
+    if (!operator || !reason) {
+        alert(t('fillOperatorAndReason'));
+        return;
+    }
+
+    // 如果有新SKU，先弹出确认框
+    if (pendingNewSkus.length > 0) {
+        showNewSkuModal();
+        return;
+    }
+
+    // 没有新SKU，直接执行导入
+    await executeImport(false);
+}
+
+// 显示新SKU确认模态框
+function showNewSkuModal() {
+    const list = document.getElementById('new-sku-list');
+    list.innerHTML = '';
+
+    pendingNewSkus.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'new-sku-item';
+        div.innerHTML = `
+            <span class="sku">${item.sku}</span>
+            <span class="name">${item.name}</span>
+            <span class="qty">${t('quantity')}: ${item.import_quantity}</span>
+        `;
+        list.appendChild(div);
+    });
+
+    document.getElementById('new-sku-modal').classList.add('show');
+}
+
+// 关闭新SKU确认模态框
+function closeNewSkuModal() {
+    document.getElementById('new-sku-modal').classList.remove('show');
+}
+
+// 跳过新增SKU
+async function skipNewSkus() {
+    closeNewSkuModal();
+    await executeImport(false);
+}
+
+// 确认创建新SKU
+async function confirmNewSkus() {
+    closeNewSkuModal();
+    await executeImport(true);
+}
+
+// 执行导入
+async function executeImport(confirmNewSkus) {
+    const operator = document.getElementById('import-operator').value.trim();
+    const reason = document.getElementById('import-reason').value.trim();
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/materials/import-excel/confirm`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                changes: importPreviewData.preview,
+                operator: operator,
+                reason: reason,
+                confirm_new_skus: confirmNewSkus
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            alert(data.message);
+            closeImportModal();
+            loadAllData(); // 刷新数据
+        } else {
+            alert(data.message || t('importFailed'));
+        }
+    } catch (error) {
+        console.error('导入失败:', error);
+        alert(t('importFailed'));
+    }
+}
+
+// ============ 手动新增记录功能 ============
+
+// 显示新增记录模态框
+function showAddRecordModal() {
+    document.getElementById('add-record-modal').classList.add('show');
+    populateProductSelect();
+    document.getElementById('add-record-form').reset();
+}
+
+// 关闭新增记录模态框
+function closeAddRecordModal() {
+    document.getElementById('add-record-modal').classList.remove('show');
+    document.getElementById('add-record-form').reset();
+}
+
+// 填充产品下拉框
+function populateProductSelect() {
+    const select = document.getElementById('record-product');
+    select.innerHTML = `<option value="">${t('pleaseSelect')}</option>`;
+
+    allMaterials.forEach(material => {
+        const option = document.createElement('option');
+        option.value = material.name;
+        option.textContent = `${material.name} (${material.sku}) - ${t('currentStockCol')}: ${material.quantity}`;
+        select.appendChild(option);
+    });
+}
+
+// 提交新增记录
+async function submitAddRecord() {
+    const productName = document.getElementById('record-product').value;
+    const type = document.querySelector('input[name="record-type"]:checked').value;
+    const quantity = parseInt(document.getElementById('record-quantity').value);
+    const operator = document.getElementById('record-operator').value.trim();
+    const reason = document.getElementById('record-reason').value.trim();
+
+    if (!productName || !quantity || !operator || !reason) {
+        alert(t('fillAllFields'));
+        return;
+    }
+
+    if (quantity <= 0) {
+        alert(t('quantityMustBePositive'));
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/inventory/add-record`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                product_name: productName,
+                type: type,
+                quantity: quantity,
+                operator: operator,
+                reason: reason
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            alert(data.message);
+            closeAddRecordModal();
+            loadAllData();
+        } else {
+            // 显示错误信息（包含当前库存）
+            alert(data.error || data.message || t('operationFailed'));
+        }
+    } catch (error) {
+        console.error('操作失败:', error);
+        alert(t('operationFailed'));
+    }
+}

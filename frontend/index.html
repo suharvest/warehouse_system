@@ -120,6 +120,40 @@
         <div class="alert-section">
             <div class="section-header">
                 <div class="section-title" data-i18n="inventoryList">库存列表</div>
+                <div class="action-buttons">
+                    <button class="action-btn export-btn" onclick="exportInventory()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        <span data-i18n="exportInventory">导出库存</span>
+                    </button>
+                    <button class="action-btn import-btn" onclick="showImportModal()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <span data-i18n="importInventory">导入库存</span>
+                    </button>
+                    <button class="action-btn record-btn" onclick="exportRecords()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                        </svg>
+                        <span data-i18n="exportRecords">导出记录</span>
+                    </button>
+                    <button class="action-btn add-btn" onclick="showAddRecordModal()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        <span data-i18n="addRecord">新增记录</span>
+                    </button>
+                </div>
                 <div class="filter-controls">
                     <input type="text" id="search-input" class="search-input" data-i18n="searchPlaceholder" placeholder="搜索产品名称...">
                     <span class="update-info"><span data-i18n="autoUpdate">自动更新:</span> <span id="countdown">3</span><span data-i18n="seconds">秒</span></span>
@@ -148,6 +182,134 @@
         <div class="chart-wrapper full-width">
             <div class="chart-title" data-i18n="topStock">库存TOP10</div>
             <div id="top-stock-chart" class="chart"></div>
+        </div>
+    </div>
+
+    <!-- 导入模态框 -->
+    <div id="import-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 data-i18n="importInventory">导入库存</h3>
+                <button class="close-btn" onclick="closeImportModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="upload-area" id="upload-area" onclick="document.getElementById('excel-file').click()">
+                    <input type="file" id="excel-file" accept=".xlsx,.xls" onchange="handleFileSelect(event)" style="display:none;">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.5">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <p data-i18n="dropFileHere">点击选择Excel文件</p>
+                    <span class="file-hint">.xlsx, .xls</span>
+                </div>
+                <div id="preview-area" style="display:none;">
+                    <h4 data-i18n="importPreview">导入预览</h4>
+                    <div class="preview-summary">
+                        <span class="summary-item in"><span data-i18n="totalInLabel">入库总量:</span> <span id="preview-in">0</span></span>
+                        <span class="summary-item out"><span data-i18n="totalOutLabel">出库总量:</span> <span id="preview-out">0</span></span>
+                        <span class="summary-item new"><span data-i18n="totalNewLabel">新增物料:</span> <span id="preview-new">0</span></span>
+                    </div>
+                    <div class="preview-table-container">
+                        <table id="preview-table">
+                            <thead>
+                                <tr>
+                                    <th data-i18n="materialCode">编码</th>
+                                    <th data-i18n="materialName">名称</th>
+                                    <th data-i18n="currentStockCol">当前库存</th>
+                                    <th data-i18n="importQty">导入数量</th>
+                                    <th data-i18n="difference">差异</th>
+                                    <th data-i18n="operation">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="preview-tbody"></tbody>
+                        </table>
+                    </div>
+                    <div class="import-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label data-i18n="operator">操作人</label>
+                                <input type="text" id="import-operator" data-i18n-placeholder="operatorPlaceholder" placeholder="请输入操作人">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="reason">导入原因</label>
+                                <input type="text" id="import-reason" data-i18n-placeholder="reasonPlaceholder" placeholder="请输入导入原因">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeImportModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="confirmImport()" id="confirm-import-btn" disabled data-i18n="confirmImport">确认导入</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新SKU确认模态框 -->
+    <div id="new-sku-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="confirmNewSku">确认新增物料</h3>
+                <button class="close-btn" onclick="closeNewSkuModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="warning-text" data-i18n="newSkuWarning">以下SKU在系统中不存在，将创建新物料：</p>
+                <div class="new-sku-list" id="new-sku-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="skipNewSkus()" data-i18n="skipNewSkus">跳过新增</button>
+                <button class="btn confirm-btn" onclick="confirmNewSkus()" data-i18n="confirmCreate">确认创建</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增记录模态框 -->
+    <div id="add-record-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="addInventoryRecord">新增出入库记录</h3>
+                <button class="close-btn" onclick="closeAddRecordModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="add-record-form">
+                    <div class="form-group">
+                        <label data-i18n="selectProduct">选择产品</label>
+                        <select id="record-product" required>
+                            <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="operationType">操作类型</label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="record-type" value="in" checked>
+                                <span data-i18n="inbound">入库</span>
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="record-type" value="out">
+                                <span data-i18n="outbound">出库</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="quantity">数量</label>
+                        <input type="number" id="record-quantity" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="operator">操作人</label>
+                        <input type="text" id="record-operator" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="reason">原因</label>
+                        <input type="text" id="record-reason" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeAddRecordModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="submitAddRecord()" data-i18n="submit">提交</button>
+            </div>
         </div>
     </div>
 

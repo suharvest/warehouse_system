@@ -330,3 +330,65 @@ function renderRecordsTable(records) {
         tbody.appendChild(tr);
     });
 }
+
+// ============ 手动新增记录功能 ============
+
+// 显示新增记录模态框
+function showAddRecordModal() {
+    document.getElementById('add-record-modal').classList.add('show');
+    document.getElementById('record-product-display').value = productName;
+    document.getElementById('add-record-form').reset();
+    document.getElementById('record-product-display').value = productName;
+}
+
+// 关闭新增记录模态框
+function closeAddRecordModal() {
+    document.getElementById('add-record-modal').classList.remove('show');
+    document.getElementById('add-record-form').reset();
+}
+
+// 提交新增记录
+async function submitAddRecord() {
+    const type = document.querySelector('input[name="record-type"]:checked').value;
+    const quantity = parseInt(document.getElementById('record-quantity').value);
+    const operator = document.getElementById('record-operator').value.trim();
+    const reason = document.getElementById('record-reason').value.trim();
+
+    if (!quantity || !operator || !reason) {
+        alert(t('fillAllFields'));
+        return;
+    }
+
+    if (quantity <= 0) {
+        alert(t('quantityMustBePositive'));
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/inventory/add-record`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                product_name: productName,
+                type: type,
+                quantity: quantity,
+                operator: operator,
+                reason: reason
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            alert(data.message);
+            closeAddRecordModal();
+            loadProductData(); // 刷新数据
+        } else {
+            // 显示错误信息（包含当前库存）
+            alert(data.error || data.message || t('operationFailed'));
+        }
+    } catch (error) {
+        console.error('操作失败:', error);
+        alert(t('operationFailed'));
+    }
+}

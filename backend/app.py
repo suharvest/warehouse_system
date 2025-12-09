@@ -1,19 +1,25 @@
 """
 仓库管理系统 FastAPI 后端
 """
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime, timedelta
 from contextlib import contextmanager
-from typing import List
+from typing import List, Optional
+from io import BytesIO
 
 from database import init_database, generate_mock_data, get_db_connection
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
     MaterialItem, XiaozhiItem, ProductStats, ProductRecord,
-    StockOperationRequest, StockOperationResponse, StockOperationProduct
+    StockOperationRequest, StockOperationResponse, StockOperationProduct,
+    ImportPreviewItem, ExcelImportPreviewResponse, ExcelImportConfirm,
+    ExcelImportResponse, ManualRecordRequest
 )
+
+# Excel处理
+from openpyxl import Workbook, load_workbook
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -638,6 +644,355 @@ def stock_out(request: StockOperationRequest):
             ),
             message=f"出库成功：{product_name} 出库 {quantity} {unit}，库存从 {old_quantity} 更新到 {new_quantity} {unit}",
             warning=warning if warning else None
+        )
+
+
+# ============ Excel Import/Export APIs ============
+
+@app.get("/api/materials/export-excel")
+def export_materials_excel():
+    """导出库存数据为Excel"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT name, sku, category, quantity, unit, safe_stock, location
+            FROM materials
+            ORDER BY name ASC
+        ''')
+        materials = cursor.fetchall()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "库存数据"
+
+    # 表头
+    headers = ['物料名称', '物料编码(SKU)', '类型', '当前库存', '单位', '安全库存', '存放位置']
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+
+    # 数据
+    for row_idx, material in enumerate(materials, 2):
+        ws.cell(row=row_idx, column=1, value=material['name'])
+        ws.cell(row=row_idx, column=2, value=material['sku'])
+        ws.cell(row=row_idx, column=3, value=material['category'])
+        ws.cell(row=row_idx, column=4, value=material['quantity'])
+        ws.cell(row=row_idx, column=5, value=material['unit'])
+        ws.cell(row=row_idx, column=6, value=material['safe_stock'])
+        ws.cell(row=row_idx, column=7, value=material['location'])
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.post("/api/materials/import-excel/preview", response_model=ExcelImportPreviewResponse)
+async def preview_import_excel(file: UploadFile = File(...)):
+    """预览Excel导入内容，计算差异"""
+    try:
+        contents = await file.read()
+        wb = load_workbook(filename=BytesIO(contents))
+        ws = wb.active
+    except Exception as e:
+        return ExcelImportPreviewResponse(
+            success=False,
+            preview=[],
+            new_skus=[],
+            total_in=0,
+            total_out=0,
+            total_new=0,
+            message=f"文件解析失败: {str(e)}"
+        )
+
+    preview_items = []
+    new_skus = []
+    total_in = 0
+    total_out = 0
+    total_new = 0
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            # 跳过空行
+            if not row[1]:  # SKU为空则跳过
+                continue
+
+            name = str(row[0]).strip() if row[0] else ""
+            sku = str(row[1]).strip()
+            category = str(row[2]).strip() if row[2] else "未分类"
+            import_qty = int(row[3]) if row[3] is not None else 0
+            unit = str(row[4]).strip() if row[4] else "个"
+            safe_stock = int(row[5]) if row[5] is not None else 20
+            location = str(row[6]).strip() if row[6] else ""
+
+            # 查询当前库存
+            cursor.execute('SELECT id, name, quantity FROM materials WHERE sku = ?', (sku,))
+            material = cursor.fetchone()
+
+            if material:
+                # 已存在的物料
+                current_qty = material['quantity']
+                difference = import_qty - current_qty
+
+                if difference > 0:
+                    operation = 'in'
+                    total_in += difference
+                elif difference < 0:
+                    operation = 'out'
+                    total_out += abs(difference)
+                else:
+                    operation = 'none'
+
+                preview_items.append(ImportPreviewItem(
+                    sku=sku,
+                    name=material['name'],
+                    category=category,
+                    unit=unit,
+                    safe_stock=safe_stock,
+                    location=location,
+                    current_quantity=current_qty,
+                    import_quantity=import_qty,
+                    difference=difference,
+                    operation=operation,
+                    is_new=False
+                ))
+            else:
+                # 新SKU
+                total_new += 1
+                new_item = ImportPreviewItem(
+                    sku=sku,
+                    name=name,
+                    category=category,
+                    unit=unit,
+                    safe_stock=safe_stock,
+                    location=location,
+                    current_quantity=None,
+                    import_quantity=import_qty,
+                    difference=import_qty,
+                    operation='new',
+                    is_new=True
+                )
+                preview_items.append(new_item)
+                new_skus.append(new_item)
+
+    return ExcelImportPreviewResponse(
+        success=True,
+        preview=preview_items,
+        new_skus=new_skus,
+        total_in=total_in,
+        total_out=total_out,
+        total_new=total_new,
+        message=f'共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条'
+    )
+
+
+@app.post("/api/materials/import-excel/confirm", response_model=ExcelImportResponse)
+def confirm_import_excel(request: ExcelImportConfirm):
+    """确认导入，执行变更单"""
+    in_count = 0
+    out_count = 0
+    new_count = 0
+    records_created = 0
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        for item in request.changes:
+            if item.operation == 'none':
+                continue
+
+            if item.is_new:
+                # 新SKU - 只有当confirm_new_skus为True时才创建
+                if not request.confirm_new_skus:
+                    continue
+
+                # 创建新物料
+                cursor.execute('''
+                    INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    item.name,
+                    item.sku,
+                    item.category or '未分类',
+                    item.import_quantity,
+                    item.unit or '个',
+                    item.safe_stock or 20,
+                    item.location or '',
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ))
+
+                # 获取新创建物料的ID
+                material_id = cursor.lastrowid
+
+                # 如果有初始库存，创建入库记录
+                if item.import_quantity != 0:
+                    record_type = 'in' if item.import_quantity > 0 else 'out'
+                    cursor.execute('''
+                        INSERT INTO inventory_records
+                        (material_id, type, quantity, operator, reason, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        material_id,
+                        record_type,
+                        abs(item.import_quantity),
+                        request.operator,
+                        f"Excel导入: {request.reason} (新建物料)",
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    ))
+                    records_created += 1
+
+                new_count += 1
+            else:
+                # 已存在的物料
+                cursor.execute('SELECT id, quantity FROM materials WHERE sku = ?', (item.sku,))
+                material = cursor.fetchone()
+
+                if not material:
+                    continue
+
+                material_id = material['id']
+                abs_diff = abs(item.difference)
+
+                if item.operation == 'in':
+                    # 入库
+                    new_qty = material['quantity'] + abs_diff
+                    cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
+                                 (new_qty, material_id))
+                    cursor.execute('''
+                        INSERT INTO inventory_records
+                        (material_id, type, quantity, operator, reason, created_at)
+                        VALUES (?, 'in', ?, ?, ?, ?)
+                    ''', (
+                        material_id,
+                        abs_diff,
+                        request.operator,
+                        f"Excel导入: {request.reason}",
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    ))
+                    in_count += 1
+                    records_created += 1
+
+                elif item.operation == 'out':
+                    # 出库（允许负库存）
+                    new_qty = material['quantity'] - abs_diff
+                    cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
+                                 (new_qty, material_id))
+                    cursor.execute('''
+                        INSERT INTO inventory_records
+                        (material_id, type, quantity, operator, reason, created_at)
+                        VALUES (?, 'out', ?, ?, ?, ?)
+                    ''', (
+                        material_id,
+                        abs_diff,
+                        request.operator,
+                        f"Excel导入: {request.reason}",
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    ))
+                    out_count += 1
+                    records_created += 1
+
+        conn.commit()
+
+    return ExcelImportResponse(
+        success=True,
+        in_count=in_count,
+        out_count=out_count,
+        new_count=new_count,
+        records_created=records_created,
+        message=f'导入完成：{in_count}条入库，{out_count}条出库，{new_count}条新增物料'
+    )
+
+
+@app.get("/api/inventory/export-excel")
+def export_inventory_records(
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    product_name: Optional[str] = Query(None, description="产品名称")
+):
+    """导出出入库记录为Excel"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        query = '''
+            SELECT m.name, m.sku, r.type, r.quantity, r.operator, r.reason, r.created_at
+            FROM inventory_records r
+            JOIN materials m ON r.material_id = m.id
+            WHERE 1=1
+        '''
+        params = []
+
+        if start_date:
+            query += ' AND DATE(r.created_at) >= ?'
+            params.append(start_date)
+        if end_date:
+            query += ' AND DATE(r.created_at) <= ?'
+            params.append(end_date)
+        if product_name:
+            query += ' AND m.name = ?'
+            params.append(product_name)
+
+        query += ' ORDER BY r.created_at DESC'
+        cursor.execute(query, params)
+        records = cursor.fetchall()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "出入库记录"
+
+    headers = ['物料名称', '物料编码', '类型', '数量', '操作人', '原因', '时间']
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+
+    for row_idx, record in enumerate(records, 2):
+        ws.cell(row=row_idx, column=1, value=record['name'])
+        ws.cell(row=row_idx, column=2, value=record['sku'])
+        ws.cell(row=row_idx, column=3, value='入库' if record['type'] == 'in' else '出库')
+        ws.cell(row=row_idx, column=4, value=record['quantity'])
+        ws.cell(row=row_idx, column=5, value=record['operator'])
+        ws.cell(row=row_idx, column=6, value=record['reason'])
+        ws.cell(row=row_idx, column=7, value=record['created_at'])
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"inventory_records_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.post("/api/inventory/add-record", response_model=StockOperationResponse)
+def add_inventory_record(request: ManualRecordRequest):
+    """手动新增出入库记录"""
+    if request.type == 'in':
+        return stock_in(StockOperationRequest(
+            product_name=request.product_name,
+            quantity=request.quantity,
+            reason=request.reason,
+            operator=request.operator
+        ))
+    elif request.type == 'out':
+        return stock_out(StockOperationRequest(
+            product_name=request.product_name,
+            quantity=request.quantity,
+            reason=request.reason,
+            operator=request.operator
+        ))
+    else:
+        return StockOperationResponse(
+            success=False,
+            error="无效的操作类型",
+            message="类型必须是 'in' 或 'out'"
         )
 
 

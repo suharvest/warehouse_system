@@ -59,6 +59,49 @@ const translations = {
         statusWarning: '偏低',
         statusDanger: '告急',
 
+        // Excel导入导出
+        exportInventory: '导出库存',
+        importInventory: '导入库存',
+        exportRecords: '导出记录',
+        addRecord: '新增记录',
+        dropFileHere: '点击选择Excel文件',
+        importPreview: '导入预览',
+        totalInLabel: '入库总量:',
+        totalOutLabel: '出库总量:',
+        totalNewLabel: '新增物料:',
+        importQty: '导入数量',
+        difference: '差异',
+        operation: '操作',
+        operatorPlaceholder: '请输入操作人',
+        reasonPlaceholder: '请输入导入原因',
+        cancel: '取消',
+        confirmImport: '确认导入',
+        newMaterial: '新增',
+        noChange: '无变化',
+
+        // 新SKU确认
+        confirmNewSku: '确认新增物料',
+        newSkuWarning: '以下SKU在系统中不存在，将创建新物料：',
+        skipNewSkus: '跳过新增',
+        confirmCreate: '确认创建',
+
+        // 新增记录
+        addInventoryRecord: '新增出入库记录',
+        selectProduct: '选择产品',
+        pleaseSelect: '-- 请选择 --',
+        operationType: '操作类型',
+        submit: '提交',
+        productName: '产品',
+
+        // 错误提示
+        fillOperatorAndReason: '请填写操作人和原因',
+        fillAllFields: '请填写所有字段',
+        quantityMustBePositive: '数量必须大于0',
+        parseFileFailed: '解析文件失败',
+        previewFailed: '预览失败',
+        importFailed: '导入失败',
+        operationFailed: '操作失败',
+
         // 其他
         noData: '暂无数据',
         noRecords: '暂无记录',
@@ -115,6 +158,49 @@ const translations = {
         statusNormal: 'Normal',
         statusWarning: 'Low',
         statusDanger: 'Critical',
+
+        // Excel import/export
+        exportInventory: 'Export Inventory',
+        importInventory: 'Import Inventory',
+        exportRecords: 'Export Records',
+        addRecord: 'Add Record',
+        dropFileHere: 'Click to select Excel file',
+        importPreview: 'Import Preview',
+        totalInLabel: 'Total In:',
+        totalOutLabel: 'Total Out:',
+        totalNewLabel: 'New Materials:',
+        importQty: 'Import Qty',
+        difference: 'Diff',
+        operation: 'Operation',
+        operatorPlaceholder: 'Enter operator name',
+        reasonPlaceholder: 'Enter import reason',
+        cancel: 'Cancel',
+        confirmImport: 'Confirm Import',
+        newMaterial: 'New',
+        noChange: 'No Change',
+
+        // New SKU confirmation
+        confirmNewSku: 'Confirm New Materials',
+        newSkuWarning: 'The following SKUs do not exist in the system and will be created:',
+        skipNewSkus: 'Skip New',
+        confirmCreate: 'Confirm Create',
+
+        // Add record
+        addInventoryRecord: 'Add Inventory Record',
+        selectProduct: 'Select Product',
+        pleaseSelect: '-- Please Select --',
+        operationType: 'Operation Type',
+        submit: 'Submit',
+        productName: 'Product',
+
+        // Error messages
+        fillOperatorAndReason: 'Please fill in operator and reason',
+        fillAllFields: 'Please fill in all fields',
+        quantityMustBePositive: 'Quantity must be greater than 0',
+        parseFileFailed: 'Failed to parse file',
+        previewFailed: 'Preview failed',
+        importFailed: 'Import failed',
+        operationFailed: 'Operation failed',
 
         noData: 'No data',
         noRecords: 'No records',
