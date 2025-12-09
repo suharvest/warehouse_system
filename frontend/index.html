@@ -332,28 +332,27 @@
                                 <tbody id="records-tbody">
                                 </tbody>
                             </table>
-                        </div>
-
-                        <!-- 分页控件 -->
-                        <div class="pagination" id="records-pagination">
-                            <div class="pagination-info">
-                                <span data-i18n="totalRecords">共</span> <span id="records-total">0</span> <span
-                                    data-i18n="recordsUnit">条记录</span>
-                            </div>
-                            <div class="pagination-controls">
-                                <select class="page-size-select" id="records-page-size"
-                                    onchange="changeRecordsPageSize(this.value)">
-                                    <option value="10">10</option>
-                                    <option value="20" selected>20</option>
-                                    <option value="50">50</option>
-                                    <option value="100">100</option>
-                                </select>
-                                <button onclick="recordsGoToPage(recordsCurrentPage - 1)" id="records-prev-btn" disabled
-                                    data-i18n="prevPage">上一页</button>
-                                <span class="page-info"><span id="records-current-page">1</span> / <span
-                                        id="records-total-pages">1</span></span>
-                                <button onclick="recordsGoToPage(recordsCurrentPage + 1)" id="records-next-btn" disabled
-                                    data-i18n="nextPage">下一页</button>
+                            <!-- 分页控件 -->
+                            <div class="pagination" id="records-pagination">
+                                <div class="pagination-info">
+                                    <span data-i18n="totalRecords">共</span> <span id="records-total">0</span> <span
+                                        data-i18n="recordsUnit">条记录</span>
+                                </div>
+                                <div class="pagination-controls">
+                                    <select class="page-size-select" id="records-page-size"
+                                        onchange="changeRecordsPageSize(this.value)">
+                                        <option value="10">10</option>
+                                        <option value="20" selected>20</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
+                                    <button onclick="recordsGoToPage(recordsCurrentPage - 1)" id="records-prev-btn"
+                                        disabled data-i18n="prevPage">上一页</button>
+                                    <span class="page-info"><span id="records-current-page">1</span> / <span
+                                            id="records-total-pages">1</span></span>
+                                    <button onclick="recordsGoToPage(recordsCurrentPage + 1)" id="records-next-btn"
+                                        disabled data-i18n="nextPage">下一页</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -459,28 +458,27 @@
                                 <tbody id="inventory-tbody">
                                 </tbody>
                             </table>
-                        </div>
-
-                        <!-- 分页控件 -->
-                        <div class="pagination" id="inventory-pagination">
-                            <div class="pagination-info">
-                                <span data-i18n="totalRecords">共</span> <span id="inventory-total">0</span> <span
-                                    data-i18n="recordsUnit">条记录</span>
-                            </div>
-                            <div class="pagination-controls">
-                                <select class="page-size-select" id="inventory-page-size"
-                                    onchange="changeInventoryPageSize(this.value)">
-                                    <option value="10">10</option>
-                                    <option value="20" selected>20</option>
-                                    <option value="50">50</option>
-                                    <option value="100">100</option>
-                                </select>
-                                <button onclick="inventoryGoToPage(inventoryCurrentPage - 1)" id="inventory-prev-btn"
-                                    disabled data-i18n="prevPage">上一页</button>
-                                <span class="page-info"><span id="inventory-current-page">1</span> / <span
-                                        id="inventory-total-pages">1</span></span>
-                                <button onclick="inventoryGoToPage(inventoryCurrentPage + 1)" id="inventory-next-btn"
-                                    disabled data-i18n="nextPage">下一页</button>
+                            <!-- 分页控件 -->
+                            <div class="pagination" id="inventory-pagination">
+                                <div class="pagination-info">
+                                    <span data-i18n="totalRecords">共</span> <span id="inventory-total">0</span>
+                                    <span data-i18n="recordsUnit">条记录</span>
+                                </div>
+                                <div class="pagination-controls">
+                                    <select class="page-size-select" id="inventory-page-size"
+                                        onchange="changeInventoryPageSize(this.value)">
+                                        <option value="10">10</option>
+                                        <option value="20" selected>20</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
+                                    <button onclick="inventoryGoToPage(inventoryCurrentPage - 1)"
+                                        id="inventory-prev-btn" disabled data-i18n="prevPage">上一页</button>
+                                    <span class="page-info"><span id="inventory-current-page">1</span> / <span
+                                            id="inventory-total-pages">1</span></span>
+                                    <button onclick="inventoryGoToPage(inventoryCurrentPage + 1)"
+                                        id="inventory-next-btn" disabled data-i18n="nextPage">下一页</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -588,28 +586,27 @@
                                     <tbody id="detail-records-tbody">
                                     </tbody>
                                 </table>
-                            </div>
-
-                            <!-- 分页控件 -->
-                            <div class="pagination" id="detail-pagination">
-                                <div class="pagination-info">
-                                    <span data-i18n="totalRecords">共</span> <span id="detail-total">0</span> <span
-                                        data-i18n="recordsUnit">条记录</span>
-                                </div>
-                                <div class="pagination-controls">
-                                    <select class="page-size-select" id="detail-page-size"
-                                        onchange="changeDetailPageSize(this.value)">
-                                        <option value="10">10</option>
-                                        <option value="20" selected>20</option>
-                                        <option value="50">50</option>
-                                        <option value="100">100</option>
-                                    </select>
-                                    <button onclick="detailGoToPage(detailCurrentPage - 1)" id="detail-prev-btn"
-                                        disabled data-i18n="prevPage">上一页</button>
-                                    <span class="page-info"><span id="detail-current-page">1</span> / <span
-                                            id="detail-total-pages">1</span></span>
-                                    <button onclick="detailGoToPage(detailCurrentPage + 1)" id="detail-next-btn"
-                                        disabled data-i18n="nextPage">下一页</button>
+                                <!-- 分页控件 -->
+                                <div class="pagination" id="detail-pagination">
+                                    <div class="pagination-info">
+                                        <span data-i18n="totalRecords">共</span> <span id="detail-total">0</span>
+                                        <span data-i18n="recordsUnit">条记录</span>
+                                    </div>
+                                    <div class="pagination-controls">
+                                        <select class="page-size-select" id="detail-page-size"
+                                            onchange="changeDetailPageSize(this.value)">
+                                            <option value="10">10</option>
+                                            <option value="20" selected>20</option>
+                                            <option value="50">50</option>
+                                            <option value="100">100</option>
+                                        </select>
+                                        <button onclick="detailGoToPage(detailCurrentPage - 1)" id="detail-prev-btn"
+                                            disabled data-i18n="prevPage">上一页</button>
+                                        <span class="page-info"><span id="detail-current-page">1</span> / <span
+                                                id="detail-total-pages">1</span></span>
+                                        <button onclick="detailGoToPage(detailCurrentPage + 1)" id="detail-next-btn"
+                                            disabled data-i18n="nextPage">下一页</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -623,8 +620,6 @@
                             <p data-i18n="selectProductHint">请从上方下拉框选择一个产品查看详情</p>
                         </div>
                     </div>
-                </div>
-            </div>
         </main>
     </div>
 

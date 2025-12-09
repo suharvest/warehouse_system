@@ -14,10 +14,12 @@
     --warning-color: #faad14;
 
     /* Backgrounds */
-    --bg-body: #f9fdf9;
+    --bg-body: #f4f7f0;
+    /* Warmer yellowish green */
     --bg-card: #ffffff;
     --bg-sidebar: #ffffff;
-    --bg-header-green: #f2f9ed;
+    --bg-header-green: #e9f0e1;
+    /* Warmer header green */
     --hover-color: #f5f7fa;
 
     /* Text */
@@ -623,8 +625,8 @@ thead {
 }
 
 th {
-    background: #f7fcf5;
-    /* Explicit light green for table header */
+    background: #f4f7f0;
+    /* Warm green for table header */
     color: var(--text-secondary);
     font-weight: 500;
     text-align: left;
@@ -693,11 +695,9 @@ tbody tr:hover {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 20px;
-    background-color: var(--bg-card);
     padding: 16px 24px;
-    border-radius: var(--border-radius);
-    box-shadow: var(--shadow-sm);
+    border-top: 1px solid var(--border-color);
+    background-color: var(--bg-card);
 }
 
 .pagination-controls {
