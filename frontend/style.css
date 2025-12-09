@@ -805,38 +805,75 @@ tbody tr:hover {
 
 /* Forms */
 .form-group {
-    margin-bottom: 20px;
+    margin-bottom: 16px;
+    /* Tighter spacing */
 }
 
 .form-group label {
     display: block;
-    margin-bottom: 8px;
-    color: var(--text-primary);
-    font-size: 14px;
+    margin-bottom: 6px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    /* Slightly smaller label */
     font-weight: 500;
 }
 
 .form-group input,
 .form-group select {
     width: 100%;
-    padding: 10px;
+    padding: 8px 12px;
+    /* More compact padding */
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: 6px;
+    /* Modern radius */
     font-size: 14px;
+    transition: all 0.2s;
+    background-color: #fff;
 }
 
+.form-group input:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px rgba(140, 198, 63, 0.1);
+}
+
+/* Radio Group - Segmented Control Style */
 .radio-group {
     display: flex;
-    gap: 24px;
-    padding: 8px 0;
+    background-color: #f0f2f5;
+    padding: 4px;
+    border-radius: 6px;
+    width: fit-content;
+    gap: 0;
+    /* Remove gap, handled by padding/margin of items */
 }
 
 .radio-label {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: center;
     cursor: pointer;
     font-size: 14px;
+    padding: 6px 20px;
+    border-radius: 4px;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+    margin: 0;
+    user-select: none;
+}
+
+.radio-label input[type="radio"] {
+    display: none;
+    /* Hide default radio */
+}
+
+/* Selected state styling based on the input checked state */
+.radio-label:has(input:checked) {
+    background-color: #fff;
+    color: var(--primary-color);
+    font-weight: 500;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
 /* Upload Area */
