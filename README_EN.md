@@ -13,6 +13,9 @@ A smart hardware warehouse management dashboard based on Python FastAPI + SQLite
 - ⚠️ **Alert List**: Low stock material warnings
 - 🌐 **Multi-language Support**: Chinese/English switching
 - 📱 **Responsive Design**: Adapts to different screen sizes
+- 🔐 **User Permission Management**: Three-level access control (view/operate/admin)
+- 👥 **Contact Management**: Supplier/Customer management linked to inventory records
+- 📦 **Batch Management**: Auto batch number generation with FIFO stock-out algorithm
 
 ## Demo Video
 
@@ -103,29 +106,40 @@ warehouse_system/
 │   ├── app.py           # FastAPI main application
 │   ├── models.py        # Pydantic response models
 │   ├── database.py      # Database initialization and data generation
+│   ├── Dockerfile       # Backend Docker image config
 │   └── warehouse.db     # SQLite database file (generated after running)
 ├── frontend/            # Frontend code
 │   ├── index.html       # Main page
-│   ├── product_detail.html  # Product detail page
 │   ├── style.css        # Stylesheet
 │   ├── app.js           # Main page JavaScript logic
-│   ├── product_detail.js    # Detail page JavaScript logic
 │   ├── i18n.js          # Internationalization config
-│   └── server.py        # Static file server
+│   ├── server.py        # Static file server
+│   └── Dockerfile       # Frontend Docker image config
 ├── mcp/                 # MCP service
 │   ├── warehouse_mcp.py # MCP server
-│   ├── mcp_config.json  # MCP configuration
-│   ├── mcp_pipe.py      # MCP pipe
-│   ├── start_mcp.sh     # MCP startup script (macOS/Linux)
-│   ├── start_mcp.ps1    # MCP startup script (Windows)
-│   └── MCP_README.md    # MCP documentation
+│   ├── config.yml       # MCP config (API URL, key)
+│   ├── config.yml.example # Config template
+│   ├── start_mcp.sh     # Startup script (macOS/Linux)
+│   ├── start_mcp.ps1    # Startup script (Windows)
+│   ├── MCP_README.md    # MCP documentation (Chinese)
+│   └── MCP_README_EN.md # MCP documentation (English)
 ├── test/                # Test files
+│   ├── backend/         # Backend feature tests
+│   ├── data/            # Test data
 │   ├── test_mcp.py      # MCP tests
 │   ├── test_api.py      # API tests
 │   ├── run_all_tests.sh # Test script
 │   └── README.md        # Test documentation
+├── docs/                # Project documentation
+│   ├── CLAUDE_DESKTOP_CONFIG.md  # Claude Desktop config guide
+│   ├── TESTING_GUIDE.md          # Testing guide
+│   ├── Warehouse_System_Guide.md # System usage guide
+│   └── assets/                   # Documentation images
+├── docker-compose.yml   # Docker Compose configuration
 ├── start.sh             # Startup script (macOS/Linux)
 ├── start.ps1            # Startup script (Windows)
+├── CHANGELOG.md         # Changelog (Chinese)
+├── CHANGELOG_EN.md      # Changelog (English)
 ├── README.md            # Project documentation (Chinese)
 └── README_EN.md         # Project documentation (English)
 ```

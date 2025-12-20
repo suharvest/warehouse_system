@@ -62,6 +62,9 @@ const translations = {
         quantity: '数量',
         operator: '操作人',
         reason: '原因',
+        batch: '批次',
+        batchNo: '批次号',
+        batchDetails: '批次消耗',
 
         // 状态文本
         statusNormal: '正常',
@@ -81,6 +84,8 @@ const translations = {
         allTypes: '全部类型',
         allCategories: '全部分类',
         allStatuses: '全部状态',
+        allContacts: '全部联系方',
+        allOperators: '全部操作员',
 
         // 分页
         prevPage: '上一页',
@@ -109,6 +114,7 @@ const translations = {
         operation: '操作',
         operatorPlaceholder: '请输入操作人',
         reasonPlaceholder: '请输入导入原因',
+        reasonSearchPlaceholder: '搜索原因...',
         disableMissingSkus: '禁用导入文件外的SKU',
         disableMissingSkusHint: '勾选后将把本次未出现的SKU标记为禁用，谨慎操作；不勾选则跳过禁用，其他变更照常执行。',
         cancel: '取消',
@@ -143,7 +149,69 @@ const translations = {
         noData: '暂无数据',
         noRecords: '暂无记录',
         loadError: '加载数据失败，请检查后端服务是否启动',
-        productNotFound: '未指定产品'
+        productNotFound: '未指定产品',
+
+        // 用户认证
+        guest: '访客',
+        login: '登录',
+        logout: '登出',
+        username: '用户名',
+        password: '密码',
+        confirmPassword: '确认密码',
+        displayName: '显示名称',
+        setupAdmin: '设置管理员',
+        setupHint: '首次使用请创建管理员账号',
+        createAdmin: '创建管理员',
+        loginFailed: '登录失败',
+        passwordMismatch: '两次密码不一致',
+
+        // 用户管理
+        tabUsers: '用户管理',
+        userList: '用户列表',
+        addUser: '添加用户',
+        editUser: '编辑用户',
+        role: '角色',
+        roleView: '只读',
+        roleOperate: '操作员',
+        roleAdmin: '管理员',
+        createdAt: '创建时间',
+        actions: '操作',
+        disable: '禁用',
+        enable: '启用',
+        edit: '编辑',
+        enabled: '正常',
+        disabled: '已禁用',
+        newPassword: '新密码',
+        leaveEmptyToKeep: '留空保持不变',
+        passwordTooShort: '密码长度至少4位',
+
+        // API密钥
+        apiKeyList: 'API密钥',
+        addApiKey: '添加API密钥',
+        keyName: '名称',
+        lastUsedAt: '最后使用',
+        apiKeyCreated: 'API密钥已创建',
+        apiKeyWarning: '请妥善保存此密钥，关闭后将无法再次查看：',
+        copied: '已复制',
+        confirm: '确定',
+        never: '从未',
+
+        // 联系方管理
+        tabContacts: '联系方',
+        contactList: '联系方列表',
+        addContact: '添加联系方',
+        editContact: '编辑联系方',
+        contactName: '名称',
+        contactType: '类型',
+        supplier: '供应商',
+        customer: '客户',
+        phone: '电话',
+        email: '邮箱',
+        address: '地址',
+        notes: '备注',
+        bothType: '供应商/客户',
+        contactMustSelectType: '必须选择供应商或客户至少一项',
+        contact: '联系方'
     },
     en: {
         pageTitle: 'Warehouse System - Dashboard',
@@ -200,6 +268,9 @@ const translations = {
         quantity: 'Quantity',
         operator: 'Operator',
         reason: 'Reason',
+        batch: 'Batch',
+        batchNo: 'Batch No.',
+        batchDetails: 'Batch Consumption',
 
         statusNormal: 'Normal',
         statusWarning: 'Low',
@@ -218,6 +289,8 @@ const translations = {
         allTypes: 'All Types',
         allCategories: 'All Categories',
         allStatuses: 'All Statuses',
+        allContacts: 'All Contacts',
+        allOperators: 'All Operators',
 
         // Pagination
         prevPage: 'Previous',
@@ -245,6 +318,7 @@ const translations = {
         operation: 'Operation',
         operatorPlaceholder: 'Enter operator name',
         reasonPlaceholder: 'Enter import reason',
+        reasonSearchPlaceholder: 'Search reason...',
         disableMissingSkus: 'Disable SKUs not in this file',
         disableMissingSkusHint: 'If checked, SKUs missing from this file will be disabled. Leave unchecked to skip disabling; other changes will still apply.',
         cancel: 'Cancel',
@@ -278,7 +352,69 @@ const translations = {
         noData: 'No data',
         noRecords: 'No records',
         loadError: 'Failed to load data. Please check if the backend service is running.',
-        productNotFound: 'Product not specified'
+        productNotFound: 'Product not specified',
+
+        // User authentication
+        guest: 'Guest',
+        login: 'Login',
+        logout: 'Logout',
+        username: 'Username',
+        password: 'Password',
+        confirmPassword: 'Confirm Password',
+        displayName: 'Display Name',
+        setupAdmin: 'Setup Admin',
+        setupHint: 'Please create an admin account for first-time use',
+        createAdmin: 'Create Admin',
+        loginFailed: 'Login failed',
+        passwordMismatch: 'Passwords do not match',
+
+        // User management
+        tabUsers: 'User Management',
+        userList: 'User List',
+        addUser: 'Add User',
+        editUser: 'Edit User',
+        role: 'Role',
+        roleView: 'View Only',
+        roleOperate: 'Operator',
+        roleAdmin: 'Admin',
+        createdAt: 'Created At',
+        actions: 'Actions',
+        disable: 'Disable',
+        enable: 'Enable',
+        edit: 'Edit',
+        enabled: 'Active',
+        disabled: 'Disabled',
+        newPassword: 'New Password',
+        leaveEmptyToKeep: 'Leave empty to keep current',
+        passwordTooShort: 'Password must be at least 4 characters',
+
+        // API Keys
+        apiKeyList: 'API Keys',
+        addApiKey: 'Add API Key',
+        keyName: 'Name',
+        lastUsedAt: 'Last Used',
+        apiKeyCreated: 'API Key Created',
+        apiKeyWarning: 'Please save this key safely. It will not be shown again:',
+        copied: 'Copied',
+        confirm: 'OK',
+        never: 'Never',
+
+        // Contact Management
+        tabContacts: 'Contacts',
+        contactList: 'Contact List',
+        addContact: 'Add Contact',
+        editContact: 'Edit Contact',
+        contactName: 'Name',
+        contactType: 'Type',
+        supplier: 'Supplier',
+        customer: 'Customer',
+        phone: 'Phone',
+        email: 'Email',
+        address: 'Address',
+        notes: 'Notes',
+        bothType: 'Supplier/Customer',
+        contactMustSelectType: 'Must select at least one: Supplier or Customer',
+        contact: 'Contact'
     }
 };
 

@@ -1,5 +1,7 @@
 import sqlite3
 import os
+import hashlib
+import secrets
 from datetime import datetime, timedelta
 import random
 
@@ -53,8 +55,168 @@ def init_database():
         )
     ''')
 
+    # 创建用户表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'view',
+            display_name TEXT,
+            is_disabled INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_by INTEGER REFERENCES users(id)
+        )
+    ''')
+
+    # 创建会话表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    # 创建API密钥表（用于MCP终端身份识别）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_hash TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'operate',
+            user_id INTEGER REFERENCES users(id),
+            is_disabled INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP
+        )
+    ''')
+
+    # 创建联系方表（供应商/客户）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            address TEXT,
+            phone TEXT,
+            email TEXT,
+            is_supplier INTEGER DEFAULT 0,
+            is_customer INTEGER DEFAULT 0,
+            notes TEXT,
+            is_disabled INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 检查并添加 contact_id 字段到 inventory_records（用于已存在的数据库）
+    try:
+        cursor.execute('SELECT contact_id FROM inventory_records LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE inventory_records ADD COLUMN contact_id INTEGER REFERENCES contacts(id)')
+
+    # 创建批次表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_no TEXT UNIQUE NOT NULL,
+            material_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            initial_quantity INTEGER NOT NULL,
+            contact_id INTEGER REFERENCES contacts(id),
+            is_exhausted INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (material_id) REFERENCES materials (id)
+        )
+    ''')
+
+    # 创建批次消耗记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS batch_consumptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id INTEGER NOT NULL,
+            batch_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (record_id) REFERENCES inventory_records (id),
+            FOREIGN KEY (batch_id) REFERENCES batches (id)
+        )
+    ''')
+
+    # 检查并添加 batch_id 字段到 inventory_records（用于入库记录关联批次）
+    try:
+        cursor.execute('SELECT batch_id FROM inventory_records LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE inventory_records ADD COLUMN batch_id INTEGER REFERENCES batches(id)')
+
+    # 检查并添加 operator_user_id 字段到 inventory_records（操作员关联用户表）
+    try:
+        cursor.execute('SELECT operator_user_id FROM inventory_records LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_user_id INTEGER REFERENCES users(id)')
+
     conn.commit()
     conn.close()
+
+
+def generate_batch_no(material_id: int) -> str:
+    """生成批次号: YYYYMMDD-XXX"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    today = datetime.now().strftime('%Y%m%d')
+
+    # 查询今天该物料的批次数量
+    cursor.execute('''
+        SELECT COUNT(*) as count FROM batches
+        WHERE batch_no LIKE ? AND material_id = ?
+    ''', (f'{today}-%', material_id))
+    count = cursor.fetchone()['count']
+    conn.close()
+
+    # 生成序号（3位数字）
+    seq = count + 1
+    return f'{today}-{seq:03d}'
+
+
+def has_admin_user():
+    """检查是否存在管理员用户"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND is_disabled = 0")
+    count = cursor.fetchone()['count']
+    conn.close()
+    return count > 0
+
+
+def hash_password(password: str) -> str:
+    """使用SHA256哈希密码（简化版，生产环境应使用bcrypt）"""
+    # 使用简单的SHA256+salt，避免bcrypt依赖问题
+    salt = "warehouse_system_salt_2024"
+    return hashlib.sha256((password + salt).encode()).hexdigest()
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """验证密码"""
+    return hash_password(password) == password_hash
+
+
+def generate_session_token() -> str:
+    """生成会话令牌"""
+    return secrets.token_hex(32)
+
+
+def generate_api_key() -> str:
+    """生成API密钥（返回明文，只显示一次）"""
+    return "wh_" + secrets.token_hex(24)
+
+
+def hash_api_key(api_key: str) -> str:
+    """哈希API密钥"""
+    return hashlib.sha256(api_key.encode()).hexdigest()
+
 
 def generate_mock_data():
     """生成模拟数据"""

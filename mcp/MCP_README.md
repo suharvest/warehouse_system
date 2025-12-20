@@ -180,7 +180,38 @@
 
 ## 配置方法
 
-### 1. 在 Claude Desktop 中配置
+### 1. 配置 MCP 服务
+
+复制配置模板并填入实际配置：
+
+```bash
+cd mcp
+cp config.yml.example config.yml
+```
+
+编辑 `config.yml`：
+
+```yaml
+# 后端 API 地址
+api_base_url: "http://localhost:2124/api"
+
+# API 密钥（在后端管理界面创建）
+api_key: "your-api-key-here"
+```
+
+**获取 API Key：**
+1. 以 admin 身份登录前端 (http://localhost:2125)
+2. 进入"用户管理" TAB
+3. 在 API 密钥管理中点击"创建密钥"
+4. 复制生成的密钥填入 `config.yml`
+
+**环境变量（可选，优先级更高）：**
+```bash
+export WAREHOUSE_API_URL="http://localhost:2124/api"
+export WAREHOUSE_API_KEY="your-api-key"
+```
+
+### 2. 在 Claude Desktop 中配置
 
 编辑 Claude Desktop 的配置文件，添加以下内容：
 

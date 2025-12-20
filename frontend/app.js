@@ -12,6 +12,10 @@ let detailTrendChart, detailPieChart;
 // 分类数据
 let allCategories = [];
 
+// 用户认证状态
+let currentUser = null;  // { id, username, display_name, role }
+let isSystemInitialized = false;
+
 function goBackToInventory() {
     switchTab('inventory');
 }
@@ -36,8 +40,16 @@ let lastProductStats = null;
 // 所有产品列表（用于产品选择器和新增记录）
 let allProducts = [];
 
+// 联系方分页状态
+let contactsCurrentPage = 1;
+let contactsPageSize = 20;
+let contactsTotalPages = 1;
+
 // ============ 页面初始化 ============
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', async function () {
+    // 首先检查认证状态
+    await checkAuthStatus();
+
     initCharts();
     loadCategories();
     loadAllProducts();
@@ -51,7 +63,7 @@ function initFromHash() {
     if (hash) {
         const params = new URLSearchParams(hash.substring(1));
         const tab = params.get('tab');
-        if (tab && ['dashboard', 'records', 'inventory', 'detail'].includes(tab)) {
+        if (tab && ['dashboard', 'records', 'inventory', 'detail', 'contacts', 'users'].includes(tab)) {
             // 解析筛选参数
             const filters = {};
             for (const [key, value] of params.entries()) {
@@ -97,6 +109,7 @@ function switchTab(tabId, filters = {}) {
             break;
         case 'records':
             applyRecordsFilters(filters);
+            loadRecordsFilterOptions();
             loadRecords();
             break;
         case 'inventory':
@@ -113,6 +126,13 @@ function switchTab(tabId, filters = {}) {
                 detailTrendChart && detailTrendChart.resize();
                 detailPieChart && detailPieChart.resize();
             }, 100);
+            break;
+        case 'contacts':
+            loadContacts();
+            break;
+        case 'users':
+            loadUsers();
+            loadApiKeys();
             break;
     }
 
@@ -679,6 +699,9 @@ async function loadRecords() {
     const category = document.getElementById('filter-records-category').value;
     const recordType = document.getElementById('filter-record-type').value;
     const selectedStatuses = getDropdownSelectedValues('filter-record-status-dropdown');
+    const contactId = document.getElementById('filter-record-contact').value;
+    const operatorUserId = document.getElementById('filter-record-operator').value;
+    const reason = document.getElementById('filter-record-reason').value.trim();
 
     const params = new URLSearchParams({
         page: recordsCurrentPage,
@@ -693,6 +716,9 @@ async function loadRecords() {
     if (selectedStatuses.length > 0) {
         params.set('status', selectedStatuses.join(','));
     }
+    if (contactId) params.set('contact_id', contactId);
+    if (operatorUserId) params.set('operator_user_id', operatorUserId);
+    if (reason) params.set('reason', reason);
 
     try {
         const response = await fetch(`${API_BASE_URL}/inventory/records?${params}`);
@@ -710,7 +736,7 @@ function renderRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -735,6 +761,14 @@ function renderRecordsTable(items) {
             statusClass = 'status-danger';
         }
 
+        // 批次信息：入库显示批次号，出库显示消耗详情
+        let batchDisplay = '-';
+        if (item.type === 'in' && item.batch_no) {
+            batchDisplay = item.batch_no;
+        } else if (item.type === 'out' && item.batch_details) {
+            batchDisplay = `<span class="batch-details" title="${item.batch_details}">${item.batch_details}</span>`;
+        }
+
         tr.innerHTML = `
             <td>${item.created_at}</td>
             <td>${item.material_name}</td>
@@ -742,7 +776,9 @@ function renderRecordsTable(items) {
             <td>${item.category || '-'}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
             <td><strong>${item.quantity}</strong></td>
-            <td>${item.operator}</td>
+            <td>${batchDisplay}</td>
+            <td>${item.contact_name || '-'}</td>
+            <td>${item.operator_name || item.operator}</td>
             <td>${item.reason || '-'}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
         `;
@@ -783,10 +819,58 @@ function resetRecordsFilter() {
     document.getElementById('filter-records-product').value = '';
     document.getElementById('filter-records-category').value = '';
     document.getElementById('filter-record-type').value = '';
+    document.getElementById('filter-record-contact').value = '';
+    document.getElementById('filter-record-operator').value = '';
+    document.getElementById('filter-record-reason').value = '';
     // 重置状态多选：选中除禁用外的所有选项
     resetDropdownSelection('filter-record-status-dropdown');
     recordsCurrentPage = 1;
     loadRecords();
+}
+
+// 加载记录筛选下拉选项（联系方和操作员）
+async function loadRecordsFilterOptions() {
+    try {
+        // 并行加载联系方和操作员
+        const [contactsRes, operatorsRes] = await Promise.all([
+            fetch(`${API_BASE_URL}/contacts?page_size=100`, { credentials: 'include' }),
+            fetch(`${API_BASE_URL}/operators`, { credentials: 'include' })
+        ]);
+
+        // 加载联系方选项
+        if (contactsRes.ok) {
+            const contactsData = await contactsRes.json();
+            const contactSelect = document.getElementById('filter-record-contact');
+            contactSelect.innerHTML = `<option value="" data-i18n="allContacts">${t('allContacts')}</option>`;
+            contactsData.items.forEach(contact => {
+                const option = document.createElement('option');
+                option.value = contact.id;
+                option.textContent = contact.name;
+                contactSelect.appendChild(option);
+            });
+            console.log(`加载了 ${contactsData.items.length} 个联系方`);
+        } else {
+            console.error('加载联系方失败:', contactsRes.status);
+        }
+
+        // 加载操作员选项
+        if (operatorsRes.ok) {
+            const operators = await operatorsRes.json();
+            const operatorSelect = document.getElementById('filter-record-operator');
+            operatorSelect.innerHTML = `<option value="" data-i18n="allOperators">${t('allOperators')}</option>`;
+            operators.forEach(op => {
+                const option = document.createElement('option');
+                option.value = op.user_id;
+                option.textContent = op.display_name || op.username;
+                operatorSelect.appendChild(option);
+            });
+            console.log(`加载了 ${operators.length} 个操作员`);
+        } else {
+            console.error('加载操作员失败:', operatorsRes.status);
+        }
+    } catch (error) {
+        console.error('加载筛选选项失败:', error);
+    }
 }
 
 // ============ 产品详情 ============
@@ -1139,10 +1223,9 @@ function renderImportPreview(data) {
 async function confirmImport() {
     if (!importPreviewData) return;
 
-    const operator = document.getElementById('import-operator').value.trim();
     const reason = document.getElementById('import-reason').value.trim();
 
-    if (!operator || !reason) {
+    if (!reason) {
         alert(t('fillAllFields'));
         return;
     }
@@ -1188,7 +1271,6 @@ async function confirmNewSkus() {
 }
 
 async function executeImport(confirmNewSkus) {
-    const operator = document.getElementById('import-operator').value.trim();
     const reason = document.getElementById('import-reason').value.trim();
     const confirmDisableMissing = document.getElementById('confirm-disable-missing')?.checked || false;
 
@@ -1196,9 +1278,9 @@ async function executeImport(confirmNewSkus) {
         const response = await fetch(`${API_BASE_URL}/materials/import-excel/confirm`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 changes: importPreviewData.preview,
-                operator: operator,
                 reason: reason,
                 confirm_new_skus: confirmNewSkus,
                 confirm_disable_missing_skus: confirmDisableMissing
@@ -1232,6 +1314,11 @@ function showAddRecordModal() {
     document.getElementById('record-product-display-group').style.display = 'none';
     document.getElementById('add-record-modal').classList.add('show');
     document.getElementById('add-record-form').reset();
+    loadContactsForRecord('in');  // 默认入库，加载供应商
+    // 监听类型变化
+    document.querySelectorAll('input[name="record-type"]').forEach(radio => {
+        radio.onchange = () => loadContactsForRecord(radio.value);
+    });
 }
 
 function showAddRecordModalForProduct() {
@@ -1243,6 +1330,35 @@ function showAddRecordModalForProduct() {
     document.getElementById('add-record-modal').classList.add('show');
     document.getElementById('add-record-form').reset();
     document.getElementById('record-product-display').value = currentProductName;
+    loadContactsForRecord('in');  // 默认入库，加载供应商
+    // 监听类型变化
+    document.querySelectorAll('input[name="record-type"]').forEach(radio => {
+        radio.onchange = () => loadContactsForRecord(radio.value);
+    });
+}
+
+// 加载联系方下拉列表
+async function loadContactsForRecord(recordType) {
+    const select = document.getElementById('record-contact');
+    if (!select) return;
+
+    const endpoint = recordType === 'in' ? '/contacts/suppliers' : '/contacts/customers';
+
+    try {
+        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+            credentials: 'include'
+        });
+
+        if (response.ok) {
+            const contacts = await response.json();
+            select.innerHTML = `<option value="">${t('pleaseSelect')}</option>`;
+            contacts.forEach(contact => {
+                select.innerHTML += `<option value="${contact.id}">${contact.name}</option>`;
+            });
+        }
+    } catch (error) {
+        console.error('加载联系方列表失败:', error);
+    }
 }
 
 function closeAddRecordModal() {
@@ -1256,11 +1372,11 @@ async function submitAddRecord() {
         : document.getElementById('record-product').value;
     const type = document.querySelector('input[name="record-type"]:checked')?.value;
     const quantity = parseInt(document.getElementById('record-quantity').value);
-    const operator = document.getElementById('record-operator').value.trim();
     const reason = document.getElementById('record-reason').value.trim();
+    const contactId = document.getElementById('record-contact')?.value || null;
 
     // 必填项校验
-    if (!productName || !type || !document.getElementById('record-quantity').value || !operator || !reason) {
+    if (!productName || !type || !document.getElementById('record-quantity').value || !reason) {
         alert(t('fillAllFields')); // 请填写所有必填项
         return;
     }
@@ -1274,12 +1390,13 @@ async function submitAddRecord() {
         const response = await fetch(`${API_BASE_URL}/inventory/add-record`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 product_name: productName,
                 type: type,
                 quantity: quantity,
-                operator: operator,
-                reason: reason
+                reason: reason,
+                contact_id: contactId ? parseInt(contactId) : null
             })
         });
 
@@ -1337,5 +1454,812 @@ function onLanguageChange() {
                 }
             }
             break;
+        case 'users':
+            loadUsers();
+            loadApiKeys();
+            break;
+    }
+}
+
+// ============ 认证相关 ============
+
+// 检查认证状态
+async function checkAuthStatus() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/auth/status`, {
+            credentials: 'include'
+        });
+        const data = await response.json();
+
+        isSystemInitialized = data.initialized;
+
+        if (!data.initialized) {
+            // 系统未初始化，显示设置模态框
+            showSetupModal();
+            return;
+        }
+
+        if (data.logged_in && data.user) {
+            currentUser = data.user;
+        } else {
+            currentUser = null;
+        }
+
+        updateUserDisplay();
+        updatePermissionUI();
+    } catch (error) {
+        console.error('检查认证状态失败:', error);
+        currentUser = null;
+        updateUserDisplay();
+    }
+}
+
+// 更新用户显示
+function updateUserDisplay() {
+    const nameDisplay = document.getElementById('user-name-display');
+    const roleBadge = document.getElementById('user-role-badge');
+    const loginBtn = document.getElementById('login-btn');
+    const logoutBtn = document.getElementById('logout-btn');
+
+    if (currentUser) {
+        nameDisplay.textContent = currentUser.display_name || currentUser.username;
+        roleBadge.textContent = t('role' + currentUser.role.charAt(0).toUpperCase() + currentUser.role.slice(1));
+        roleBadge.className = 'user-role-badge ' + currentUser.role;
+        roleBadge.style.display = 'inline';
+        loginBtn.style.display = 'none';
+        logoutBtn.style.display = 'inline';
+    } else {
+        nameDisplay.textContent = t('guest');
+        roleBadge.style.display = 'none';
+        loginBtn.style.display = 'inline';
+        logoutBtn.style.display = 'none';
+    }
+}
+
+// 更新权限控制UI
+function updatePermissionUI() {
+    const role = currentUser ? currentUser.role : 'view';
+    const roleLevel = { view: 1, operate: 2, admin: 3 };
+    const currentLevel = roleLevel[role] || 1;
+
+    // 显示/隐藏联系方管理TAB（operate+）
+    const contactsNav = document.getElementById('nav-contacts');
+    if (contactsNav) {
+        contactsNav.style.display = currentLevel >= 2 ? 'flex' : 'none';
+    }
+
+    // 显示/隐藏用户管理TAB（admin only）
+    const usersNav = document.getElementById('nav-users');
+    if (usersNav) {
+        usersNav.style.display = role === 'admin' ? 'flex' : 'none';
+    }
+
+    // 根据权限控制按钮显示（未来可扩展）
+    // 目前operate权限的按钮（入库、出库、导入、导出）不做隐藏，由后端权限控制
+}
+
+// 显示登录模态框
+function showLoginModal() {
+    document.getElementById('login-modal').classList.add('show');
+    document.getElementById('login-username').focus();
+    document.getElementById('login-error').style.display = 'none';
+}
+
+// 关闭登录模态框
+function closeLoginModal() {
+    document.getElementById('login-modal').classList.remove('show');
+    document.getElementById('login-form').reset();
+    document.getElementById('login-error').style.display = 'none';
+}
+
+// 处理登录
+async function handleLogin(event) {
+    if (event) event.preventDefault();
+
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errorDiv = document.getElementById('login-error');
+
+    if (!username || !password) {
+        errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ username, password })
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            currentUser = data.user;
+            closeLoginModal();
+            updateUserDisplay();
+            updatePermissionUI();
+            refreshCurrentTab();
+        } else {
+            errorDiv.textContent = data.message || t('loginFailed');
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('登录失败:', error);
+        errorDiv.textContent = t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+// 处理登出
+async function handleLogout() {
+    try {
+        await fetch(`${API_BASE_URL}/auth/logout`, {
+            method: 'POST',
+            credentials: 'include'
+        });
+    } catch (error) {
+        console.error('登出失败:', error);
+    }
+
+    currentUser = null;
+    updateUserDisplay();
+    updatePermissionUI();
+
+    // 如果在用户管理页面，切换到看板
+    if (currentTab === 'users') {
+        switchTab('dashboard');
+    }
+}
+
+// 显示设置模态框（首次使用）
+function showSetupModal() {
+    document.getElementById('setup-modal').classList.add('show');
+    document.getElementById('setup-username').focus();
+    document.getElementById('setup-error').style.display = 'none';
+}
+
+// 处理首次设置
+async function handleSetup(event) {
+    if (event) event.preventDefault();
+
+    const username = document.getElementById('setup-username').value.trim();
+    const displayName = document.getElementById('setup-display-name').value.trim();
+    const password = document.getElementById('setup-password').value;
+    const passwordConfirm = document.getElementById('setup-password-confirm').value;
+    const errorDiv = document.getElementById('setup-error');
+
+    if (!username || !password) {
+        errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    if (password !== passwordConfirm) {
+        errorDiv.textContent = t('passwordMismatch');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    if (password.length < 4) {
+        errorDiv.textContent = '密码长度至少4位';
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/auth/setup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                username,
+                password,
+                display_name: displayName || null
+            })
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            currentUser = data.user;
+            isSystemInitialized = true;
+            document.getElementById('setup-modal').classList.remove('show');
+            updateUserDisplay();
+            updatePermissionUI();
+        } else {
+            errorDiv.textContent = data.message || t('operationFailed');
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('设置失败:', error);
+        errorDiv.textContent = t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+// ============ 用户管理 ============
+
+// 加载用户列表
+async function loadUsers() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/users`, {
+            credentials: 'include'
+        });
+
+        if (response.status === 401 || response.status === 403) {
+            return;
+        }
+
+        const users = await response.json();
+        renderUsersTable(users);
+    } catch (error) {
+        console.error('加载用户列表失败:', error);
+    }
+}
+
+// 渲染用户表格
+function renderUsersTable(users) {
+    const tbody = document.getElementById('users-tbody');
+    if (!tbody) return;
+
+    if (!users || users.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = users.map(user => {
+        const displayNameEscaped = (user.display_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        return `
+        <tr>
+            <td>${user.username}</td>
+            <td>${user.display_name || '-'}</td>
+            <td><span class="user-role-badge ${user.role}">${t('role' + user.role.charAt(0).toUpperCase() + user.role.slice(1))}</span></td>
+            <td>${user.is_disabled ? `<span style="color:#ff4d4f;">${t('disabled')}</span>` : `<span style="color:#52c41a;">${t('enabled')}</span>`}</td>
+            <td>${user.created_at}</td>
+            <td>
+                <button class="action-btn-small" onclick="showEditUserModal(${user.id}, '${user.username}', '${displayNameEscaped}', '${user.role}')">
+                    ${t('edit')}
+                </button>
+                ${user.id !== currentUser.id ? `
+                    <button class="action-btn-small ${user.is_disabled ? '' : 'danger'}" onclick="toggleUserStatus(${user.id}, ${user.is_disabled})">
+                        ${user.is_disabled ? t('enable') : t('disable')}
+                    </button>
+                ` : ''}
+            </td>
+        </tr>
+    `}).join('');
+}
+
+// 显示添加用户模态框
+function showAddUserModal() {
+    document.getElementById('add-user-modal').classList.add('show');
+    document.getElementById('new-user-username').focus();
+    document.getElementById('add-user-error').style.display = 'none';
+}
+
+// 关闭添加用户模态框
+function closeAddUserModal() {
+    document.getElementById('add-user-modal').classList.remove('show');
+    document.getElementById('add-user-form').reset();
+    document.getElementById('add-user-error').style.display = 'none';
+}
+
+// 处理添加用户
+async function handleAddUser() {
+    const username = document.getElementById('new-user-username').value.trim();
+    const displayName = document.getElementById('new-user-display-name').value.trim();
+    const password = document.getElementById('new-user-password').value;
+    const role = document.getElementById('new-user-role').value;
+    const errorDiv = document.getElementById('add-user-error');
+
+    if (!username || !password) {
+        errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                username,
+                password,
+                display_name: displayName || null,
+                role
+            })
+        });
+
+        if (response.ok) {
+            closeAddUserModal();
+            loadUsers();
+        } else {
+            const data = await response.json();
+            errorDiv.textContent = data.detail || data.error || t('operationFailed');
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('添加用户失败:', error);
+        errorDiv.textContent = t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+// 切换用户状态
+async function toggleUserStatus(userId, isDisabled) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/users/${userId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ is_disabled: !isDisabled })
+        });
+
+        if (response.ok) {
+            loadUsers();
+        } else {
+            const data = await response.json();
+            alert(data.detail || data.error || t('operationFailed'));
+        }
+    } catch (error) {
+        console.error('更新用户状态失败:', error);
+        alert(t('operationFailed'));
+    }
+}
+
+// 显示编辑用户模态框
+function showEditUserModal(userId, username, displayName, role) {
+    document.getElementById('edit-user-id').value = userId;
+    document.getElementById('edit-user-username').value = username;
+    document.getElementById('edit-user-display-name').value = displayName || '';
+    document.getElementById('edit-user-password').value = '';
+    document.getElementById('edit-user-role').value = role;
+    document.getElementById('edit-user-modal').classList.add('show');
+    document.getElementById('edit-user-username').focus();
+    document.getElementById('edit-user-error').style.display = 'none';
+}
+
+// 关闭编辑用户模态框
+function closeEditUserModal() {
+    document.getElementById('edit-user-modal').classList.remove('show');
+    document.getElementById('edit-user-form').reset();
+    document.getElementById('edit-user-error').style.display = 'none';
+}
+
+// 处理编辑用户
+async function handleEditUser() {
+    const userId = document.getElementById('edit-user-id').value;
+    const username = document.getElementById('edit-user-username').value.trim();
+    const displayName = document.getElementById('edit-user-display-name').value.trim();
+    const password = document.getElementById('edit-user-password').value;
+    const role = document.getElementById('edit-user-role').value;
+    const errorDiv = document.getElementById('edit-user-error');
+
+    if (!username) {
+        errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    const updateData = {
+        username,
+        display_name: displayName || null,
+        role
+    };
+
+    // 只有填写了新密码才更新密码
+    if (password) {
+        if (password.length < 4) {
+            errorDiv.textContent = t('passwordTooShort');
+            errorDiv.style.display = 'block';
+            return;
+        }
+        updateData.password = password;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/users/${userId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(updateData)
+        });
+
+        if (response.ok) {
+            closeEditUserModal();
+            loadUsers();
+            // 如果修改的是当前用户，刷新用户信息
+            if (currentUser && currentUser.id == userId) {
+                await checkAuthStatus();
+            }
+        } else {
+            const data = await response.json();
+            errorDiv.textContent = data.detail || data.error || t('operationFailed');
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('编辑用户失败:', error);
+        errorDiv.textContent = t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+// ============ API密钥管理 ============
+
+// 加载API密钥列表
+async function loadApiKeys() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/api-keys`, {
+            credentials: 'include'
+        });
+
+        if (response.status === 401 || response.status === 403) {
+            return;
+        }
+
+        const keys = await response.json();
+        renderApiKeysTable(keys);
+    } catch (error) {
+        console.error('加载API密钥列表失败:', error);
+    }
+}
+
+// 渲染API密钥表格
+function renderApiKeysTable(keys) {
+    const tbody = document.getElementById('api-keys-tbody');
+    if (!tbody) return;
+
+    if (!keys || keys.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = keys.map(key => `
+        <tr>
+            <td>${key.name}</td>
+            <td><span class="user-role-badge ${key.role}">${t('role' + key.role.charAt(0).toUpperCase() + key.role.slice(1))}</span></td>
+            <td>${key.is_disabled ? `<span style="color:#ff4d4f;">${t('disabled')}</span>` : `<span style="color:#52c41a;">${t('enabled')}</span>`}</td>
+            <td>${key.created_at}</td>
+            <td>${key.last_used_at || t('never')}</td>
+            <td>
+                <button class="action-btn-small danger" onclick="disableApiKey(${key.id})">
+                    ${t('disable')}
+                </button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+// 显示添加API密钥模态框
+function showAddApiKeyModal() {
+    document.getElementById('add-api-key-modal').classList.add('show');
+    document.getElementById('new-api-key-name').focus();
+    document.getElementById('add-api-key-error').style.display = 'none';
+}
+
+// 关闭添加API密钥模态框
+function closeAddApiKeyModal() {
+    document.getElementById('add-api-key-modal').classList.remove('show');
+    document.getElementById('add-api-key-form').reset();
+    document.getElementById('add-api-key-error').style.display = 'none';
+}
+
+// 处理添加API密钥
+async function handleAddApiKey() {
+    const name = document.getElementById('new-api-key-name').value.trim();
+    const role = document.getElementById('new-api-key-role').value;
+    const errorDiv = document.getElementById('add-api-key-error');
+
+    if (!name) {
+        errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/api-keys`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ name, role })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            closeAddApiKeyModal();
+            loadApiKeys();
+            // 显示创建的API密钥
+            showCreatedApiKey(data.key);
+        } else {
+            const data = await response.json();
+            errorDiv.textContent = data.detail || data.error || t('operationFailed');
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('添加API密钥失败:', error);
+        errorDiv.textContent = t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+// 显示创建的API密钥
+function showCreatedApiKey(key) {
+    document.getElementById('created-api-key').textContent = key;
+    document.getElementById('show-api-key-modal').classList.add('show');
+}
+
+// 关闭显示API密钥模态框
+function closeShowApiKeyModal() {
+    document.getElementById('show-api-key-modal').classList.remove('show');
+}
+
+// 复制API密钥
+function copyApiKey() {
+    const key = document.getElementById('created-api-key').textContent;
+    navigator.clipboard.writeText(key).then(() => {
+        alert(t('copied'));
+    }).catch(err => {
+        console.error('复制失败:', err);
+    });
+}
+
+// 禁用API密钥
+async function disableApiKey(keyId) {
+    if (!confirm('确定要禁用此API密钥吗？')) return;
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/api-keys/${keyId}`, {
+            method: 'DELETE',
+            credentials: 'include'
+        });
+
+        if (response.ok) {
+            loadApiKeys();
+        } else {
+            const data = await response.json();
+            alert(data.detail || data.error || t('operationFailed'));
+        }
+    } catch (error) {
+        console.error('禁用API密钥失败:', error);
+        alert(t('operationFailed'));
+    }
+}
+
+// ============ 联系方管理 ============
+
+// 加载联系方列表
+async function loadContacts() {
+    try {
+        const name = document.getElementById('filter-contact-name')?.value || '';
+        const contactType = document.getElementById('filter-contact-type')?.value || '';
+
+        const params = new URLSearchParams({
+            page: contactsCurrentPage,
+            page_size: contactsPageSize
+        });
+        if (name) params.append('name', name);
+        if (contactType) params.append('contact_type', contactType);
+
+        const response = await fetch(`${API_BASE_URL}/contacts?${params}`, {
+            credentials: 'include'
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            renderContactsTable(data.items);
+            updateContactsPagination(data);
+        }
+    } catch (error) {
+        console.error('加载联系方列表失败:', error);
+    }
+}
+
+// 渲染联系方表格
+function renderContactsTable(contacts) {
+    const tbody = document.getElementById('contacts-tbody');
+    if (!tbody) return;
+
+    if (!contacts || contacts.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = contacts.map(contact => {
+        let typeText = '';
+        if (contact.is_supplier && contact.is_customer) {
+            typeText = t('bothType');
+        } else if (contact.is_supplier) {
+            typeText = t('supplier');
+        } else if (contact.is_customer) {
+            typeText = t('customer');
+        }
+
+        return `
+            <tr>
+                <td>${contact.name}</td>
+                <td>${typeText}</td>
+                <td>${contact.phone || '-'}</td>
+                <td>${contact.email || '-'}</td>
+                <td>${contact.address || '-'}</td>
+                <td>${contact.is_disabled ? `<span style="color:#ff4d4f;">${t('disabled')}</span>` : `<span style="color:#52c41a;">${t('enabled')}</span>`}</td>
+                <td>
+                    <button class="action-btn-small" onclick="editContact(${contact.id})">${t('edit')}</button>
+                    ${contact.is_disabled
+                        ? `<button class="action-btn-small success" onclick="toggleContactStatus(${contact.id}, true)">${t('enable')}</button>`
+                        : `<button class="action-btn-small danger" onclick="toggleContactStatus(${contact.id}, false)">${t('disable')}</button>`
+                    }
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+// 更新联系方分页
+function updateContactsPagination(data) {
+    contactsTotalPages = data.total_pages;
+
+    document.getElementById('contacts-total').textContent = data.total;
+    document.getElementById('contacts-current-page').textContent = contactsCurrentPage;
+    document.getElementById('contacts-total-pages').textContent = contactsTotalPages;
+
+    document.getElementById('contacts-prev-btn').disabled = contactsCurrentPage <= 1;
+    document.getElementById('contacts-next-btn').disabled = contactsCurrentPage >= contactsTotalPages;
+}
+
+// 联系方分页导航
+function contactsGoToPage(page) {
+    if (page < 1 || page > contactsTotalPages) return;
+    contactsCurrentPage = page;
+    loadContacts();
+}
+
+// 改变联系方页面大小
+function changeContactsPageSize(size) {
+    contactsPageSize = parseInt(size);
+    contactsCurrentPage = 1;
+    loadContacts();
+}
+
+// 应用联系方筛选
+function applyContactsFilter() {
+    contactsCurrentPage = 1;
+    loadContacts();
+}
+
+// 重置联系方筛选
+function resetContactsFilter() {
+    document.getElementById('filter-contact-name').value = '';
+    document.getElementById('filter-contact-type').value = '';
+    contactsCurrentPage = 1;
+    loadContacts();
+}
+
+// 显示添加联系方模态框
+function showAddContactModal() {
+    document.getElementById('contact-modal-title').textContent = t('addContact');
+    document.getElementById('contact-id').value = '';
+    document.getElementById('contact-form').reset();
+    document.getElementById('contact-error').style.display = 'none';
+    document.getElementById('contact-modal').classList.add('show');
+    document.getElementById('contact-name').focus();
+}
+
+// 关闭联系方模态框
+function closeContactModal() {
+    document.getElementById('contact-modal').classList.remove('show');
+    document.getElementById('contact-form').reset();
+    document.getElementById('contact-error').style.display = 'none';
+}
+
+// 编辑联系方
+async function editContact(contactId) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/contacts/${contactId}`, {
+            credentials: 'include'
+        });
+
+        if (response.ok) {
+            const contact = await response.json();
+            document.getElementById('contact-modal-title').textContent = t('editContact');
+            document.getElementById('contact-id').value = contact.id;
+            document.getElementById('contact-name').value = contact.name;
+            document.getElementById('contact-is-supplier').checked = contact.is_supplier;
+            document.getElementById('contact-is-customer').checked = contact.is_customer;
+            document.getElementById('contact-phone').value = contact.phone || '';
+            document.getElementById('contact-email').value = contact.email || '';
+            document.getElementById('contact-address').value = contact.address || '';
+            document.getElementById('contact-notes').value = contact.notes || '';
+            document.getElementById('contact-error').style.display = 'none';
+            document.getElementById('contact-modal').classList.add('show');
+        }
+    } catch (error) {
+        console.error('获取联系方详情失败:', error);
+        alert(t('operationFailed'));
+    }
+}
+
+// 保存联系方
+async function handleSaveContact() {
+    const contactId = document.getElementById('contact-id').value;
+    const name = document.getElementById('contact-name').value.trim();
+    const isSupplier = document.getElementById('contact-is-supplier').checked;
+    const isCustomer = document.getElementById('contact-is-customer').checked;
+    const phone = document.getElementById('contact-phone').value.trim();
+    const email = document.getElementById('contact-email').value.trim();
+    const address = document.getElementById('contact-address').value.trim();
+    const notes = document.getElementById('contact-notes').value.trim();
+    const errorDiv = document.getElementById('contact-error');
+
+    if (!name) {
+        errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    if (!isSupplier && !isCustomer) {
+        errorDiv.textContent = t('contactMustSelectType');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    const data = {
+        name,
+        is_supplier: isSupplier,
+        is_customer: isCustomer,
+        phone: phone || null,
+        email: email || null,
+        address: address || null,
+        notes: notes || null
+    };
+
+    try {
+        const url = contactId
+            ? `${API_BASE_URL}/contacts/${contactId}`
+            : `${API_BASE_URL}/contacts`;
+        const method = contactId ? 'PUT' : 'POST';
+
+        const response = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+            closeContactModal();
+            loadContacts();
+        } else {
+            const result = await response.json();
+            errorDiv.textContent = result.detail || result.error || t('operationFailed');
+            errorDiv.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('保存联系方失败:', error);
+        errorDiv.textContent = t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+// 切换联系方状态
+async function toggleContactStatus(contactId, isDisabled) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/contacts/${contactId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ is_disabled: !isDisabled })
+        });
+
+        if (response.ok) {
+            loadContacts();
+        } else {
+            const data = await response.json();
+            alert(data.detail || data.error || t('operationFailed'));
+        }
+    } catch (error) {
+        console.error('更新联系方状态失败:', error);
+        alert(t('operationFailed'));
     }
 }

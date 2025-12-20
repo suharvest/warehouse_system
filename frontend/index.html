@@ -67,6 +67,24 @@
                     </svg>
                     <span data-i18n="tabDetail">产品详情</span>
                 </button>
+                <button class="nav-item" data-tab="contacts" data-min-role="operate" onclick="switchTab('contacts')" id="nav-contacts" style="display:none;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="8.5" cy="7" r="4"></circle>
+                        <line x1="20" y1="8" x2="20" y2="14"></line>
+                        <line x1="23" y1="11" x2="17" y2="11"></line>
+                    </svg>
+                    <span data-i18n="tabContacts">联系方</span>
+                </button>
+                <button class="nav-item" data-tab="users" data-min-role="admin" onclick="switchTab('users')" id="nav-users" style="display:none;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                    </svg>
+                    <span data-i18n="tabUsers">用户管理</span>
+                </button>
             </nav>
         </aside>
 
@@ -78,6 +96,20 @@
                 </div>
 
                 <div class="header-right">
+                    <!-- 用户信息 -->
+                    <div class="user-info" id="user-info-area">
+                        <div class="user-display" id="user-display">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                                <circle cx="12" cy="7" r="4"></circle>
+                            </svg>
+                            <span id="user-name-display" data-i18n="guest">访客</span>
+                            <span class="user-role-badge" id="user-role-badge"></span>
+                        </div>
+                        <button class="login-btn" id="login-btn" onclick="showLoginModal()" data-i18n="login">登录</button>
+                        <button class="logout-btn" id="logout-btn" onclick="handleLogout()" style="display:none;" data-i18n="logout">登出</button>
+                    </div>
+
                     <!-- 语言切换 -->
                     <div class="lang-dropdown">
                         <button class="lang-btn" onclick="toggleLangDropdown()">
@@ -289,6 +321,23 @@
                                     <option value="out" data-i18n="outbound">出库</option>
                                 </select>
                             </div>
+                            <div class="filter-group">
+                                <label data-i18n="contact">联系方</label>
+                                <select id="filter-record-contact">
+                                    <option value="" data-i18n="allContacts">全部联系方</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label data-i18n="operator">操作员</label>
+                                <select id="filter-record-operator">
+                                    <option value="" data-i18n="allOperators">全部操作员</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label data-i18n="reason">原因</label>
+                                <input type="text" id="filter-record-reason" data-i18n="reasonSearchPlaceholder"
+                                    placeholder="搜索原因...">
+                            </div>
                             <div class="filter-actions">
                                 <button class="filter-btn primary" onclick="applyRecordsFilter()"
                                     data-i18n="filterBtn">筛选</button>
@@ -331,6 +380,8 @@
                                         <th data-i18n="productCategory">商品类型</th>
                                         <th data-i18n="recordType">记录类型</th>
                                         <th data-i18n="quantity">数量</th>
+                                        <th data-i18n="batch">批次</th>
+                                        <th data-i18n="contact">联系方</th>
                                         <th data-i18n="operator">操作人</th>
                                         <th data-i18n="reason">原因</th>
                                         <th data-i18n="status">状态</th>
@@ -635,6 +686,140 @@
                             <p data-i18n="selectProductHint">请从上方下拉框选择一个产品查看详情</p>
                         </div>
                     </div>
+
+                    <!-- 联系方管理 Tab -->
+                    <div id="tab-contacts" class="tab-pane">
+                        <div class="page-header">
+                            <h2 class="page-title" data-i18n="tabContacts">联系方管理</h2>
+                        </div>
+
+                        <!-- 筛选区域 -->
+                        <div class="filter-bar">
+                            <div class="filter-group">
+                                <label data-i18n="filterProduct">名称</label>
+                                <input type="text" id="filter-contact-name" placeholder="搜索联系方名称...">
+                            </div>
+                            <div class="filter-group">
+                                <label data-i18n="filterType">类型</label>
+                                <select id="filter-contact-type">
+                                    <option value="" data-i18n="allTypes">全部类型</option>
+                                    <option value="supplier" data-i18n="supplier">供应商</option>
+                                    <option value="customer" data-i18n="customer">客户</option>
+                                </select>
+                            </div>
+                            <div class="filter-actions">
+                                <button class="filter-btn primary" onclick="applyContactsFilter()" data-i18n="filterBtn">筛选</button>
+                                <button class="filter-btn secondary" onclick="resetContactsFilter()" data-i18n="resetBtn">重置</button>
+                            </div>
+                        </div>
+
+                        <!-- 联系方表格 -->
+                        <div class="table-container">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="contactList">联系方列表</div>
+                                <button class="action-btn add-btn" onclick="showAddContactModal()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    <span data-i18n="addContact">添加联系方</span>
+                                </button>
+                            </div>
+                            <table id="contacts-table">
+                                <thead>
+                                    <tr>
+                                        <th data-i18n="contactName">名称</th>
+                                        <th data-i18n="contactType">类型</th>
+                                        <th data-i18n="phone">电话</th>
+                                        <th data-i18n="email">邮箱</th>
+                                        <th data-i18n="address">地址</th>
+                                        <th data-i18n="status">状态</th>
+                                        <th data-i18n="actions">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="contacts-tbody"></tbody>
+                            </table>
+                            <!-- 分页控件 -->
+                            <div class="pagination" id="contacts-pagination">
+                                <div class="pagination-info">
+                                    <span data-i18n="totalRecords">共</span> <span id="contacts-total">0</span>
+                                    <span data-i18n="recordsUnit">条记录</span>
+                                </div>
+                                <div class="pagination-controls">
+                                    <select class="page-size-select" id="contacts-page-size" onchange="changeContactsPageSize(this.value)">
+                                        <option value="10">10</option>
+                                        <option value="20" selected>20</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
+                                    <button onclick="contactsGoToPage(contactsCurrentPage - 1)" id="contacts-prev-btn" disabled data-i18n="prevPage">上一页</button>
+                                    <span class="page-info"><span id="contacts-current-page">1</span> / <span id="contacts-total-pages">1</span></span>
+                                    <button onclick="contactsGoToPage(contactsCurrentPage + 1)" id="contacts-next-btn" disabled data-i18n="nextPage">下一页</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 用户管理 Tab -->
+                    <div id="tab-users" class="tab-pane">
+                        <div class="page-header">
+                            <h2 class="page-title" data-i18n="tabUsers">用户管理</h2>
+                        </div>
+
+                        <!-- 用户列表 -->
+                        <div class="table-container">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="userList">用户列表</div>
+                                <button class="action-btn add-btn" onclick="showAddUserModal()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    <span data-i18n="addUser">添加用户</span>
+                                </button>
+                            </div>
+                            <table id="users-table">
+                                <thead>
+                                    <tr>
+                                        <th data-i18n="username">用户名</th>
+                                        <th data-i18n="displayName">显示名称</th>
+                                        <th data-i18n="role">角色</th>
+                                        <th data-i18n="status">状态</th>
+                                        <th data-i18n="createdAt">创建时间</th>
+                                        <th data-i18n="actions">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="users-tbody"></tbody>
+                            </table>
+                        </div>
+
+                        <!-- API密钥列表 -->
+                        <div class="table-container" style="margin-top: 24px;">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="apiKeyList">API密钥</div>
+                                <button class="action-btn add-btn" onclick="showAddApiKeyModal()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    <span data-i18n="addApiKey">添加API密钥</span>
+                                </button>
+                            </div>
+                            <table id="api-keys-table">
+                                <thead>
+                                    <tr>
+                                        <th data-i18n="keyName">名称</th>
+                                        <th data-i18n="role">角色</th>
+                                        <th data-i18n="status">状态</th>
+                                        <th data-i18n="createdAt">创建时间</th>
+                                        <th data-i18n="lastUsedAt">最后使用</th>
+                                        <th data-i18n="actions">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="api-keys-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
         </main>
     </div>
 
@@ -686,12 +871,7 @@
                     </div>
                     <div class="import-form">
                         <div class="form-row">
-                            <div class="form-group">
-                                <label><span data-i18n="operator">操作人</span> <span class="required">*</span></label>
-                                <input type="text" id="import-operator" data-i18n-placeholder="operatorPlaceholder"
-                                    placeholder="请输入操作人" required>
-                            </div>
-                            <div class="form-group">
+                            <div class="form-group" style="flex: 1;">
                                 <label><span data-i18n="reason">导入原因</span> <span class="required">*</span></label>
                                 <input type="text" id="import-reason" data-i18n-placeholder="reasonPlaceholder"
                                     placeholder="请输入导入原因" required>
@@ -774,18 +954,268 @@
                         <input type="number" id="record-quantity" min="1" required>
                     </div>
                     <div class="form-group">
-                        <label><span data-i18n="operator">操作人</span> <span class="required">*</span></label>
-                        <input type="text" id="record-operator" required>
-                    </div>
-                    <div class="form-group">
                         <label><span data-i18n="reason">原因</span> <span class="required">*</span></label>
                         <input type="text" id="record-reason" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="contact">联系方</label>
+                        <select id="record-contact">
+                            <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
+                        </select>
                     </div>
                 </form>
             </div>
             <div class="modal-footer">
                 <button class="btn cancel-btn" onclick="closeAddRecordModal()" data-i18n="cancel">取消</button>
                 <button class="btn confirm-btn" onclick="submitAddRecord()" data-i18n="submit">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 登录模态框 -->
+    <div id="login-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 data-i18n="login">登录</h3>
+                <button class="close-btn" onclick="closeLoginModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="login-form" onsubmit="handleLogin(event)">
+                    <div class="form-group">
+                        <label><span data-i18n="username">用户名</span> <span class="required">*</span></label>
+                        <input type="text" id="login-username" required autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="password">密码</span> <span class="required">*</span></label>
+                        <input type="password" id="login-password" required autocomplete="current-password">
+                    </div>
+                    <div class="form-error" id="login-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeLoginModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="handleLogin(event)" data-i18n="login">登录</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 首次设置模态框 -->
+    <div id="setup-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 data-i18n="setupAdmin">设置管理员</h3>
+            </div>
+            <div class="modal-body">
+                <p class="setup-hint" data-i18n="setupHint">首次使用请创建管理员账号</p>
+                <form id="setup-form" onsubmit="handleSetup(event)">
+                    <div class="form-group">
+                        <label><span data-i18n="username">用户名</span> <span class="required">*</span></label>
+                        <input type="text" id="setup-username" required>
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="displayName">显示名称</span></label>
+                        <input type="text" id="setup-display-name">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="password">密码</span> <span class="required">*</span></label>
+                        <input type="password" id="setup-password" required minlength="4">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="confirmPassword">确认密码</span> <span class="required">*</span></label>
+                        <input type="password" id="setup-password-confirm" required minlength="4">
+                    </div>
+                    <div class="form-error" id="setup-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn confirm-btn" onclick="handleSetup(event)" data-i18n="createAdmin">创建管理员</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加用户模态框 -->
+    <div id="add-user-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 data-i18n="addUser">添加用户</h3>
+                <button class="close-btn" onclick="closeAddUserModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="add-user-form">
+                    <div class="form-group">
+                        <label><span data-i18n="username">用户名</span> <span class="required">*</span></label>
+                        <input type="text" id="new-user-username" required>
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="displayName">显示名称</span></label>
+                        <input type="text" id="new-user-display-name">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="password">密码</span> <span class="required">*</span></label>
+                        <input type="password" id="new-user-password" required minlength="4">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="role">角色</span> <span class="required">*</span></label>
+                        <select id="new-user-role" required>
+                            <option value="view" data-i18n="roleView">只读</option>
+                            <option value="operate" data-i18n="roleOperate">操作员</option>
+                            <option value="admin" data-i18n="roleAdmin">管理员</option>
+                        </select>
+                    </div>
+                    <div class="form-error" id="add-user-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeAddUserModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="handleAddUser()" data-i18n="submit">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑用户模态框 -->
+    <div id="edit-user-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 data-i18n="editUser">编辑用户</h3>
+                <button class="close-btn" onclick="closeEditUserModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="edit-user-form">
+                    <input type="hidden" id="edit-user-id">
+                    <div class="form-group">
+                        <label><span data-i18n="username">用户名</span> <span class="required">*</span></label>
+                        <input type="text" id="edit-user-username" required minlength="2">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="displayName">显示名称</span></label>
+                        <input type="text" id="edit-user-display-name">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="newPassword">新密码</span> <small data-i18n="leaveEmptyToKeep">（留空保持不变）</small></label>
+                        <input type="password" id="edit-user-password" minlength="4" placeholder="">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="role">角色</span> <span class="required">*</span></label>
+                        <select id="edit-user-role" required>
+                            <option value="view" data-i18n="roleView">只读</option>
+                            <option value="operate" data-i18n="roleOperate">操作员</option>
+                            <option value="admin" data-i18n="roleAdmin">管理员</option>
+                        </select>
+                    </div>
+                    <div class="form-error" id="edit-user-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeEditUserModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="handleEditUser()" data-i18n="submit">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加API密钥模态框 -->
+    <div id="add-api-key-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 data-i18n="addApiKey">添加API密钥</h3>
+                <button class="close-btn" onclick="closeAddApiKeyModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="add-api-key-form">
+                    <div class="form-group">
+                        <label><span data-i18n="keyName">名称</span> <span class="required">*</span></label>
+                        <input type="text" id="new-api-key-name" required placeholder="例如: 工厂A终端">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="role">权限</span> <span class="required">*</span></label>
+                        <select id="new-api-key-role" required>
+                            <option value="view" data-i18n="roleView">只读</option>
+                            <option value="operate" selected data-i18n="roleOperate">操作员</option>
+                            <option value="admin" data-i18n="roleAdmin">管理员</option>
+                        </select>
+                    </div>
+                    <div class="form-error" id="add-api-key-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeAddApiKeyModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="handleAddApiKey()" data-i18n="submit">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 显示API密钥模态框（创建成功后显示） -->
+    <div id="show-api-key-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 data-i18n="apiKeyCreated">API密钥已创建</h3>
+            </div>
+            <div class="modal-body">
+                <p class="warning-text" data-i18n="apiKeyWarning">请妥善保存此密钥，关闭后将无法再次查看：</p>
+                <div class="api-key-display">
+                    <code id="created-api-key"></code>
+                    <button class="copy-btn" onclick="copyApiKey()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn confirm-btn" onclick="closeShowApiKeyModal()" data-i18n="confirm">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加/编辑联系方模态框 -->
+    <div id="contact-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="contact-modal-title" data-i18n="addContact">添加联系方</h3>
+                <button class="close-btn" onclick="closeContactModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="contact-form">
+                    <input type="hidden" id="contact-id">
+                    <div class="form-group">
+                        <label><span data-i18n="contactName">名称</span> <span class="required">*</span></label>
+                        <input type="text" id="contact-name" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="contactType">类型</label>
+                        <div class="checkbox-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="contact-is-supplier">
+                                <span data-i18n="supplier">供应商</span>
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="contact-is-customer">
+                                <span data-i18n="customer">客户</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="phone">电话</label>
+                        <input type="text" id="contact-phone">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="email">邮箱</label>
+                        <input type="email" id="contact-email">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="address">地址</label>
+                        <input type="text" id="contact-address">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="notes">备注</label>
+                        <textarea id="contact-notes" rows="3"></textarea>
+                    </div>
+                    <div class="form-error" id="contact-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" onclick="closeContactModal()" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" onclick="handleSaveContact()" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>

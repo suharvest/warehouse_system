@@ -1,15 +1,21 @@
 """
 仓库管理系统 FastAPI 后端
 """
-from fastapi import FastAPI, Query, HTTPException, File, UploadFile
+from fastapi import FastAPI, Query, HTTPException, File, UploadFile, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import List, Optional
 from io import BytesIO
+from functools import wraps
 
-from database import init_database, generate_mock_data, get_db_connection
+from database import (
+    init_database, generate_mock_data, get_db_connection,
+    has_admin_user, hash_password, verify_password,
+    generate_session_token, generate_api_key, hash_api_key,
+    generate_batch_no
+)
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
     MaterialItem, XiaozhiItem, ProductStats, ProductRecord,
@@ -17,7 +23,18 @@ from models import (
     ImportPreviewItem, ExcelImportPreviewResponse, ExcelImportConfirm,
     ExcelImportResponse, ManualRecordRequest,
     PaginatedMaterialsResponse, PaginatedRecordsResponse, MaterialItemWithDisabled,
-    InventoryRecordItem, PaginatedProductRecordsResponse
+    InventoryRecordItem, PaginatedProductRecordsResponse,
+    # Auth models
+    AuthStatusResponse, UserInfo, SetupRequest, LoginRequest, LoginResponse,
+    CreateUserRequest, UpdateUserRequest, UserListItem,
+    CreateApiKeyRequest, ApiKeyResponse, ApiKeyListItem,
+    # Contact models
+    CreateContactRequest, UpdateContactRequest, ContactItem, ContactListItem,
+    PaginatedContactsResponse,
+    # Batch models
+    BatchInfo, BatchConsumption, StockInResponse, StockOutResponse,
+    # Operator model
+    OperatorListItem
 )
 import math
 
@@ -62,6 +79,827 @@ async def http_exception_handler(request, exc):
         status_code=exc.status_code,
         content={"error": exc.detail}
     )
+
+
+# ============ 认证相关 ============
+
+# 权限级别映射（数字越大权限越高）
+ROLE_LEVELS = {
+    'view': 1,
+    'operate': 2,
+    'admin': 3
+}
+
+
+class CurrentUser:
+    """当前用户信息"""
+    def __init__(self, user_id: int = None, username: str = None,
+                 display_name: str = None, role: str = 'view',
+                 is_guest: bool = True, source: str = 'guest'):
+        self.id = user_id
+        self.username = username
+        self.display_name = display_name
+        self.role = role
+        self.is_guest = is_guest
+        self.source = source  # 'session' | 'api_key' | 'guest'
+
+    def has_permission(self, min_role: str) -> bool:
+        """检查是否有最低权限"""
+        return ROLE_LEVELS.get(self.role, 0) >= ROLE_LEVELS.get(min_role, 0)
+
+    def get_operator_name(self) -> str:
+        """获取操作人名称"""
+        if self.display_name:
+            return self.display_name
+        if self.username:
+            return self.username
+        return "访客"
+
+
+async def get_current_user(request: Request) -> CurrentUser:
+    """
+    获取当前用户（认证中间件）
+    优先级：X-API-Key > session_token Cookie > 访客
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 1. 检查 X-API-Key Header
+        api_key = request.headers.get('X-API-Key')
+        if api_key:
+            key_hash = hash_api_key(api_key)
+            cursor.execute('''
+                SELECT ak.id, ak.name, ak.role, ak.user_id, u.username, u.display_name
+                FROM api_keys ak
+                LEFT JOIN users u ON ak.user_id = u.id
+                WHERE ak.key_hash = ? AND ak.is_disabled = 0
+            ''', (key_hash,))
+            key_row = cursor.fetchone()
+
+            if key_row:
+                # 更新最后使用时间
+                cursor.execute(
+                    'UPDATE api_keys SET last_used_at = ? WHERE id = ?',
+                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), key_row['id'])
+                )
+                conn.commit()
+
+                # 使用关联用户名或API Key名称
+                display_name = key_row['display_name'] or key_row['username'] or key_row['name']
+                return CurrentUser(
+                    user_id=key_row['user_id'],
+                    username=key_row['username'] or key_row['name'],
+                    display_name=display_name,
+                    role=key_row['role'],
+                    is_guest=False,
+                    source='api_key'
+                )
+
+        # 2. 检查 session_token Cookie
+        session_token = request.cookies.get('session_token')
+        if session_token:
+            cursor.execute('''
+                SELECT s.user_id, s.expires_at, u.username, u.display_name, u.role
+                FROM sessions s
+                JOIN users u ON s.user_id = u.id
+                WHERE s.token = ? AND u.is_disabled = 0
+            ''', (session_token,))
+            session_row = cursor.fetchone()
+
+            if session_row:
+                # 检查是否过期
+                expires_at = datetime.strptime(session_row['expires_at'], '%Y-%m-%d %H:%M:%S')
+                if expires_at > datetime.now():
+                    return CurrentUser(
+                        user_id=session_row['user_id'],
+                        username=session_row['username'],
+                        display_name=session_row['display_name'],
+                        role=session_row['role'],
+                        is_guest=False,
+                        source='session'
+                    )
+
+        # 3. 访客模式
+        return CurrentUser()
+
+
+def require_auth(min_role: str = 'view'):
+    """
+    权限检查装饰器
+    - view: 只读访问
+    - operate: 入库/出库/导入/导出/管理联系方
+    - admin: 用户管理
+    """
+    async def dependency(current_user: CurrentUser = Depends(get_current_user)):
+        if not current_user.has_permission(min_role):
+            if current_user.is_guest:
+                raise HTTPException(status_code=401, detail="请先登录")
+            else:
+                raise HTTPException(status_code=403, detail="权限不足")
+        return current_user
+    return dependency
+
+
+# ============ Auth APIs ============
+
+@app.get("/api/auth/status", response_model=AuthStatusResponse)
+async def get_auth_status(current_user: CurrentUser = Depends(get_current_user)):
+    """获取认证状态"""
+    initialized = has_admin_user()
+
+    if current_user.is_guest:
+        return AuthStatusResponse(
+            initialized=initialized,
+            logged_in=False,
+            user=None
+        )
+
+    return AuthStatusResponse(
+        initialized=initialized,
+        logged_in=True,
+        user=UserInfo(
+            id=current_user.id,
+            username=current_user.username,
+            display_name=current_user.display_name,
+            role=current_user.role
+        )
+    )
+
+
+@app.post("/api/auth/setup", response_model=LoginResponse)
+async def setup_admin(request: SetupRequest, response: Response):
+    """首次设置管理员账号"""
+    if has_admin_user():
+        raise HTTPException(status_code=400, detail="系统已初始化，无法重复设置")
+
+    if len(request.password) < 4:
+        raise HTTPException(status_code=400, detail="密码长度至少4位")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 创建管理员
+        password_hash = hash_password(request.password)
+        cursor.execute('''
+            INSERT INTO users (username, password_hash, role, display_name, created_at)
+            VALUES (?, ?, 'admin', ?, ?)
+        ''', (request.username, password_hash, request.display_name,
+              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+
+        user_id = cursor.lastrowid
+
+        # 创建会话
+        token = generate_session_token()
+        expires_at = datetime.now() + timedelta(hours=24)
+        cursor.execute('''
+            INSERT INTO sessions (user_id, token, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, token, expires_at.strftime('%Y-%m-%d %H:%M:%S'),
+              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+
+        conn.commit()
+
+        # 设置Cookie
+        response.set_cookie(
+            key="session_token",
+            value=token,
+            max_age=86400,  # 24小时
+            httponly=True,
+            samesite="lax"
+        )
+
+        return LoginResponse(
+            success=True,
+            message="管理员账号创建成功",
+            user=UserInfo(
+                id=user_id,
+                username=request.username,
+                display_name=request.display_name,
+                role='admin'
+            )
+        )
+
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(request: LoginRequest, response: Response):
+    """用户登录"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, username, password_hash, display_name, role, is_disabled
+            FROM users WHERE username = ?
+        ''', (request.username,))
+        user = cursor.fetchone()
+
+        if not user:
+            return LoginResponse(success=False, message="用户名或密码错误")
+
+        if user['is_disabled']:
+            return LoginResponse(success=False, message="账号已被禁用")
+
+        if not verify_password(request.password, user['password_hash']):
+            return LoginResponse(success=False, message="用户名或密码错误")
+
+        # 清理旧会话
+        cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user['id'],))
+
+        # 创建新会话
+        token = generate_session_token()
+        expires_at = datetime.now() + timedelta(hours=24)
+        cursor.execute('''
+            INSERT INTO sessions (user_id, token, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (user['id'], token, expires_at.strftime('%Y-%m-%d %H:%M:%S'),
+              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+
+        conn.commit()
+
+        # 设置Cookie
+        response.set_cookie(
+            key="session_token",
+            value=token,
+            max_age=86400,
+            httponly=True,
+            samesite="lax"
+        )
+
+        return LoginResponse(
+            success=True,
+            message="登录成功",
+            user=UserInfo(
+                id=user['id'],
+                username=user['username'],
+                display_name=user['display_name'],
+                role=user['role']
+            )
+        )
+
+
+@app.post("/api/auth/logout")
+async def logout(response: Response, current_user: CurrentUser = Depends(get_current_user)):
+    """用户登出"""
+    if current_user.source == 'session' and current_user.id:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM sessions WHERE user_id = ?', (current_user.id,))
+            conn.commit()
+
+    response.delete_cookie("session_token")
+    return {"success": True, "message": "已登出"}
+
+
+@app.get("/api/auth/me", response_model=UserInfo)
+async def get_current_user_info(current_user: CurrentUser = Depends(require_auth('view'))):
+    """获取当前用户信息"""
+    if current_user.is_guest:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    return UserInfo(
+        id=current_user.id,
+        username=current_user.username,
+        display_name=current_user.display_name,
+        role=current_user.role
+    )
+
+
+# ============ User Management APIs ============
+
+@app.get("/api/users", response_model=List[UserListItem])
+async def list_users(current_user: CurrentUser = Depends(require_auth('admin'))):
+    """获取用户列表（仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, username, display_name, role, is_disabled, created_at
+            FROM users ORDER BY created_at DESC
+        ''')
+
+        return [
+            UserListItem(
+                id=row['id'],
+                username=row['username'],
+                display_name=row['display_name'],
+                role=row['role'],
+                is_disabled=bool(row['is_disabled']),
+                created_at=row['created_at']
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+@app.post("/api/users", response_model=UserListItem)
+async def create_user(
+    request: CreateUserRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """创建用户（仅管理员）"""
+    if request.role not in ['admin', 'operate', 'view']:
+        raise HTTPException(status_code=400, detail="无效的角色")
+
+    if len(request.password) < 4:
+        raise HTTPException(status_code=400, detail="密码长度至少4位")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 检查用户名是否已存在
+        cursor.execute('SELECT id FROM users WHERE username = ?', (request.username,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="用户名已存在")
+
+        password_hash = hash_password(request.password)
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        cursor.execute('''
+            INSERT INTO users (username, password_hash, role, display_name, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (request.username, password_hash, request.role,
+              request.display_name, current_user.id, created_at))
+
+        user_id = cursor.lastrowid
+        conn.commit()
+
+        return UserListItem(
+            id=user_id,
+            username=request.username,
+            display_name=request.display_name,
+            role=request.role,
+            is_disabled=False,
+            created_at=created_at
+        )
+
+
+@app.put("/api/users/{user_id}", response_model=UserListItem)
+async def update_user(
+    user_id: int,
+    request: UpdateUserRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """更新用户（仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        updates = []
+        params = []
+
+        if request.username is not None:
+            # 检查用户名是否已被占用
+            cursor.execute('SELECT id FROM users WHERE username = ? AND id != ?', (request.username, user_id))
+            if cursor.fetchone():
+                raise HTTPException(status_code=400, detail="用户名已存在")
+            if len(request.username) < 2:
+                raise HTTPException(status_code=400, detail="用户名长度至少2位")
+            updates.append('username = ?')
+            params.append(request.username)
+
+        if request.display_name is not None:
+            updates.append('display_name = ?')
+            params.append(request.display_name)
+
+        if request.role is not None:
+            if request.role not in ['admin', 'operate', 'view']:
+                raise HTTPException(status_code=400, detail="无效的角色")
+            updates.append('role = ?')
+            params.append(request.role)
+
+        if request.password is not None:
+            if len(request.password) < 4:
+                raise HTTPException(status_code=400, detail="密码长度至少4位")
+            updates.append('password_hash = ?')
+            params.append(hash_password(request.password))
+
+        if request.is_disabled is not None:
+            updates.append('is_disabled = ?')
+            params.append(1 if request.is_disabled else 0)
+
+        if updates:
+            params.append(user_id)
+            cursor.execute(f'''
+                UPDATE users SET {', '.join(updates)} WHERE id = ?
+            ''', params)
+            conn.commit()
+
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        updated = cursor.fetchone()
+
+        return UserListItem(
+            id=updated['id'],
+            username=updated['username'],
+            display_name=updated['display_name'],
+            role=updated['role'],
+            is_disabled=bool(updated['is_disabled']),
+            created_at=updated['created_at']
+        )
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """禁用用户（仅管理员）"""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能禁用自己")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        cursor.execute('UPDATE users SET is_disabled = 1 WHERE id = ?', (user_id,))
+        cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
+        conn.commit()
+
+        return {"success": True, "message": "用户已禁用"}
+
+
+# ============ API Key Management APIs ============
+
+@app.get("/api/api-keys", response_model=List[ApiKeyListItem])
+async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'))):
+    """获取API密钥列表（仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, name, role, is_disabled, created_at, last_used_at
+            FROM api_keys ORDER BY created_at DESC
+        ''')
+
+        return [
+            ApiKeyListItem(
+                id=row['id'],
+                name=row['name'],
+                role=row['role'],
+                is_disabled=bool(row['is_disabled']),
+                created_at=row['created_at'],
+                last_used_at=row['last_used_at']
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+@app.post("/api/api-keys", response_model=ApiKeyResponse)
+async def create_api_key(
+    request: CreateApiKeyRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """创建API密钥（仅管理员）"""
+    if request.role not in ['admin', 'operate', 'view']:
+        raise HTTPException(status_code=400, detail="无效的角色")
+
+    api_key = generate_api_key()
+    key_hash = hash_api_key(api_key)
+    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO api_keys (key_hash, name, role, user_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (key_hash, request.name, request.role, current_user.id, created_at))
+
+        key_id = cursor.lastrowid
+        conn.commit()
+
+        return ApiKeyResponse(
+            id=key_id,
+            name=request.name,
+            role=request.role,
+            key=api_key,  # 只在创建时返回完整密钥
+            created_at=created_at
+        )
+
+
+@app.delete("/api/api-keys/{key_id}")
+async def delete_api_key(
+    key_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """禁用API密钥（仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM api_keys WHERE id = ?', (key_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="API密钥不存在")
+
+        cursor.execute('UPDATE api_keys SET is_disabled = 1 WHERE id = ?', (key_id,))
+        conn.commit()
+
+        return {"success": True, "message": "API密钥已禁用"}
+
+
+# ============ Contact Management APIs ============
+
+@app.get("/api/contacts", response_model=PaginatedContactsResponse)
+async def list_contacts(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=10, le=100, description="每页条数"),
+    name: Optional[str] = Query(None, description="名称模糊搜索"),
+    contact_type: Optional[str] = Query(None, description="类型: supplier/customer/all"),
+    include_disabled: bool = Query(False, description="是否包含禁用的联系方")
+):
+    """获取联系方列表（分页）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        base_query = '''
+            SELECT id, name, address, phone, email, is_supplier, is_customer,
+                   notes, is_disabled, created_at
+            FROM contacts
+            WHERE 1=1
+        '''
+        count_query = 'SELECT COUNT(*) as total FROM contacts WHERE 1=1'
+        params = []
+
+        if not include_disabled:
+            base_query += ' AND is_disabled = 0'
+            count_query += ' AND is_disabled = 0'
+
+        if name:
+            base_query += ' AND name LIKE ?'
+            count_query += ' AND name LIKE ?'
+            params.append(f'%{name}%')
+
+        if contact_type == 'supplier':
+            base_query += ' AND is_supplier = 1'
+            count_query += ' AND is_supplier = 1'
+        elif contact_type == 'customer':
+            base_query += ' AND is_customer = 1'
+            count_query += ' AND is_customer = 1'
+
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        items = [
+            ContactItem(
+                id=row['id'],
+                name=row['name'],
+                address=row['address'],
+                phone=row['phone'],
+                email=row['email'],
+                is_supplier=bool(row['is_supplier']),
+                is_customer=bool(row['is_customer']),
+                notes=row['notes'],
+                is_disabled=bool(row['is_disabled']),
+                created_at=row['created_at']
+            )
+            for row in rows
+        ]
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+        return PaginatedContactsResponse(
+            items=items,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages
+        )
+
+
+@app.get("/api/contacts/suppliers", response_model=List[ContactListItem])
+async def list_suppliers():
+    """获取供应商列表（用于下拉选择）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, name, is_supplier, is_customer
+            FROM contacts
+            WHERE is_supplier = 1 AND is_disabled = 0
+            ORDER BY name ASC
+        ''')
+        return [
+            ContactListItem(
+                id=row['id'],
+                name=row['name'],
+                is_supplier=bool(row['is_supplier']),
+                is_customer=bool(row['is_customer'])
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+@app.get("/api/contacts/customers", response_model=List[ContactListItem])
+async def list_customers():
+    """获取客户列表（用于下拉选择）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, name, is_supplier, is_customer
+            FROM contacts
+            WHERE is_customer = 1 AND is_disabled = 0
+            ORDER BY name ASC
+        ''')
+        return [
+            ContactListItem(
+                id=row['id'],
+                name=row['name'],
+                is_supplier=bool(row['is_supplier']),
+                is_customer=bool(row['is_customer'])
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+@app.get("/api/operators", response_model=List[OperatorListItem])
+async def get_operators_for_filter():
+    """获取操作员列表（用于筛选下拉）- 返回所有有操作权限的用户"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # 获取所有有操作权限的用户（operate或admin角色）
+        cursor.execute('''
+            SELECT id as user_id, username, display_name
+            FROM users
+            WHERE is_disabled = 0 AND role IN ('operate', 'admin')
+            ORDER BY display_name, username
+        ''')
+        return [
+            OperatorListItem(
+                user_id=row['user_id'],
+                username=row['username'],
+                display_name=row['display_name']
+            )
+            for row in cursor.fetchall()
+        ]
+
+
+@app.get("/api/contacts/{contact_id}", response_model=ContactItem)
+async def get_contact(contact_id: int):
+    """获取单个联系方详情"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, name, address, phone, email, is_supplier, is_customer,
+                   notes, is_disabled, created_at
+            FROM contacts WHERE id = ?
+        ''', (contact_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="联系方不存在")
+
+        return ContactItem(
+            id=row['id'],
+            name=row['name'],
+            address=row['address'],
+            phone=row['phone'],
+            email=row['email'],
+            is_supplier=bool(row['is_supplier']),
+            is_customer=bool(row['is_customer']),
+            notes=row['notes'],
+            is_disabled=bool(row['is_disabled']),
+            created_at=row['created_at']
+        )
+
+
+@app.post("/api/contacts", response_model=ContactItem)
+async def create_contact(
+    request: CreateContactRequest,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """创建联系方（需要operate权限）"""
+    if not request.is_supplier and not request.is_customer:
+        raise HTTPException(status_code=400, detail="必须选择供应商或客户至少一项")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        cursor.execute('''
+            INSERT INTO contacts (name, address, phone, email, is_supplier, is_customer, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            request.name,
+            request.address,
+            request.phone,
+            request.email,
+            1 if request.is_supplier else 0,
+            1 if request.is_customer else 0,
+            request.notes,
+            created_at
+        ))
+
+        contact_id = cursor.lastrowid
+        conn.commit()
+
+        return ContactItem(
+            id=contact_id,
+            name=request.name,
+            address=request.address,
+            phone=request.phone,
+            email=request.email,
+            is_supplier=request.is_supplier,
+            is_customer=request.is_customer,
+            notes=request.notes,
+            is_disabled=False,
+            created_at=created_at
+        )
+
+
+@app.put("/api/contacts/{contact_id}", response_model=ContactItem)
+async def update_contact(
+    contact_id: int,
+    request: UpdateContactRequest,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """更新联系方（需要operate权限）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM contacts WHERE id = ?', (contact_id,))
+        contact = cursor.fetchone()
+        if not contact:
+            raise HTTPException(status_code=404, detail="联系方不存在")
+
+        updates = []
+        params = []
+
+        if request.name is not None:
+            updates.append('name = ?')
+            params.append(request.name)
+        if request.address is not None:
+            updates.append('address = ?')
+            params.append(request.address)
+        if request.phone is not None:
+            updates.append('phone = ?')
+            params.append(request.phone)
+        if request.email is not None:
+            updates.append('email = ?')
+            params.append(request.email)
+        if request.is_supplier is not None:
+            updates.append('is_supplier = ?')
+            params.append(1 if request.is_supplier else 0)
+        if request.is_customer is not None:
+            updates.append('is_customer = ?')
+            params.append(1 if request.is_customer else 0)
+        if request.notes is not None:
+            updates.append('notes = ?')
+            params.append(request.notes)
+        if request.is_disabled is not None:
+            updates.append('is_disabled = ?')
+            params.append(1 if request.is_disabled else 0)
+
+        if updates:
+            params.append(contact_id)
+            cursor.execute(f'''
+                UPDATE contacts SET {', '.join(updates)} WHERE id = ?
+            ''', params)
+            conn.commit()
+
+        cursor.execute('''
+            SELECT id, name, address, phone, email, is_supplier, is_customer,
+                   notes, is_disabled, created_at
+            FROM contacts WHERE id = ?
+        ''', (contact_id,))
+        updated = cursor.fetchone()
+
+        return ContactItem(
+            id=updated['id'],
+            name=updated['name'],
+            address=updated['address'],
+            phone=updated['phone'],
+            email=updated['email'],
+            is_supplier=bool(updated['is_supplier']),
+            is_customer=bool(updated['is_customer']),
+            notes=updated['notes'],
+            is_disabled=bool(updated['is_disabled']),
+            created_at=updated['created_at']
+        )
+
+
+@app.delete("/api/contacts/{contact_id}")
+async def delete_contact(
+    contact_id: int,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """禁用联系方（需要operate权限）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM contacts WHERE id = ?', (contact_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="联系方不存在")
+
+        cursor.execute('UPDATE contacts SET is_disabled = 1 WHERE id = ?', (contact_id,))
+        conn.commit()
+
+        return {"success": True, "message": "联系方已禁用"}
 
 
 # ============ Dashboard APIs ============
@@ -668,7 +1506,10 @@ def get_inventory_records_paginated(
     product_name: Optional[str] = Query(None, description="产品名称/SKU模糊搜索"),
     category: Optional[str] = Query(None, description="商品类型/分类"),
     record_type: Optional[str] = Query(None, description="记录类型: in/out"),
-    status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)")
+    status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)"),
+    contact_id: Optional[int] = Query(None, description="联系方ID筛选"),
+    operator_user_id: Optional[int] = Query(None, description="操作员用户ID筛选"),
+    reason: Optional[str] = Query(None, description="原因关键词搜索")
 ):
     """获取所有进出库记录（分页+筛选）"""
     with get_db() as conn:
@@ -677,13 +1518,19 @@ def get_inventory_records_paginated(
         # 解析状态筛选
         status_filter = status.split(',') if status else None
 
-        # 构建查询
+        # 构建查询（含联系方、批次和操作员信息）
         base_query = '''
             SELECT r.id, m.name as material_name, m.sku as material_sku, m.category,
-                   r.type, r.quantity, r.operator, r.reason, r.created_at,
-                   m.quantity as current_quantity, m.safe_stock, m.is_disabled
+                   r.type, r.quantity, r.operator, r.operator_user_id, r.reason, r.created_at,
+                   m.quantity as current_quantity, m.safe_stock, m.is_disabled,
+                   r.contact_id, c.name as contact_name,
+                   r.batch_id, b.batch_no,
+                   u.display_name as operator_display_name, u.username as operator_username
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
+            LEFT JOIN contacts c ON r.contact_id = c.id
+            LEFT JOIN batches b ON r.batch_id = b.id
+            LEFT JOIN users u ON r.operator_user_id = u.id
             WHERE 1=1
         '''
         count_query = '''
@@ -722,6 +1569,24 @@ def get_inventory_records_paginated(
             count_query += ' AND r.type = ?'
             params.append(record_type)
 
+        # 联系方筛选
+        if contact_id:
+            base_query += ' AND r.contact_id = ?'
+            count_query += ' AND r.contact_id = ?'
+            params.append(contact_id)
+
+        # 操作员筛选
+        if operator_user_id:
+            base_query += ' AND r.operator_user_id = ?'
+            count_query += ' AND r.operator_user_id = ?'
+            params.append(operator_user_id)
+
+        # 原因关键词搜索
+        if reason:
+            base_query += ' AND r.reason LIKE ?'
+            count_query += ' AND r.reason LIKE ?'
+            params.append(f'%{reason}%')
+
         # 获取总数
         cursor.execute(count_query, params)
         total = cursor.fetchone()['total']
@@ -755,18 +1620,47 @@ def get_inventory_records_paginated(
             if status_filter and material_status not in status_filter:
                 continue
 
+            # 获取批次详情
+            batch_details = None
+            record_id = row['id']
+            record_type = row['type']
+
+            if record_type == 'out':
+                # 出库记录：查询批次消耗详情
+                cursor.execute('''
+                    SELECT b.batch_no, bc.quantity
+                    FROM batch_consumptions bc
+                    JOIN batches b ON bc.batch_id = b.id
+                    WHERE bc.record_id = ?
+                    ORDER BY b.created_at ASC
+                ''', (record_id,))
+                consumptions = cursor.fetchall()
+                if consumptions:
+                    details = [f"{c['batch_no']}×{c['quantity']}" for c in consumptions]
+                    batch_details = ', '.join(details)
+
+            # 操作员名称：优先使用用户表中的显示名称，否则使用旧的operator字段
+            operator_name = row['operator_display_name'] or row['operator_username'] or row['operator']
+
             result.append(InventoryRecordItem(
-                id=row['id'],
+                id=record_id,
                 material_name=row['material_name'],
                 material_sku=row['material_sku'],
                 category=row['category'],
-                type=row['type'],
+                type=record_type,
                 quantity=row['quantity'],
                 operator=row['operator'],
+                operator_user_id=row['operator_user_id'],
+                operator_name=operator_name,
                 reason=row['reason'],
                 created_at=row['created_at'],
                 material_status=material_status,
-                is_disabled=is_disabled
+                is_disabled=is_disabled,
+                contact_id=row['contact_id'],
+                contact_name=row['contact_name'],
+                batch_id=row['batch_id'],
+                batch_no=row['batch_no'],
+                batch_details=batch_details
             ))
             filtered_count += 1
 
@@ -824,16 +1718,22 @@ def get_inventory_records_paginated(
 
 # ============ Stock Operation APIs (for MCP) ============
 
-@app.post("/api/materials/stock-in", response_model=StockOperationResponse)
-def stock_in(request: StockOperationRequest):
-    """入库操作"""
+@app.post("/api/materials/stock-in", response_model=StockInResponse)
+async def stock_in(
+    request: StockOperationRequest,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """入库操作（需要operate权限）- 自动创建批次"""
     product_name = request.product_name
     quantity = request.quantity
     reason = request.reason or "采购入库"
-    operator = request.operator or "MCP系统"
+    # 优先使用请求中的operator，否则使用当前用户名
+    operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
+    # 获取操作员用户ID（用于关联用户表）
+    operator_user_id = current_user.id
 
     if quantity <= 0:
-        return StockOperationResponse(
+        return StockInResponse(
             success=False,
             error="入库数量必须大于0",
             message=f"入库失败：数量 {quantity} 无效"
@@ -847,7 +1747,7 @@ def stock_in(request: StockOperationRequest):
         row = cursor.fetchone()
 
         if not row:
-            return StockOperationResponse(
+            return StockInResponse(
                 success=False,
                 error=f"产品不存在: {product_name}",
                 message=f"入库失败：未找到产品 '{product_name}'"
@@ -863,7 +1763,7 @@ def stock_in(request: StockOperationRequest):
             WHERE id = ?
         ''', (quantity, material_id))
         if cursor.rowcount == 0:
-            return StockOperationResponse(
+            return StockInResponse(
                 success=False,
                 error="入库失败",
                 message="入库操作未生效，请重试"
@@ -874,15 +1774,23 @@ def stock_in(request: StockOperationRequest):
         new_quantity = cursor.fetchone()['quantity']
         old_quantity = new_quantity - quantity
 
-        # 记录入库
+        # 生成批次号并创建批次记录
+        batch_no = generate_batch_no(material_id)
         cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-            VALUES (?, 'in', ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (batch_no, material_id, quantity, quantity, request.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        batch_id = cursor.lastrowid
+
+        # 记录入库（含联系方、批次和操作员用户ID）
+        cursor.execute('''
+            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, batch_id, created_at)
+            VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, quantity, operator, operator_user_id, reason, request.contact_id, batch_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
         conn.commit()
 
-        return StockOperationResponse(
+        return StockInResponse(
             success=True,
             operation="stock_in",
             product=StockOperationProduct(
@@ -892,20 +1800,31 @@ def stock_in(request: StockOperationRequest):
                 new_quantity=new_quantity,
                 unit=unit
             ),
-            message=f"入库成功：{product_name} 入库 {quantity} {unit}，库存从 {old_quantity} 更新到 {new_quantity} {unit}"
+            batch=BatchInfo(
+                batch_no=batch_no,
+                batch_id=batch_id,
+                quantity=quantity
+            ),
+            message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}"
         )
 
 
-@app.post("/api/materials/stock-out", response_model=StockOperationResponse)
-def stock_out(request: StockOperationRequest):
-    """出库操作"""
+@app.post("/api/materials/stock-out", response_model=StockOutResponse)
+async def stock_out(
+    request: StockOperationRequest,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """出库操作（需要operate权限）- FIFO批次消耗"""
     product_name = request.product_name
     quantity = request.quantity
     reason = request.reason or "销售出库"
-    operator = request.operator or "MCP系统"
+    # 优先使用请求中的operator，否则使用当前用户名
+    operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
+    # 获取操作员用户ID（用于关联用户表）
+    operator_user_id = current_user.id
 
     if quantity <= 0:
-        return StockOperationResponse(
+        return StockOutResponse(
             success=False,
             error="出库数量必须大于0",
             message=f"出库失败：数量 {quantity} 无效"
@@ -919,7 +1838,7 @@ def stock_out(request: StockOperationRequest):
         row = cursor.fetchone()
 
         if not row:
-            return StockOperationResponse(
+            return StockOutResponse(
                 success=False,
                 error=f"产品不存在: {product_name}",
                 message=f"出库失败：未找到产品 '{product_name}'"
@@ -941,7 +1860,7 @@ def stock_out(request: StockOperationRequest):
             cursor.execute('SELECT quantity FROM materials WHERE id = ?', (material_id,))
             current_qty_row = cursor.fetchone()
             current_qty = current_qty_row['quantity'] if current_qty_row else 0
-            return StockOperationResponse(
+            return StockOutResponse(
                 success=False,
                 error="库存不足",
                 message=f"出库失败：{product_name} 库存不足，当前库存 {current_qty} {unit}，需要出库 {quantity} {unit}"
@@ -951,11 +1870,56 @@ def stock_out(request: StockOperationRequest):
         new_quantity = cursor.fetchone()['quantity']
         old_quantity = new_quantity + quantity
 
-        # 记录出库
+        # 记录出库（含联系方和操作员用户ID，batch_id留空因为出库可能涉及多批次）
         cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-            VALUES (?, 'out', ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, created_at)
+            VALUES (?, 'out', ?, ?, ?, ?, ?, ?)
+        ''', (material_id, quantity, operator, operator_user_id, reason, request.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        record_id = cursor.lastrowid
+
+        # FIFO批次消耗
+        batch_consumptions = []
+        remaining_to_consume = quantity
+
+        # 获取未耗尽的批次，按创建时间升序（FIFO）
+        cursor.execute('''
+            SELECT id, batch_no, quantity FROM batches
+            WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0
+            ORDER BY created_at ASC
+        ''', (material_id,))
+        available_batches = cursor.fetchall()
+
+        for batch in available_batches:
+            if remaining_to_consume <= 0:
+                break
+
+            batch_id = batch['id']
+            batch_no = batch['batch_no']
+            batch_qty = batch['quantity']
+
+            # 计算从该批次消耗的数量
+            consume_qty = min(batch_qty, remaining_to_consume)
+            new_batch_qty = batch_qty - consume_qty
+            remaining_to_consume -= consume_qty
+
+            # 更新批次剩余数量
+            is_exhausted = 1 if new_batch_qty == 0 else 0
+            cursor.execute('''
+                UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?
+            ''', (new_batch_qty, is_exhausted, batch_id))
+
+            # 记录批次消耗
+            cursor.execute('''
+                INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (record_id, batch_id, consume_qty, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+
+            batch_consumptions.append(BatchConsumption(
+                batch_no=batch_no,
+                batch_id=batch_id,
+                quantity=consume_qty,
+                remaining=new_batch_qty
+            ))
 
         conn.commit()
 
@@ -967,7 +1931,13 @@ def stock_out(request: StockOperationRequest):
             else:
                 warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
 
-        return StockOperationResponse(
+        # 构建批次消耗信息
+        batch_details = ""
+        if batch_consumptions:
+            details = [f"{bc.batch_no}×{bc.quantity}" for bc in batch_consumptions]
+            batch_details = f"（消耗批次: {', '.join(details)}）"
+
+        return StockOutResponse(
             success=True,
             operation="stock_out",
             product=StockOperationProduct(
@@ -978,7 +1948,8 @@ def stock_out(request: StockOperationRequest):
                 unit=unit,
                 safe_stock=safe_stock
             ),
-            message=f"出库成功：{product_name} 出库 {quantity} {unit}，库存从 {old_quantity} 更新到 {new_quantity} {unit}",
+            batch_consumptions=batch_consumptions if batch_consumptions else None,
+            message=f"出库成功：{product_name} 出库 {quantity} {unit}{batch_details}，库存从 {old_quantity} 更新到 {new_quantity} {unit}",
             warning=warning if warning else None
         )
 
@@ -1223,13 +2194,18 @@ async def preview_import_excel(file: UploadFile = File(...)):
 
 
 @app.post("/api/materials/import-excel/confirm", response_model=ExcelImportResponse)
-def confirm_import_excel(request: ExcelImportConfirm):
-    """确认导入，执行变更单"""
+async def confirm_import_excel(
+    request: ExcelImportConfirm,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """确认导入，执行变更单（需要operate权限）"""
     in_count = 0
     out_count = 0
     new_count = 0
     records_created = 0
     warnings = []
+    operator_user_id = current_user.id
+    operator = request.operator if request.operator else current_user.get_operator_name()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1286,13 +2262,14 @@ def confirm_import_excel(request: ExcelImportConfirm):
                     record_type = 'in' if item.import_quantity > 0 else 'out'
                     cursor.execute('''
                         INSERT INTO inventory_records
-                        (material_id, type, quantity, operator, reason, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        (material_id, type, quantity, operator, operator_user_id, reason, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         material_id,
                         record_type,
                         abs(item.import_quantity),
-                        request.operator,
+                        operator,
+                        operator_user_id,
                         f"Excel导入: {request.reason} (新建物料)",
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     ))
@@ -1347,12 +2324,13 @@ def confirm_import_excel(request: ExcelImportConfirm):
                                  (new_qty, material_id))
                     cursor.execute('''
                         INSERT INTO inventory_records
-                        (material_id, type, quantity, operator, reason, created_at)
-                        VALUES (?, 'in', ?, ?, ?, ?)
+                        (material_id, type, quantity, operator, operator_user_id, reason, created_at)
+                        VALUES (?, 'in', ?, ?, ?, ?, ?)
                     ''', (
                         material_id,
                         abs_diff,
-                        request.operator,
+                        operator,
+                        operator_user_id,
                         f"Excel导入: {request.reason}",
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     ))
@@ -1376,12 +2354,13 @@ def confirm_import_excel(request: ExcelImportConfirm):
                                  (new_qty, material_id))
                     cursor.execute('''
                         INSERT INTO inventory_records
-                        (material_id, type, quantity, operator, reason, created_at)
-                        VALUES (?, 'out', ?, ?, ?, ?)
+                        (material_id, type, quantity, operator, operator_user_id, reason, created_at)
+                        VALUES (?, 'out', ?, ?, ?, ?, ?)
                     ''', (
                         material_id,
                         abs_diff,
-                        request.operator,
+                        operator,
+                        operator_user_id,
                         f"Excel导入: {request.reason}",
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     ))
@@ -1408,14 +2387,19 @@ def export_inventory_records(
     product_name: Optional[str] = Query(None, description="产品名称"),
     record_type: Optional[str] = Query(None, description="记录类型(in/out)")
 ):
-    """导出出入库记录为Excel（支持筛选）"""
+    """导出出入库记录为Excel（支持筛选，含批次信息）"""
     with get_db() as conn:
         cursor = conn.cursor()
 
         query = '''
-            SELECT m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.reason, r.created_at
+            SELECT r.id, m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.operator_user_id, r.reason, r.created_at,
+                   c.name as contact_name, r.batch_id, b.batch_no,
+                   u.display_name as operator_display_name, u.username as operator_username
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
+            LEFT JOIN contacts c ON r.contact_id = c.id
+            LEFT JOIN batches b ON r.batch_id = b.id
+            LEFT JOIN users u ON r.operator_user_id = u.id
             WHERE 1=1
         '''
         params = []
@@ -1437,26 +2421,54 @@ def export_inventory_records(
         cursor.execute(query, params)
         records = cursor.fetchall()
 
+        # 为出库记录获取批次消耗详情
+        batch_details_map = {}
+        for record in records:
+            if record['type'] == 'out':
+                record_id = record['id']
+                cursor.execute('''
+                    SELECT b.batch_no, bc.quantity
+                    FROM batch_consumptions bc
+                    JOIN batches b ON bc.batch_id = b.id
+                    WHERE bc.record_id = ?
+                    ORDER BY b.created_at ASC
+                ''', (record_id,))
+                consumptions = cursor.fetchall()
+                if consumptions:
+                    details = [f"{c['batch_no']}×{c['quantity']}" for c in consumptions]
+                    batch_details_map[record_id] = ', '.join(details)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "出入库记录"
 
-    headers = ['物料名称', '物料编码', '商品类型', '记录类型', '数量', '操作人', '原因', '时间']
+    headers = ['物料名称', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '操作人', '原因', '时间']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
     for row_idx, record in enumerate(records, 2):
+        # 批次信息：入库显示批次号，出库显示消耗详情
+        batch_info = ''
+        if record['type'] == 'in' and record['batch_no']:
+            batch_info = record['batch_no']
+        elif record['type'] == 'out':
+            batch_info = batch_details_map.get(record['id'], '')
+
         ws.cell(row=row_idx, column=1, value=record['name'])
         ws.cell(row=row_idx, column=2, value=record['sku'])
         ws.cell(row=row_idx, column=3, value=record['category'])
         ws.cell(row=row_idx, column=4, value='入库' if record['type'] == 'in' else '出库')
         ws.cell(row=row_idx, column=5, value=record['quantity'])
-        ws.cell(row=row_idx, column=6, value=record['operator'])
-        ws.cell(row=row_idx, column=7, value=record['reason'])
-        ws.cell(row=row_idx, column=8, value=record['created_at'])
+        ws.cell(row=row_idx, column=6, value=batch_info)
+        ws.cell(row=row_idx, column=7, value=record['contact_name'] or '')
+        # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段
+        operator_name = record['operator_display_name'] or record['operator_username'] or record['operator']
+        ws.cell(row=row_idx, column=8, value=operator_name)
+        ws.cell(row=row_idx, column=9, value=record['reason'])
+        ws.cell(row=row_idx, column=10, value=record['created_at'])
 
     # 设置列宽
-    column_widths = [22, 18, 14, 12, 10, 14, 24, 22]
+    column_widths = [22, 18, 14, 12, 10, 28, 16, 14, 24, 22]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -1472,23 +2484,37 @@ def export_inventory_records(
     )
 
 
-@app.post("/api/inventory/add-record", response_model=StockOperationResponse)
-def add_inventory_record(request: ManualRecordRequest):
-    """手动新增出入库记录"""
+@app.post("/api/inventory/add-record")
+async def add_inventory_record(
+    request: ManualRecordRequest,
+    current_user: CurrentUser = Depends(require_auth('operate'))
+):
+    """手动新增出入库记录（需要operate权限）- 返回StockInResponse或StockOutResponse"""
+    # 使用请求中的operator，如果为空则使用当前用户名
+    operator = request.operator if request.operator else current_user.get_operator_name()
+
     if request.type == 'in':
-        return stock_in(StockOperationRequest(
-            product_name=request.product_name,
-            quantity=request.quantity,
-            reason=request.reason,
-            operator=request.operator
-        ))
+        return await stock_in(
+            StockOperationRequest(
+                product_name=request.product_name,
+                quantity=request.quantity,
+                reason=request.reason,
+                operator=operator,
+                contact_id=request.contact_id
+            ),
+            current_user
+        )
     elif request.type == 'out':
-        return stock_out(StockOperationRequest(
-            product_name=request.product_name,
-            quantity=request.quantity,
-            reason=request.reason,
-            operator=request.operator
-        ))
+        return await stock_out(
+            StockOperationRequest(
+                product_name=request.product_name,
+                quantity=request.quantity,
+                reason=request.reason,
+                operator=operator,
+                contact_id=request.contact_id
+            ),
+            current_user
+        )
     else:
         return StockOperationResponse(
             success=False,

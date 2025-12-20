@@ -109,6 +109,7 @@ class StockOperationRequest(BaseModel):
     quantity: int
     reason: Optional[str] = None
     operator: Optional[str] = "MCP系统"
+    contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
 
 
 class StockOperationProduct(BaseModel):
@@ -163,7 +164,7 @@ class ExcelImportPreviewResponse(BaseModel):
 class ExcelImportConfirm(BaseModel):
     """Excel导入确认请求"""
     changes: List[ImportPreviewItem]
-    operator: str
+    operator: Optional[str] = None  # 可选，如不提供则使用当前登录用户
     reason: str
     confirm_new_skus: bool = False  # 是否确认创建新SKU
     confirm_disable_missing_skus: bool = False  # 是否确认禁用导入文件以外的SKU
@@ -184,8 +185,9 @@ class ManualRecordRequest(BaseModel):
     product_name: str
     type: str  # 'in' | 'out'
     quantity: int
-    operator: str
+    operator: Optional[str] = None  # 可选，如不提供则使用当前登录用户
     reason: str
+    contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
 
 
 # ============ Pagination Models ============
@@ -230,11 +232,18 @@ class InventoryRecordItem(BaseModel):
     category: str
     type: str  # 'in' | 'out'
     quantity: int
-    operator: str
+    operator: str  # 保留用于向后兼容（旧记录）
+    operator_user_id: Optional[int] = None  # 关联用户ID
+    operator_name: Optional[str] = None  # 从用户表获取的当前显示名称
     reason: Optional[str]
     created_at: str
     material_status: str  # 物料当前状态
     is_disabled: bool = False
+    contact_id: Optional[int] = None
+    contact_name: Optional[str] = None
+    batch_id: Optional[int] = None
+    batch_no: Optional[str] = None
+    batch_details: Optional[str] = None  # 出库时的批次消耗详情
 
 
 class PaginatedProductRecordsResponse(BaseModel):
@@ -244,3 +253,216 @@ class PaginatedProductRecordsResponse(BaseModel):
     page_size: int
     total: int
     total_pages: int
+
+
+# ============ Auth Models ============
+
+class AuthStatusResponse(BaseModel):
+    """认证状态响应"""
+    initialized: bool  # 系统是否已初始化（有管理员）
+    logged_in: bool
+    user: Optional['UserInfo'] = None
+
+
+class UserInfo(BaseModel):
+    """用户信息"""
+    id: int
+    username: str
+    display_name: Optional[str]
+    role: str  # 'admin' | 'operate' | 'view'
+
+
+class SetupRequest(BaseModel):
+    """首次设置请求"""
+    username: str
+    password: str
+    display_name: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    """登录请求"""
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    """登录响应"""
+    success: bool
+    message: str
+    user: Optional[UserInfo] = None
+
+
+class CreateUserRequest(BaseModel):
+    """创建用户请求"""
+    username: str
+    password: str
+    display_name: Optional[str] = None
+    role: str = 'view'  # 'admin' | 'operate' | 'view'
+
+
+class UpdateUserRequest(BaseModel):
+    """更新用户请求"""
+    username: Optional[str] = None
+    display_name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    is_disabled: Optional[bool] = None
+
+
+class UserListItem(BaseModel):
+    """用户列表项"""
+    id: int
+    username: str
+    display_name: Optional[str]
+    role: str
+    is_disabled: bool
+    created_at: str
+
+
+# ============ API Key Models ============
+
+class CreateApiKeyRequest(BaseModel):
+    """创建API密钥请求"""
+    name: str
+    role: str = 'operate'  # 'admin' | 'operate' | 'view'
+
+
+class ApiKeyResponse(BaseModel):
+    """API密钥响应（只在创建时返回完整密钥）"""
+    id: int
+    name: str
+    role: str
+    key: Optional[str] = None  # 只在创建时返回
+    created_at: str
+    last_used_at: Optional[str] = None
+
+
+class ApiKeyListItem(BaseModel):
+    """API密钥列表项"""
+    id: int
+    name: str
+    role: str
+    is_disabled: bool
+    created_at: str
+    last_used_at: Optional[str] = None
+
+
+# ============ Contact Models ============
+
+class ContactBase(BaseModel):
+    """联系方基础信息"""
+    name: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    is_supplier: bool = False
+    is_customer: bool = False
+    notes: Optional[str] = None
+
+
+class CreateContactRequest(ContactBase):
+    """创建联系方请求"""
+    pass
+
+
+class UpdateContactRequest(BaseModel):
+    """更新联系方请求"""
+    name: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    is_supplier: Optional[bool] = None
+    is_customer: Optional[bool] = None
+    notes: Optional[str] = None
+    is_disabled: Optional[bool] = None
+
+
+class ContactItem(BaseModel):
+    """联系方项"""
+    id: int
+    name: str
+    address: Optional[str]
+    phone: Optional[str]
+    email: Optional[str]
+    is_supplier: bool
+    is_customer: bool
+    notes: Optional[str]
+    is_disabled: bool
+    created_at: str
+
+
+class ContactListItem(BaseModel):
+    """联系方列表项（简化版，用于下拉选择）"""
+    id: int
+    name: str
+    is_supplier: bool
+    is_customer: bool
+
+
+class PaginatedContactsResponse(BaseModel):
+    """联系方分页响应"""
+    items: List[ContactItem]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+# ============ Batch Models ============
+
+class BatchInfo(BaseModel):
+    """批次信息（入库时返回）"""
+    batch_no: str
+    batch_id: int
+    quantity: int
+
+
+class BatchConsumption(BaseModel):
+    """批次消耗详情（出库时返回）"""
+    batch_no: str
+    batch_id: int
+    quantity: int  # 从该批次消耗的数量
+    remaining: int  # 该批次剩余数量
+
+
+class StockInResponse(BaseModel):
+    """入库响应（含批次信息）"""
+    success: bool
+    operation: Optional[str] = None
+    product: Optional[StockOperationProduct] = None
+    batch: Optional[BatchInfo] = None
+    message: str
+    warning: Optional[str] = None
+    error: Optional[str] = None
+
+
+class StockOutResponse(BaseModel):
+    """出库响应（含批次消耗详情）"""
+    success: bool
+    operation: Optional[str] = None
+    product: Optional[StockOperationProduct] = None
+    batch_consumptions: Optional[List[BatchConsumption]] = None
+    message: str
+    warning: Optional[str] = None
+    error: Optional[str] = None
+
+
+class BatchItem(BaseModel):
+    """批次列表项"""
+    id: int
+    batch_no: str
+    material_id: int
+    material_name: str
+    quantity: int
+    initial_quantity: int
+    contact_id: Optional[int] = None
+    contact_name: Optional[str] = None
+    is_exhausted: bool
+    created_at: str
+
+
+class OperatorListItem(BaseModel):
+    """操作员列表项（用于筛选下拉）"""
+    user_id: int
+    username: str
+    display_name: Optional[str]

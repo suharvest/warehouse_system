@@ -180,7 +180,38 @@ List stock information for all watcher-xiaozhi related products.
 
 ## Configuration
 
-### 1. Configure in Claude Desktop
+### 1. Configure MCP Service
+
+Copy the configuration template and fill in your settings:
+
+```bash
+cd mcp
+cp config.yml.example config.yml
+```
+
+Edit `config.yml`:
+
+```yaml
+# Backend API URL
+api_base_url: "http://localhost:2124/api"
+
+# API Key (create in backend admin panel)
+api_key: "your-api-key-here"
+```
+
+**How to get API Key:**
+1. Login to frontend (http://localhost:2125) as admin
+2. Go to "User Management" TAB
+3. Click "Create Key" in API Key Management section
+4. Copy the generated key to `config.yml`
+
+**Environment Variables (optional, higher priority):**
+```bash
+export WAREHOUSE_API_URL="http://localhost:2124/api"
+export WAREHOUSE_API_KEY="your-api-key"
+```
+
+### 2. Configure in Claude Desktop
 
 Edit the Claude Desktop configuration file and add the following:
 

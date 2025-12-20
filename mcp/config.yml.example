@@ -1,0 +1,9 @@
+# MCP 服务配置文件
+# 复制此文件为 config.yml 并填入实际配置
+
+# 后端 API 地址
+api_base_url: "http://localhost:2124/api"
+
+# API 密钥（用于身份验证）
+# 在后端管理界面创建密钥后填入此处
+api_key: "your-api-key-here"

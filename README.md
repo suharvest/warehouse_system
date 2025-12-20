@@ -13,6 +13,9 @@
 - ⚠️ **预警列表**：低于安全库存的物料提醒
 - 🌐 **多语言支持**：支持中英文切换
 - 📱 **响应式设计**：适配不同屏幕尺寸
+- 🔐 **用户权限管理**：支持 view/operate/admin 三级权限控制
+- 👥 **联系方管理**：供应商/客户信息管理，关联出入库记录
+- 📦 **批次管理**：自动批次号生成，FIFO先进先出出库算法
 
 ## 演示视频
 
@@ -137,30 +140,36 @@ warehouse_system/
 │   └── warehouse.db     # SQLite 数据库文件（运行后生成）
 ├── frontend/            # 前端代码
 │   ├── index.html       # 主页面
-│   ├── product_detail.html  # 产品详情页
 │   ├── style.css        # 样式文件
 │   ├── app.js           # 主页 JavaScript 逻辑
-│   ├── product_detail.js    # 详情页 JavaScript 逻辑
 │   ├── i18n.js          # 国际化配置
 │   ├── server.py        # 静态文件服务器
 │   └── Dockerfile       # 前端 Docker 镜像配置
 ├── mcp/                 # MCP 服务
 │   ├── warehouse_mcp.py # MCP 服务器
-│   ├── mcp_config.json  # MCP 配置
-│   ├── mcp_pipe.py      # MCP 管道
-│   ├── start_mcp.sh     # MCP 启动脚本 (macOS/Linux)
-│   ├── start_mcp.ps1    # MCP 启动脚本 (Windows)
-│   └── MCP_README.md    # MCP 文档
+│   ├── config.yml       # MCP 配置（API地址、密钥）
+│   ├── config.yml.example # 配置模板
+│   ├── start_mcp.sh     # 启动脚本 (macOS/Linux)
+│   ├── start_mcp.ps1    # 启动脚本 (Windows)
+│   ├── MCP_README.md    # MCP 文档（中文）
+│   └── MCP_README_EN.md # MCP 文档（英文）
 ├── test/                # 测试文件
+│   ├── backend/         # 后端功能测试
+│   ├── data/            # 测试数据
 │   ├── test_mcp.py      # MCP 测试
 │   ├── test_api.py      # API 测试
 │   ├── run_all_tests.sh # 测试脚本
 │   └── README.md        # 测试文档
-├── data/                # 数据目录（Docker 挂载用）
+├── docs/                # 项目文档
+│   ├── CLAUDE_DESKTOP_CONFIG.md  # Claude Desktop 配置指南
+│   ├── TESTING_GUIDE.md          # 测试指南
+│   ├── Warehouse_System_Guide.md # 系统使用指南
+│   └── assets/                   # 文档图片
 ├── docker-compose.yml   # Docker Compose 配置
-├── .dockerignore        # Docker 构建忽略文件
 ├── start.sh             # 启动脚本 (macOS/Linux)
 ├── start.ps1            # 启动脚本 (Windows)
+├── CHANGELOG.md         # 更新记录（中文）
+├── CHANGELOG_EN.md      # 更新记录（英文）
 ├── README.md            # 项目说明（中文）
 └── README_EN.md         # 项目说明（英文）
 ```

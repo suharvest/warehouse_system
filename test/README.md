@@ -2,6 +2,21 @@
 
 本目录包含仓库管理系统的所有测试脚本。
 
+## 目录结构
+
+```
+test/
+├── backend/              # 后端功能测试（v2/v3新功能）
+│   ├── quick_test.py     # 快速验证脚本
+│   └── test_v2_features.py  # v2功能pytest测试
+├── data/                 # 测试数据文件
+├── test_mcp.py          # MCP 工具测试
+├── test_api.py          # API 接口测试
+├── test_mcp_statistics.py  # MCP 统计接口测试
+├── run_all_tests.sh     # 运行所有测试脚本
+└── README.md            # 本文档
+```
+
 ## 测试文件
 
 ### 1. test_mcp.py - MCP 工具测试

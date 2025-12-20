@@ -1,5 +1,120 @@
 # 更新记录
 
+## 2025-12-20 v3.0.0
+
+本次升级为仓库管理系统添加了三个核心功能模块：用户权限管理、联系方管理、批次管理。
+
+### 用户管理与权限控制
+
+**新增数据库表**
+- `users`: 用户账户（用户名、密码哈希、角色、显示名称）
+- `sessions`: 会话管理（令牌、过期时间）
+- `api_keys`: API密钥（用于MCP终端身份识别）
+
+**权限级别**
+| 角色 | 权限范围 |
+|------|----------|
+| `view` | 只读访问所有数据 |
+| `operate` | view + 入库/出库/导入/导出/管理联系方 |
+| `admin` | operate + 用户管理/API密钥管理 |
+| 访客 | 等同view，无需登录 |
+
+**新增API**
+- 认证相关: `GET /api/auth/status`, `POST /api/auth/setup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+- 用户管理: `GET/POST/PUT/DELETE /api/users` (admin权限)
+- API密钥: `GET/POST/DELETE /api/api-keys` (admin权限)
+
+**前端变更**
+- 登录/注册模态框
+- 首次设置管理员流程
+- 用户管理TAB（仅admin可见）
+- API密钥管理界面
+- `data-min-role` 属性控制按钮可见性
+- 头部显示当前用户状态
+
+### 联系方管理
+
+**新增数据库表**
+- `contacts`: 联系方（供应商/客户）信息
+
+**功能特性**
+- 联系方TAB（第5个标签页）
+- 联系方CRUD模态框
+- 入库/出库时可选择联系方（入库→供应商，出库→客户）
+- 进出库记录表格显示联系方
+- Excel导出包含"联系方"列
+
+**新增API**
+- `GET /api/contacts`: 联系方列表（分页+筛选）
+- `GET /api/contacts/suppliers`: 供应商下拉列表
+- `GET /api/contacts/customers`: 客户下拉列表
+- `POST/PUT/DELETE /api/contacts`: 联系方CRUD (operate权限)
+
+### 批次管理
+
+**新增数据库表**
+- `batches`: 批次记录（批次号、剩余数量、初始数量、供应商）
+- `batch_consumptions`: 批次消耗记录（出库时FIFO消耗详情）
+
+**批次号格式**
+- 格式: `YYYYMMDD-XXX`（如 20251220-001）
+- 每日从001开始，每个物料独立计数
+
+**FIFO出库算法**
+1. 获取该物料未耗尽批次，按 `created_at` ASC 排序
+2. 从最早批次开始消耗，直到满足出库数量
+3. 更新批次剩余数量，记录消耗明细
+4. 若批次耗尽则标记 `is_exhausted = 1`
+
+**API响应变更**
+| API | 新增响应字段 |
+|-----|-------------|
+| `stock_in` | `batch: {batch_no, batch_id, quantity}` |
+| `stock_out` | `batch_consumptions: [{batch_no, batch_id, quantity, remaining}]` |
+| `inventory/records` | `batch_id, batch_no, batch_details` |
+
+**前端变更**
+- 进出库记录表格新增"批次"列
+- 入库记录显示批次号
+- 出库记录显示批次消耗详情（如 `20251220-001×30, 20251220-002×20`）
+- Excel导出包含批次信息
+
+### 数据库架构图
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
+│   users     │     │ inventory_records│     │  contacts   │
+├─────────────┤     ├──────────────────┤     ├─────────────┤
+│ id          │     │ id               │     │ id          │
+│ username    │     │ material_id      │     │ name        │
+│ password    │     │ type             │  ┌──│ is_supplier │
+│ role        │     │ quantity         │  │  │ is_customer │
+│ display_name│     │ operator         │  │  │ is_disabled │
+│ is_disabled │     │ reason           │  │  └─────────────┘
+│ created_at  │     │ contact_id    ───┘
+└─────────────┘     │ batch_id      ───┐
+                    │ created_at       │
+┌─────────────┐     └──────────────────┘
+│  sessions   │              │
+├─────────────┤              │
+│ id          │     ┌────────┴─────────┐
+│ user_id     │     ▼                  ▼
+│ token       │  ┌─────────┐    ┌──────────────────┐
+│ expires_at  │  │ batches │    │batch_consumptions│
+└─────────────┘  ├─────────┤    ├──────────────────┤
+                 │ id      │◄───│ batch_id         │
+┌─────────────┐  │ batch_no│    │ record_id        │
+│  api_keys   │  │material │    │ quantity         │
+├─────────────┤  │quantity │    │ created_at       │
+│ id          │  │initial  │    └──────────────────┘
+│ key_hash    │  │contact  │
+│ name        │  │exhausted│
+│ role        │  └─────────┘
+│ user_id     │
+│ is_disabled │
+└─────────────┘
+```
+
 ## 2025-12-09 v2.1.0
 
 ### UI/UX 优化

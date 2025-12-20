@@ -689,6 +689,18 @@ tbody tr:hover {
     color: #ff4d4f;
 }
 
+/* Batch details */
+.batch-details {
+    display: inline-block;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: #666;
+    cursor: help;
+}
+
 
 /* Pagination */
 .pagination {
@@ -819,7 +831,8 @@ tbody tr:hover {
 }
 
 .form-group input,
-.form-group select {
+.form-group select,
+.form-group textarea {
     width: 100%;
     padding: 8px 12px;
     /* More compact padding */
@@ -832,10 +845,17 @@ tbody tr:hover {
 }
 
 .form-group input:focus,
-.form-group select:focus {
+.form-group select:focus,
+.form-group textarea:focus {
     outline: none;
     border-color: var(--primary-color);
     box-shadow: 0 0 0 2px rgba(140, 198, 63, 0.1);
+}
+
+.form-group textarea {
+    min-height: 80px;
+    resize: vertical;
+    font-family: inherit;
 }
 
 /* Radio Group - Segmented Control Style */
@@ -1097,12 +1117,30 @@ tbody tr:hover {
     /* Align with text */
 }
 
+/* Checkbox Group - Styled like Radio Group */
+.checkbox-group {
+    display: flex;
+    gap: 12px;
+}
+
 .checkbox-label {
     display: flex;
     align-items: center;
     cursor: pointer;
     font-weight: 500;
-    color: var(--text-primary);
+    color: var(--text-secondary);
+    padding: 8px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    transition: all 0.2s;
+    background-color: #fff;
+    user-select: none;
+}
+
+.checkbox-label:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+    background-color: var(--bg-hover);
 }
 
 .checkbox-label input[type="checkbox"] {
@@ -1111,6 +1149,12 @@ tbody tr:hover {
     height: 16px;
     cursor: pointer;
     accent-color: var(--primary-color);
+}
+
+.checkbox-label:has(input:checked) {
+    background-color: var(--primary-light);
+    border-color: var(--primary-color);
+    color: var(--primary-color);
 }
 
 /* Warning box for dangerous options */
@@ -1124,4 +1168,186 @@ tbody tr:hover {
 
 .warning-box .checkbox-label {
     margin-bottom: 4px;
+}
+
+/* User Info Area */
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-right: 16px;
+    border-right: 1px solid var(--border-color);
+    margin-right: 8px;
+}
+
+.user-display {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.user-role-badge {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--primary-light);
+    color: var(--primary-hover);
+    font-weight: 500;
+}
+
+.user-role-badge.admin {
+    background: #fff1f0;
+    color: #cf1322;
+}
+
+.user-role-badge.operate {
+    background: #e6f7ff;
+    color: #1890ff;
+}
+
+.login-btn,
+.logout-btn {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.login-btn:hover {
+    background: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+.logout-btn:hover {
+    background: #ff4d4f;
+    color: white;
+    border-color: #ff4d4f;
+}
+
+/* Small Modal */
+.modal-content.modal-small {
+    max-width: 400px;
+}
+
+/* Form Error */
+.form-error {
+    color: #ff4d4f;
+    font-size: 13px;
+    padding: 8px 12px;
+    background: #fff2f0;
+    border: 1px solid #ffccc7;
+    border-radius: 6px;
+    margin-top: 12px;
+}
+
+/* Setup Hint */
+.setup-hint {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+/* API Key Display */
+.api-key-display {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
+    background: #f5f5f5;
+    border-radius: 8px;
+    margin-top: 12px;
+}
+
+.api-key-display code {
+    flex: 1;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    word-break: break-all;
+    color: var(--text-primary);
+}
+
+.copy-btn {
+    padding: 8px;
+    border: none;
+    background: var(--primary-color);
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+}
+
+.copy-btn:hover {
+    background: var(--primary-hover);
+}
+
+/* Warning Text */
+.warning-text {
+    color: #fa8c16;
+    font-size: 14px;
+}
+
+/* Role Select Styling */
+#new-user-role,
+#new-api-key-role {
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 14px;
+    width: 100%;
+}
+
+/* Action buttons in table */
+.action-btn-small {
+    padding: 6px 12px;
+    font-size: 13px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: #fff;
+    color: var(--text-primary);
+    cursor: pointer;
+    margin-right: 8px;
+    transition: all 0.2s;
+    font-weight: 500;
+}
+
+.action-btn-small:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+    background-color: var(--bg-hover);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.action-btn-small.danger {
+    color: #ff4d4f;
+    border-color: #ffccc7;
+    background: #fff1f0;
+}
+
+.action-btn-small.danger:hover {
+    color: #fff;
+    background: #ff4d4f;
+    border-color: #ff4d4f;
+}
+
+.action-btn-small.success {
+    color: #52c41a;
+    border-color: #b7eb8f;
+    background: #f6ffed;
+}
+
+.action-btn-small.success:hover {
+    color: #fff;
+    background: #52c41a;
+    border-color: #52c41a;
 }

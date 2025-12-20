@@ -14,8 +14,10 @@
 
 from fastmcp import FastMCP
 import sys
+import os
 import logging
 import requests
+import yaml
 
 # 配置日志
 logger = logging.getLogger('WarehouseMCP')
@@ -25,8 +27,35 @@ if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8')
     sys.stdout.reconfigure(encoding='utf-8')
 
-# 后端 API 地址
-API_BASE_URL = "http://localhost:2124/api"
+# 加载配置文件
+def load_config():
+    """从 config.yml 加载配置，支持环境变量覆盖"""
+    config_path = os.path.join(os.path.dirname(__file__), 'config.yml')
+    config = {
+        'api_base_url': 'http://localhost:2124/api',
+        'api_key': ''
+    }
+
+    # 尝试读取配置文件
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                file_config = yaml.safe_load(f) or {}
+                config.update(file_config)
+        except Exception as e:
+            logger.warning(f"读取配置文件失败: {e}，使用默认配置")
+
+    # 环境变量优先级更高
+    if os.environ.get("WAREHOUSE_API_URL"):
+        config['api_base_url'] = os.environ.get("WAREHOUSE_API_URL")
+    if os.environ.get("WAREHOUSE_API_KEY"):
+        config['api_key'] = os.environ.get("WAREHOUSE_API_KEY")
+
+    return config
+
+_config = load_config()
+API_BASE_URL = _config['api_base_url']
+API_KEY = _config['api_key']
 
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
@@ -35,7 +64,8 @@ mcp = FastMCP("Warehouse System")
 def api_get(endpoint: str, params: dict = None) -> dict:
     """发送 GET 请求到后端 API"""
     try:
-        response = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=10)
+        headers = {"X-API-Key": API_KEY} if API_KEY else {}
+        response = requests.get(f"{API_BASE_URL}{endpoint}", params=params, headers=headers, timeout=10)
         return response.json()
     except requests.exceptions.ConnectionError:
         return {
@@ -54,7 +84,8 @@ def api_get(endpoint: str, params: dict = None) -> dict:
 def api_post(endpoint: str, data: dict) -> dict:
     """发送 POST 请求到后端 API"""
     try:
-        response = requests.post(f"{API_BASE_URL}{endpoint}", json=data, timeout=10)
+        headers = {"X-API-Key": API_KEY} if API_KEY else {}
+        response = requests.post(f"{API_BASE_URL}{endpoint}", json=data, headers=headers, timeout=10)
         return response.json()
     except requests.exceptions.ConnectionError:
         return {
