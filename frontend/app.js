@@ -993,8 +993,8 @@ function changeDetailPageSize(size) {
 
 // ============ 导出功能 ============
 function exportInventory() {
-    const name = document.getElementById('filter-product').value.trim();
-    const category = document.getElementById('filter-category').value;
+    const name = document.getElementById('filter-inventory-name').value.trim();
+    const category = document.getElementById('filter-inventory-category').value;
 
     // 获取选中的状态
     const statusContainer = document.getElementById('filter-inventory-status-dropdown');

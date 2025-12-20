@@ -1074,6 +1074,11 @@ def export_materials_excel(
         ws.cell(row=row_idx, column=7, value=material['safe_stock'])
         ws.cell(row=row_idx, column=8, value=material['location'])
 
+    # 设置列宽
+    column_widths = [22, 18, 14, 10, 12, 8, 12, 14]
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = width
+
     output = BytesIO()
     wb.save(output)
     output.seek(0)
@@ -1441,6 +1446,11 @@ def export_inventory_records(
         ws.cell(row=row_idx, column=5, value=record['operator'])
         ws.cell(row=row_idx, column=6, value=record['reason'])
         ws.cell(row=row_idx, column=7, value=record['created_at'])
+
+    # 设置列宽
+    column_widths = [22, 18, 10, 10, 14, 24, 22]
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = width
 
     output = BytesIO()
     wb.save(output)
