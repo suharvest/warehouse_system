@@ -1211,6 +1211,7 @@ async function executeImport(confirmNewSkus) {
             alert(data.message);
             closeImportModal();
             loadAllProducts(); // 刷新产品列表
+            loadCategories();  // 刷新分类列表
             if (currentTab === 'inventory') loadInventory();
             if (currentTab === 'dashboard') loadDashboardData();
         } else {
