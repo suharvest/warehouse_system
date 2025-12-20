@@ -310,19 +310,25 @@ async function loadCategories() {
 }
 
 function populateCategorySelect() {
-    const select = document.getElementById('filter-inventory-category');
-    if (!select) return;
+    const selects = [
+        document.getElementById('filter-inventory-category'),
+        document.getElementById('filter-records-category')
+    ];
 
-    // 保留第一个选项
-    const firstOption = select.options[0];
-    select.innerHTML = '';
-    select.appendChild(firstOption);
+    selects.forEach(select => {
+        if (!select) return;
 
-    allCategories.forEach(cat => {
-        const option = document.createElement('option');
-        option.value = cat;
-        option.textContent = cat;
-        select.appendChild(option);
+        // 保留第一个选项
+        const firstOption = select.options[0];
+        select.innerHTML = '';
+        select.appendChild(firstOption);
+
+        allCategories.forEach(cat => {
+            const option = document.createElement('option');
+            option.value = cat;
+            option.textContent = cat;
+            select.appendChild(option);
+        });
     });
 }
 
@@ -670,6 +676,7 @@ async function loadRecords() {
     const startDate = document.getElementById('filter-start-date').value;
     const endDate = document.getElementById('filter-end-date').value;
     const productName = document.getElementById('filter-records-product').value.trim();
+    const category = document.getElementById('filter-records-category').value;
     const recordType = document.getElementById('filter-record-type').value;
     const selectedStatuses = getDropdownSelectedValues('filter-record-status-dropdown');
 
@@ -681,6 +688,7 @@ async function loadRecords() {
     if (startDate) params.set('start_date', startDate);
     if (endDate) params.set('end_date', endDate);
     if (productName) params.set('product_name', productName);
+    if (category) params.set('category', category);
     if (recordType) params.set('record_type', recordType);
     if (selectedStatuses.length > 0) {
         params.set('status', selectedStatuses.join(','));
@@ -702,7 +710,7 @@ function renderRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -731,6 +739,7 @@ function renderRecordsTable(items) {
             <td>${item.created_at}</td>
             <td>${item.material_name}</td>
             <td>${item.material_sku}</td>
+            <td>${item.category || '-'}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
             <td><strong>${item.quantity}</strong></td>
             <td>${item.operator}</td>
@@ -772,6 +781,7 @@ function resetRecordsFilter() {
     document.getElementById('filter-start-date').value = '';
     document.getElementById('filter-end-date').value = '';
     document.getElementById('filter-records-product').value = '';
+    document.getElementById('filter-records-category').value = '';
     document.getElementById('filter-record-type').value = '';
     // 重置状态多选：选中除禁用外的所有选项
     resetDropdownSelection('filter-record-status-dropdown');

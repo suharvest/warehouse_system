@@ -666,7 +666,8 @@ def get_inventory_records_paginated(
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
     product_name: Optional[str] = Query(None, description="产品名称/SKU模糊搜索"),
-    record_type: Optional[str] = Query(None, description="类型: in/out"),
+    category: Optional[str] = Query(None, description="商品类型/分类"),
+    record_type: Optional[str] = Query(None, description="记录类型: in/out"),
     status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)")
 ):
     """获取所有进出库记录（分页+筛选）"""
@@ -709,7 +710,13 @@ def get_inventory_records_paginated(
             count_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
             params.extend([f'%{product_name}%', f'%{product_name}%'])
 
-        # 类型筛选
+        # 商品类型/分类筛选
+        if category:
+            base_query += ' AND m.category = ?'
+            count_query += ' AND m.category = ?'
+            params.append(category)
+
+        # 记录类型筛选
         if record_type:
             base_query += ' AND r.type = ?'
             count_query += ' AND r.type = ?'
@@ -1406,7 +1413,7 @@ def export_inventory_records(
         cursor = conn.cursor()
 
         query = '''
-            SELECT m.name, m.sku, r.type, r.quantity, r.operator, r.reason, r.created_at
+            SELECT m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.reason, r.created_at
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
             WHERE 1=1
@@ -1434,21 +1441,22 @@ def export_inventory_records(
     ws = wb.active
     ws.title = "出入库记录"
 
-    headers = ['物料名称', '物料编码', '类型', '数量', '操作人', '原因', '时间']
+    headers = ['物料名称', '物料编码', '商品类型', '记录类型', '数量', '操作人', '原因', '时间']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
     for row_idx, record in enumerate(records, 2):
         ws.cell(row=row_idx, column=1, value=record['name'])
         ws.cell(row=row_idx, column=2, value=record['sku'])
-        ws.cell(row=row_idx, column=3, value='入库' if record['type'] == 'in' else '出库')
-        ws.cell(row=row_idx, column=4, value=record['quantity'])
-        ws.cell(row=row_idx, column=5, value=record['operator'])
-        ws.cell(row=row_idx, column=6, value=record['reason'])
-        ws.cell(row=row_idx, column=7, value=record['created_at'])
+        ws.cell(row=row_idx, column=3, value=record['category'])
+        ws.cell(row=row_idx, column=4, value='入库' if record['type'] == 'in' else '出库')
+        ws.cell(row=row_idx, column=5, value=record['quantity'])
+        ws.cell(row=row_idx, column=6, value=record['operator'])
+        ws.cell(row=row_idx, column=7, value=record['reason'])
+        ws.cell(row=row_idx, column=8, value=record['created_at'])
 
     # 设置列宽
-    column_widths = [22, 18, 10, 10, 14, 24, 22]
+    column_widths = [22, 18, 14, 12, 10, 14, 24, 22]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 

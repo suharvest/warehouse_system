@@ -243,6 +243,12 @@
                                 <input type="text" id="filter-records-product" data-i18n="filterProduct"
                                     placeholder="名称/编码">
                             </div>
+                            <div class="filter-group">
+                                <label data-i18n="productCategory">商品类型</label>
+                                <select id="filter-records-category">
+                                    <option value="" data-i18n="allCategories">全部分类</option>
+                                </select>
+                            </div>
                             <!-- 多选下拉框：状态 -->
                             <div class="filter-group">
                                 <label data-i18n="filterStatus">状态</label>
@@ -276,7 +282,7 @@
                             </div>
 
                             <div class="filter-group">
-                                <label data-i18n="filterType">类型</label>
+                                <label data-i18n="recordType">记录类型</label>
                                 <select id="filter-record-type">
                                     <option value="" data-i18n="allTypes">全部类型</option>
                                     <option value="in" data-i18n="inbound">入库</option>
@@ -322,7 +328,8 @@
                                         <th data-i18n="time">时间</th>
                                         <th data-i18n="materialName">物料名称</th>
                                         <th data-i18n="materialCode">物料编码</th>
-                                        <th data-i18n="type">类型</th>
+                                        <th data-i18n="productCategory">商品类型</th>
+                                        <th data-i18n="recordType">记录类型</th>
                                         <th data-i18n="quantity">数量</th>
                                         <th data-i18n="operator">操作人</th>
                                         <th data-i18n="reason">原因</th>

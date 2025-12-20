@@ -47,6 +47,8 @@ const translations = {
         // 表头 - 主页
         materialName: '物料名称',
         materialCode: '物料编码',
+        productCategory: '商品类型',
+        recordType: '记录类型',
         type: '类型',
         currentStockCol: '当前库存',
         unitCol: '单位',
@@ -184,6 +186,8 @@ const translations = {
 
         materialName: 'Material Name',
         materialCode: 'Material Code',
+        productCategory: 'Product Category',
+        recordType: 'Record Type',
         type: 'Type',
         currentStockCol: 'Current Stock',
         unitCol: 'Unit',
