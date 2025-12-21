@@ -40,6 +40,10 @@ let lastProductStats = null;
 // 所有产品列表（用于产品选择器和新增记录）
 let allProducts = [];
 
+// 可搜索下拉组件状态
+let productSelectorHighlightIndex = -1;
+let recordProductHighlightIndex = -1;
+
 // 联系方分页状态
 let contactsCurrentPage = 1;
 let contactsPageSize = 20;
@@ -118,8 +122,10 @@ function switchTab(tabId, filters = {}) {
             break;
         case 'detail':
             if (filters.product) {
-                document.getElementById('product-selector').value = filters.product;
-                onProductSelect(filters.product);
+                // 使用可搜索选择器的设置方法
+                setTimeout(() => {
+                    setProductSelectorValue(filters.product);
+                }, 100);
             }
             // 切换到详情页时，强制重绘图表
             setTimeout(() => {
@@ -380,51 +386,264 @@ async function loadAllProducts() {
 }
 
 function populateProductSelector() {
-    const selector = document.getElementById('product-selector');
-    const recordProduct = document.getElementById('record-product');
-
     if (!allProducts || !Array.isArray(allProducts)) {
         allProducts = [];
     }
 
-    if (selector) {
-        const firstOption = selector.options[0];
-        selector.innerHTML = '';
-        if (firstOption) {
-            selector.appendChild(firstOption);
-        } else {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = t('selectProductHint');
-            selector.appendChild(opt);
-        }
+    // 初始化产品详情页的可搜索选择器
+    initSearchableSelect({
+        wrapperId: 'product-selector-wrapper',
+        inputId: 'product-selector-input',
+        dropdownId: 'product-selector-dropdown',
+        hiddenId: 'product-selector',
+        products: allProducts,
+        includeDisabled: true,
+        showStock: false,
+        onSelect: (productName) => {
+            onProductSelect(productName);
+        },
+        placeholder: t('searchPlaceholder') || '搜索产品名称或编码...'
+    });
 
-        allProducts.forEach(product => {
-            const option = document.createElement('option');
-            option.value = product.name;
-            option.textContent = `${product.name} (${product.sku})${product.is_disabled ? ' [' + t('statusDisabled') + ']' : ''}`;
-            selector.appendChild(option);
-        });
+    // 初始化新增记录弹窗的可搜索选择器
+    initSearchableSelect({
+        wrapperId: 'record-product-wrapper',
+        inputId: 'record-product-input',
+        dropdownId: 'record-product-dropdown',
+        hiddenId: 'record-product',
+        products: allProducts.filter(p => !p.is_disabled),
+        includeDisabled: false,
+        showStock: true,
+        onSelect: null,
+        placeholder: t('searchPlaceholder') || '搜索产品名称或编码...'
+    });
+}
+
+// 初始化可搜索下拉选择器
+function initSearchableSelect(config) {
+    const wrapper = document.getElementById(config.wrapperId);
+    const input = document.getElementById(config.inputId);
+    const dropdown = document.getElementById(config.dropdownId);
+    const hidden = document.getElementById(config.hiddenId);
+
+    if (!wrapper || !input || !dropdown || !hidden) return;
+
+    // 设置 placeholder
+    if (config.placeholder) {
+        input.placeholder = config.placeholder;
     }
 
-    if (recordProduct) {
-        const firstOption = recordProduct.options[0];
-        recordProduct.innerHTML = '';
-        if (firstOption) {
-            recordProduct.appendChild(firstOption);
-        } else {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = t('pleaseSelect');
-            recordProduct.appendChild(opt);
+    // 存储配置到元素上
+    wrapper._searchableConfig = config;
+    wrapper._highlightIndex = -1;
+
+    // 渲染下拉选项
+    renderSearchableOptions(wrapper, '');
+
+    // 移除旧事件监听器（如果有）
+    const newInput = input.cloneNode(true);
+    input.parentNode.replaceChild(newInput, input);
+
+    // 输入事件 - 过滤选项
+    newInput.addEventListener('input', function(e) {
+        const query = e.target.value.trim();
+        renderSearchableOptions(wrapper, query);
+        openSearchableDropdown(wrapper);
+        wrapper._highlightIndex = -1;
+    });
+
+    // 点击输入框 - 显示下拉
+    newInput.addEventListener('focus', function() {
+        renderSearchableOptions(wrapper, newInput.value.trim());
+        openSearchableDropdown(wrapper);
+    });
+
+    // 键盘导航
+    newInput.addEventListener('keydown', function(e) {
+        const options = dropdown.querySelectorAll('.searchable-select-option');
+        const maxIndex = options.length - 1;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            wrapper._highlightIndex = Math.min(wrapper._highlightIndex + 1, maxIndex);
+            updateHighlight(dropdown, wrapper._highlightIndex);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            wrapper._highlightIndex = Math.max(wrapper._highlightIndex - 1, 0);
+            updateHighlight(dropdown, wrapper._highlightIndex);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (wrapper._highlightIndex >= 0 && options[wrapper._highlightIndex]) {
+                options[wrapper._highlightIndex].click();
+            }
+        } else if (e.key === 'Escape') {
+            closeSearchableDropdown(wrapper);
+            newInput.blur();
+        }
+    });
+
+    // 点击外部关闭下拉
+    document.addEventListener('click', function(e) {
+        if (!wrapper.contains(e.target)) {
+            closeSearchableDropdown(wrapper);
+        }
+    });
+}
+
+// 渲染可搜索选项
+function renderSearchableOptions(wrapper, query) {
+    const config = wrapper._searchableConfig;
+    const dropdown = document.getElementById(config.dropdownId);
+    const hidden = document.getElementById(config.hiddenId);
+
+    if (!dropdown || !config.products) return;
+
+    const queryLower = query.toLowerCase();
+    const filtered = config.products.filter(p => {
+        if (!query) return true;
+        return p.name.toLowerCase().includes(queryLower) ||
+               p.sku.toLowerCase().includes(queryLower);
+    });
+
+    if (filtered.length === 0) {
+        dropdown.innerHTML = `<div class="searchable-select-empty">${t('noData') || '暂无数据'}</div>`;
+        return;
+    }
+
+    dropdown.innerHTML = filtered.map((product, idx) => {
+        const isSelected = hidden.value === product.name;
+        const isDisabled = product.is_disabled;
+        const classes = ['searchable-select-option'];
+        if (isSelected) classes.push('selected');
+        if (isDisabled) classes.push('disabled-product');
+
+        // 高亮匹配文本
+        let nameHtml = escapeHtml(product.name);
+        let skuHtml = escapeHtml(product.sku);
+        if (query) {
+            nameHtml = highlightMatch(product.name, query);
+            skuHtml = highlightMatch(product.sku, query);
         }
 
-        allProducts.filter(p => !p.is_disabled).forEach(product => {
-            const option = document.createElement('option');
-            option.value = product.name;
-            option.textContent = `${product.name} (${product.sku}) - ${t('currentStockCol')}: ${product.quantity}`;
-            recordProduct.appendChild(option);
+        let stockHtml = '';
+        if (config.showStock) {
+            stockHtml = `<span class="option-stock">${t('currentStockCol') || '库存'}: ${product.quantity}</span>`;
+        }
+
+        return `
+            <div class="${classes.join(' ')}" data-value="${escapeHtml(product.name)}" data-index="${idx}">
+                <div class="option-name">${nameHtml} ${stockHtml}</div>
+                <div class="option-info"><span class="option-sku">SKU: ${skuHtml}</span></div>
+            </div>
+        `;
+    }).join('');
+
+    // 绑定点击事件
+    dropdown.querySelectorAll('.searchable-select-option').forEach(opt => {
+        opt.addEventListener('click', function() {
+            const value = this.dataset.value;
+            selectSearchableOption(wrapper, value);
         });
+    });
+}
+
+// 选择选项
+function selectSearchableOption(wrapper, value) {
+    const config = wrapper._searchableConfig;
+    const input = document.getElementById(config.inputId);
+    const hidden = document.getElementById(config.hiddenId);
+
+    // 找到对应的产品
+    const product = config.products.find(p => p.name === value);
+    if (!product) return;
+
+    // 设置值
+    hidden.value = value;
+    input.value = `${product.name} (${product.sku})`;
+
+    // 更新外观
+    wrapper.classList.add('has-value');
+    closeSearchableDropdown(wrapper);
+
+    // 调用回调
+    if (config.onSelect) {
+        config.onSelect(value);
+    }
+}
+
+// 打开下拉
+function openSearchableDropdown(wrapper) {
+    wrapper.classList.add('open');
+}
+
+// 关闭下拉
+function closeSearchableDropdown(wrapper) {
+    wrapper.classList.remove('open');
+    wrapper._highlightIndex = -1;
+}
+
+// 更新高亮
+function updateHighlight(dropdown, index) {
+    dropdown.querySelectorAll('.searchable-select-option').forEach((opt, i) => {
+        opt.classList.toggle('highlighted', i === index);
+        if (i === index) {
+            opt.scrollIntoView({ block: 'nearest' });
+        }
+    });
+}
+
+// 高亮匹配文本
+function highlightMatch(text, query) {
+    if (!query) return escapeHtml(text);
+    const regex = new RegExp(`(${escapeRegExp(query)})`, 'gi');
+    return escapeHtml(text).replace(regex, '<span class="searchable-select-highlight">$1</span>');
+}
+
+// 转义正则特殊字符
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 转义 HTML
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// 清除产品详情选择器
+function clearProductSelector() {
+    const wrapper = document.getElementById('product-selector-wrapper');
+    const input = document.getElementById('product-selector-input');
+    const hidden = document.getElementById('product-selector');
+
+    if (input) input.value = '';
+    if (hidden) hidden.value = '';
+    if (wrapper) wrapper.classList.remove('has-value');
+
+    onProductSelect('');
+}
+
+// 清除新增记录产品选择器
+function clearRecordProductSelector() {
+    const wrapper = document.getElementById('record-product-wrapper');
+    const input = document.getElementById('record-product-input');
+    const hidden = document.getElementById('record-product');
+
+    if (input) input.value = '';
+    if (hidden) hidden.value = '';
+    if (wrapper) wrapper.classList.remove('has-value');
+}
+
+// 设置产品选择器的值（用于外部调用）
+function setProductSelectorValue(productName) {
+    const wrapper = document.getElementById('product-selector-wrapper');
+    if (!wrapper || !wrapper._searchableConfig) return;
+
+    if (productName) {
+        selectSearchableOption(wrapper, productName);
+    } else {
+        clearProductSelector();
     }
 }
 
@@ -1182,6 +1401,27 @@ function renderImportPreview(data) {
     document.getElementById('preview-out').textContent = data.total_out;
     document.getElementById('preview-new').textContent = data.total_new;
 
+    // 判断是否有实际变化（处理可能的 undefined 或字符串值）
+    const totalIn = parseInt(data.total_in) || 0;
+    const totalOut = parseInt(data.total_out) || 0;
+    const totalNew = parseInt(data.total_new) || 0;
+    const hasChanges = totalIn > 0 || totalOut > 0 || totalNew > 0;
+
+    // 存储 hasChanges 状态供 confirmImport 使用
+    data._hasChanges = hasChanges;
+
+    // 根据是否有变化显示/隐藏原因输入和禁用SKU选项
+    const reasonRow = document.getElementById('import-reason').closest('.form-row');
+    const disableRow = document.getElementById('confirm-disable-missing').closest('.form-row');
+
+    if (hasChanges) {
+        reasonRow.style.display = '';
+        disableRow.style.display = '';
+    } else {
+        reasonRow.style.display = 'none';
+        disableRow.style.display = 'none';
+    }
+
     const tbody = document.getElementById('preview-tbody');
     tbody.innerHTML = '';
 
@@ -1222,6 +1462,16 @@ function renderImportPreview(data) {
 
 async function confirmImport() {
     if (!importPreviewData) return;
+
+    // 使用预览时计算的 hasChanges 状态
+    const hasChanges = importPreviewData._hasChanges;
+
+    // 如果没有变化，直接关闭模态框
+    if (!hasChanges) {
+        alert(t('noChangesToImport') || '数据无变化，无需导入');
+        closeImportModal();
+        return;
+    }
 
     const reason = document.getElementById('import-reason').value.trim();
 
@@ -1314,6 +1564,8 @@ function showAddRecordModal() {
     document.getElementById('record-product-display-group').style.display = 'none';
     document.getElementById('add-record-modal').classList.add('show');
     document.getElementById('add-record-form').reset();
+    // 清理可搜索选择器状态
+    clearRecordProductSelector();
     loadContactsForRecord('in');  // 默认入库，加载供应商
     // 监听类型变化
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
@@ -1364,6 +1616,8 @@ async function loadContactsForRecord(recordType) {
 function closeAddRecordModal() {
     document.getElementById('add-record-modal').classList.remove('show');
     document.getElementById('add-record-form').reset();
+    // 清理可搜索选择器状态
+    clearRecordProductSelector();
 }
 
 async function submitAddRecord() {

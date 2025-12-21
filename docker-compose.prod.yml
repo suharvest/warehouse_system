@@ -1,0 +1,66 @@
+version: '3.8'
+
+# 生产环境 Docker Compose 配置
+# 使用方式: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.prod
+    container_name: warehouse-backend-prod
+    ports:
+      - "2124:2124"
+    volumes:
+      - warehouse_data:/data
+    environment:
+      - DATABASE_PATH=/data/warehouse.db
+      - SQLITE_PRODUCTION_MODE=true
+      - INIT_MOCK_DATA=false
+      - BCRYPT_ENABLED=true
+      - ENABLE_SECURITY_HEADERS=true
+      - ENABLE_AUDIT_LOG=true
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-10}
+      - MAX_IMPORT_ROWS=${MAX_IMPORT_ROWS:-10000}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:2124/api/dashboard/stats', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: warehouse-frontend-prod
+    ports:
+      - "2125:2125"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+volumes:
+  warehouse_data:
+    driver: local
+
+networks:
+  default:
+    name: warehouse-network

@@ -1,20 +1,28 @@
 """
 仓库管理系统 FastAPI 后端
 """
+import os
+import logging
 from fastapi import FastAPI, Query, HTTPException, File, UploadFile, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import List, Optional
 from io import BytesIO
 from functools import wraps
 
+# 速率限制
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 from database import (
     init_database, generate_mock_data, get_db_connection,
     has_admin_user, hash_password, verify_password,
     generate_session_token, generate_api_key, hash_api_key,
-    generate_batch_no
+    generate_batch_no, needs_password_rehash
 )
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
@@ -41,6 +49,33 @@ import math
 # Excel处理
 from openpyxl import Workbook, load_workbook
 
+# ============================================
+# 环境变量配置
+# ============================================
+# CORS配置：逗号分隔的域名列表，或 * 表示允许所有
+CORS_ORIGINS = os.environ.get('CORS_ORIGINS', '*')
+# 是否生成模拟数据（生产环境设为false）
+INIT_MOCK_DATA = os.environ.get('INIT_MOCK_DATA', 'true').lower() == 'true'
+# 是否启用安全响应头
+ENABLE_SECURITY_HEADERS = os.environ.get('ENABLE_SECURITY_HEADERS', 'false').lower() == 'true'
+# 是否启用审计日志
+ENABLE_AUDIT_LOG = os.environ.get('ENABLE_AUDIT_LOG', 'true').lower() == 'true'
+# Excel上传限制
+MAX_UPLOAD_SIZE_MB = int(os.environ.get('MAX_UPLOAD_SIZE_MB', '10'))
+MAX_IMPORT_ROWS = int(os.environ.get('MAX_IMPORT_ROWS', '10000'))
+
+# 配置日志
+logging.basicConfig(
+    level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('warehouse')
+
+# ============================================
+# 速率限制配置
+# ============================================
+limiter = Limiter(key_func=get_remote_address)
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="仓库管理系统 API",
@@ -48,18 +83,114 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# CORS 配置
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 注册速率限制异常处理（带 CORS 头）
+app.state.limiter = limiter
 
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    """自定义速率限制异常处理器，确保响应包含 CORS 头"""
+    from starlette.responses import JSONResponse
+    origin = request.headers.get("origin", "*")
+    response = JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded: {exc.detail}"}
+    )
+    # 添加 CORS 头
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# ============================================
+# 安全头中间件
+# ============================================
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """添加安全响应头"""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if ENABLE_SECURITY_HEADERS:
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['X-Frame-Options'] = 'DENY'
+            response.headers['X-XSS-Protection'] = '1; mode=block'
+            response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# ============================================
+# CORS 配置
+# ============================================
+def get_cors_origins():
+    """解析CORS配置"""
+    if CORS_ORIGINS == '*':
+        return ['*']
+    return [origin.strip() for origin in CORS_ORIGINS.split(',') if origin.strip()]
+
+cors_origins = get_cors_origins()
+
+# 自定义 CORS 中间件：正确处理通配符和 credentials
+class DynamicCORSMiddleware(BaseHTTPMiddleware):
+    """
+    动态 CORS 中间件，解决以下问题：
+    1. 当 allow_origins=['*'] 时，自动将 Access-Control-Allow-Origin 设为请求的 Origin
+    2. 确保 credentials 模式下不返回通配符
+    3. 正确处理预检请求（OPTIONS）
+    """
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin")
+
+        # 处理预检请求
+        if request.method == "OPTIONS":
+            response = Response(status_code=204)
+        else:
+            response = await call_next(request)
+
+        # 设置 CORS 头
+        if origin:
+            if CORS_ORIGINS == '*':
+                # 通配符模式：使用请求的 Origin
+                response.headers["Access-Control-Allow-Origin"] = origin
+            elif origin in cors_origins:
+                # 明确列表模式：只允许列表中的 Origin
+                response.headers["Access-Control-Allow-Origin"] = origin
+            else:
+                # Origin 不在允许列表中，不设置 CORS 头（浏览器会拒绝）
+                pass
+
+        # 设置其他 CORS 头
+        if "Access-Control-Allow-Origin" in response.headers:
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key"
+            response.headers["Access-Control-Max-Age"] = "86400"
+
+        return response
+
+# 使用自定义 CORS 中间件替代 FastAPI 的 CORSMiddleware
+app.add_middleware(DynamicCORSMiddleware)
+
+# ============================================
+# 审计日志函数
+# ============================================
+def audit_log(action: str, user_id: int = None, username: str = None, details: dict = None):
+    """记录审计日志"""
+    if not ENABLE_AUDIT_LOG:
+        return
+    log_data = {
+        "action": action,
+        "user_id": user_id,
+        "username": username,
+        "timestamp": datetime.now().isoformat(),
+        "details": details or {}
+    }
+    logger.info(f"AUDIT: {action} | user={username}({user_id}) | {details}")
+
+# ============================================
 # 初始化数据库
+# ============================================
 init_database()
-generate_mock_data()
+if INIT_MOCK_DATA:
+    generate_mock_data()
 
 
 # 数据库连接上下文管理器
@@ -281,7 +412,8 @@ async def setup_admin(request: SetupRequest, response: Response):
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(request: LoginRequest, response: Response):
+@limiter.limit("5/minute")  # 登录接口速率限制：每分钟5次
+async def login(request: Request, login_data: LoginRequest, response: Response):
     """用户登录"""
     with get_db() as conn:
         cursor = conn.cursor()
@@ -289,7 +421,7 @@ async def login(request: LoginRequest, response: Response):
         cursor.execute('''
             SELECT id, username, password_hash, display_name, role, is_disabled
             FROM users WHERE username = ?
-        ''', (request.username,))
+        ''', (login_data.username,))
         user = cursor.fetchone()
 
         if not user:
@@ -298,8 +430,15 @@ async def login(request: LoginRequest, response: Response):
         if user['is_disabled']:
             return LoginResponse(success=False, message="账号已被禁用")
 
-        if not verify_password(request.password, user['password_hash']):
+        if not verify_password(login_data.password, user['password_hash']):
             return LoginResponse(success=False, message="用户名或密码错误")
+
+        # 透明密码升级：如果使用旧的SHA256哈希，自动升级到bcrypt
+        if needs_password_rehash(user['password_hash']):
+            new_hash = hash_password(login_data.password)
+            cursor.execute('UPDATE users SET password_hash = ? WHERE id = ?',
+                          (new_hash, user['id']))
+            logger.info(f"Password upgraded to bcrypt for user: {user['username']}")
 
         # 清理旧会话
         cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user['id'],))
@@ -314,6 +453,9 @@ async def login(request: LoginRequest, response: Response):
               datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
         conn.commit()
+
+        # 审计日志
+        audit_log("LOGIN", user['id'], user['username'], {"role": user['role']})
 
         # 设置Cookie
         response.set_cookie(
@@ -1790,6 +1932,15 @@ async def stock_in(
 
         conn.commit()
 
+        # 审计日志
+        audit_log("STOCK_IN", current_user.id, current_user.username, {
+            "product": product_name,
+            "quantity": quantity,
+            "batch_no": batch_no,
+            "old_qty": old_quantity,
+            "new_qty": new_quantity
+        })
+
         return StockInResponse(
             success=True,
             operation="stock_in",
@@ -1810,16 +1961,18 @@ async def stock_in(
 
 
 @app.post("/api/materials/stock-out", response_model=StockOutResponse)
+@limiter.limit("60/minute")  # 出库速率限制
 async def stock_out(
-    request: StockOperationRequest,
+    request: Request,
+    stock_data: StockOperationRequest,
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
     """出库操作（需要operate权限）- FIFO批次消耗"""
-    product_name = request.product_name
-    quantity = request.quantity
-    reason = request.reason or "销售出库"
+    product_name = stock_data.product_name
+    quantity = stock_data.quantity
+    reason = stock_data.reason or "销售出库"
     # 优先使用请求中的operator，否则使用当前用户名
-    operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
+    operator = stock_data.operator if stock_data.operator and stock_data.operator != "MCP系统" else current_user.get_operator_name()
     # 获取操作员用户ID（用于关联用户表）
     operator_user_id = current_user.id
 
@@ -1874,7 +2027,7 @@ async def stock_out(
         cursor.execute('''
             INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, created_at)
             VALUES (?, 'out', ?, ?, ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, operator_user_id, reason, request.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        ''', (material_id, quantity, operator, operator_user_id, reason, stock_data.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         record_id = cursor.lastrowid
 
         # FIFO批次消耗
@@ -1922,6 +2075,15 @@ async def stock_out(
             ))
 
         conn.commit()
+
+        # 审计日志
+        audit_log("STOCK_OUT", current_user.id, current_user.username, {
+            "product": product_name,
+            "quantity": quantity,
+            "old_qty": old_quantity,
+            "new_qty": new_quantity,
+            "batches": [bc.batch_no for bc in batch_consumptions] if batch_consumptions else []
+        })
 
         # 检查是否低于安全库存
         warning = ""
@@ -2070,10 +2232,28 @@ def export_materials_excel(
 
 
 @app.post("/api/materials/import-excel/preview", response_model=ExcelImportPreviewResponse)
-async def preview_import_excel(file: UploadFile = File(...)):
+@limiter.limit("10/minute")  # Excel导入速率限制
+async def preview_import_excel(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: CurrentUser = Depends(get_current_user)  # 需要登录
+):
     """预览Excel导入内容，计算差异"""
+    # 文件大小检查
+    contents = await file.read()
+    file_size_mb = len(contents) / (1024 * 1024)
+    if file_size_mb > MAX_UPLOAD_SIZE_MB:
+        return ExcelImportPreviewResponse(
+            success=False,
+            preview=[],
+            new_skus=[],
+            total_in=0,
+            total_out=0,
+            total_new=0,
+            message=f"文件大小 ({file_size_mb:.1f}MB) 超过限制 ({MAX_UPLOAD_SIZE_MB}MB)"
+        )
+
     try:
-        contents = await file.read()
         wb = load_workbook(filename=BytesIO(contents))
         ws = wb.active
     except Exception as e:
@@ -2092,21 +2272,75 @@ async def preview_import_excel(file: UploadFile = File(...)):
     total_in = 0
     total_out = 0
     total_new = 0
+    row_count = 0
+
+    # 读取表头，自动识别列位置（支持系统导出的格式）
+    header_row = [str(cell).strip() if cell else "" for cell in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+
+    # 定义列名映射（支持多种可能的表头名称）
+    col_mapping = {
+        'name': None,      # 物料名称
+        'sku': None,       # SKU/物料编码
+        'category': None,  # 分类
+        'quantity': None,  # 数量/库存
+        'unit': None,      # 单位
+        'safe_stock': None,# 安全库存
+        'location': None   # 位置
+    }
+
+    # 识别列位置
+    for idx, header in enumerate(header_row):
+        header_lower = header.lower()
+        if '名称' in header or 'name' in header_lower:
+            col_mapping['name'] = idx
+        elif 'sku' in header_lower or '编码' in header:
+            col_mapping['sku'] = idx
+        elif '分类' in header or 'category' in header_lower:
+            col_mapping['category'] = idx
+        elif '库存' in header or 'quantity' in header_lower or '数量' in header:
+            if '安全' not in header:  # 排除"安全库存"
+                col_mapping['quantity'] = idx
+        elif '单位' in header or 'unit' in header_lower:
+            col_mapping['unit'] = idx
+        elif '安全库存' in header or 'safe' in header_lower:
+            col_mapping['safe_stock'] = idx
+        elif '位置' in header or 'location' in header_lower:
+            col_mapping['location'] = idx
+
+    # 检查必须的列是否存在
+    if col_mapping['sku'] is None:
+        return ExcelImportPreviewResponse(
+            success=False,
+            preview=[],
+            new_skus=[],
+            total_in=0,
+            total_out=0,
+            total_new=0,
+            message="Excel格式错误：找不到SKU/物料编码列"
+        )
+    if col_mapping['quantity'] is None:
+        return ExcelImportPreviewResponse(
+            success=False,
+            preview=[],
+            new_skus=[],
+            total_in=0,
+            total_out=0,
+            total_new=0,
+            message="Excel格式错误：找不到库存/数量列"
+        )
 
     with get_db() as conn:
         cursor = conn.cursor()
 
         for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             # 跳过空行
-            if not row[1]:  # SKU为空则跳过
+            sku_col = col_mapping['sku']
+            if not row[sku_col]:  # SKU为空则跳过
                 continue
 
-            name = str(row[0]).strip() if row[0] else ""
-            sku = str(row[1]).strip()
-            category = str(row[2]).strip() if row[2] else "未分类"
-            try:
-                import_qty = int(row[3]) if row[3] is not None else 0
-            except (ValueError, TypeError):
+            # 行数限制检查
+            row_count += 1
+            if row_count > MAX_IMPORT_ROWS:
                 return ExcelImportPreviewResponse(
                     success=False,
                     preview=[],
@@ -2114,12 +2348,17 @@ async def preview_import_excel(file: UploadFile = File(...)):
                     total_in=0,
                     total_out=0,
                     total_new=0,
-                    message=f"第 {idx} 行【导入数量】格式错误：需要整数，当前值为 '{row[3]}'，请修改后重新上传"
+                    message=f"数据行数 ({row_count}) 超过限制 ({MAX_IMPORT_ROWS}行)"
                 )
 
-            unit = str(row[4]).strip() if row[4] else "个"
+            # 根据列映射读取数据
+            name = str(row[col_mapping['name']]).strip() if col_mapping['name'] is not None and row[col_mapping['name']] else ""
+            sku = str(row[col_mapping['sku']]).strip()
+            category = str(row[col_mapping['category']]).strip() if col_mapping['category'] is not None and row[col_mapping['category']] else "未分类"
+
+            qty_col = col_mapping['quantity']
             try:
-                safe_stock = int(row[5]) if row[5] is not None else 20
+                import_qty = int(row[qty_col]) if row[qty_col] is not None else 0
             except (ValueError, TypeError):
                 return ExcelImportPreviewResponse(
                     success=False,
@@ -2128,9 +2367,27 @@ async def preview_import_excel(file: UploadFile = File(...)):
                     total_in=0,
                     total_out=0,
                     total_new=0,
-                    message=f"第 {idx} 行【安全库存】格式错误：需要整数，当前值为 '{row[5]}'，请修改后重新上传"
+                    message=f"第 {idx} 行【库存数量】格式错误：需要整数，当前值为 '{row[qty_col]}'，请修改后重新上传"
                 )
-            location = str(row[6]).strip() if row[6] else ""
+
+            unit = str(row[col_mapping['unit']]).strip() if col_mapping['unit'] is not None and row[col_mapping['unit']] else "个"
+
+            safe_stock_col = col_mapping['safe_stock']
+            try:
+                safe_stock = int(row[safe_stock_col]) if safe_stock_col is not None and row[safe_stock_col] is not None else 20
+            except (ValueError, TypeError):
+                return ExcelImportPreviewResponse(
+                    success=False,
+                    preview=[],
+                    new_skus=[],
+                    total_in=0,
+                    total_out=0,
+                    total_new=0,
+                    message=f"第 {idx} 行【安全库存】格式错误：需要整数，当前值为 '{row[safe_stock_col]}'，请修改后重新上传"
+                )
+
+            location_col = col_mapping['location']
+            location = str(row[location_col]).strip() if location_col is not None and row[location_col] else ""
 
             # 查询当前库存
             cursor.execute('SELECT id, name, quantity FROM materials WHERE sku = ?', (sku,))

@@ -40,7 +40,7 @@ const translations = {
 
         // 库存列表
         inventoryList: '库存列表',
-        searchPlaceholder: '搜索产品名称...',
+        searchPlaceholder: '搜索产品名称或编码...',
         autoUpdate: '自动更新:',
         seconds: '秒',
 
@@ -121,6 +121,7 @@ const translations = {
         confirmImport: '确认导入',
         newMaterial: '新增',
         noChange: '无变化',
+        noChangesToImport: '数据无变化，无需导入',
 
         // 新SKU确认
         confirmNewSku: '确认新增物料',
@@ -197,7 +198,7 @@ const translations = {
         never: '从未',
 
         // 联系方管理
-        tabContacts: '联系方',
+        tabContacts: '联系方管理',
         contactList: '联系方列表',
         addContact: '添加联系方',
         editContact: '编辑联系方',
@@ -248,7 +249,7 @@ const translations = {
         outbound: 'Outbound',
 
         inventoryList: 'Inventory List',
-        searchPlaceholder: 'Search product name...',
+        searchPlaceholder: 'Search by name or code...',
         autoUpdate: 'Auto update:',
         seconds: 's',
 
@@ -325,6 +326,7 @@ const translations = {
         confirmImport: 'Confirm Import',
         newMaterial: 'New',
         noChange: 'No Change',
+        noChangesToImport: 'No changes to import',
 
         // New SKU confirmation
         confirmNewSku: 'Confirm New Materials',

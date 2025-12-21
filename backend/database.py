@@ -5,13 +5,37 @@ import secrets
 from datetime import datetime, timedelta
 import random
 
-# 支持通过环境变量配置数据库路径，默认为当前目录下的 warehouse.db
+# 尝试导入bcrypt（生产环境使用）
+try:
+    import bcrypt
+    BCRYPT_AVAILABLE = True
+except ImportError:
+    BCRYPT_AVAILABLE = False
+
+# ============================================
+# 环境变量配置
+# ============================================
+# 数据库路径
 DATABASE_PATH = os.environ.get('DATABASE_PATH', 'warehouse.db')
+# 是否启用bcrypt密码哈希（默认true，需要bcrypt可用）
+BCRYPT_ENABLED = os.environ.get('BCRYPT_ENABLED', 'true').lower() == 'true' and BCRYPT_AVAILABLE
+# 是否启用SQLite生产优化（WAL模式、外键约束等）
+SQLITE_PRODUCTION_MODE = os.environ.get('SQLITE_PRODUCTION_MODE', 'false').lower() == 'true'
+
 
 def get_db_connection():
     """获取数据库连接"""
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
+
+    # 生产模式下启用优化配置
+    if SQLITE_PRODUCTION_MODE:
+        cursor = conn.cursor()
+        cursor.execute('PRAGMA journal_mode=WAL')       # 更好的并发性能
+        cursor.execute('PRAGMA foreign_keys=ON')        # 启用外键约束
+        cursor.execute('PRAGMA synchronous=NORMAL')     # 平衡安全与性能
+        cursor.execute('PRAGMA cache_size=-64000')      # 64MB缓存
+
     return conn
 
 def init_database():
@@ -192,15 +216,47 @@ def has_admin_user():
 
 
 def hash_password(password: str) -> str:
-    """使用SHA256哈希密码（简化版，生产环境应使用bcrypt）"""
-    # 使用简单的SHA256+salt，避免bcrypt依赖问题
-    salt = "warehouse_system_salt_2024"
-    return hashlib.sha256((password + salt).encode()).hexdigest()
+    """
+    哈希密码
+    - 启用bcrypt时使用bcrypt（推荐生产环境）
+    - 否则使用SHA256+salt（向后兼容）
+    """
+    if BCRYPT_ENABLED:
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    else:
+        # 旧版SHA256哈希（向后兼容）
+        salt = "warehouse_system_salt_2024"
+        return hashlib.sha256((password + salt).encode()).hexdigest()
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """验证密码"""
-    return hash_password(password) == password_hash
+    """
+    验证密码
+    自动识别bcrypt和SHA256格式，实现向后兼容
+    """
+    # bcrypt哈希以 $2b$ 或 $2a$ 开头
+    if password_hash.startswith('$2'):
+        if not BCRYPT_AVAILABLE:
+            return False
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+        except Exception:
+            return False
+    else:
+        # 旧版SHA256验证
+        salt = "warehouse_system_salt_2024"
+        return hashlib.sha256((password + salt).encode()).hexdigest() == password_hash
+
+
+def needs_password_rehash(password_hash: str) -> bool:
+    """
+    检查密码是否需要升级到bcrypt
+    用于登录时透明迁移旧密码
+    """
+    if not BCRYPT_ENABLED:
+        return False
+    # 如果不是bcrypt格式，需要重新哈希
+    return not password_hash.startswith('$2')
 
 
 def generate_session_token() -> str:
@@ -214,8 +270,12 @@ def generate_api_key() -> str:
 
 
 def hash_api_key(api_key: str) -> str:
-    """哈希API密钥"""
-    return hashlib.sha256(api_key.encode()).hexdigest()
+    """
+    哈希API密钥
+    添加盐值提高安全性
+    """
+    salt = "warehouse_api_salt_2024"
+    return hashlib.sha256(f"{api_key}:{salt}".encode()).hexdigest()
 
 
 def generate_mock_data():

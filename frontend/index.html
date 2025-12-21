@@ -74,7 +74,7 @@
                         <line x1="20" y1="8" x2="20" y2="14"></line>
                         <line x1="23" y1="11" x2="17" y2="11"></line>
                     </svg>
-                    <span data-i18n="tabContacts">联系方</span>
+                    <span data-i18n="tabContacts">联系方管理</span>
                 </button>
                 <button class="nav-item" data-tab="users" data-min-role="admin" onclick="switchTab('users')" id="nav-users" style="display:none;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -554,9 +554,14 @@
                             </button>
                             <div class="divider-vertical"></div>
                             <label data-i18n="selectProduct">选择产品</label>
-                            <select id="product-selector" onchange="onProductSelect(this.value)">
-                                <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
-                            </select>
+                            <div id="product-selector-wrapper" class="searchable-select">
+                                <input type="text" class="searchable-select-input" id="product-selector-input"
+                                    placeholder="搜索产品名称或编码..." autocomplete="off">
+                                <button type="button" class="searchable-select-clear" onclick="clearProductSelector()">&times;</button>
+                                <span class="searchable-select-arrow">▼</span>
+                                <div class="searchable-select-dropdown" id="product-selector-dropdown"></div>
+                                <input type="hidden" id="product-selector" value="">
+                            </div>
                         </div>
 
                         <!-- 产品详情内容 -->
@@ -928,9 +933,14 @@
                 <form id="add-record-form">
                     <div class="form-group" id="record-product-group">
                         <label><span data-i18n="selectProduct">选择产品</span> <span class="required">*</span></label>
-                        <select id="record-product" required>
-                            <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
-                        </select>
+                        <div id="record-product-wrapper" class="searchable-select">
+                            <input type="text" class="searchable-select-input" id="record-product-input"
+                                placeholder="搜索产品名称或编码..." autocomplete="off">
+                            <button type="button" class="searchable-select-clear" onclick="clearRecordProductSelector()">&times;</button>
+                            <span class="searchable-select-arrow">▼</span>
+                            <div class="searchable-select-dropdown" id="record-product-dropdown"></div>
+                            <input type="hidden" id="record-product" value="" required>
+                        </div>
                     </div>
                     <div class="form-group" id="record-product-display-group" style="display: none;">
                         <label data-i18n="productName">产品名称</label>

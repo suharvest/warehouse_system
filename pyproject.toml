@@ -11,4 +11,14 @@ dependencies = [
     "requests>=2.32.5",
     "openpyxl>=3.1.0",
     "python-multipart>=0.0.6",
+    # 生产安全依赖
+    "bcrypt>=4.1.0",
+    "slowapi>=0.1.9",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
 ]

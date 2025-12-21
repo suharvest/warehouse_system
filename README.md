@@ -35,6 +35,8 @@
 - Uvicorn (ASGI服务器)
 - Pydantic (数据验证)
 - SQLite (数据库)
+- bcrypt (密码哈希)
+- slowapi (速率限制)
 - uv (包管理工具)
 
 ### 前端
@@ -79,14 +81,10 @@ cd mcp
 .\start_mcp.ps1
 ```
 
-### 3. Docker 部署（推荐生产环境）
+### 3. Docker 部署
 
-使用 Docker Compose 一键部署，数据库文件通过 volume 挂载到宿主机以确保数据持久化。
-
+#### 开发环境
 ```bash
-# 创建数据目录
-mkdir -p ./data
-
 # 构建并启动服务
 docker-compose up -d
 
@@ -97,17 +95,40 @@ docker-compose logs -f
 docker-compose down
 ```
 
-**自定义数据库路径**（可选）：
+#### 生产环境部署
+
+生产环境使用专门的配置文件，包含安全加固和资源限制：
+
 ```bash
-# 指定自定义数据库存储路径
-DB_PATH=/path/to/your/data docker-compose up -d
+# 1. 复制并编辑环境配置
+cp .env.production.example .env.production
+# 编辑 .env.production 设置 CORS_ORIGINS 为您的域名
+
+# 2. 使用生产配置启动
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+生产环境默认启用：
+- bcrypt 密码哈希（自动迁移旧密码）
+- SQLite WAL 模式和外键约束
+- 安全响应头
+- 审计日志
+- 容器资源限制
+
+#### 反向代理配置（推荐）
+
+生产环境建议使用 nginx 反向代理，配置 HTTPS：
+
+```bash
+# 参考配置文件
+cat deploy/nginx.conf.example
 ```
 
 启动后访问：
 - 前端页面：http://localhost:2125
 - API 文档：http://localhost:2124/docs
 
-**注意**：数据库文件 `warehouse.db` 会自动创建在挂载的 `./data` 目录（或自定义的 `DB_PATH`）中，容器重启或重建不会丢失数据。
+**注意**：数据库文件会自动创建在挂载的 volume 中，容器重启不会丢失数据。
 
 ### 4. 手动启动
 
@@ -136,7 +157,8 @@ warehouse_system/
 │   ├── app.py           # FastAPI 应用主文件
 │   ├── models.py        # Pydantic 响应模型
 │   ├── database.py      # 数据库初始化和数据生成
-│   ├── Dockerfile       # 后端 Docker 镜像配置
+│   ├── Dockerfile       # 后端 Docker 镜像配置（开发）
+│   ├── Dockerfile.prod  # 后端 Docker 镜像配置（生产）
 │   └── warehouse.db     # SQLite 数据库文件（运行后生成）
 ├── frontend/            # 前端代码
 │   ├── index.html       # 主页面
@@ -153,6 +175,8 @@ warehouse_system/
 │   ├── start_mcp.ps1    # 启动脚本 (Windows)
 │   ├── MCP_README.md    # MCP 文档（中文）
 │   └── MCP_README_EN.md # MCP 文档（英文）
+├── deploy/              # 部署配置
+│   └── nginx.conf.example  # Nginx 反向代理配置示例
 ├── test/                # 测试文件
 │   ├── backend/         # 后端功能测试
 │   ├── data/            # 测试数据
@@ -165,7 +189,10 @@ warehouse_system/
 │   ├── TESTING_GUIDE.md          # 测试指南
 │   ├── Warehouse_System_Guide.md # 系统使用指南
 │   └── assets/                   # 文档图片
-├── docker-compose.yml   # Docker Compose 配置
+├── docker-compose.yml       # Docker Compose 配置（开发）
+├── docker-compose.prod.yml  # Docker Compose 配置（生产）
+├── .env.example             # 环境变量模板（开发）
+├── .env.production.example  # 环境变量模板（生产）
 ├── start.sh             # 启动脚本 (macOS/Linux)
 ├── start.ps1            # 启动脚本 (Windows)
 ├── CHANGELOG.md         # 更新记录（中文）
@@ -310,12 +337,30 @@ python3 test/test_api.py
 
 详见 `test/README.md`
 
+## 环境变量配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `DATABASE_PATH` | `warehouse.db` | 数据库文件路径 |
+| `CORS_ORIGINS` | `*` | 允许的CORS源（逗号分隔） |
+| `BCRYPT_ENABLED` | `true` | 使用bcrypt密码哈希 |
+| `SQLITE_PRODUCTION_MODE` | `false` | 启用SQLite生产优化（WAL模式） |
+| `INIT_MOCK_DATA` | `true` | 启动时生成模拟数据 |
+| `ENABLE_SECURITY_HEADERS` | `false` | 启用安全响应头 |
+| `ENABLE_AUDIT_LOG` | `true` | 启用审计日志 |
+| `MAX_UPLOAD_SIZE_MB` | `10` | Excel上传大小限制 |
+| `MAX_IMPORT_ROWS` | `10000` | Excel导入行数限制 |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+
+详细配置请参考 `.env.example` 和 `.env.production.example`。
+
 ## 注意事项
 
 1. 确保端口 2124 和 2125 未被占用
 2. 首次运行会自动创建数据库和初始数据
 3. 数据库文件位于 `backend/warehouse.db`
 4. 重新生成数据可删除数据库文件后重新运行
+5. 生产环境建议设置 `INIT_MOCK_DATA=false` 避免生成测试数据
 
 ## 开发说明
 

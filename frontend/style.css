@@ -950,6 +950,169 @@ tbody tr:hover {
     border-radius: 4px;
 }
 
+/* Searchable Select / Autocomplete Component */
+.searchable-select {
+    position: relative;
+    flex: 1;
+    max-width: 400px;
+}
+
+.searchable-select-input {
+    width: 100%;
+    padding: 8px 32px 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 14px;
+    background: #fff;
+    cursor: text;
+    box-sizing: border-box;
+}
+
+.searchable-select-input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+}
+
+.searchable-select-input::placeholder {
+    color: var(--text-secondary);
+}
+
+.searchable-select-arrow {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+    color: var(--text-secondary);
+    transition: transform 0.2s;
+}
+
+.searchable-select.open .searchable-select-arrow {
+    transform: translateY(-50%) rotate(180deg);
+}
+
+.searchable-select-clear {
+    position: absolute;
+    right: 30px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    border: none;
+    background: var(--text-muted);
+    color: #fff;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 14px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+}
+
+.searchable-select-clear:hover {
+    background: var(--text-secondary);
+}
+
+.searchable-select.has-value .searchable-select-clear {
+    display: flex;
+}
+
+.searchable-select-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    box-shadow: var(--shadow-md);
+    max-height: 280px;
+    overflow-y: auto;
+    z-index: 1000;
+    display: none;
+    margin-top: 4px;
+}
+
+.searchable-select.open .searchable-select-dropdown {
+    display: block;
+}
+
+.searchable-select-option {
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border-light);
+    transition: background-color 0.15s;
+}
+
+.searchable-select-option:last-child {
+    border-bottom: none;
+}
+
+.searchable-select-option:hover,
+.searchable-select-option.highlighted {
+    background-color: var(--bg-light);
+}
+
+.searchable-select-option.selected {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: var(--primary-color);
+}
+
+.searchable-select-option .option-name {
+    font-weight: 500;
+}
+
+.searchable-select-option .option-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+.searchable-select-option .option-sku {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.searchable-select-option .option-stock {
+    float: right;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.searchable-select-option.disabled-product {
+    opacity: 0.6;
+}
+
+.searchable-select-option.disabled-product .option-name::after {
+    content: ' [禁用]';
+    color: var(--danger-color);
+    font-size: 12px;
+}
+
+.searchable-select-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.searchable-select-highlight {
+    background-color: #fef08a;
+    font-weight: 500;
+}
+
+/* Form group searchable select */
+.form-group .searchable-select {
+    max-width: none;
+}
+
+.form-group .searchable-select-input {
+    width: 100%;
+}
+
 /* Dropdown Multiselect Style */
 .dropdown-multiselect {
     position: relative;
