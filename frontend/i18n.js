@@ -500,3 +500,15 @@ document.addEventListener('DOMContentLoaded', function () {
     updatePageTexts();
     updateLangOptionActive();
 });
+
+// 导出到 window 对象（用于 ES Module 环境）
+window.t = t;
+window.translations = translations;
+window.currentLang = currentLang;
+window.setLanguage = setLanguage;
+window.updatePageTexts = updatePageTexts;
+window.toggleLangDropdown = toggleLangDropdown;
+window.selectLanguage = selectLanguage;
+
+// ES Module 导出
+export { translations, t, setLanguage, updatePageTexts, toggleLangDropdown, selectLanguage };

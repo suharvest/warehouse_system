@@ -5,9 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>仓库管理系统 - SenseCraft Voice Style</title>
-    <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-    <script src="i18n.js"></script>
+    <link rel="stylesheet" href="./src/main.css">
 </head>
 
 <body>
@@ -30,7 +28,7 @@
             </div>
 
             <nav class="side-nav">
-                <button class="nav-item active" data-tab="dashboard" onclick="switchTab('dashboard')">
+                <button class="nav-item active" data-tab="dashboard" data-action="switchTab">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="3" y="3" width="7" height="7"></rect>
                         <rect x="14" y="3" width="7" height="7"></rect>
@@ -39,7 +37,7 @@
                     </svg>
                     <span data-i18n="tabDashboard">看板</span>
                 </button>
-                <button class="nav-item" data-tab="records" onclick="switchTab('records')">
+                <button class="nav-item" data-tab="records" data-action="switchTab">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                         <polyline points="14 2 14 8 20 8"></polyline>
@@ -49,7 +47,7 @@
                     </svg>
                     <span data-i18n="tabRecords">进出库记录</span>
                 </button>
-                <button class="nav-item" data-tab="inventory" onclick="switchTab('inventory')">
+                <button class="nav-item" data-tab="inventory" data-action="switchTab">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path
                             d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z">
@@ -59,7 +57,7 @@
                     </svg>
                     <span data-i18n="tabInventory">库存列表</span>
                 </button>
-                <button class="nav-item" data-tab="detail" onclick="switchTab('detail')">
+                <button class="nav-item" data-tab="detail" data-action="switchTab">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="10"></circle>
                         <line x1="12" y1="16" x2="12" y2="12"></line>
@@ -67,7 +65,7 @@
                     </svg>
                     <span data-i18n="tabDetail">产品详情</span>
                 </button>
-                <button class="nav-item" data-tab="contacts" data-min-role="operate" onclick="switchTab('contacts')" id="nav-contacts" style="display:none;">
+                <button class="nav-item" data-tab="contacts" data-min-role="operate" data-action="switchTab" id="nav-contacts" style="display:none;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                         <circle cx="8.5" cy="7" r="4"></circle>
@@ -76,7 +74,7 @@
                     </svg>
                     <span data-i18n="tabContacts">联系方管理</span>
                 </button>
-                <button class="nav-item" data-tab="users" data-min-role="admin" onclick="switchTab('users')" id="nav-users" style="display:none;">
+                <button class="nav-item" data-tab="users" data-min-role="admin" data-action="switchTab" id="nav-users" style="display:none;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                         <circle cx="9" cy="7" r="4"></circle>
@@ -106,13 +104,13 @@
                             <span id="user-name-display" data-i18n="guest">访客</span>
                             <span class="user-role-badge" id="user-role-badge"></span>
                         </div>
-                        <button class="login-btn" id="login-btn" onclick="showLoginModal()" data-i18n="login">登录</button>
-                        <button class="logout-btn" id="logout-btn" onclick="handleLogout()" style="display:none;" data-i18n="logout">登出</button>
+                        <button class="login-btn" id="login-btn" data-action="showLoginModal" data-i18n="login">登录</button>
+                        <button class="logout-btn" id="logout-btn" data-action="handleLogout" style="display:none;" data-i18n="logout">登出</button>
                     </div>
 
                     <!-- 语言切换 -->
                     <div class="lang-dropdown">
-                        <button class="lang-btn" onclick="toggleLangDropdown()">
+                        <button class="lang-btn" data-action="toggleLangDropdown">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2">
                                 <circle cx="12" cy="12" r="10"></circle>
@@ -128,13 +126,13 @@
                             </svg>
                         </button>
                         <div class="lang-dropdown-menu" id="lang-dropdown-menu">
-                            <div class="lang-option" onclick="selectLanguage('zh')">中文简体</div>
-                            <div class="lang-option" onclick="selectLanguage('en')">English</div>
+                            <div class="lang-option" data-action="selectLanguage" data-lang="zh">中文简体</div>
+                            <div class="lang-option" data-action="selectLanguage" data-lang="en">English</div>
                         </div>
                     </div>
 
                     <!-- 刷新按钮 -->
-                    <button class="refresh-btn" onclick="refreshCurrentTab()">
+                    <button class="refresh-btn" data-action="refreshCurrentTab">
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                             <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z" />
                             <path
@@ -160,7 +158,7 @@
 
                         <!-- 统计卡片 -->
                         <div class="stats-grid">
-                            <div class="stat-card clickable" onclick="onTotalStockClick()">
+                            <div class="stat-card clickable" data-action="onTotalStockClick">
                                 <div class="stat-info">
                                     <div class="stat-label" data-i18n="totalStock">库存总量</div>
                                     <div class="stat-value-group">
@@ -178,7 +176,7 @@
                                 </div>
                             </div>
 
-                            <div class="stat-card clickable" onclick="onTodayInClick()">
+                            <div class="stat-card clickable" data-action="onTodayInClick">
                                 <div class="stat-info">
                                     <div class="stat-label" data-i18n="todayIn">今日入库</div>
                                     <div class="stat-value-group">
@@ -195,7 +193,7 @@
                                 </div>
                             </div>
 
-                            <div class="stat-card clickable" onclick="onTodayOutClick()">
+                            <div class="stat-card clickable" data-action="onTodayOutClick">
                                 <div class="stat-info">
                                     <div class="stat-label" data-i18n="todayOut">今日出库</div>
                                     <div class="stat-value-group">
@@ -212,7 +210,7 @@
                                 </div>
                             </div>
 
-                            <div class="stat-card clickable" onclick="onLowStockClick()">
+                            <div class="stat-card clickable" data-action="onLowStockClick">
                                 <div class="stat-info">
                                     <div class="stat-label" data-i18n="lowStockAlert">库存预警</div>
                                     <div class="stat-value-group">
@@ -285,8 +283,7 @@
                             <div class="filter-group">
                                 <label data-i18n="filterStatus">状态</label>
                                 <div class="dropdown-multiselect" id="filter-record-status-dropdown">
-                                    <div class="dropdown-trigger"
-                                        onclick="toggleDropdown('filter-record-status-dropdown')">
+                                    <div class="dropdown-trigger" data-action="toggleDropdown">
                                         <span class="dropdown-text" data-i18n="allStatuses">全部状态</span>
                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
@@ -295,17 +292,17 @@
                                     </div>
                                     <div class="dropdown-menu">
                                         <div class="dropdown-item selected" data-value="normal"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusNormal">正常</span>
                                         </div>
                                         <div class="dropdown-item selected" data-value="warning"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusWarning">警告</span>
                                         </div>
                                         <div class="dropdown-item selected" data-value="danger"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusDanger">危险</span>
                                         </div>
@@ -339,9 +336,9 @@
                                     placeholder="搜索原因...">
                             </div>
                             <div class="filter-actions">
-                                <button class="filter-btn primary" onclick="applyRecordsFilter()"
+                                <button class="filter-btn primary" data-action="applyRecordsFilter"
                                     data-i18n="filterBtn">筛选</button>
-                                <button class="filter-btn secondary" onclick="resetRecordsFilter()"
+                                <button class="filter-btn secondary" data-action="resetRecordsFilter"
                                     data-i18n="resetBtn">重置</button>
                             </div>
                         </div>
@@ -352,7 +349,7 @@
                             <div class="section-header">
                                 <div class="section-title" data-i18n="tabRecords">进出库记录</div>
                                 <div class="action-buttons">
-                                    <button class="action-btn add-btn" onclick="showAddRecordModal()">
+                                    <button class="action-btn add-btn" data-action="showAddRecordModal">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
                                             <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -360,7 +357,7 @@
                                         </svg>
                                         <span data-i18n="addRecord">新增记录</span>
                                     </button>
-                                    <button class="action-btn record-btn" onclick="exportRecords()">
+                                    <button class="action-btn record-btn" data-action="exportRecords">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
                                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -398,17 +395,17 @@
                                 </div>
                                 <div class="pagination-controls">
                                     <select class="page-size-select" id="records-page-size"
-                                        onchange="changeRecordsPageSize(this.value)">
+                                        data-action-change="changeRecordsPageSize">
                                         <option value="10">10</option>
                                         <option value="20" selected>20</option>
                                         <option value="50">50</option>
                                         <option value="100">100</option>
                                     </select>
-                                    <button onclick="recordsGoToPage(recordsCurrentPage - 1)" id="records-prev-btn"
+                                    <button data-action="recordsPrevPage" id="records-prev-btn"
                                         disabled data-i18n="prevPage">上一页</button>
                                     <span class="page-info"><span id="records-current-page">1</span> / <span
                                             id="records-total-pages">1</span></span>
-                                    <button onclick="recordsGoToPage(recordsCurrentPage + 1)" id="records-next-btn"
+                                    <button data-action="recordsNextPage" id="records-next-btn"
                                         disabled data-i18n="nextPage">下一页</button>
                                 </div>
                             </div>
@@ -434,8 +431,7 @@
                             <div class="filter-group">
                                 <label data-i18n="filterStatus">状态</label>
                                 <div class="dropdown-multiselect" id="filter-inventory-status-dropdown">
-                                    <div class="dropdown-trigger"
-                                        onclick="toggleDropdown('filter-inventory-status-dropdown')">
+                                    <div class="dropdown-trigger" data-action="toggleDropdown">
                                         <span class="dropdown-text" data-i18n="allStatuses">全部状态</span>
                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
@@ -444,22 +440,22 @@
                                     </div>
                                     <div class="dropdown-menu">
                                         <div class="dropdown-item selected" data-value="normal"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusNormal">正常</span>
                                         </div>
                                         <div class="dropdown-item selected" data-value="warning"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusWarning">警告</span>
                                         </div>
                                         <div class="dropdown-item selected" data-value="danger"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusDanger">危险</span>
                                         </div>
                                         <div class="dropdown-item" data-value="disabled"
-                                            onclick="toggleDropdownItem(this)">
+                                            data-action="toggleDropdownItem">
                                             <span class="checkbox"></span>
                                             <span data-i18n="statusDisabled">禁用</span>
                                         </div>
@@ -468,9 +464,9 @@
                             </div>
 
                             <div class="filter-actions">
-                                <button class="filter-btn primary" onclick="applyInventoryFilter()"
+                                <button class="filter-btn primary" data-action="applyInventoryFilter"
                                     data-i18n="filterBtn">筛选</button>
-                                <button class="filter-btn secondary" onclick="resetInventoryFilter()"
+                                <button class="filter-btn secondary" data-action="resetInventoryFilter"
                                     data-i18n="resetBtn">重置</button>
                             </div>
                         </div>
@@ -480,7 +476,7 @@
                             <div class="section-header">
                                 <div class="section-title" data-i18n="inventoryList">库存列表</div>
                                 <div class="action-buttons">
-                                    <button class="action-btn import-btn" onclick="showImportModal()">
+                                    <button class="action-btn import-btn" data-action="showImportModal">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
                                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -489,7 +485,7 @@
                                         </svg>
                                         <span data-i18n="importInventory">导入库存</span>
                                     </button>
-                                    <button class="action-btn export-btn" onclick="exportInventory()">
+                                    <button class="action-btn export-btn" data-action="exportInventory">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
                                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -524,17 +520,17 @@
                                 </div>
                                 <div class="pagination-controls">
                                     <select class="page-size-select" id="inventory-page-size"
-                                        onchange="changeInventoryPageSize(this.value)">
+                                        data-action-change="changeInventoryPageSize">
                                         <option value="10">10</option>
                                         <option value="20" selected>20</option>
                                         <option value="50">50</option>
                                         <option value="100">100</option>
                                     </select>
-                                    <button onclick="inventoryGoToPage(inventoryCurrentPage - 1)"
+                                    <button data-action="inventoryPrevPage"
                                         id="inventory-prev-btn" disabled data-i18n="prevPage">上一页</button>
                                     <span class="page-info"><span id="inventory-current-page">1</span> / <span
                                             id="inventory-total-pages">1</span></span>
-                                    <button onclick="inventoryGoToPage(inventoryCurrentPage + 1)"
+                                    <button data-action="inventoryNextPage"
                                         id="inventory-next-btn" disabled data-i18n="nextPage">下一页</button>
                                 </div>
                             </div>
@@ -545,7 +541,7 @@
                     <div id="tab-detail" class="tab-pane">
                         <!-- 产品选择 -->
                         <div class="product-selector-bar">
-                            <button class="action-btn back-btn" onclick="goBackToInventory()">
+                            <button class="action-btn back-btn" data-action="goBackToInventory">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                     stroke-width="2">
                                     <path d="M19 12H5M12 19l-7-7 7-7" />
@@ -557,7 +553,7 @@
                             <div id="product-selector-wrapper" class="searchable-select">
                                 <input type="text" class="searchable-select-input" id="product-selector-input"
                                     placeholder="搜索产品名称或编码..." autocomplete="off">
-                                <button type="button" class="searchable-select-clear" onclick="clearProductSelector()">&times;</button>
+                                <button type="button" class="searchable-select-clear" data-action="clearProductSelector">&times;</button>
                                 <span class="searchable-select-arrow">▼</span>
                                 <div class="searchable-select-dropdown" id="product-selector-dropdown"></div>
                                 <input type="hidden" id="product-selector" value="">
@@ -625,7 +621,7 @@
                                 <div class="section-header">
                                     <div class="section-title" data-i18n="inOutRecords">出入库记录</div>
                                     <div class="action-buttons">
-                                        <button class="action-btn add-btn" onclick="showAddRecordModalForProduct()">
+                                        <button class="action-btn add-btn" data-action="showAddRecordModalForProduct">
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                                 stroke="currentColor" stroke-width="2">
                                                 <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -633,7 +629,7 @@
                                             </svg>
                                             <span data-i18n="addRecord">新增记录</span>
                                         </button>
-                                        <button class="action-btn record-btn" onclick="exportProductRecords()">
+                                        <button class="action-btn record-btn" data-action="exportProductRecords">
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                                 stroke="currentColor" stroke-width="2">
                                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -665,17 +661,17 @@
                                     </div>
                                     <div class="pagination-controls">
                                         <select class="page-size-select" id="detail-page-size"
-                                            onchange="changeDetailPageSize(this.value)">
+                                            data-action-change="changeDetailPageSize">
                                             <option value="10">10</option>
                                             <option value="20" selected>20</option>
                                             <option value="50">50</option>
                                             <option value="100">100</option>
                                         </select>
-                                        <button onclick="detailGoToPage(detailCurrentPage - 1)" id="detail-prev-btn"
+                                        <button data-action="detailPrevPage" id="detail-prev-btn"
                                             disabled data-i18n="prevPage">上一页</button>
                                         <span class="page-info"><span id="detail-current-page">1</span> / <span
                                                 id="detail-total-pages">1</span></span>
-                                        <button onclick="detailGoToPage(detailCurrentPage + 1)" id="detail-next-btn"
+                                        <button data-action="detailNextPage" id="detail-next-btn"
                                             disabled data-i18n="nextPage">下一页</button>
                                     </div>
                                 </div>
@@ -713,8 +709,8 @@
                                 </select>
                             </div>
                             <div class="filter-actions">
-                                <button class="filter-btn primary" onclick="applyContactsFilter()" data-i18n="filterBtn">筛选</button>
-                                <button class="filter-btn secondary" onclick="resetContactsFilter()" data-i18n="resetBtn">重置</button>
+                                <button class="filter-btn primary" data-action="applyContactsFilter" data-i18n="filterBtn">筛选</button>
+                                <button class="filter-btn secondary" data-action="resetContactsFilter" data-i18n="resetBtn">重置</button>
                             </div>
                         </div>
 
@@ -722,7 +718,7 @@
                         <div class="table-container">
                             <div class="section-header">
                                 <div class="section-title" data-i18n="contactList">联系方列表</div>
-                                <button class="action-btn add-btn" onclick="showAddContactModal()">
+                                <button class="action-btn add-btn" data-action="showAddContactModal">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <line x1="12" y1="5" x2="12" y2="19"></line>
                                         <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -751,15 +747,15 @@
                                     <span data-i18n="recordsUnit">条记录</span>
                                 </div>
                                 <div class="pagination-controls">
-                                    <select class="page-size-select" id="contacts-page-size" onchange="changeContactsPageSize(this.value)">
+                                    <select class="page-size-select" id="contacts-page-size" data-action-change="changeContactsPageSize">
                                         <option value="10">10</option>
                                         <option value="20" selected>20</option>
                                         <option value="50">50</option>
                                         <option value="100">100</option>
                                     </select>
-                                    <button onclick="contactsGoToPage(contactsCurrentPage - 1)" id="contacts-prev-btn" disabled data-i18n="prevPage">上一页</button>
+                                    <button data-action="contactsPrevPage" id="contacts-prev-btn" disabled data-i18n="prevPage">上一页</button>
                                     <span class="page-info"><span id="contacts-current-page">1</span> / <span id="contacts-total-pages">1</span></span>
-                                    <button onclick="contactsGoToPage(contactsCurrentPage + 1)" id="contacts-next-btn" disabled data-i18n="nextPage">下一页</button>
+                                    <button data-action="contactsNextPage" id="contacts-next-btn" disabled data-i18n="nextPage">下一页</button>
                                 </div>
                             </div>
                         </div>
@@ -775,7 +771,7 @@
                         <div class="table-container">
                             <div class="section-header">
                                 <div class="section-title" data-i18n="userList">用户列表</div>
-                                <button class="action-btn add-btn" onclick="showAddUserModal()">
+                                <button class="action-btn add-btn" data-action="showAddUserModal">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <line x1="12" y1="5" x2="12" y2="19"></line>
                                         <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -799,10 +795,10 @@
                         </div>
 
                         <!-- API密钥列表 -->
-                        <div class="table-container" style="margin-top: 24px;">
+                        <div class="table-container mt-6">
                             <div class="section-header">
                                 <div class="section-title" data-i18n="apiKeyList">API密钥</div>
-                                <button class="action-btn add-btn" onclick="showAddApiKeyModal()">
+                                <button class="action-btn add-btn" data-action="showAddApiKeyModal">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <line x1="12" y1="5" x2="12" y2="19"></line>
                                         <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -833,14 +829,14 @@
         <div class="modal-content modal-large">
             <div class="modal-header">
                 <h3 data-i18n="importInventory">导入库存</h3>
-                <button class="close-btn" onclick="closeImportModal()">&times;</button>
+                <button class="close-btn" data-action="closeImportModal">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label><span data-i18n="selectFile">选择Excel文件</span> <span class="required">*</span></label>
-                    <div class="upload-area" onclick="document.getElementById('excel-file').click()">
+                    <div class="upload-area" data-action="triggerFileUpload">
                         <input type="file" id="excel-file" accept=".xlsx, .xls" style="display: none;"
-                            onchange="handleFileSelect(event)">
+                            data-action-change="handleFileSelect">
                         <div class="upload-content">
                             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2">
                                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
@@ -897,8 +893,8 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeImportModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="confirmImport()" id="confirm-import-btn" disabled
+                <button class="btn cancel-btn" data-action="closeImportModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="confirmImport" id="confirm-import-btn" disabled
                     data-i18n="confirmImport">确认导入</button>
             </div>
         </div>
@@ -909,15 +905,15 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3 data-i18n="confirmNewSku">确认新增物料</h3>
-                <button class="close-btn" onclick="closeNewSkuModal()">&times;</button>
+                <button class="close-btn" data-action="closeNewSkuModal">&times;</button>
             </div>
             <div class="modal-body">
                 <p class="warning-text" data-i18n="newSkuWarning">以下SKU在系统中不存在，将创建新物料：</p>
                 <div class="new-sku-list" id="new-sku-list"></div>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="skipNewSkus()" data-i18n="skipNewSkus">跳过新增</button>
-                <button class="btn confirm-btn" onclick="confirmNewSkus()" data-i18n="confirmCreate">确认创建</button>
+                <button class="btn cancel-btn" data-action="skipNewSkus" data-i18n="skipNewSkus">跳过新增</button>
+                <button class="btn confirm-btn" data-action="confirmNewSkus" data-i18n="confirmCreate">确认创建</button>
             </div>
         </div>
     </div>
@@ -927,7 +923,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3 data-i18n="addInventoryRecord">新增出入库记录</h3>
-                <button class="close-btn" onclick="closeAddRecordModal()">&times;</button>
+                <button class="close-btn" data-action="closeAddRecordModal">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="add-record-form">
@@ -936,7 +932,7 @@
                         <div id="record-product-wrapper" class="searchable-select">
                             <input type="text" class="searchable-select-input" id="record-product-input"
                                 placeholder="搜索产品名称或编码..." autocomplete="off">
-                            <button type="button" class="searchable-select-clear" onclick="clearRecordProductSelector()">&times;</button>
+                            <button type="button" class="searchable-select-clear" data-action="clearRecordProductSelector">&times;</button>
                             <span class="searchable-select-arrow">▼</span>
                             <div class="searchable-select-dropdown" id="record-product-dropdown"></div>
                             <input type="hidden" id="record-product" value="" required>
@@ -976,8 +972,8 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeAddRecordModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="submitAddRecord()" data-i18n="submit">提交</button>
+                <button class="btn cancel-btn" data-action="closeAddRecordModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="submitAddRecord" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>
@@ -987,10 +983,10 @@
         <div class="modal-content modal-small">
             <div class="modal-header">
                 <h3 data-i18n="login">登录</h3>
-                <button class="close-btn" onclick="closeLoginModal()">&times;</button>
+                <button class="close-btn" data-action="closeLoginModal">&times;</button>
             </div>
             <div class="modal-body">
-                <form id="login-form" onsubmit="handleLogin(event)">
+                <form id="login-form">
                     <div class="form-group">
                         <label><span data-i18n="username">用户名</span> <span class="required">*</span></label>
                         <input type="text" id="login-username" required autocomplete="username">
@@ -1003,8 +999,8 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeLoginModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="handleLogin(event)" data-i18n="login">登录</button>
+                <button class="btn cancel-btn" data-action="closeLoginModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="handleLogin" data-i18n="login">登录</button>
             </div>
         </div>
     </div>
@@ -1017,7 +1013,7 @@
             </div>
             <div class="modal-body">
                 <p class="setup-hint" data-i18n="setupHint">首次使用请创建管理员账号</p>
-                <form id="setup-form" onsubmit="handleSetup(event)">
+                <form id="setup-form">
                     <div class="form-group">
                         <label><span data-i18n="username">用户名</span> <span class="required">*</span></label>
                         <input type="text" id="setup-username" required>
@@ -1038,7 +1034,7 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn confirm-btn" onclick="handleSetup(event)" data-i18n="createAdmin">创建管理员</button>
+                <button class="btn confirm-btn" data-action="handleSetup" data-i18n="createAdmin">创建管理员</button>
             </div>
         </div>
     </div>
@@ -1048,7 +1044,7 @@
         <div class="modal-content modal-small">
             <div class="modal-header">
                 <h3 data-i18n="addUser">添加用户</h3>
-                <button class="close-btn" onclick="closeAddUserModal()">&times;</button>
+                <button class="close-btn" data-action="closeAddUserModal">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="add-user-form">
@@ -1076,8 +1072,8 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeAddUserModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="handleAddUser()" data-i18n="submit">提交</button>
+                <button class="btn cancel-btn" data-action="closeAddUserModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="handleAddUser" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>
@@ -1087,7 +1083,7 @@
         <div class="modal-content modal-small">
             <div class="modal-header">
                 <h3 data-i18n="editUser">编辑用户</h3>
-                <button class="close-btn" onclick="closeEditUserModal()">&times;</button>
+                <button class="close-btn" data-action="closeEditUserModal">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="edit-user-form">
@@ -1116,8 +1112,8 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeEditUserModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="handleEditUser()" data-i18n="submit">保存</button>
+                <button class="btn cancel-btn" data-action="closeEditUserModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="handleEditUser" data-i18n="submit">保存</button>
             </div>
         </div>
     </div>
@@ -1127,7 +1123,7 @@
         <div class="modal-content modal-small">
             <div class="modal-header">
                 <h3 data-i18n="addApiKey">添加API密钥</h3>
-                <button class="close-btn" onclick="closeAddApiKeyModal()">&times;</button>
+                <button class="close-btn" data-action="closeAddApiKeyModal">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="add-api-key-form">
@@ -1147,8 +1143,8 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeAddApiKeyModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="handleAddApiKey()" data-i18n="submit">提交</button>
+                <button class="btn cancel-btn" data-action="closeAddApiKeyModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="handleAddApiKey" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>
@@ -1163,7 +1159,7 @@
                 <p class="warning-text" data-i18n="apiKeyWarning">请妥善保存此密钥，关闭后将无法再次查看：</p>
                 <div class="api-key-display">
                     <code id="created-api-key"></code>
-                    <button class="copy-btn" onclick="copyApiKey()">
+                    <button class="copy-btn" data-action="copyApiKey">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
@@ -1172,7 +1168,7 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn confirm-btn" onclick="closeShowApiKeyModal()" data-i18n="confirm">确定</button>
+                <button class="btn confirm-btn" data-action="closeShowApiKeyModal" data-i18n="confirm">确定</button>
             </div>
         </div>
     </div>
@@ -1182,7 +1178,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="contact-modal-title" data-i18n="addContact">添加联系方</h3>
-                <button class="close-btn" onclick="closeContactModal()">&times;</button>
+                <button class="close-btn" data-action="closeContactModal">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="contact-form">
@@ -1224,13 +1220,13 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn cancel-btn" onclick="closeContactModal()" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" onclick="handleSaveContact()" data-i18n="submit">提交</button>
+                <button class="btn cancel-btn" data-action="closeContactModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="handleSaveContact" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
 </body>
 
 </html>

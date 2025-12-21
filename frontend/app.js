@@ -1,4 +1,11 @@
-const API_BASE_URL = 'http://localhost:2124/api';
+// Import ECharts from npm package (local installation)
+console.log('App module initializing...');
+import * as echarts from 'echarts';
+
+// Import i18n module
+import { toggleLangDropdown, selectLanguage } from './i18n.js';
+
+const API_BASE_URL = '/api';
 
 // ============ 全局变量 ============
 let currentTab = 'dashboard';
@@ -445,7 +452,7 @@ function initSearchableSelect(config) {
     input.parentNode.replaceChild(newInput, input);
 
     // 输入事件 - 过滤选项
-    newInput.addEventListener('input', function(e) {
+    newInput.addEventListener('input', function (e) {
         const query = e.target.value.trim();
         renderSearchableOptions(wrapper, query);
         openSearchableDropdown(wrapper);
@@ -453,13 +460,13 @@ function initSearchableSelect(config) {
     });
 
     // 点击输入框 - 显示下拉
-    newInput.addEventListener('focus', function() {
+    newInput.addEventListener('focus', function () {
         renderSearchableOptions(wrapper, newInput.value.trim());
         openSearchableDropdown(wrapper);
     });
 
     // 键盘导航
-    newInput.addEventListener('keydown', function(e) {
+    newInput.addEventListener('keydown', function (e) {
         const options = dropdown.querySelectorAll('.searchable-select-option');
         const maxIndex = options.length - 1;
 
@@ -483,7 +490,7 @@ function initSearchableSelect(config) {
     });
 
     // 点击外部关闭下拉
-    document.addEventListener('click', function(e) {
+    document.addEventListener('click', function (e) {
         if (!wrapper.contains(e.target)) {
             closeSearchableDropdown(wrapper);
         }
@@ -502,7 +509,7 @@ function renderSearchableOptions(wrapper, query) {
     const filtered = config.products.filter(p => {
         if (!query) return true;
         return p.name.toLowerCase().includes(queryLower) ||
-               p.sku.toLowerCase().includes(queryLower);
+            p.sku.toLowerCase().includes(queryLower);
     });
 
     if (filtered.length === 0) {
@@ -540,7 +547,7 @@ function renderSearchableOptions(wrapper, query) {
 
     // 绑定点击事件
     dropdown.querySelectorAll('.searchable-select-option').forEach(opt => {
-        opt.addEventListener('click', function() {
+        opt.addEventListener('click', function () {
             const value = this.dataset.value;
             selectSearchableOption(wrapper, value);
         });
@@ -2281,6 +2288,28 @@ async function disableApiKey(keyId) {
     }
 }
 
+// 切换API密钥状态
+async function toggleApiKeyStatus(keyId, isDisabled) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/api-keys/${keyId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ is_disabled: !isDisabled })
+        });
+
+        if (response.ok) {
+            loadApiKeys();
+        } else {
+            const data = await response.json();
+            alert(data.detail || data.error || t('operationFailed'));
+        }
+    } catch (error) {
+        console.error('更新API密钥状态失败:', error);
+        alert(t('operationFailed'));
+    }
+}
+
 // ============ 联系方管理 ============
 
 // 加载联系方列表
@@ -2341,9 +2370,9 @@ function renderContactsTable(contacts) {
                 <td>
                     <button class="action-btn-small" onclick="editContact(${contact.id})">${t('edit')}</button>
                     ${contact.is_disabled
-                        ? `<button class="action-btn-small success" onclick="toggleContactStatus(${contact.id}, true)">${t('enable')}</button>`
-                        : `<button class="action-btn-small danger" onclick="toggleContactStatus(${contact.id}, false)">${t('disable')}</button>`
-                    }
+                ? `<button class="action-btn-small success" onclick="toggleContactStatus(${contact.id}, true)">${t('enable')}</button>`
+                : `<button class="action-btn-small danger" onclick="toggleContactStatus(${contact.id}, false)">${t('disable')}</button>`
+            }
                 </td>
             </tr>
         `;
@@ -2517,3 +2546,265 @@ async function toggleContactStatus(contactId, isDisabled) {
         alert(t('operationFailed'));
     }
 }
+
+// ============ 导出到 window 对象（用于 HTML inline handlers） ============
+// 由于使用 ES Module，需要将 HTML 中 onclick 等调用的函数暴露到全局
+
+// Tab 切换与导航
+window.switchTab = switchTab;
+window.goBackToInventory = goBackToInventory;
+window.refreshCurrentTab = refreshCurrentTab;
+
+// 统计卡片点击
+window.onTotalStockClick = onTotalStockClick;
+window.onTodayInClick = onTodayInClick;
+window.onTodayOutClick = onTodayOutClick;
+window.onLowStockClick = onLowStockClick;
+
+// 语言切换
+window.toggleLangDropdown = toggleLangDropdown;
+window.selectLanguage = selectLanguage;
+
+// 用户认证
+window.showLoginModal = showLoginModal;
+window.closeLoginModal = closeLoginModal;
+window.handleLogin = handleLogin;
+window.handleLogout = handleLogout;
+window.handleSetup = handleSetup;
+
+// 用户管理
+window.showAddUserModal = showAddUserModal;
+window.closeAddUserModal = closeAddUserModal;
+window.handleAddUser = handleAddUser;
+window.showEditUserModal = showEditUserModal;
+window.closeEditUserModal = closeEditUserModal;
+window.handleEditUser = handleEditUser;
+window.toggleUserStatus = toggleUserStatus;
+
+// API 密钥管理
+window.showAddApiKeyModal = showAddApiKeyModal;
+window.closeAddApiKeyModal = closeAddApiKeyModal;
+window.handleAddApiKey = handleAddApiKey;
+window.copyApiKey = copyApiKey;
+window.closeShowApiKeyModal = closeShowApiKeyModal;
+window.toggleApiKeyStatus = toggleApiKeyStatus;
+
+// 筛选器
+window.applyRecordsFilter = applyRecordsFilter;
+window.resetRecordsFilter = resetRecordsFilter;
+window.applyInventoryFilter = applyInventoryFilter;
+window.resetInventoryFilter = resetInventoryFilter;
+window.applyContactsFilter = applyContactsFilter;
+window.resetContactsFilter = resetContactsFilter;
+
+// 多选下拉组件
+window.toggleDropdown = toggleDropdown;
+window.toggleDropdownItem = toggleDropdownItem;
+
+// 记录操作
+window.showAddRecordModal = showAddRecordModal;
+window.closeAddRecordModal = closeAddRecordModal;
+window.submitAddRecord = submitAddRecord;
+window.showAddRecordModalForProduct = showAddRecordModalForProduct;
+window.exportRecords = exportRecords;
+window.exportProductRecords = exportProductRecords;
+
+// 产品选择器
+window.clearProductSelector = clearProductSelector;
+window.clearRecordProductSelector = clearRecordProductSelector;
+
+// 库存操作
+window.showImportModal = showImportModal;
+window.closeImportModal = closeImportModal;
+window.handleFileSelect = handleFileSelect;
+window.confirmImport = confirmImport;
+window.exportInventory = exportInventory;
+window.viewProductDetail = viewProductDetail;
+
+// 新 SKU 确认
+window.closeNewSkuModal = closeNewSkuModal;
+window.skipNewSkus = skipNewSkus;
+window.confirmNewSkus = confirmNewSkus;
+
+// 分页控制
+window.recordsGoToPage = recordsGoToPage;
+window.changeRecordsPageSize = changeRecordsPageSize;
+window.inventoryGoToPage = inventoryGoToPage;
+window.changeInventoryPageSize = changeInventoryPageSize;
+window.detailGoToPage = detailGoToPage;
+window.changeDetailPageSize = changeDetailPageSize;
+window.contactsGoToPage = contactsGoToPage;
+window.changeContactsPageSize = changeContactsPageSize;
+
+// 联系方管理
+window.showAddContactModal = showAddContactModal;
+window.closeContactModal = closeContactModal;
+window.handleSaveContact = handleSaveContact;
+window.showEditContactModal = showEditContactModal;
+window.toggleContactStatus = toggleContactStatus;
+
+// 暴露分页状态变量（用于 HTML inline 引用）
+// 使用 getter 保持与模块变量同步
+Object.defineProperty(window, 'recordsCurrentPage', {
+    get: function () { return recordsCurrentPage; }
+});
+Object.defineProperty(window, 'inventoryCurrentPage', {
+    get: function () { return inventoryCurrentPage; }
+});
+Object.defineProperty(window, 'detailCurrentPage', {
+    get: function () { return detailCurrentPage; }
+});
+Object.defineProperty(window, 'contactsCurrentPage', {
+    get: function () { return contactsCurrentPage; }
+});
+
+// ============ 事件委托系统 ============
+// 使用 data-action 属性替代 inline onclick
+
+const actionHandlers = {
+    // 导航
+    'switchTab': (el) => switchTab(el.dataset.tab),
+
+    // 语言
+    'toggleLangDropdown': toggleLangDropdown,
+    'selectLanguage': (el) => selectLanguage(el.dataset.lang),
+
+    // 刷新
+    'refreshCurrentTab': refreshCurrentTab,
+
+    // 登录/登出
+    'showLoginModal': showLoginModal,
+    'closeLoginModal': closeLoginModal,
+    'handleLogin': (el) => handleLogin(new Event('click')),
+    'handleLogout': handleLogout,
+    'handleSetup': (el) => handleSetup(new Event('click')),
+
+    // 用户管理
+    'showAddUserModal': showAddUserModal,
+    'closeAddUserModal': closeAddUserModal,
+    'handleAddUser': handleAddUser,
+    'showEditUserModal': (el) => showEditUserModal(el.dataset.userId),
+    'closeEditUserModal': closeEditUserModal,
+    'handleEditUser': handleEditUser,
+    'toggleUserStatus': (el) => toggleUserStatus(el.dataset.userId, el.dataset.isDisabled === 'true'),
+
+    // API 密钥
+    'showAddApiKeyModal': showAddApiKeyModal,
+    'closeAddApiKeyModal': closeAddApiKeyModal,
+    'handleAddApiKey': handleAddApiKey,
+    'copyApiKey': copyApiKey,
+    'closeShowApiKeyModal': closeShowApiKeyModal,
+    'toggleApiKeyStatus': (el) => toggleApiKeyStatus(el.dataset.keyId, el.dataset.isDisabled === 'true'),
+    'disableApiKey': (el) => disableApiKey(el.dataset.keyId),
+
+    // 筛选器
+    'applyRecordsFilter': applyRecordsFilter,
+    'resetRecordsFilter': resetRecordsFilter,
+    'applyInventoryFilter': applyInventoryFilter,
+    'resetInventoryFilter': resetInventoryFilter,
+    'applyContactsFilter': applyContactsFilter,
+    'resetContactsFilter': resetContactsFilter,
+
+    // 多选下拉 - dropdown ID 从父元素获取
+    'toggleDropdown': (el) => {
+        const dropdown = el.closest('.dropdown-multiselect');
+        if (dropdown) toggleDropdown(dropdown.id);
+    },
+    'toggleDropdownItem': (el) => toggleDropdownItem(el),
+
+    // 记录操作
+    'showAddRecordModal': showAddRecordModal,
+    'closeAddRecordModal': closeAddRecordModal,
+    'submitAddRecord': submitAddRecord,
+    'showAddRecordModalForProduct': showAddRecordModalForProduct,
+    'exportRecords': exportRecords,
+    'exportProductRecords': exportProductRecords,
+
+    // 产品选择器
+    'clearProductSelector': clearProductSelector,
+    'clearRecordProductSelector': clearRecordProductSelector,
+    'goBackToInventory': goBackToInventory,
+
+    // 库存操作
+    'showImportModal': showImportModal,
+    'closeImportModal': closeImportModal,
+    'triggerFileUpload': () => document.getElementById('excel-file').click(),
+    'handleFileSelect': (el, event) => handleFileSelect(event),
+    'confirmImport': confirmImport,
+    'exportInventory': exportInventory,
+    'viewProductDetail': (el) => viewProductDetail(el.dataset.productId),
+
+    // 新 SKU 确认
+    'closeNewSkuModal': closeNewSkuModal,
+    'skipNewSkus': skipNewSkus,
+    'confirmNewSkus': confirmNewSkus,
+
+    // 分页 - 上一页/下一页
+    'recordsPrevPage': () => recordsGoToPage(recordsCurrentPage - 1),
+    'recordsNextPage': () => recordsGoToPage(recordsCurrentPage + 1),
+    'changeRecordsPageSize': (el) => changeRecordsPageSize(el.value),
+    'inventoryPrevPage': () => inventoryGoToPage(inventoryCurrentPage - 1),
+    'inventoryNextPage': () => inventoryGoToPage(inventoryCurrentPage + 1),
+    'changeInventoryPageSize': (el) => changeInventoryPageSize(el.value),
+    'detailPrevPage': () => detailGoToPage(detailCurrentPage - 1),
+    'detailNextPage': () => detailGoToPage(detailCurrentPage + 1),
+    'changeDetailPageSize': (el) => changeDetailPageSize(el.value),
+    'contactsPrevPage': () => contactsGoToPage(contactsCurrentPage - 1),
+    'contactsNextPage': () => contactsGoToPage(contactsCurrentPage + 1),
+    'changeContactsPageSize': (el) => changeContactsPageSize(el.value),
+
+    // 联系方管理
+    'showAddContactModal': showAddContactModal,
+    'closeContactModal': closeContactModal,
+    'handleSaveContact': handleSaveContact,
+    'showEditContactModal': (el) => showEditContactModal(el.dataset.contactId),
+    'toggleContactStatus': (el) => toggleContactStatus(el.dataset.contactId, el.dataset.isDisabled === 'true'),
+
+    // 统计卡片点击
+    'onTotalStockClick': onTotalStockClick,
+    'onTodayInClick': onTodayInClick,
+    'onTodayOutClick': onTodayOutClick,
+    'onLowStockClick': onLowStockClick,
+};
+
+console.log('ActionHandlers initialized successfully:', Object.keys(actionHandlers));
+
+// 事件委托：监听所有点击事件
+document.addEventListener('click', function (e) {
+    // 查找具有 data-action 属性的元素（包括冒泡路径上的元素）
+    const actionEl = e.target.closest('[data-action]');
+    if (!actionEl) return;
+
+    const action = actionEl.dataset.action;
+    const handler = actionHandlers[action];
+
+    if (handler) {
+        e.preventDefault();
+        handler(actionEl);
+    } else {
+        console.warn('未定义的 action:', action);
+    }
+});
+
+// 处理 change 事件（select、input 等）
+document.addEventListener('change', function (e) {
+    const actionEl = e.target.closest('[data-action-change]');
+    if (!actionEl) return;
+
+    const action = actionEl.dataset.actionChange;
+    const handler = actionHandlers[action];
+
+    if (handler) {
+        handler(actionEl, e);
+    }
+});
+
+
+// ============ Missing Function Stubs (Fix for ReferenceErrors) ============
+function viewProductDetail(productId) {
+    console.log('viewProductDetail called', productId);
+    // Logic to switch to detail tab
+    currentProductName = productId;
+    switchTab('detail', { product: productId });
+}
+function showEditContactModal(contactId) { console.log('showEditContactModal not implemented', contactId); }

@@ -1,0 +1,46 @@
+# 前端生产环境 Dockerfile
+# 多阶段构建：Node.js 构建 + Python 静态服务
+
+# 阶段1：构建前端
+FROM node:20-alpine AS builder
+
+WORKDIR /build
+
+# 复制 package 文件
+COPY frontend/package.json frontend/package-lock.json* ./
+
+# 安装依赖
+RUN npm ci --prefer-offline 2>/dev/null || npm install
+
+# 复制源代码
+COPY frontend/ ./
+
+# 构建生产版本
+RUN npm run build
+
+# 阶段2：运行静态服务
+FROM python:3.12-slim
+
+# 创建非root用户
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# 只复制构建产物
+COPY --from=builder /build/dist ./dist
+COPY frontend/server.py ./
+
+# 设置权限
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 2125
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:2125/', timeout=5)" || exit 1
+
+CMD ["python", "server.py"]

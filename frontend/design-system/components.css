@@ -1,0 +1,988 @@
+/**
+ * Seeed Warehouse Design System - Component Classes
+ *
+ * Complete migration from style.css to Tailwind.
+ * All classes are preserved for compatibility with existing HTML.
+ *
+ * Organization:
+ * 1. Layout (app-wrapper, sidebar, main-content)
+ * 2. Navigation (side-nav, nav-item, logo)
+ * 3. Header (top-header, breadcrumb, controls)
+ * 4. Tabs & Content
+ * 5. Statistics (stats-grid, stat-card)
+ * 6. Charts (dashboard-grid, chart-card)
+ * 7. Filters & Tables
+ * 8. Buttons
+ * 9. Badges
+ * 10. Pagination
+ * 11. Modals
+ * 12. Forms
+ * 13. Searchable Select
+ * 14. Dropdown Multiselect
+ * 15. User Info
+ * 16. Utilities
+ */
+
+@layer components {
+  /* ============================================
+     1. LAYOUT - Core App Structure
+     ============================================ */
+
+  .app-wrapper {
+    @apply flex h-screen w-screen;
+  }
+
+  .sidebar {
+    width: 240px;
+    @apply bg-sidebar border-r border-border flex flex-col flex-shrink-0;
+    transition: width 0.3s;
+  }
+
+  .main-content {
+    @apply flex-1 flex flex-col min-w-0 bg-body;
+  }
+
+  .content-scroll-area {
+    @apply flex-1 overflow-y-auto p-6;
+  }
+
+  .page-header {
+    @apply mb-6;
+  }
+
+  .page-title {
+    @apply text-xl font-semibold text-text-primary;
+  }
+
+  /* ============================================
+     2. NAVIGATION - Sidebar Navigation
+     ============================================ */
+
+  .logo-area {
+    height: 64px;
+    @apply flex items-center px-5 gap-3 border-b border-transparent;
+  }
+
+  .logo-icon {
+    @apply w-8 h-8 bg-primary text-white rounded-md flex items-center justify-center;
+  }
+
+  .logo-text .brand {
+    @apply font-bold text-base text-text-primary;
+  }
+
+  .side-nav {
+    @apply py-5 px-3 flex flex-col gap-2 flex-1;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 py-3 px-4 rounded-lg
+           text-text-secondary text-sm font-medium
+           transition-all duration-200 cursor-pointer
+           w-full text-left bg-transparent border-none no-underline;
+  }
+
+  .nav-item:hover {
+    @apply bg-hover text-text-primary;
+  }
+
+  .nav-item.active {
+    @apply bg-primary-light text-primary font-semibold;
+  }
+
+  /* ============================================
+     3. HEADER - Top Header Bar
+     ============================================ */
+
+  .top-header {
+    height: 64px;
+    @apply bg-sidebar border-b border-border flex items-center justify-between px-6 flex-shrink-0;
+  }
+
+  .breadcrumb {
+    @apply flex items-center;
+  }
+
+  .current-page-title {
+    @apply font-semibold text-lg text-text-primary;
+  }
+
+  .header-right {
+    @apply flex items-center gap-4;
+  }
+
+  /* Header Controls */
+  .lang-dropdown {
+    @apply relative;
+  }
+
+  .lang-btn,
+  .refresh-btn {
+    @apply flex items-center gap-1.5 py-1.5 px-3 bg-transparent
+           border border-border rounded cursor-pointer text-13
+           text-text-secondary transition-all duration-200 h-8;
+  }
+
+  .lang-btn:hover,
+  .refresh-btn:hover {
+    @apply border-primary text-primary bg-primary-light;
+  }
+
+  .lang-dropdown-menu {
+    @apply hidden absolute top-full right-0 mt-1 bg-white
+           border border-border rounded shadow-md z-modal min-w-[100px];
+  }
+
+  .lang-dropdown-menu.show {
+    @apply block;
+  }
+
+  .lang-option {
+    @apply py-2 px-3 text-13 cursor-pointer text-text-primary;
+  }
+
+  .lang-option:hover {
+    @apply bg-hover text-primary;
+  }
+
+  .update-info {
+    @apply text-xs text-text-muted flex items-center gap-1 py-1 px-2 bg-table rounded;
+  }
+
+  #countdown {
+    @apply text-primary font-semibold min-w-[16px] text-center;
+  }
+
+  /* ============================================
+     4. TABS & CONTENT
+     ============================================ */
+
+  .tab-pane {
+    @apply hidden;
+    animation: fadeIn 0.3s ease;
+  }
+
+  .tab-pane.active {
+    @apply block;
+  }
+
+  /* ============================================
+     5. STATISTICS CARDS
+     ============================================ */
+
+  .stats-grid {
+    @apply grid gap-5 mb-6;
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .stat-card {
+    @apply bg-card rounded-lg p-6 shadow-sm
+           border border-transparent flex justify-between items-center;
+    transition: all 0.3s ease;
+  }
+
+  .stat-card:hover {
+    @apply shadow-md border-primary;
+    transform: translateY(-2px);
+  }
+
+  .stat-card.clickable {
+    @apply cursor-pointer;
+  }
+
+  .stat-info {
+    @apply flex flex-col;
+  }
+
+  .stat-label {
+    @apply text-sm text-text-secondary mb-3;
+  }
+
+  .stat-value-group {
+    @apply flex flex-col gap-1;
+  }
+
+  .stat-value {
+    @apply text-[32px] font-bold text-text-primary leading-none;
+  }
+
+  .stat-subtitle {
+    @apply text-xs text-text-muted;
+  }
+
+  .stat-change {
+    @apply text-13 font-medium;
+  }
+
+  .stat-change.positive {
+    @apply text-success;
+  }
+
+  .stat-change.negative {
+    @apply text-danger;
+  }
+
+  .stat-icon-bg {
+    @apply w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0;
+  }
+
+  .stat-icon-bg.green {
+    @apply bg-primary-light text-primary;
+  }
+
+  .stat-icon-bg.blue {
+    @apply bg-[#e6f7ff] text-info;
+  }
+
+  .stat-icon-bg.orange {
+    @apply bg-[#fff7e6] text-warning;
+  }
+
+  .stat-icon-bg.red {
+    @apply bg-[#fff1f0] text-danger;
+  }
+
+  /* ============================================
+     6. DASHBOARD & CHARTS
+     ============================================ */
+
+  .dashboard-grid {
+    @apply grid gap-5;
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .chart-card {
+    @apply bg-card rounded-lg p-6 shadow-sm flex flex-col;
+  }
+
+  .chart-card.full-width {
+    grid-column: span 2;
+  }
+
+  .card-header {
+    @apply flex justify-between items-center mb-6;
+  }
+
+  .card-title {
+    @apply text-base font-semibold text-text-primary relative pl-3;
+  }
+
+  .card-title::before {
+    content: '';
+    @apply absolute left-0 top-1/2 w-1 h-4 bg-primary rounded-sm;
+    transform: translateY(-50%);
+  }
+
+  .charts-container {
+    @apply grid gap-5 mb-6;
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .chart-wrapper {
+    @apply bg-card rounded-lg p-6 shadow-sm flex flex-col;
+  }
+
+  .chart-title {
+    @apply text-base font-semibold text-text-primary mb-4 relative pl-3;
+  }
+
+  .chart-title::before {
+    content: '';
+    @apply absolute left-0 top-1/2 w-1 h-4 bg-primary rounded-sm;
+    transform: translateY(-50%);
+  }
+
+  .chart {
+    @apply w-full;
+    height: 300px;
+  }
+
+  /* ============================================
+     7. FILTERS & TABLES
+     ============================================ */
+
+  .filter-bar {
+    @apply bg-card rounded-lg p-5 shadow-sm mb-5 flex flex-wrap gap-5 items-end;
+  }
+
+  .filter-group {
+    @apply flex flex-col gap-2;
+  }
+
+  .filter-group label {
+    @apply text-xs text-text-secondary font-medium;
+  }
+
+  .filter-group input,
+  .filter-group select {
+    @apply py-2 px-3 border border-border rounded text-sm transition-all duration-200;
+    min-width: 180px;
+  }
+
+  .filter-group input:focus,
+  .filter-group select:focus {
+    @apply outline-none border-primary;
+    box-shadow: 0 0 0 2px rgba(140, 198, 63, 0.2);
+  }
+
+  .filter-actions {
+    @apply ml-auto flex gap-3;
+  }
+
+  .section-header {
+    @apply flex justify-between items-center py-5 px-6 border-b border-border bg-header;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .section-title {
+    @apply text-lg font-semibold text-text-primary;
+  }
+
+  .action-buttons {
+    @apply flex gap-3;
+  }
+
+  .table-container {
+    @apply bg-card rounded-lg p-0 shadow-sm overflow-hidden;
+  }
+
+  /* ============================================
+     8. BUTTONS
+     ============================================ */
+
+  .btn,
+  .filter-btn,
+  .action-btn {
+    @apply py-2 px-4 rounded-lg border border-transparent cursor-pointer text-sm
+           transition-all duration-200 inline-flex items-center gap-2 justify-center font-medium;
+  }
+
+  .filter-btn.primary,
+  .btn.confirm-btn {
+    @apply bg-primary text-white;
+  }
+
+  .filter-btn.primary:hover,
+  .btn.confirm-btn:hover {
+    @apply bg-primary-hover;
+  }
+
+  .filter-btn.secondary,
+  .btn.cancel-btn {
+    @apply bg-white border-border text-text-primary;
+  }
+
+  .filter-btn.secondary:hover,
+  .btn.cancel-btn:hover {
+    @apply border-primary text-primary;
+  }
+
+  .action-btn {
+    @apply bg-white border-border text-text-secondary;
+  }
+
+  .action-btn:hover {
+    @apply text-primary border-primary bg-primary-light;
+  }
+
+  .back-btn {
+    @apply border-none shadow-none text-text-secondary py-2 px-3;
+  }
+
+  .back-btn:hover {
+    @apply bg-hover text-primary;
+  }
+
+  /* Action buttons in table */
+  .action-btn-small {
+    @apply py-1.5 px-3 text-13 rounded-md border border-border bg-white
+           text-text-primary cursor-pointer mr-2 transition-all duration-200 font-medium;
+  }
+
+  .action-btn-small:hover {
+    @apply border-primary text-primary bg-hover;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  }
+
+  .action-btn-small.danger {
+    @apply text-danger border-[#ffccc7] bg-[#fff1f0];
+  }
+
+  .action-btn-small.danger:hover {
+    @apply text-white bg-danger border-danger;
+  }
+
+  .action-btn-small.success {
+    @apply text-success border-[#b7eb8f] bg-[#f6ffed];
+  }
+
+  .action-btn-small.success:hover {
+    @apply text-white bg-success border-success;
+  }
+
+  /* ============================================
+     9. BADGES
+     ============================================ */
+
+  .status-badge {
+    @apply py-1 px-2 rounded text-xs font-medium;
+  }
+
+  .status-badge.status-normal {
+    @apply bg-[#effce8] text-success;
+  }
+
+  .status-badge.status-warning {
+    @apply bg-[#fff7e6] text-warning;
+  }
+
+  .status-badge.status-danger {
+    @apply bg-[#fff1f0] text-danger;
+  }
+
+  .status-badge.status-disabled {
+    @apply bg-[#f5f5f5] text-text-muted;
+  }
+
+  .type-badge {
+    @apply py-0.5 px-2 rounded text-xs;
+  }
+
+  .type-badge.type-in {
+    @apply bg-[#e6f7ff] text-info;
+  }
+
+  .type-badge.type-out {
+    @apply bg-[#fff1f0] text-danger;
+  }
+
+  .batch-details {
+    @apply inline-block max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap
+           text-xs text-text-secondary cursor-help;
+  }
+
+  /* ============================================
+     10. PAGINATION
+     ============================================ */
+
+  .pagination {
+    @apply flex justify-between items-center py-4 px-6 border-t border-border bg-card;
+  }
+
+  .pagination-controls {
+    @apply flex items-center gap-2;
+  }
+
+  .page-size-select {
+    @apply py-1.5 px-3 border border-border rounded text-sm bg-white cursor-pointer mr-2;
+  }
+
+  .pagination-controls button {
+    @apply py-1.5 px-3 border border-border bg-white rounded cursor-pointer text-sm;
+  }
+
+  .pagination-controls button:disabled {
+    @apply opacity-50 cursor-not-allowed;
+  }
+
+  /* ============================================
+     11. MODALS
+     ============================================ */
+
+  .modal {
+    @apply hidden fixed inset-0 bg-black/50 z-modal items-center justify-center;
+  }
+
+  .modal.show {
+    @apply flex;
+  }
+
+  .modal-content {
+    @apply bg-white rounded-lg w-[90%] max-h-[90vh] overflow-y-auto shadow-lg flex flex-col;
+    max-width: 500px;
+  }
+
+  .modal-content.modal-large {
+    max-width: 800px;
+  }
+
+  .modal-content.modal-small {
+    max-width: 400px;
+  }
+
+  .modal-header {
+    @apply py-5 px-6 border-b border-border flex justify-between items-center;
+  }
+
+  .modal-header h3 {
+    @apply text-lg m-0 font-semibold;
+  }
+
+  .close-btn {
+    @apply bg-transparent border-none text-2xl cursor-pointer text-text-muted transition-colors duration-200;
+  }
+
+  .close-btn:hover {
+    @apply text-text-primary;
+  }
+
+  .modal-body {
+    @apply p-6;
+  }
+
+  .modal-footer {
+    @apply py-5 px-6 border-t border-border flex justify-end gap-3;
+  }
+
+  /* ============================================
+     12. FORMS
+     ============================================ */
+
+  .form-group {
+    @apply mb-4;
+  }
+
+  .form-group label {
+    @apply block mb-1.5 text-text-secondary text-13 font-medium;
+  }
+
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    @apply w-full py-2 px-3 border border-border rounded-md text-sm transition-all duration-200 bg-white;
+  }
+
+  .form-group input:focus,
+  .form-group select:focus,
+  .form-group textarea:focus {
+    @apply outline-none border-primary;
+    box-shadow: 0 0 0 2px rgba(140, 198, 63, 0.1);
+  }
+
+  .form-group textarea {
+    @apply min-h-[80px] resize-y;
+    font-family: inherit;
+  }
+
+  /* Radio Group - Segmented Control Style */
+  .radio-group {
+    @apply flex bg-[#f0f2f5] p-1 rounded-md w-fit gap-0;
+  }
+
+  .radio-label {
+    @apply flex items-center justify-center cursor-pointer text-sm py-1.5 px-5
+           rounded text-text-secondary transition-all duration-200 m-0 select-none;
+  }
+
+  .radio-label input[type="radio"] {
+    @apply hidden;
+  }
+
+  .radio-label:has(input:checked) {
+    @apply bg-white text-primary font-medium;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  }
+
+  /* Checkbox Group */
+  .checkbox-group {
+    @apply flex gap-3;
+  }
+
+  .checkbox-label {
+    @apply flex items-center cursor-pointer font-medium text-text-secondary
+           py-2 px-4 border border-border rounded-md transition-all duration-200 bg-white select-none;
+  }
+
+  .checkbox-label:hover {
+    @apply border-primary text-primary bg-hover;
+  }
+
+  .checkbox-label input[type="checkbox"] {
+    @apply mr-2 w-4 h-4 cursor-pointer;
+    accent-color: var(--color-primary);
+  }
+
+  .checkbox-label:has(input:checked) {
+    @apply bg-primary-light border-primary text-primary;
+  }
+
+  /* Upload Area */
+  .upload-area {
+    @apply border-2 border-dashed border-border p-10 text-center rounded-lg
+           cursor-pointer transition-all duration-200 bg-[#fafafa];
+  }
+
+  .upload-area:hover {
+    @apply border-primary bg-hover;
+  }
+
+  /* Form Utilities */
+  .required {
+    @apply text-danger ml-1;
+  }
+
+  .form-hint {
+    @apply mt-1 text-xs text-text-secondary leading-relaxed pl-6;
+  }
+
+  .form-error {
+    @apply text-danger text-13 py-2 px-3 bg-[#fff2f0] border border-[#ffccc7] rounded-md mt-3;
+  }
+
+  .warning-box {
+    @apply bg-[#fffbe6] border border-[#ffe58f] p-3 rounded-lg mt-4;
+  }
+
+  /* ============================================
+     13. HELPERS
+     ============================================ */
+
+  .no-data-hint {
+    @apply flex flex-col items-center justify-center h-[400px] text-text-muted gap-4 bg-white rounded-lg;
+  }
+
+  .divider-vertical {
+    @apply w-px h-6 bg-border mx-1;
+  }
+
+  /* ============================================
+     14. PRODUCT DETAIL
+     ============================================ */
+
+  .product-selector-bar {
+    @apply bg-card p-5 rounded-lg mb-5 flex items-center gap-3 shadow-sm;
+  }
+
+  .product-selector-bar label {
+    @apply font-medium text-text-primary;
+  }
+
+  .product-selector-bar select {
+    @apply flex-1 py-2 px-3 border border-border rounded;
+    max-width: 400px;
+  }
+
+  /* ============================================
+     15. SEARCHABLE SELECT
+     ============================================ */
+
+  .searchable-select {
+    @apply relative flex-1;
+    max-width: 400px;
+  }
+
+  .searchable-select-input {
+    @apply w-full py-2 pr-8 pl-3 border border-border rounded text-sm bg-white cursor-text;
+    box-sizing: border-box;
+  }
+
+  .searchable-select-input:focus {
+    @apply outline-none border-primary;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+  }
+
+  .searchable-select-input::placeholder {
+    @apply text-text-secondary;
+  }
+
+  .searchable-select-arrow {
+    @apply absolute right-2.5 top-1/2 pointer-events-none text-text-secondary transition-transform duration-200;
+    transform: translateY(-50%);
+  }
+
+  .searchable-select.open .searchable-select-arrow {
+    transform: translateY(-50%) rotate(180deg);
+  }
+
+  .searchable-select-clear {
+    @apply absolute top-1/2 w-4 h-4 border-none bg-text-muted text-white rounded-full
+           cursor-pointer text-xs leading-[14px] hidden items-center justify-center;
+    right: 30px;
+    transform: translateY(-50%);
+  }
+
+  .searchable-select-clear:hover {
+    @apply bg-text-secondary;
+  }
+
+  .searchable-select.has-value .searchable-select-clear {
+    @apply flex;
+  }
+
+  .searchable-select-dropdown {
+    @apply absolute top-full left-0 right-0 bg-white border border-border rounded
+           shadow-md max-h-[280px] overflow-y-auto z-modal hidden mt-1;
+  }
+
+  .searchable-select.open .searchable-select-dropdown {
+    @apply block;
+  }
+
+  .searchable-select-option {
+    @apply py-2.5 px-3 cursor-pointer text-sm border-b border-border-light transition-colors duration-150;
+  }
+
+  .searchable-select-option:last-child {
+    @apply border-b-0;
+  }
+
+  .searchable-select-option:hover,
+  .searchable-select-option.highlighted {
+    @apply bg-hover;
+  }
+
+  .searchable-select-option.selected {
+    @apply text-primary;
+    background-color: rgba(37, 99, 235, 0.1);
+  }
+
+  .searchable-select-option .option-name {
+    @apply font-medium;
+  }
+
+  .searchable-select-option .option-info {
+    @apply text-xs text-text-secondary mt-0.5;
+  }
+
+  .searchable-select-option .option-sku {
+    @apply text-text-muted text-xs;
+  }
+
+  .searchable-select-option .option-stock {
+    @apply float-right text-xs text-text-secondary;
+  }
+
+  .searchable-select-option.disabled-product {
+    @apply opacity-60;
+  }
+
+  .searchable-select-option.disabled-product .option-name::after {
+    content: ' [禁用]';
+    @apply text-danger text-xs;
+  }
+
+  .searchable-select-empty {
+    @apply py-5 text-center text-text-secondary text-sm;
+  }
+
+  .searchable-select-highlight {
+    @apply bg-[#fef08a] font-medium;
+  }
+
+  /* Form group searchable select */
+  .form-group .searchable-select {
+    max-width: none;
+  }
+
+  .form-group .searchable-select-input {
+    @apply w-full;
+  }
+
+  /* ============================================
+     16. DROPDOWN MULTISELECT
+     ============================================ */
+
+  .dropdown-multiselect {
+    @apply relative;
+    min-width: 180px;
+  }
+
+  .dropdown-trigger {
+    @apply py-2 px-3 border border-border rounded bg-white cursor-pointer
+           flex justify-between items-center text-sm;
+  }
+
+  .dropdown-menu {
+    @apply hidden absolute top-full left-0 w-full bg-white border border-border
+           rounded shadow-md mt-1 z-10 max-h-[200px] overflow-y-auto;
+  }
+
+  .dropdown-multiselect.open .dropdown-menu {
+    @apply block;
+  }
+
+  .dropdown-item {
+    @apply py-2 px-3 cursor-pointer flex items-center gap-2 text-sm;
+  }
+
+  .dropdown-item:hover {
+    @apply bg-hover;
+  }
+
+  .dropdown-item .checkbox {
+    @apply w-4 h-4 border border-border rounded-sm flex items-center justify-center;
+  }
+
+  .dropdown-item.selected .checkbox {
+    @apply bg-primary border-primary;
+  }
+
+  .dropdown-item.selected .checkbox::after {
+    content: '';
+    @apply border-solid border-white;
+    width: 4px;
+    height: 8px;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+    margin-top: -2px;
+  }
+
+  /* ============================================
+     17. USER INFO
+     ============================================ */
+
+  .user-info {
+    @apply flex items-center gap-3 pr-4 border-r border-border mr-2;
+  }
+
+  .user-display {
+    @apply flex items-center gap-2 text-text-secondary text-sm;
+  }
+
+  .user-role-badge {
+    @apply text-2xs py-0.5 px-1.5 rounded bg-primary-light text-primary-hover font-medium;
+  }
+
+  .user-role-badge.admin {
+    @apply bg-[#fff1f0] text-[#cf1322];
+  }
+
+  .user-role-badge.operate {
+    @apply bg-[#e6f7ff] text-info;
+  }
+
+  .login-btn,
+  .logout-btn {
+    @apply py-1.5 px-3 rounded-md border border-border bg-card text-text-primary
+           text-13 cursor-pointer transition-all duration-200;
+  }
+
+  .login-btn:hover {
+    @apply bg-primary text-white border-primary;
+  }
+
+  .logout-btn:hover {
+    @apply bg-danger text-white border-danger;
+  }
+
+  /* ============================================
+     18. API KEY & SETUP
+     ============================================ */
+
+  .setup-hint {
+    @apply text-text-secondary text-sm mb-4 text-center;
+  }
+
+  .api-key-display {
+    @apply flex items-center gap-2 p-3 bg-[#f5f5f5] rounded-lg mt-3;
+  }
+
+  .api-key-display code {
+    @apply flex-1 font-mono text-13 break-all text-text-primary;
+  }
+
+  .copy-btn {
+    @apply p-2 border-none bg-primary text-white rounded-md cursor-pointer
+           flex items-center justify-center transition-colors duration-200;
+  }
+
+  .copy-btn:hover {
+    @apply bg-primary-hover;
+  }
+
+  .warning-text {
+    @apply text-warning text-sm;
+  }
+}
+
+/* ============================================
+   KEYFRAMES (must be outside @layer)
+   ============================================ */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============================================
+   TABLE ELEMENTS (using base layer)
+   ============================================ */
+
+@layer base {
+  table {
+    @apply w-full border-collapse;
+  }
+
+  thead {
+    @apply bg-[#fafafa] border-b border-border;
+  }
+
+  th {
+    @apply bg-header text-text-secondary font-medium text-left py-4 px-6 border-b border-border;
+  }
+
+  td {
+    @apply py-4 px-6 border-b border-border-light text-text-primary text-sm;
+  }
+
+  tbody tr:hover {
+    @apply bg-[#fafafa];
+  }
+}
+
+/* ============================================
+   RESPONSIVE STYLES
+   ============================================ */
+
+@media (max-width: 768px) {
+  .app-wrapper {
+    @apply flex-col overflow-y-auto;
+  }
+
+  .sidebar {
+    @apply w-full h-auto border-r-0 border-b border-border;
+  }
+
+  .logo-area {
+    @apply justify-center;
+  }
+
+  .side-nav {
+    @apply flex-row overflow-x-auto p-2.5;
+  }
+
+  .nav-item {
+    @apply w-auto whitespace-nowrap py-2 px-3 flex-col gap-1.5 text-center text-xs;
+  }
+
+  .main-content {
+    @apply h-auto;
+    min-height: calc(100vh - 120px);
+  }
+
+  .content-scroll-area {
+    @apply overflow-visible;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-card.full-width {
+    grid-column: span 1;
+  }
+
+  .charts-container {
+    grid-template-columns: 1fr;
+  }
+}

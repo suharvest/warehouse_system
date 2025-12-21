@@ -1,0 +1,19 @@
+/**
+ * Seeed Warehouse Design System - Main Entry Point
+ *
+ * This file imports Tailwind CSS directives and the design system styles.
+ * It serves as the single entry point for all CSS in the application.
+ *
+ * Order is important:
+ * 1. @import statements (processed by postcss-import)
+ * 2. @tailwind directives (processed by Tailwind)
+ */
+
+/* Design System Imports (must come before @tailwind for postcss-import) */
+@import '../design-system/base.css';
+@import '../design-system/components.css';
+
+/* Tailwind CSS Directives */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
