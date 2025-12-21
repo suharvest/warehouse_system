@@ -43,7 +43,7 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: frontend/Dockerfile
+      dockerfile: frontend/Dockerfile.prod
     container_name: warehouse-frontend-prod
     ports:
       - "2125:2125"

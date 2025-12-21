@@ -150,14 +150,24 @@ class ImportPreviewItem(BaseModel):
     is_new: bool = False
 
 
+class MissingSkuItem(BaseModel):
+    """缺失的SKU项"""
+    sku: str
+    name: str
+    category: str
+    current_quantity: int
+
+
 class ExcelImportPreviewResponse(BaseModel):
     """Excel导入预览响应"""
     success: bool
     preview: List[ImportPreviewItem]
     new_skus: List[ImportPreviewItem]
+    missing_skus: List[MissingSkuItem] = []  # 系统中有但导入文件中没有的SKU
     total_in: int
     total_out: int
     total_new: int
+    total_missing: int = 0  # 缺失SKU数量
     message: str
 
 
@@ -325,6 +335,11 @@ class CreateApiKeyRequest(BaseModel):
     """创建API密钥请求"""
     name: str
     role: str = 'operate'  # 'admin' | 'operate' | 'view'
+
+
+class ApiKeyStatusRequest(BaseModel):
+    """API密钥状态请求"""
+    disabled: bool
 
 
 class ApiKeyResponse(BaseModel):

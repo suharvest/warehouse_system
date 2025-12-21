@@ -35,3 +35,8 @@ env/
 # 日志文件
 *.log
 logs/
+
+# Node.js / npm
+frontend/node_modules/
+frontend/dist/
+frontend/package-lock.json

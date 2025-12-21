@@ -834,7 +834,7 @@
             <div class="modal-body">
                 <div class="form-group">
                     <label><span data-i18n="selectFile">选择Excel文件</span> <span class="required">*</span></label>
-                    <div class="upload-area" data-action="triggerFileUpload">
+                    <label class="upload-area" for="excel-file">
                         <input type="file" id="excel-file" accept=".xlsx, .xls" style="display: none;"
                             data-action-change="handleFileSelect">
                         <div class="upload-content">
@@ -843,7 +843,7 @@
                             </svg>
                             <p data-i18n="dropFileHere">点击选择Excel文件</p>
                         </div>
-                    </div>
+                    </label>
                 </div>
                 <div id="preview-area" style="display:none;">
                     <h4 data-i18n="importPreview">导入预览</h4>
@@ -1226,7 +1226,7 @@
         </div>
     </div>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="src/modules/main.js"></script>
 </body>
 
 </html>

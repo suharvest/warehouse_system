@@ -29,13 +29,13 @@ from models import (
     MaterialItem, XiaozhiItem, ProductStats, ProductRecord,
     StockOperationRequest, StockOperationResponse, StockOperationProduct,
     ImportPreviewItem, ExcelImportPreviewResponse, ExcelImportConfirm,
-    ExcelImportResponse, ManualRecordRequest,
+    ExcelImportResponse, ManualRecordRequest, MissingSkuItem,
     PaginatedMaterialsResponse, PaginatedRecordsResponse, MaterialItemWithDisabled,
     InventoryRecordItem, PaginatedProductRecordsResponse,
     # Auth models
     AuthStatusResponse, UserInfo, SetupRequest, LoginRequest, LoginResponse,
     CreateUserRequest, UpdateUserRequest, UserListItem,
-    CreateApiKeyRequest, ApiKeyResponse, ApiKeyListItem,
+    CreateApiKeyRequest, ApiKeyStatusRequest, ApiKeyResponse, ApiKeyListItem,
     # Contact models
     CreateContactRequest, UpdateContactRequest, ContactItem, ContactListItem,
     PaginatedContactsResponse,
@@ -725,7 +725,7 @@ async def delete_api_key(
     key_id: int,
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
-    """禁用API密钥（仅管理员）"""
+    """删除API密钥（仅管理员）"""
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -733,10 +733,32 @@ async def delete_api_key(
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="API密钥不存在")
 
-        cursor.execute('UPDATE api_keys SET is_disabled = 1 WHERE id = ?', (key_id,))
+        cursor.execute('DELETE FROM api_keys WHERE id = ?', (key_id,))
         conn.commit()
 
-        return {"success": True, "message": "API密钥已禁用"}
+        return {"success": True, "message": "API密钥已删除"}
+
+
+@app.put("/api/api-keys/{key_id}/status")
+async def toggle_api_key_status(
+    key_id: int,
+    request: ApiKeyStatusRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """切换API密钥状态（仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM api_keys WHERE id = ?', (key_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="API密钥不存在")
+
+        cursor.execute('UPDATE api_keys SET is_disabled = ? WHERE id = ?',
+                      (1 if request.disabled else 0, key_id))
+        conn.commit()
+
+        status_text = "已禁用" if request.disabled else "已启用"
+        return {"success": True, "message": f"API密钥{status_text}"}
 
 
 # ============ Contact Management APIs ============
@@ -2439,14 +2461,37 @@ async def preview_import_excel(
                 preview_items.append(new_item)
                 new_skus.append(new_item)
 
+        # 查找缺失的SKU（系统中有但导入文件中没有的，且未被禁用的）
+        import_skus = {item.sku for item in preview_items}
+        cursor.execute('''
+            SELECT sku, name, category, quantity
+            FROM materials
+            WHERE is_disabled = 0
+        ''')
+        all_system_skus = cursor.fetchall()
+
+        missing_skus = []
+        for row in all_system_skus:
+            if row['sku'] not in import_skus:
+                missing_skus.append(MissingSkuItem(
+                    sku=row['sku'],
+                    name=row['name'],
+                    category=row['category'] or '未分类',
+                    current_quantity=row['quantity']
+                ))
+
+        total_missing = len(missing_skus)
+
     return ExcelImportPreviewResponse(
         success=True,
         preview=preview_items,
         new_skus=new_skus,
+        missing_skus=missing_skus,
         total_in=total_in,
         total_out=total_out,
         total_new=total_new,
-        message=f'共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条'
+        total_missing=total_missing,
+        message=f'共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条' + (f'，有 {total_missing} 个SKU不在导入文件中' if total_missing > 0 else '')
     )
 
 
