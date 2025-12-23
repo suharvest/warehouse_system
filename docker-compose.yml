@@ -28,6 +28,8 @@ services:
     container_name: warehouse-frontend
     ports:
       - "2125:2125"
+    environment:
+      - BACKEND_URL=http://backend:2124
     depends_on:
       - backend
     restart: unless-stopped

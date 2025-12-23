@@ -47,6 +47,8 @@ services:
     container_name: warehouse-frontend-prod
     ports:
       - "2125:2125"
+    environment:
+      - BACKEND_URL=http://backend:2124
     depends_on:
       backend:
         condition: service_healthy

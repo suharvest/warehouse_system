@@ -766,7 +766,9 @@ async def toggle_api_key_status(
 # ============ Database Management APIs ============
 
 # 仓库相关表（导出/导入/清空时操作）
-WAREHOUSE_TABLES = ['materials', 'inventory_records', 'batches', 'batch_consumptions', 'contacts']
+# 顺序很重要：先无依赖的表，再有外键依赖的表
+# materials, contacts -> batches -> inventory_records -> batch_consumptions
+WAREHOUSE_TABLES = ['materials', 'contacts', 'batches', 'inventory_records', 'batch_consumptions']
 
 
 @app.get("/api/database/export")
@@ -933,6 +935,9 @@ async def import_database(
 
             except Exception as e:
                 conn.rollback()
+                import traceback
+                logger.error(f"[ERROR] 数据库导入失败: {str(e)}")
+                logger.error(traceback.format_exc())
                 raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
 
         import_conn.close()

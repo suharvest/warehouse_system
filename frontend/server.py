@@ -6,7 +6,8 @@ import urllib.request
 import urllib.error
 
 PORT = 2125
-BACKEND_URL = 'http://localhost:2124'
+# Docker 环境使用服务名 'backend'，本地开发使用 'localhost'
+BACKEND_URL = os.environ.get('BACKEND_URL', 'http://localhost:2124')
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 优先使用 dist 目录（生产构建），否则使用源目录（开发模式）
