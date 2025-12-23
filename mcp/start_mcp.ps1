@@ -1,49 +1,44 @@
 #
-# MCP 服务启动脚本 (Windows PowerShell)
+# MCP Service Startup Script (Windows PowerShell)
 #
-# 使用方法:
-#   1. 配置 MCP_ENDPOINT（在下方或通过环境变量）
-#   2. 运行: .\start_mcp.ps1
+# Usage:
+#   1. Configure MCP_ENDPOINT (below or via environment variable)
+#   2. Run: .\start_mcp.ps1
 #
 
-# 设置控制台编码为 UTF-8，解决中文乱码问题
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
-chcp 65001 | Out-Null
-
-# ============ MCP 配置 ============
-# 设置 MCP WebSocket 端点地址
-# 如果环境变量已设置，则使用环境变量的值
+# ============ MCP Configuration ============
+# Set MCP WebSocket endpoint address
+# If environment variable is set, use its value
 if (-not $env:MCP_ENDPOINT) {
     $env:MCP_ENDPOINT = "ws://localhost:8080/mcp"
 }
 
-# ============ 脚本逻辑 ============
+# ============ Script Logic ============
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
 Write-Host "================================"
-Write-Host "  MCP 服务启动脚本"
+Write-Host "  MCP Service Startup Script"
 Write-Host "================================"
 Write-Host ""
-Write-Host "MCP 端点: $env:MCP_ENDPOINT"
+Write-Host "MCP Endpoint: $env:MCP_ENDPOINT"
 Write-Host ""
 
-# 检查是否安装了 uv
+# Check if uv is installed
 $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
 
-# 如果 PATH 中找不到，检查 UV_HOME 环境变量
+# If not in PATH, check UV_HOME environment variable
 if (-not $uvCommand -and $env:UV_HOME) {
     $uvExe = Join-Path $env:UV_HOME "uv.exe"
     if (Test-Path $uvExe) {
         $env:PATH = "$env:UV_HOME;$env:PATH"
-        Write-Host "已从 UV_HOME 找到 uv: $uvExe" -ForegroundColor Green
+        Write-Host "Found uv from UV_HOME: $uvExe" -ForegroundColor Green
         $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
     }
 }
 
-# 如果仍未找到，检查常见安装位置
+# If still not found, check common install locations
 if (-not $uvCommand) {
     $uvPaths = @(
         "$env:USERPROFILE\.local\bin\uv.exe",
@@ -54,7 +49,7 @@ if (-not $uvCommand) {
         if (Test-Path $path) {
             $uvDir = Split-Path -Parent $path
             $env:PATH = "$uvDir;$env:PATH"
-            Write-Host "已找到 uv: $path" -ForegroundColor Green
+            Write-Host "Found uv: $path" -ForegroundColor Green
             $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
             break
         }
@@ -62,33 +57,33 @@ if (-not $uvCommand) {
 }
 
 if (-not $uvCommand) {
-    Write-Host "错误: 未找到 uv，请先安装 uv" -ForegroundColor Red
-    Write-Host "安装命令: irm https://astral.sh/uv/install.ps1 | iex"
-    Write-Host "安装后请重新打开 PowerShell 窗口"
+    Write-Host "Error: uv not found, please install uv first" -ForegroundColor Red
+    Write-Host "Install command: irm https://astral.sh/uv/install.ps1 | iex"
+    Write-Host "Or set UV_HOME environment variable to uv install directory"
     exit 1
 }
 
-# 检查后端服务是否运行
-Write-Host "检查后端服务..."
+# Check if backend service is running
+Write-Host "Checking backend service..."
 try {
     $response = Invoke-WebRequest -Uri "http://localhost:2124/api/dashboard/stats" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-    Write-Host "后端服务运行正常 (端口 2124)" -ForegroundColor Green
+    Write-Host "Backend service is running (port 2124)" -ForegroundColor Green
 } catch {
-    Write-Host "警告: 后端服务未运行，MCP 功能可能受限" -ForegroundColor Yellow
-    Write-Host "请先启动后端服务: uv run python run_backend.py"
+    Write-Host "Warning: Backend service is not running, MCP features may be limited" -ForegroundColor Yellow
+    Write-Host "Please start backend first: uv run python run_backend.py"
     Write-Host ""
 }
 
-# 启动 MCP 服务
-Write-Host "启动 MCP 服务..."
+# Start MCP service
+Write-Host "Starting MCP service..."
 Write-Host ""
 
 try {
     uv run python mcp_pipe.py warehouse_mcp.py
 } catch {
-    Write-Host "MCP 服务启动失败: $_" -ForegroundColor Red
+    Write-Host "MCP service startup failed: $_" -ForegroundColor Red
     exit 1
 } finally {
     Write-Host ""
-    Write-Host "MCP 服务已停止"
+    Write-Host "MCP service stopped"
 }

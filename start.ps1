@@ -1,86 +1,146 @@
 #
-# 仓库管理系统 - 启动脚本 (Windows PowerShell)
+# Warehouse Management System - Startup Script (Windows PowerShell)
 #
-# 使用方法: .\start.ps1 [-Vite]
-# 参数: -Vite  使用 Vite 开发服务器 (热更新模式)
+# Usage: .\start.ps1 [-Vite]
+# Args: -Vite  Use Vite dev server (hot reload mode)
 #
 
 param(
     [switch]$Vite
 )
 
-# 设置控制台编码为 UTF-8
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
-chcp 65001 | Out-Null
-
 Write-Host "================================"
-Write-Host "  仓库管理系统 - 启动脚本"
+Write-Host "  Warehouse System - Startup"
 Write-Host "================================"
 Write-Host ""
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
-# 检查是否安装了 uv
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Host "错误: 未找到 uv，请先安装 uv" -ForegroundColor Red
-    Write-Host "安装命令: irm https://astral.sh/uv/install.ps1 | iex"
+# Check if uv is installed
+$uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+
+# If not in PATH, check UV_HOME environment variable
+if (-not $uvCommand -and $env:UV_HOME) {
+    $uvExe = Join-Path $env:UV_HOME "uv.exe"
+    if (Test-Path $uvExe) {
+        $env:PATH = "$env:UV_HOME;$env:PATH"
+        Write-Host "Found uv from UV_HOME: $uvExe" -ForegroundColor Green
+        $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    }
+}
+
+# If still not found, check common install locations
+if (-not $uvCommand) {
+    $uvPaths = @(
+        "$env:USERPROFILE\.local\bin\uv.exe",
+        "$env:LOCALAPPDATA\uv\uv.exe",
+        "$env:USERPROFILE\.cargo\bin\uv.exe"
+    )
+    foreach ($path in $uvPaths) {
+        if (Test-Path $path) {
+            $uvDir = Split-Path -Parent $path
+            $env:PATH = "$uvDir;$env:PATH"
+            Write-Host "Found uv: $path" -ForegroundColor Green
+            $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+            break
+        }
+    }
+}
+
+if (-not $uvCommand) {
+    Write-Host "Error: uv not found, please install uv first" -ForegroundColor Red
+    Write-Host "Install command: irm https://astral.sh/uv/install.ps1 | iex"
+    Write-Host "Or set UV_HOME environment variable to uv install directory"
     exit 1
 }
 
-# 如果使用 Vite，检查 npm
+# Check npm availability
+$hasNpm = Get-Command npm -ErrorAction SilentlyContinue
+
 if ($Vite) {
-    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-        Write-Host "错误: 未找到 npm，请先安装 Node.js" -ForegroundColor Red
+    # Vite mode requires npm
+    if (-not $hasNpm) {
+        Write-Host "Error: npm not found, please install Node.js first" -ForegroundColor Red
         exit 1
     }
-    # 检查是否需要安装依赖
+    # Check if dependencies need to be installed
     if (-not (Test-Path "frontend\node_modules")) {
-        Write-Host "正在安装前端依赖..."
+        Write-Host "Installing frontend dependencies..."
         Push-Location frontend
         npm install
         Pop-Location
     }
+} else {
+    # Production mode: check if dist exists, if not try to build
+    if (-not (Test-Path "frontend\dist\index.html")) {
+        if ($hasNpm) {
+            Write-Host "Building frontend (first time)..."
+            Push-Location frontend
+            if (-not (Test-Path "node_modules")) {
+                Write-Host "Installing dependencies..."
+                npm install
+            }
+            npm run build
+            Pop-Location
+        } else {
+            Write-Host "Warning: frontend/dist not found and npm not available" -ForegroundColor Yellow
+            Write-Host "Frontend may not work properly. Install Node.js and run:" -ForegroundColor Yellow
+            Write-Host "  cd frontend && npm install && npm run build" -ForegroundColor Yellow
+        }
+    }
 }
 
-# 初始化数据库（仅当数据库不存在时）
+# Initialize database (only if it doesn't exist)
 if (-not (Test-Path "backend\warehouse.db")) {
-    Write-Host "正在初始化数据库..."
+    Write-Host "Initializing database..."
     Push-Location backend
     uv run python database.py
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "数据库初始化失败" -ForegroundColor Red
+        Write-Host "Database initialization failed" -ForegroundColor Red
         Pop-Location
         exit 1
     }
     Pop-Location
-    Write-Host "数据库初始化完成！" -ForegroundColor Green
+    Write-Host "Database initialized!" -ForegroundColor Green
 } else {
-    Write-Host "数据库已存在，跳过初始化"
+    Write-Host "Database exists, skipping initialization"
 }
 
 Write-Host ""
-Write-Host "启动服务..."
+Write-Host "Starting services..."
 Write-Host ""
 
-# 停止可能残留的进程
-Get-Process -Name python* -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "run_backend|server\.py"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
+# Function to kill process by port
+function Stop-ProcessByPort {
+    param([int]$Port)
+    $connections = netstat -ano 2>$null | Select-String ":$Port\s" | Select-String "LISTENING"
+    foreach ($conn in $connections) {
+        $parts = $conn -split '\s+'
+        $pid = $parts[-1]
+        if ($pid -match '^\d+$' -and $pid -ne '0') {
+            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Stop any leftover processes by port (most reliable on Windows)
+Write-Host "Cleaning up any leftover processes..."
+Stop-ProcessByPort -Port 2124
+Stop-ProcessByPort -Port 2125
 
 Start-Sleep -Seconds 1
 
-# 启动后端服务
-Write-Host "启动后端服务 (端口 2124)..."
+# Start backend service
+Write-Host "Starting backend service (port 2124)..."
 $backend = Start-Process -FilePath "uv" -ArgumentList "run", "python", "run_backend.py" -PassThru -NoNewWindow
 
 Start-Sleep -Seconds 2
 
-# 启动前端服务
-Write-Host "启动前端服务 (端口 2125)..."
+# Start frontend service
+Write-Host "Starting frontend service (port 2125)..."
 if ($Vite) {
-    Write-Host "使用 Vite 开发服务器 (热更新模式)..."
+    Write-Host "Using Vite dev server (hot reload mode)..."
     Push-Location frontend
     $frontend = Start-Process -FilePath "npm" -ArgumentList "run", "dev" -PassThru -NoNewWindow
     Pop-Location
@@ -92,46 +152,61 @@ Start-Sleep -Seconds 2
 
 Write-Host ""
 Write-Host "================================"
-Write-Host "  服务启动成功！"
+Write-Host "  Services started!"
 Write-Host "================================"
 Write-Host ""
-Write-Host "后端 API: http://localhost:2124"
-Write-Host "API 文档: http://localhost:2124/docs"
-Write-Host "前端页面: http://localhost:2125"
+Write-Host "Backend API: http://localhost:2124"
+Write-Host "API Docs: http://localhost:2124/docs"
+Write-Host "Frontend: http://localhost:2125"
 Write-Host ""
 if ($Vite) {
-    Write-Host "前端模式: Vite 开发服务器 (支持热更新)" -ForegroundColor Cyan
+    Write-Host "Frontend mode: Vite dev server (hot reload)" -ForegroundColor Cyan
 } else {
-    Write-Host "前端模式: Python 静态服务器"
-    Write-Host "提示: 使用 -Vite 参数启用热更新模式" -ForegroundColor DarkGray
+    Write-Host "Frontend mode: Python static server"
+    Write-Host "Tip: Use -Vite flag to enable hot reload mode" -ForegroundColor DarkGray
 }
 Write-Host ""
-Write-Host "请在浏览器中打开: http://localhost:2125"
+Write-Host "Open in browser: http://localhost:2125"
 Write-Host ""
-Write-Host "按任意键停止所有服务..."
-
-# 等待用户按键
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-
+Write-Host "Press Ctrl+C to stop all services..."
 Write-Host ""
-Write-Host "正在停止服务..."
 
-# 停止进程
-if ($backend -and -not $backend.HasExited) {
-    Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+# Function to clean up all services
+function Stop-AllServices {
+    Write-Host ""
+    Write-Host "Stopping services..."
+
+    # Stop tracked processes
+    if ($backend -and -not $backend.HasExited) {
+        Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($frontend -and -not $frontend.HasExited) {
+        Stop-Process -Id $frontend.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    # Kill by port (more reliable on Windows)
+    Stop-ProcessByPort -Port 2124
+    Stop-ProcessByPort -Port 2125
+
+    # Clean up leftover python processes
+    Get-Process -Name python* -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -match "run_backend|server\.py"
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+    # Clean up Vite/Node processes
+    Get-Process -Name node* -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -match "vite"
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+    Write-Host "All services stopped" -ForegroundColor Green
 }
-if ($frontend -and -not $frontend.HasExited) {
-    Stop-Process -Id $frontend.Id -Force -ErrorAction SilentlyContinue
+
+# Register Ctrl+C handler
+try {
+    # Wait for backend process to exit (keeps script running)
+    if ($backend) {
+        $backend.WaitForExit()
+    }
+} finally {
+    Stop-AllServices
 }
-
-# 清理残留进程
-Get-Process -Name python* -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "run_backend|server\.py"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
-
-# 清理 Vite/Node 进程
-Get-Process -Name node* -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "vite"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
-
-Write-Host "所有服务已停止" -ForegroundColor Green
