@@ -14,8 +14,10 @@ A smart hardware warehouse management dashboard based on Python FastAPI + SQLite
 - 🌐 **Multi-language Support**: Chinese/English switching
 - 📱 **Responsive Design**: Adapts to different screen sizes
 - 🔐 **User Permission Management**: Three-level access control (view/operate/admin)
+- 🔑 **API Key Management**: Multiple keys with independent permissions for MCP terminal access
 - 👥 **Contact Management**: Supplier/Customer management linked to inventory records
 - 📦 **Batch Management**: Auto batch number generation with FIFO stock-out algorithm
+- 💾 **Database Management**: Export, import, and clear warehouse data (user data unaffected)
 
 ## Demo Video
 
@@ -255,6 +257,34 @@ Content-Type: application/json
   "operator": "operator_name"
 }
 ```
+
+### Database Management (Admin Only)
+
+#### Export Warehouse Data
+```
+GET /api/database/export
+```
+Downloads a SQLite file containing warehouse data (excludes user accounts and API keys).
+
+#### Import Warehouse Data
+```
+POST /api/database/import
+Content-Type: multipart/form-data
+
+file: <.db file>
+```
+Restores warehouse data from a backup file. This will clear existing warehouse data.
+
+#### Clear Warehouse Data
+```
+POST /api/database/clear
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+```
+Clears all warehouse data (materials, records, batches, contacts). User accounts and API keys are not affected.
 
 ## Stop Services
 

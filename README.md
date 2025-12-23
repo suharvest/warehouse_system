@@ -14,8 +14,10 @@
 - 🌐 **多语言支持**：支持中英文切换
 - 📱 **响应式设计**：适配不同屏幕尺寸
 - 🔐 **用户权限管理**：支持 view/operate/admin 三级权限控制
+- 🔑 **API 密钥管理**：支持多密钥、独立权限，用于 MCP 终端访问
 - 👥 **联系方管理**：供应商/客户信息管理，关联出入库记录
 - 📦 **批次管理**：自动批次号生成，FIFO先进先出出库算法
+- 💾 **数据库管理**：支持仓库数据导出、导入、清空（用户数据不受影响）
 
 ## 演示视频
 
@@ -324,6 +326,34 @@ Content-Type: application/json
   "operator": "操作人"
 }
 ```
+
+### 数据库管理（仅管理员）
+
+#### 导出仓库数据
+```
+GET /api/database/export
+```
+下载包含仓库数据的 SQLite 文件（不含用户账户和 API 密钥）。
+
+#### 导入仓库数据
+```
+POST /api/database/import
+Content-Type: multipart/form-data
+
+file: <.db 文件>
+```
+从备份文件恢复仓库数据，会清空现有仓库数据。
+
+#### 清空仓库数据
+```
+POST /api/database/clear
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+```
+清空所有仓库数据（物料、记录、批次、联系方），用户账户和 API 密钥不受影响。
 
 ## 停止服务
 
