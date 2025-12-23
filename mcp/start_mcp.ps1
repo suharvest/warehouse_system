@@ -6,6 +6,11 @@
 #   2. 运行: .\start_mcp.ps1
 #
 
+# 设置控制台编码为 UTF-8，解决中文乱码问题
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 # ============ MCP 配置 ============
 # 设置 MCP WebSocket 端点地址
 # 如果环境变量已设置，则使用环境变量的值
@@ -26,9 +31,40 @@ Write-Host "MCP 端点: $env:MCP_ENDPOINT"
 Write-Host ""
 
 # 检查是否安装了 uv
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+$uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+
+# 如果 PATH 中找不到，检查 UV_HOME 环境变量
+if (-not $uvCommand -and $env:UV_HOME) {
+    $uvExe = Join-Path $env:UV_HOME "uv.exe"
+    if (Test-Path $uvExe) {
+        $env:PATH = "$env:UV_HOME;$env:PATH"
+        Write-Host "已从 UV_HOME 找到 uv: $uvExe" -ForegroundColor Green
+        $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    }
+}
+
+# 如果仍未找到，检查常见安装位置
+if (-not $uvCommand) {
+    $uvPaths = @(
+        "$env:USERPROFILE\.local\bin\uv.exe",
+        "$env:LOCALAPPDATA\uv\uv.exe",
+        "$env:USERPROFILE\.cargo\bin\uv.exe"
+    )
+    foreach ($path in $uvPaths) {
+        if (Test-Path $path) {
+            $uvDir = Split-Path -Parent $path
+            $env:PATH = "$uvDir;$env:PATH"
+            Write-Host "已找到 uv: $path" -ForegroundColor Green
+            $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+            break
+        }
+    }
+}
+
+if (-not $uvCommand) {
     Write-Host "错误: 未找到 uv，请先安装 uv" -ForegroundColor Red
     Write-Host "安装命令: irm https://astral.sh/uv/install.ps1 | iex"
+    Write-Host "安装后请重新打开 PowerShell 窗口"
     exit 1
 }
 

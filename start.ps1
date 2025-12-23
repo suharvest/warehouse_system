@@ -9,6 +9,11 @@ param(
     [switch]$Vite
 )
 
+# 设置控制台编码为 UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 Write-Host "================================"
 Write-Host "  仓库管理系统 - 启动脚本"
 Write-Host "================================"
