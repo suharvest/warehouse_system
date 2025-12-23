@@ -330,7 +330,7 @@
   }
 
   .section-header {
-    @apply flex justify-between items-center py-5 px-6 border-b border-border bg-header;
+    @apply flex justify-between items-center py-5 px-6 border-b border-border;
     border-radius: 12px 12px 0 0;
   }
 
