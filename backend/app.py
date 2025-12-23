@@ -42,7 +42,9 @@ from models import (
     # Batch models
     BatchInfo, BatchConsumption, StockInResponse, StockOutResponse,
     # Operator model
-    OperatorListItem
+    OperatorListItem,
+    # Database management models
+    DatabaseClearRequest, DatabaseOperationResponse
 )
 import math
 
@@ -759,6 +761,243 @@ async def toggle_api_key_status(
 
         status_text = "已禁用" if request.disabled else "已启用"
         return {"success": True, "message": f"API密钥{status_text}"}
+
+
+# ============ Database Management APIs ============
+
+# 仓库相关表（导出/导入/清空时操作）
+WAREHOUSE_TABLES = ['materials', 'inventory_records', 'batches', 'batch_consumptions', 'contacts']
+
+
+@app.get("/api/database/export")
+def export_database(current_user: CurrentUser = Depends(require_auth('admin'))):
+    """导出仓库数据为SQLite数据库文件（仅管理员）
+
+    只导出仓库相关表：materials, inventory_records, batches, batch_consumptions, contacts
+    不导出用户相关表：users, sessions, api_keys
+    """
+    import tempfile
+    import sqlite3
+    import shutil
+
+    # 获取当前数据库路径
+    db_path = os.environ.get('DATABASE_PATH', 'warehouse.db')
+
+    # 创建临时文件
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.db')
+    os.close(temp_fd)
+
+    try:
+        # 创建新的临时数据库
+        temp_conn = sqlite3.connect(temp_path)
+        temp_cursor = temp_conn.cursor()
+
+        with get_db() as source_conn:
+            source_cursor = source_conn.cursor()
+
+            for table in WAREHOUSE_TABLES:
+                # 获取表结构
+                source_cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,))
+                result = source_cursor.fetchone()
+                if result and result['sql']:
+                    # 创建表
+                    temp_cursor.execute(result['sql'])
+
+                    # 复制数据
+                    source_cursor.execute(f"SELECT * FROM {table}")
+                    rows = source_cursor.fetchall()
+                    if rows:
+                        columns = [desc[0] for desc in source_cursor.description]
+                        placeholders = ','.join(['?' for _ in columns])
+                        insert_sql = f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})"
+                        for row in rows:
+                            temp_cursor.execute(insert_sql, tuple(row[col] for col in columns))
+
+        temp_conn.commit()
+        temp_conn.close()
+
+        # 读取临时文件内容
+        with open(temp_path, 'rb') as f:
+            db_content = f.read()
+
+        # 创建 BytesIO 对象用于流式响应
+        output = BytesIO(db_content)
+        output.seek(0)
+
+        filename = f"warehouse_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+
+        if ENABLE_AUDIT_LOG:
+            logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 导出了数据库")
+
+        return StreamingResponse(
+            output,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    finally:
+        # 清理临时文件
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+@app.post("/api/database/import", response_model=DatabaseOperationResponse)
+@limiter.limit("5/minute")
+async def import_database(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """导入仓库数据（仅管理员）
+
+    从上传的SQLite数据库文件中导入仓库相关表的数据。
+    会清空现有仓库数据后再导入。
+    不影响用户相关表：users, sessions, api_keys
+    """
+    import tempfile
+    import sqlite3
+
+    # 读取上传的文件
+    contents = await file.read()
+
+    # 检查文件大小
+    file_size_mb = len(contents) / (1024 * 1024)
+    if file_size_mb > MAX_UPLOAD_SIZE_MB:
+        raise HTTPException(status_code=400, detail=f"文件过大，最大允许 {MAX_UPLOAD_SIZE_MB}MB")
+
+    # 保存到临时文件
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.db')
+    try:
+        os.write(temp_fd, contents)
+        os.close(temp_fd)
+
+        # 验证是否为有效的SQLite数据库
+        try:
+            import_conn = sqlite3.connect(temp_path)
+            import_conn.row_factory = sqlite3.Row
+            import_cursor = import_conn.cursor()
+
+            # 检查必要的表是否存在
+            import_cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            available_tables = {row[0] for row in import_cursor.fetchall()}
+
+            # 至少需要 materials 表
+            if 'materials' not in available_tables:
+                raise HTTPException(status_code=400, detail="无效的数据库文件：缺少 materials 表")
+
+        except sqlite3.DatabaseError:
+            raise HTTPException(status_code=400, detail="无效的数据库文件格式")
+
+        # 开始导入
+        details = {}
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            try:
+                # 按外键顺序清空现有数据
+                for table in reversed(WAREHOUSE_TABLES):
+                    cursor.execute(f"DELETE FROM {table}")
+
+                # 按顺序导入数据
+                for table in WAREHOUSE_TABLES:
+                    if table not in available_tables:
+                        details[table] = 0
+                        continue
+
+                    # 获取源表的数据
+                    import_cursor.execute(f"SELECT * FROM {table}")
+                    rows = import_cursor.fetchall()
+
+                    if rows:
+                        # 获取目标表的列名
+                        cursor.execute(f"PRAGMA table_info({table})")
+                        target_columns = {row['name'] for row in cursor.fetchall()}
+
+                        # 获取源表的列名
+                        source_columns = [desc[0] for desc in import_cursor.description]
+
+                        # 只使用目标表中存在的列
+                        common_columns = [col for col in source_columns if col in target_columns]
+
+                        if common_columns:
+                            placeholders = ','.join(['?' for _ in common_columns])
+                            insert_sql = f"INSERT INTO {table} ({','.join(common_columns)}) VALUES ({placeholders})"
+
+                            for row in rows:
+                                values = [row[col] for col in common_columns]
+                                cursor.execute(insert_sql, values)
+
+                    details[table] = len(rows)
+
+                conn.commit()
+
+            except Exception as e:
+                conn.rollback()
+                raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+
+        import_conn.close()
+
+        if ENABLE_AUDIT_LOG:
+            logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 导入了数据库")
+
+        message = f"导入成功：{details.get('materials', 0)} 物料，{details.get('inventory_records', 0)} 记录，{details.get('batches', 0)} 批次，{details.get('contacts', 0)} 联系方"
+
+        return DatabaseOperationResponse(
+            success=True,
+            message=message,
+            details=details
+        )
+
+    finally:
+        # 清理临时文件
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+@app.post("/api/database/clear", response_model=DatabaseOperationResponse)
+async def clear_database(
+    request: DatabaseClearRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """清空仓库数据（仅管理员）
+
+    清空仓库相关表：materials, inventory_records, batches, batch_consumptions, contacts
+    不影响用户相关表：users, sessions, api_keys
+    """
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="请确认清空操作")
+
+    details = {}
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        try:
+            # 获取每个表的记录数（清空前）
+            for table in WAREHOUSE_TABLES:
+                cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+                details[table] = cursor.fetchone()['count']
+
+            # 按外键顺序删除
+            for table in reversed(WAREHOUSE_TABLES):
+                cursor.execute(f"DELETE FROM {table}")
+
+            conn.commit()
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"清空失败: {str(e)}")
+
+    if ENABLE_AUDIT_LOG:
+        logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 清空了数据库")
+
+    message = f"已清空：{details.get('materials', 0)} 物料，{details.get('inventory_records', 0)} 记录，{details.get('batches', 0)} 批次，{details.get('contacts', 0)} 联系方"
+
+    return DatabaseOperationResponse(
+        success=True,
+        message=message,
+        details=details
+    )
 
 
 # ============ Contact Management APIs ============

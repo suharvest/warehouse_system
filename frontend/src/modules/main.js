@@ -20,6 +20,7 @@ import { exportInventory, exportRecords, exportProductRecords, showImportModal, 
 import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEditUserModal, closeEditUserModal, handleEditUser, toggleUserStatus, setUsersCallbacks } from './features/users.js';
 import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
+import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 
 // 语言切换
 import { toggleLangDropdown, selectLanguage } from '../../i18n.js';
@@ -312,6 +313,17 @@ const actionHandlers = {
     'onTodayInClick': onTodayInClick,
     'onTodayOutClick': onTodayOutClick,
     'onLowStockClick': onLowStockClick,
+
+    // 数据库管理
+    'exportDatabase': exportDatabase,
+    'showImportDatabaseModal': showImportDatabaseModal,
+    'closeImportDatabaseModal': closeImportDatabaseModal,
+    'handleDatabaseFileSelect': (el, event) => handleDatabaseFileSelect(event),
+    'confirmImportDatabase': confirmImportDatabase,
+    'showClearDatabaseModal': showClearDatabaseModal,
+    'closeClearDatabaseModal': closeClearDatabaseModal,
+    'exportThenClearDatabase': exportThenClearDatabase,
+    'directClearDatabase': directClearDatabase,
 };
 
 // 事件委托监听

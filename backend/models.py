@@ -481,3 +481,17 @@ class OperatorListItem(BaseModel):
     user_id: int
     username: str
     display_name: Optional[str]
+
+
+# ============ Database Management Models ============
+
+class DatabaseClearRequest(BaseModel):
+    """清空数据库请求"""
+    confirm: bool
+
+
+class DatabaseOperationResponse(BaseModel):
+    """数据库操作响应"""
+    success: bool
+    message: str
+    details: Optional[dict] = None
