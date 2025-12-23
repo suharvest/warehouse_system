@@ -40,48 +40,151 @@ A smart hardware warehouse management dashboard based on Python FastAPI + SQLite
 - uv (Package Manager)
 
 ### Frontend
-- Native HTML/CSS/JavaScript
+- Vite (Build Tool)
+- Tailwind CSS (Styling Framework)
+- ES Modules (Modular Architecture)
 - ECharts (Charting Library)
 - i18n.js (Internationalization)
 - Responsive Design
 
 ## Quick Start
 
-### 1. One-click Start
+### 1. Docker Deployment (Recommended)
 
-**macOS/Linux:**
+Docker is the simplest way to deploy - no need to configure Python/Node.js environment.
+
 ```bash
-./start.sh
-```
+# Clone the repository
+git clone https://github.com/suharvest/warehouse_system.git
+cd warehouse_system
 
-**Windows (PowerShell):**
-```powershell
-.\start.ps1
+# Start services (one command)
+docker-compose -f docker-compose.prod.yml up -d
 ```
 
 After starting, visit:
 - Frontend: http://localhost:2125
 - API Docs: http://localhost:2124/docs
 
-### 2. Start MCP Service (Optional)
+> 💡 First visit requires registering an admin account. The first registered user becomes the administrator.
 
-MCP service has been separated into standalone scripts. Configure `MCP_ENDPOINT` environment variable before starting.
+**Common Commands:**
+```bash
+# View logs
+docker-compose -f docker-compose.prod.yml logs -f
+
+# Stop services
+docker-compose -f docker-compose.prod.yml down
+
+# Rebuild and update
+docker-compose -f docker-compose.prod.yml up -d --build
+```
+
+**Note**: Database files are stored in Docker volumes and persist across container restarts.
+
+#### Production Configuration
+
+```bash
+# 1. Copy and edit environment config (optional)
+cp .env.production.example .env.production
+# Edit .env.production to set CORS_ORIGINS for your domain
+
+# 2. Start with production config
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+Production environment enables:
+- bcrypt password hashing (auto-migrates old passwords)
+- SQLite WAL mode and foreign key constraints
+- Security response headers
+- Audit logging
+- Container resource limits
+
+#### Reverse Proxy Configuration
+
+For production, use nginx reverse proxy with HTTPS:
+
+```bash
+# Reference config file
+cat deploy/nginx.conf.example
+```
+
+### 2. Local Start (Development)
+
+Local startup requires:
+- **Python 3.10+** and **uv** (package manager)
+- **Node.js 18+** and **npm** (production mode only)
+
+#### Install uv
 
 **macOS/Linux:**
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+#### One-click Start
+
+**macOS/Linux:**
+```bash
+./start.sh          # Production mode (requires npm run build first)
+./start.sh --vite   # Development mode (hot reload, recommended)
+```
+
+**Windows (PowerShell):**
+```powershell
+.\start.ps1          # Production mode (requires npm run build first)
+.\start.ps1 -Vite    # Development mode (hot reload, recommended)
+```
+
+> ⚠️ **Production mode** requires building frontend first:
+> ```bash
+> cd frontend
+> npm install
+> npm run build
+> cd ..
+> ./start.sh
+> ```
+
+> 💡 **For development, use `--vite` mode** - supports hot reload without manual builds.
+
+After starting, visit:
+- Frontend: http://localhost:2125
+- API Docs: http://localhost:2124/docs
+
+### 3. Start MCP Service (Optional)
+
+MCP service enables voice control for the warehouse system. Requires API key and MCP endpoint configuration.
+
+**1. Create API Key in the system:**
+Login and navigate to "User Management" → "API Key Management" to create an API key.
+
+**2. Configure MCP:**
+```bash
 cd mcp
-# Edit start_mcp.sh to configure MCP_ENDPOINT
+cp config.yml.example config.yml
+# Edit config.yml and enter your API key
+```
+
+**3. Start MCP:**
+
+**macOS/Linux:**
+```bash
+export MCP_ENDPOINT="wss://your-endpoint-address"
 ./start_mcp.sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-cd mcp
-# Edit start_mcp.ps1 to configure MCP_ENDPOINT
+$env:MCP_ENDPOINT="wss://your-endpoint-address"
 .\start_mcp.ps1
 ```
 
-### 3. Manual Start
+### 4. Manual Start
 
 #### Initialize Database
 ```bash

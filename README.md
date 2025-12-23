@@ -51,64 +51,43 @@
 
 ## 快速开始
 
-### 1. 一键启动
+### 1. Docker 部署（推荐）
 
-**macOS/Linux:**
+使用 Docker 是最简单的部署方式，无需配置 Python/Node.js 环境。
+
 ```bash
-./start.sh          # 生产模式
-./start.sh --vite   # 开发模式（热更新）
-```
+# 克隆项目
+git clone https://github.com/suharvest/warehouse_system.git
+cd warehouse_system
 
-**Windows (PowerShell):**
-```powershell
-.\start.ps1          # 生产模式
-.\start.ps1 -Vite    # 开发模式（热更新）
+# 启动服务（一条命令）
+docker-compose -f docker-compose.prod.yml up -d
 ```
 
 启动后访问：
 - 前端页面：http://localhost:2125
 - API 文档：http://localhost:2124/docs
 
-> 💡 开发时推荐使用 `--vite` 模式，支持热更新和更快的构建速度。
+> 💡 首次访问需要注册管理员账户。第一个注册的用户自动成为管理员。
 
-### 2. 启动 MCP 服务（可选）
-
-MCP 服务已独立为单独的启动脚本，需要配置 `MCP_ENDPOINT` 环境变量。
-
-**macOS/Linux:**
+**常用命令：**
 ```bash
-cd mcp
-# 编辑 start_mcp.sh 配置 MCP_ENDPOINT
-./start_mcp.sh
-```
-
-**Windows (PowerShell):**
-```powershell
-cd mcp
-# 编辑 start_mcp.ps1 配置 MCP_ENDPOINT
-.\start_mcp.ps1
-```
-
-### 3. Docker 部署
-
-#### 开发环境
-```bash
-# 构建并启动服务
-docker-compose up -d
-
 # 查看日志
-docker-compose logs -f
+docker-compose -f docker-compose.prod.yml logs -f
 
 # 停止服务
-docker-compose down
+docker-compose -f docker-compose.prod.yml down
+
+# 更新重建
+docker-compose -f docker-compose.prod.yml up -d --build
 ```
 
-#### 生产环境部署
+**注意**：数据库文件会自动创建在 Docker volume 中，容器重启不会丢失数据。
 
-生产环境使用专门的配置文件，包含安全加固和资源限制：
+#### 生产环境配置
 
 ```bash
-# 1. 复制并编辑环境配置
+# 1. 复制并编辑环境配置（可选）
 cp .env.production.example .env.production
 # 编辑 .env.production 设置 CORS_ORIGINS 为您的域名
 
@@ -123,7 +102,7 @@ docker-compose -f docker-compose.prod.yml up -d
 - 审计日志
 - 容器资源限制
 
-#### 反向代理配置（推荐）
+#### 反向代理配置
 
 生产环境建议使用 nginx 反向代理，配置 HTTPS：
 
@@ -132,11 +111,80 @@ docker-compose -f docker-compose.prod.yml up -d
 cat deploy/nginx.conf.example
 ```
 
+### 2. 本地启动（开发）
+
+本地启动需要安装以下环境：
+- **Python 3.10+** 和 **uv**（包管理工具）
+- **Node.js 18+** 和 **npm**（仅生产模式需要）
+
+#### 安装 uv
+
+**macOS/Linux:**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+#### 一键启动
+
+**macOS/Linux:**
+```bash
+./start.sh          # 生产模式（需要先 npm run build）
+./start.sh --vite   # 开发模式（热更新，推荐）
+```
+
+**Windows (PowerShell):**
+```powershell
+.\start.ps1          # 生产模式（需要先 npm run build）
+.\start.ps1 -Vite    # 开发模式（热更新，推荐）
+```
+
+> ⚠️ **生产模式**需要先构建前端：
+> ```bash
+> cd frontend
+> npm install
+> npm run build
+> cd ..
+> ./start.sh
+> ```
+
+> 💡 **开发时推荐使用 `--vite` 模式**，支持热更新，无需手动构建。
+
 启动后访问：
 - 前端页面：http://localhost:2125
 - API 文档：http://localhost:2124/docs
 
-**注意**：数据库文件会自动创建在挂载的 volume 中，容器重启不会丢失数据。
+### 3. 启动 MCP 服务（可选）
+
+MCP 服务用于语音控制仓库系统，需要配置 API 密钥和 MCP 端点。
+
+**1. 在系统中创建 API 密钥：**
+登录后进入「用户管理」→「API 密钥管理」，创建一个 API 密钥。
+
+**2. 配置 MCP：**
+```bash
+cd mcp
+cp config.yml.example config.yml
+# 编辑 config.yml，填入 API 密钥
+```
+
+**3. 启动 MCP：**
+
+**macOS/Linux:**
+```bash
+export MCP_ENDPOINT="wss://your-endpoint-address"
+./start_mcp.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:MCP_ENDPOINT="wss://your-endpoint-address"
+.\start_mcp.ps1
+```
 
 ### 4. 手动启动
 
