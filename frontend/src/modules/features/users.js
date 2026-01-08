@@ -165,6 +165,7 @@ export async function toggleUserStatus(userId, isDisabled) {
         await usersApi.toggleStatus(userId, !isDisabled);
         loadUsers();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('更新用户状态失败:', error);
         alert(error.message || t('operationFailed'));
     }

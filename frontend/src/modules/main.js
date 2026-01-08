@@ -11,7 +11,7 @@ import { initDropdownListeners, initSearchableSelect, setProductSelectorValue, c
 import { switchTab, initFromHash, startAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules } from './ui/tabs.js';
 
 // 功能模块
-import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks } from './features/auth.js';
+import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks, initSessionExpiredHandler } from './features/auth.js';
 import { initCharts, loadDashboardData, onTotalStockClick, onTodayInClick, onTodayOutClick, onLowStockClick, setDashboardCallbacks } from './features/dashboard.js';
 import { loadInventory, inventoryGoToPage, changeInventoryPageSize, applyInventoryFilter, resetInventoryFilter, applyInventoryFilters, setInventoryCallbacks } from './features/inventory.js';
 import { loadRecords, recordsGoToPage, changeRecordsPageSize, applyRecordsFilter, resetRecordsFilter, applyRecordsFilters, loadRecordsFilterOptions, showAddRecordModal, showAddRecordModalForProduct, closeAddRecordModal, submitAddRecord, setRecordsCallbacks } from './features/records.js';
@@ -365,6 +365,9 @@ function initEventDelegation() {
 document.addEventListener('DOMContentLoaded', async function () {
     // 设置模块回调
     setupModuleCallbacks();
+
+    // 初始化 session 过期处理
+    initSessionExpiredHandler();
 
     // 初始化事件委托
     initEventDelegation();

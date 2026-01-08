@@ -132,6 +132,7 @@ export async function disableApiKey(keyId) {
         await apiKeysApi.toggleStatus(keyId, true);
         loadApiKeys();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('禁用API密钥失败:', error);
         alert(error.message || t('operationFailed'));
     }
@@ -142,6 +143,7 @@ export async function toggleApiKeyStatus(keyId, isDisabled) {
         await apiKeysApi.toggleStatus(keyId, !isDisabled);
         loadApiKeys();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('更新API密钥状态失败:', error);
         alert(error.message || t('operationFailed'));
     }
@@ -156,6 +158,7 @@ export async function deleteApiKey(keyId, keyName) {
         await apiKeysApi.delete(keyId);
         loadApiKeys();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('删除API密钥失败:', error);
         alert(error.message || t('operationFailed'));
     }

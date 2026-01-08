@@ -167,6 +167,7 @@ const translations = {
         setupHint: '首次使用请创建管理员账号',
         createAdmin: '创建管理员',
         loginFailed: '登录失败',
+        sessionExpired: '登录已过期，请重新登录',
         passwordMismatch: '两次密码不一致',
 
         // 用户管理
@@ -401,6 +402,7 @@ const translations = {
         setupHint: 'Please create an admin account for first-time use',
         createAdmin: 'Create Admin',
         loginFailed: 'Login failed',
+        sessionExpired: 'Session expired, please log in again',
         passwordMismatch: 'Passwords do not match',
 
         // User management

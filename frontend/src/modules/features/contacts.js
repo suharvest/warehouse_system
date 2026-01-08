@@ -135,6 +135,7 @@ export async function editContact(contactId) {
         document.getElementById('contact-error').style.display = 'none';
         document.getElementById('contact-modal').classList.add('show');
     } catch (error) {
+        if (error.status === 401) return;
         console.error('获取联系方详情失败:', error);
         alert(t('operationFailed'));
     }
@@ -194,6 +195,7 @@ export async function toggleContactStatus(contactId, isDisabled) {
         await contactsApi.toggleStatus(contactId, !isDisabled);
         loadContacts();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('更新联系方状态失败:', error);
         alert(error.message || t('operationFailed'));
     }

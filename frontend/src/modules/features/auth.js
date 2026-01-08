@@ -1,11 +1,14 @@
 // ============ 认证模块 ============
 import { t } from '../../../i18n.js';
-import { authApi } from '../api.js';
+import { authApi, setSessionExpiredHandler } from '../api.js';
 import {
     currentUser, setCurrentUser,
     isSystemInitialized, setIsSystemInitialized,
     currentTab
 } from '../state.js';
+
+// 标记是否已显示过期提示（避免重复弹窗）
+let sessionExpiredNotified = false;
 
 // 回调函数引用（由 main.js 设置）
 let onAuthChange = null;
@@ -17,6 +20,38 @@ export function setAuthCallbacks(callbacks) {
     onAuthChange = callbacks.onAuthChange;
     switchTabFn = callbacks.switchTab;
     refreshCurrentTabFn = callbacks.refreshCurrentTab;
+}
+
+// 初始化 session 过期处理
+export function initSessionExpiredHandler() {
+    setSessionExpiredHandler(handleSessionExpired);
+}
+
+// 处理 session 过期
+function handleSessionExpired() {
+    // 如果当前没有用户或已经通知过，跳过
+    if (!currentUser || sessionExpiredNotified) return;
+
+    sessionExpiredNotified = true;
+
+    // 清除用户状态
+    setCurrentUser(null);
+    updateUserDisplay();
+    updatePermissionUI();
+
+    // 如果在需要权限的页面，切换到看板
+    if ((currentTab === 'users' || currentTab === 'contacts') && switchTabFn) {
+        switchTabFn('dashboard');
+    }
+
+    // 提示用户重新登录
+    alert(t('sessionExpired') || '登录已过期，请重新登录');
+    showLoginModal();
+
+    // 重置通知标记（允许下次再次通知）
+    setTimeout(() => {
+        sessionExpiredNotified = false;
+    }, 3000);
 }
 
 // 检查认证状态

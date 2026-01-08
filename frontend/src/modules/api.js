@@ -2,6 +2,13 @@
 
 export const API_BASE_URL = '/api';
 
+// 全局 session 过期回调
+let onSessionExpired = null;
+
+export function setSessionExpiredHandler(handler) {
+  onSessionExpired = handler;
+}
+
 // 通用请求封装
 async function request(url, options = {}) {
   const defaultOptions = {
@@ -23,6 +30,10 @@ async function request(url, options = {}) {
 async function fetchJson(url, options = {}) {
   const response = await request(url, options);
   if (!response.ok) {
+    // 检测 session 过期（排除 auth 相关的 API）
+    if (response.status === 401 && !url.startsWith('/auth/') && onSessionExpired) {
+      onSessionExpired();
+    }
     const error = new Error(`HTTP ${response.status}`);
     error.status = response.status;
     try {

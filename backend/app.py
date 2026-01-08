@@ -3032,6 +3032,7 @@ def export_inventory_records(
 
 @app.post("/api/inventory/add-record")
 async def add_inventory_record(
+    http_request: Request,
     request: ManualRecordRequest,
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
@@ -3052,6 +3053,7 @@ async def add_inventory_record(
         )
     elif request.type == 'out':
         return await stock_out(
+            http_request,
             StockOperationRequest(
                 product_name=request.product_name,
                 quantity=request.quantity,

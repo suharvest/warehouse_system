@@ -295,6 +295,8 @@ export async function submitAddRecord() {
             alert(data.error || data.message || t('operationFailed'));
         }
     } catch (error) {
+        // 401 错误已由全局 session 过期处理器处理，不再重复提示
+        if (error.status === 401) return;
         console.error('操作失败:', error);
         alert(t('operationFailed'));
     }
