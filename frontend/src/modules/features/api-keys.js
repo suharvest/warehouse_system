@@ -8,7 +8,7 @@ export async function loadApiKeys() {
         const keys = await apiKeysApi.getList();
         renderApiKeysTable(keys);
     } catch (error) {
-        if (error.message?.includes('401') || error.message?.includes('403')) {
+        if (error.status === 401 || error.status === 403) {
             return;
         }
         console.error('加载API密钥列表失败:', error);
@@ -19,7 +19,7 @@ function renderApiKeysTable(keys) {
     const tbody = document.getElementById('api-keys-tbody');
     if (!tbody) return;
 
-    if (!keys || keys.length === 0) {
+    if (!Array.isArray(keys) || keys.length === 0) {
         tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
         return;
     }
@@ -91,12 +91,37 @@ export function closeShowApiKeyModal() {
 }
 
 export function copyApiKey() {
-    const key = document.getElementById('created-api-key').textContent;
-    navigator.clipboard.writeText(key).then(() => {
+    const keyEl = document.getElementById('created-api-key');
+    if (!keyEl) return;
+    const key = keyEl.textContent;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(key).then(() => {
+            alert(t('copied'));
+        }).catch(err => {
+            console.error('复制失败:', err);
+            fallbackCopy(key);
+        });
+    } else {
+        fallbackCopy(key);
+    }
+}
+
+function fallbackCopy(text) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
         alert(t('copied'));
-    }).catch(err => {
+    } catch (err) {
         console.error('复制失败:', err);
-    });
+        alert('复制失败，请手动复制');
+    }
+    document.body.removeChild(textarea);
 }
 
 // ============ 禁用密钥 ============

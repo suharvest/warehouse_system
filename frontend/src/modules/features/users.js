@@ -17,7 +17,7 @@ export async function loadUsers() {
         const users = await usersApi.getList();
         renderUsersTable(users);
     } catch (error) {
-        if (error.message?.includes('401') || error.message?.includes('403')) {
+        if (error.status === 401 || error.status === 403) {
             return;
         }
         console.error('加载用户列表失败:', error);
@@ -28,7 +28,7 @@ function renderUsersTable(users) {
     const tbody = document.getElementById('users-tbody');
     if (!tbody) return;
 
-    if (!users || users.length === 0) {
+    if (!Array.isArray(users) || users.length === 0) {
         tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
         return;
     }

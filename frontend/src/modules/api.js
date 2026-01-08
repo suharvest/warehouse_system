@@ -22,6 +22,14 @@ async function request(url, options = {}) {
 
 async function fetchJson(url, options = {}) {
   const response = await request(url, options);
+  if (!response.ok) {
+    const error = new Error(`HTTP ${response.status}`);
+    error.status = response.status;
+    try {
+      error.data = await response.json();
+    } catch {}
+    throw error;
+  }
   return response.json();
 }
 
