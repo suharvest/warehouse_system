@@ -9,6 +9,7 @@ RUN pip install uv
 # 复制项目文件
 COPY pyproject.toml uv.lock ./
 COPY backend/ ./backend/
+COPY mcp/ ./mcp/
 COPY run_backend.py ./
 
 # 安装依赖
