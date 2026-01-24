@@ -83,7 +83,7 @@ logger = logging.getLogger('warehouse')
 # ============================================
 # 速率限制配置
 # ============================================
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_remote_address, enabled=os.environ.get('DISABLE_RATE_LIMIT', '0') != '1')
 
 # 创建 FastAPI 应用
 app = FastAPI(
