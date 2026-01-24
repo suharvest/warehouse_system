@@ -2,9 +2,9 @@
 const translations = {
     zh: {
         // 通用
-        pageTitle: '仓库管理系统 - 仪表盘',
-        detailPageTitle: '产品详情 - 仓库管理系统',
-        systemTitle: '仓库管理系统',
+        pageTitle: '智能仓管系统 - 仪表盘',
+        detailPageTitle: '产品详情 - 智能仓管系统',
+        systemTitle: '智能仓管系统',
         subtitle: '访问统计概览',
         refresh: '刷新',
         back: '返回',
@@ -243,12 +243,35 @@ const translations = {
         notes: '备注',
         bothType: '供应商/客户',
         contactMustSelectType: '必须选择供应商或客户至少一项',
-        contact: '联系方'
+        contact: '联系方',
+
+        // MCP (智能体) 管理
+        tabMCP: '智能体配置',
+        mcpConnectionList: '连接列表',
+        mcpAddConnection: '添加智能体',
+        mcpEditConnection: '编辑智能体',
+        mcpName: '名称',
+        mcpRole: '权限角色',
+        mcpUptime: '运行时长',
+        mcpAutoStart: '自动启动',
+        mcpAutoStartYes: '是',
+        mcpAutoStartNo: '否',
+        mcpAutoStartLabel: '系统启动时自动连接',
+        mcpStatusRunning: '运行中',
+        mcpStatusStopped: '已停止',
+        mcpStatusError: '错误',
+        mcpStart: '启动',
+        mcpStop: '停止',
+        mcpRestart: '重启',
+        mcpSaveAndStart: '保存并启动',
+        mcpConfirmDelete: '确定要删除智能体 "{name}" 吗？',
+        mcpNoConnections: '暂无智能体连接，点击"添加智能体"开始配置',
+        mcpNoLogs: '暂无日志'
     },
     en: {
-        pageTitle: 'Warehouse System - Dashboard',
-        detailPageTitle: 'Product Detail - Warehouse System',
-        systemTitle: 'Warehouse System',
+        pageTitle: 'Smart Warehouse - Dashboard',
+        detailPageTitle: 'Product Detail - Smart Warehouse',
+        systemTitle: 'Smart Warehouse',
         subtitle: 'Statistics Overview',
         refresh: 'Refresh',
         back: 'Back',
@@ -478,7 +501,30 @@ const translations = {
         notes: 'Notes',
         bothType: 'Supplier/Customer',
         contactMustSelectType: 'Must select at least one: Supplier or Customer',
-        contact: 'Contact'
+        contact: 'Contact',
+
+        // MCP (Agent) Management
+        tabMCP: 'Agent Config',
+        mcpConnectionList: 'Connection List',
+        mcpAddConnection: 'Add Agent',
+        mcpEditConnection: 'Edit Agent',
+        mcpName: 'Name',
+        mcpRole: 'Role',
+        mcpUptime: 'Uptime',
+        mcpAutoStart: 'Auto Start',
+        mcpAutoStartYes: 'Yes',
+        mcpAutoStartNo: 'No',
+        mcpAutoStartLabel: 'Auto-connect on system startup',
+        mcpStatusRunning: 'Running',
+        mcpStatusStopped: 'Stopped',
+        mcpStatusError: 'Error',
+        mcpStart: 'Start',
+        mcpStop: 'Stop',
+        mcpRestart: 'Restart',
+        mcpSaveAndStart: 'Save & Start',
+        mcpConfirmDelete: 'Are you sure you want to delete agent "{name}"?',
+        mcpNoConnections: 'No agent connections. Click "Add Agent" to get started.',
+        mcpNoLogs: 'No logs available'
     }
 };
 

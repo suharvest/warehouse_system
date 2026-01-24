@@ -40,7 +40,7 @@ function handleSessionExpired() {
     updatePermissionUI();
 
     // 如果在需要权限的页面，切换到看板
-    if ((currentTab === 'users' || currentTab === 'contacts') && switchTabFn) {
+    if ((currentTab === 'users' || currentTab === 'contacts' || currentTab === 'mcp') && switchTabFn) {
         switchTabFn('dashboard');
     }
 
@@ -121,6 +121,12 @@ export function updatePermissionUI() {
     if (usersNav) {
         usersNav.style.display = role === 'admin' ? 'flex' : 'none';
     }
+
+    // 显示/隐藏智能体配置TAB（admin only）
+    const mcpNav = document.getElementById('nav-mcp');
+    if (mcpNav) {
+        mcpNav.style.display = role === 'admin' ? 'flex' : 'none';
+    }
 }
 
 // 显示登录模态框
@@ -183,8 +189,8 @@ export async function handleLogout() {
     updateUserDisplay();
     updatePermissionUI();
 
-    // 如果在用户管理页面，切换到看板
-    if (currentTab === 'users' && switchTabFn) {
+    // 如果在需要权限的页面，切换到看板
+    if ((currentTab === 'users' || currentTab === 'mcp') && switchTabFn) {
         switchTabFn('dashboard');
     }
 }

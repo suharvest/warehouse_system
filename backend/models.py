@@ -495,3 +495,44 @@ class DatabaseOperationResponse(BaseModel):
     success: bool
     message: str
     details: Optional[dict] = None
+
+
+# ============ MCP Connection Models ============
+
+class CreateMCPConnectionRequest(BaseModel):
+    """创建MCP连接请求"""
+    name: str
+    mcp_endpoint: str
+    role: str = 'operate'  # 'admin' | 'operate' | 'view'
+    auto_start: bool = True
+
+
+class UpdateMCPConnectionRequest(BaseModel):
+    """更新MCP连接请求"""
+    name: Optional[str] = None
+    mcp_endpoint: Optional[str] = None
+    role: Optional[str] = None  # 'admin' | 'operate' | 'view'
+    auto_start: Optional[bool] = None
+
+
+class MCPConnectionItem(BaseModel):
+    """MCP连接列表项"""
+    id: str
+    name: str
+    mcp_endpoint: str
+    role: str = 'operate'
+    auto_start: bool
+    status: str  # stopped | running | error
+    error_message: Optional[str] = None
+    restart_count: int = 0
+    pid: Optional[int] = None
+    uptime_seconds: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class MCPConnectionResponse(BaseModel):
+    """MCP连接操作响应"""
+    success: bool
+    message: str
+    connection: Optional[MCPConnectionItem] = None

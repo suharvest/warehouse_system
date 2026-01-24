@@ -114,6 +114,7 @@ def init_database():
             role TEXT NOT NULL DEFAULT 'operate',
             user_id INTEGER REFERENCES users(id),
             is_disabled INTEGER DEFAULT 0,
+            is_system INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_used_at TIMESTAMP
         )
@@ -181,22 +182,50 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_user_id INTEGER REFERENCES users(id)')
 
+    # 创建MCP连接表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mcp_connections (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            mcp_endpoint TEXT NOT NULL,
+            api_key TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'operate',
+            auto_start INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'stopped',
+            error_message TEXT,
+            restart_count INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    ''')
+
+    # 为已有数据库添加新列
+    try:
+        cursor.execute('SELECT is_system FROM api_keys LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE api_keys ADD COLUMN is_system INTEGER DEFAULT 0')
+
+    try:
+        cursor.execute('SELECT role FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN role TEXT DEFAULT \'operate\'')
+
     conn.commit()
     conn.close()
 
 
 def generate_batch_no(material_id: int) -> str:
-    """生成批次号: YYYYMMDD-XXX"""
+    """生成批次号: YYYYMMDD-XXX (globally unique)"""
     conn = get_db_connection()
     cursor = conn.cursor()
 
     today = datetime.now().strftime('%Y%m%d')
 
-    # 查询今天该物料的批次数量
+    # 查询今天所有批次数量（batch_no 有全局唯一约束）
     cursor.execute('''
         SELECT COUNT(*) as count FROM batches
-        WHERE batch_no LIKE ? AND material_id = ?
-    ''', (f'{today}-%', material_id))
+        WHERE batch_no LIKE ?
+    ''', (f'{today}-%',))
     count = cursor.fetchone()['count']
     conn.close()
 

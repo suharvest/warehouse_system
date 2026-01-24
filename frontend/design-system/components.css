@@ -986,3 +986,35 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ============ MCP Connection Styles ============ */
+
+.mcp-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.mcp-status-badge.running {
+  background-color: #dcfce7;
+  color: #166534;
+}
+
+.mcp-status-badge.stopped {
+  background-color: #f3f4f6;
+  color: #6b7280;
+}
+
+.mcp-status-badge.error {
+  background-color: #fef2f2;
+  color: #991b1b;
+}
+
+.mcp-status-dot {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 1;
+}

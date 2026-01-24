@@ -44,12 +44,19 @@ from models import (
     # Operator model
     OperatorListItem,
     # Database management models
-    DatabaseClearRequest, DatabaseOperationResponse
+    DatabaseClearRequest, DatabaseOperationResponse,
+    # MCP models
+    CreateMCPConnectionRequest, UpdateMCPConnectionRequest,
+    MCPConnectionItem, MCPConnectionResponse
 )
 import math
+import uuid
 
 # Excel处理
 from openpyxl import Workbook, load_workbook
+
+# MCP进程管理
+from mcp_manager import MCPProcessManager
 
 # ============================================
 # 环境变量配置
@@ -674,7 +681,7 @@ async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'
         cursor = conn.cursor()
         cursor.execute('''
             SELECT id, name, role, is_disabled, created_at, last_used_at
-            FROM api_keys ORDER BY created_at DESC
+            FROM api_keys WHERE is_system = 0 ORDER BY created_at DESC
         ''')
 
         return [
@@ -3069,6 +3076,354 @@ async def add_inventory_record(
             error="无效的操作类型",
             message="类型必须是 'in' 或 'out'"
         )
+
+
+# ============ MCP 连接管理 ============
+
+# 全局 MCP 进程管理器实例
+mcp_manager = MCPProcessManager()
+
+
+@app.on_event("startup")
+async def startup_mcp_manager():
+    """启动时恢复 auto_start 的 MCP 连接"""
+    await mcp_manager.start_monitor()
+
+    # 恢复 auto_start 的连接
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM mcp_connections WHERE auto_start = 1')
+            rows = cursor.fetchall()
+            for row in rows:
+                logger.info(f"Auto-starting MCP connection: {row['name']}")
+                await mcp_manager.start_connection(
+                    row['id'], row['mcp_endpoint'], row['api_key']
+                )
+                # 更新数据库状态
+                status_info = mcp_manager.get_connection_status(row['id'])
+                cursor.execute(
+                    'UPDATE mcp_connections SET status = ?, updated_at = ? WHERE id = ?',
+                    (status_info['status'], datetime.now().isoformat(), row['id'])
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to restore MCP connections: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_mcp_manager():
+    """关闭时停止所有 MCP 连接"""
+    await mcp_manager.stop_all()
+
+
+def _build_connection_item(row, status_info: dict) -> MCPConnectionItem:
+    """从数据库行和实时状态构建响应对象"""
+    return MCPConnectionItem(
+        id=row['id'],
+        name=row['name'],
+        mcp_endpoint=row['mcp_endpoint'],
+        role=row['role'] or 'operate',
+        auto_start=bool(row['auto_start']),
+        status=status_info.get('status', row['status'] or 'stopped'),
+        error_message=status_info.get('error_message') or row['error_message'],
+        restart_count=status_info.get('restart_count', row['restart_count'] or 0),
+        pid=status_info.get('pid'),
+        uptime_seconds=status_info.get('uptime_seconds'),
+        created_at=row['created_at'],
+        updated_at=row['updated_at']
+    )
+
+
+@app.get("/api/mcp/connections")
+async def list_mcp_connections(
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """列出所有MCP连接（含实时状态）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections ORDER BY created_at DESC')
+        rows = cursor.fetchall()
+
+    items = []
+    for row in rows:
+        status_info = mcp_manager.get_connection_status(row['id'])
+        items.append(_build_connection_item(row, status_info))
+
+    return items
+
+
+@app.post("/api/mcp/connections", response_model=MCPConnectionResponse)
+async def create_mcp_connection(
+    request: CreateMCPConnectionRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """创建MCP连接（自动创建关联的API Key）"""
+    conn_id = str(uuid.uuid4())[:8]
+    now = datetime.now().isoformat()
+
+    # 验证角色
+    role = request.role if request.role in ('admin', 'operate', 'view') else 'operate'
+
+    # 自动生成 API Key
+    api_key_plain = generate_api_key()
+    key_hash = hash_api_key(api_key_plain)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 创建关联的 API Key（is_system=1，不在用户管理中显示）
+        cursor.execute('''
+            INSERT INTO api_keys (key_hash, name, role, user_id, is_system, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+        ''', (key_hash, f'Agent: {request.name}', role, current_user.id, now))
+
+        # 创建 MCP 连接记录
+        cursor.execute('''
+            INSERT INTO mcp_connections (id, name, mcp_endpoint, api_key, role, auto_start, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'stopped', ?, ?)
+        ''', (conn_id, request.name, request.mcp_endpoint, api_key_plain, role,
+              1 if request.auto_start else 0, now, now))
+        conn.commit()
+
+    # 如果 auto_start，立即启动
+    if request.auto_start:
+        await mcp_manager.start_connection(conn_id, request.mcp_endpoint, api_key_plain)
+        status_info = mcp_manager.get_connection_status(conn_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE mcp_connections SET status = ?, updated_at = ? WHERE id = ?',
+                (status_info['status'], datetime.now().isoformat(), conn_id)
+            )
+            conn.commit()
+
+    # 获取创建的记录
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+
+    status_info = mcp_manager.get_connection_status(conn_id)
+    return MCPConnectionResponse(
+        success=True,
+        message="连接已创建",
+        connection=_build_connection_item(row, status_info)
+    )
+
+
+@app.put("/api/mcp/connections/{conn_id}", response_model=MCPConnectionResponse)
+async def update_mcp_connection(
+    conn_id: str,
+    request: UpdateMCPConnectionRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """修改MCP连接配置"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+        updates = []
+        params = []
+        key_hash = hash_api_key(row['api_key'])
+
+        if request.name is not None:
+            updates.append('name = ?')
+            params.append(request.name)
+            # 同步更新关联的 API Key 名称
+            cursor.execute(
+                'UPDATE api_keys SET name = ? WHERE key_hash = ?',
+                (f'Agent: {request.name}', key_hash)
+            )
+        if request.mcp_endpoint is not None:
+            updates.append('mcp_endpoint = ?')
+            params.append(request.mcp_endpoint)
+        if request.role is not None and request.role in ('admin', 'operate', 'view'):
+            updates.append('role = ?')
+            params.append(request.role)
+            # 同步更新关联的 API Key 角色
+            cursor.execute(
+                'UPDATE api_keys SET role = ? WHERE key_hash = ?',
+                (request.role, key_hash)
+            )
+        if request.auto_start is not None:
+            updates.append('auto_start = ?')
+            params.append(1 if request.auto_start else 0)
+
+        if updates:
+            updates.append('updated_at = ?')
+            params.append(datetime.now().isoformat())
+            params.append(conn_id)
+            cursor.execute(
+                f'UPDATE mcp_connections SET {", ".join(updates)} WHERE id = ?',
+                params
+            )
+            conn.commit()
+
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+
+    status_info = mcp_manager.get_connection_status(conn_id)
+    return MCPConnectionResponse(
+        success=True,
+        message="连接已更新",
+        connection=_build_connection_item(row, status_info)
+    )
+
+
+@app.delete("/api/mcp/connections/{conn_id}")
+async def delete_mcp_connection(
+    conn_id: str,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """删除MCP连接（先停止）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+    # 先停止进程
+    await mcp_manager.stop_connection(conn_id)
+    mcp_manager.remove_connection(conn_id)
+
+    # 删除数据库记录及关联的 API Key
+    with get_db() as conn:
+        cursor = conn.cursor()
+        api_key_plain = row['api_key']
+        if api_key_plain:
+            key_hash = hash_api_key(api_key_plain)
+            cursor.execute('DELETE FROM api_keys WHERE key_hash = ?', (key_hash,))
+        cursor.execute('DELETE FROM mcp_connections WHERE id = ?', (conn_id,))
+        conn.commit()
+
+    return {"success": True, "message": "连接已删除"}
+
+
+@app.post("/api/mcp/connections/{conn_id}/start", response_model=MCPConnectionResponse)
+async def start_mcp_connection(
+    conn_id: str,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """启动MCP连接"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+    success = await mcp_manager.start_connection(
+        conn_id, row['mcp_endpoint'], row['api_key']
+    )
+
+    status_info = mcp_manager.get_connection_status(conn_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE mcp_connections SET status = ?, error_message = ?, restart_count = 0, updated_at = ? WHERE id = ?',
+            (status_info['status'], status_info.get('error_message'),
+             datetime.now().isoformat(), conn_id)
+        )
+        conn.commit()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+
+    return MCPConnectionResponse(
+        success=success,
+        message="连接已启动" if success else "启动失败",
+        connection=_build_connection_item(row, status_info)
+    )
+
+
+@app.post("/api/mcp/connections/{conn_id}/stop", response_model=MCPConnectionResponse)
+async def stop_mcp_connection(
+    conn_id: str,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """停止MCP连接"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+    await mcp_manager.stop_connection(conn_id)
+
+    status_info = mcp_manager.get_connection_status(conn_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE mcp_connections SET status = ?, error_message = NULL, updated_at = ? WHERE id = ?',
+            ('stopped', datetime.now().isoformat(), conn_id)
+        )
+        conn.commit()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+
+    return MCPConnectionResponse(
+        success=True,
+        message="连接已停止",
+        connection=_build_connection_item(row, status_info)
+    )
+
+
+@app.post("/api/mcp/connections/{conn_id}/restart", response_model=MCPConnectionResponse)
+async def restart_mcp_connection(
+    conn_id: str,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """重启MCP连接"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+    success = await mcp_manager.restart_connection(
+        conn_id, row['mcp_endpoint'], row['api_key']
+    )
+
+    status_info = mcp_manager.get_connection_status(conn_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE mcp_connections SET status = ?, error_message = ?, restart_count = 0, updated_at = ? WHERE id = ?',
+            (status_info['status'], status_info.get('error_message'),
+             datetime.now().isoformat(), conn_id)
+        )
+        conn.commit()
+        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
+        row = cursor.fetchone()
+
+    return MCPConnectionResponse(
+        success=success,
+        message="连接已重启" if success else "重启失败",
+        connection=_build_connection_item(row, status_info)
+    )
+
+
+@app.get("/api/mcp/connections/{conn_id}/logs")
+async def get_mcp_connection_logs(
+    conn_id: str,
+    lines: int = Query(default=50, ge=1, le=200),
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """获取MCP连接的最近日志"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM mcp_connections WHERE id = ?', (conn_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+    logs = mcp_manager.get_logs(conn_id, lines)
+    return {"logs": logs}
 
 
 # ============ 启动配置 ============

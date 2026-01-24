@@ -33,6 +33,11 @@ export function switchTab(tabId, filters = {}) {
     // 更新URL hash
     updateUrlHash(tabId, filters);
 
+    // 离开 MCP tab 时停止刷新
+    if (tabId !== 'mcp' && modules.stopMCPRefresh) {
+        modules.stopMCPRefresh();
+    }
+
     // 加载对应数据
     switch (tabId) {
         case 'dashboard':
@@ -70,6 +75,10 @@ export function switchTab(tabId, filters = {}) {
             if (modules.loadUsers) modules.loadUsers();
             if (modules.loadApiKeys) modules.loadApiKeys();
             break;
+        case 'mcp':
+            if (modules.loadMCPConnections) modules.loadMCPConnections();
+            if (modules.startMCPRefresh) modules.startMCPRefresh();
+            break;
     }
 
     resetCountdown();
@@ -91,7 +100,7 @@ export function initFromHash() {
     if (hash) {
         const params = new URLSearchParams(hash.substring(1));
         const tab = params.get('tab');
-        if (tab && ['dashboard', 'records', 'inventory', 'detail', 'contacts', 'users'].includes(tab)) {
+        if (tab && ['dashboard', 'records', 'inventory', 'detail', 'contacts', 'users', 'mcp'].includes(tab)) {
             const filters = {};
             for (const [key, value] of params.entries()) {
                 if (key !== 'tab') {

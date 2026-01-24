@@ -21,6 +21,7 @@ import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEdit
 import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
+import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh } from './features/mcp.js';
 
 // 语言切换
 import { toggleLangDropdown, selectLanguage } from '../../i18n.js';
@@ -39,7 +40,10 @@ function setupModuleCallbacks() {
         loadUsers,
         loadApiKeys,
         loadProductDetail,
-        setProductSelectorValue
+        setProductSelectorValue,
+        loadMCPConnections,
+        startMCPRefresh,
+        stopMCPRefresh
     });
 
     // 设置认证回调
@@ -199,6 +203,9 @@ function onLanguageChange() {
             loadUsers();
             loadApiKeys();
             break;
+        case 'mcp':
+            loadMCPConnections();
+            break;
     }
 }
 
@@ -324,6 +331,16 @@ const actionHandlers = {
     'closeClearDatabaseModal': closeClearDatabaseModal,
     'exportThenClearDatabase': exportThenClearDatabase,
     'directClearDatabase': directClearDatabase,
+
+    // MCP 连接管理
+    'showAddMCPModal': showAddMCPModal,
+    'closeMCPModal': closeMCPModal,
+    'handleSaveMCP': handleSaveMCP,
+    'mcpEdit': (el) => editMCPConnection(el.dataset.connId),
+    'mcpStart': (el) => startMCPConnection(el.dataset.connId),
+    'mcpStop': (el) => stopMCPConnection(el.dataset.connId),
+    'mcpRestart': (el) => restartMCPConnection(el.dataset.connId),
+    'mcpDelete': (el) => deleteMCPConnection(el.dataset.connId),
 };
 
 // 事件委托监听
