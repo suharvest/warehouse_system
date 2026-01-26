@@ -1,0 +1,102 @@
+version: '3.8'
+
+# 服务器生产环境 Docker Compose 配置
+# 域名: smart_wms.harvestlife.xyz
+# 使用方式: docker-compose -f deploy/docker-compose.server.yml up -d --build
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile.prod
+    container_name: smart-wms-backend
+    expose:
+      - "2124"
+    volumes:
+      - ../data:/data
+    environment:
+      - DATABASE_PATH=/data/warehouse.db
+      - SQLITE_PRODUCTION_MODE=true
+      - INIT_MOCK_DATA=false
+      - BCRYPT_ENABLED=true
+      - ENABLE_SECURITY_HEADERS=true
+      - ENABLE_AUDIT_LOG=true
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=https://smart_wms.harvestlife.xyz,http://localhost:2125
+      - MAX_UPLOAD_SIZE_MB=10
+      - MAX_IMPORT_ROWS=10000
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:2124/api/dashboard/stats', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - wms-network
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile.prod
+    container_name: smart-wms-frontend
+    expose:
+      - "2125"
+    environment:
+      - BACKEND_URL=http://backend:2124
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+    networks:
+      - wms-network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: smart-wms-caddy
+    ports:
+      - "2125:2125"
+      - "2124:2124"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../caddy_data:/data
+      - ../caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - wms-network
+
+networks:
+  wms-network:
+    name: smart-wms-network
+    driver: bridge

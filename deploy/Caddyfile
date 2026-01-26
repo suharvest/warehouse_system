@@ -1,0 +1,35 @@
+# Smart WMS Caddy Configuration
+# 反向代理配置（端口 2125 用于前端+API，2124 用于直接API访问）
+
+# 主服务端口 - 前端和API统一入口
+:2125 {
+    # 后端 API 代理
+    handle /api/* {
+        reverse_proxy backend:2124
+    }
+
+    # 前端静态资源
+    handle {
+        reverse_proxy frontend:2125
+    }
+
+    # 访问日志
+    log {
+        output file /data/access.log {
+            roll_size 50mb
+            roll_keep 3
+        }
+    }
+
+    # 安全头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}
+
+# API 直接访问端口（可选）
+:2124 {
+    reverse_proxy backend:2124
+}
