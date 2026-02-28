@@ -1,5 +1,5 @@
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -9,7 +9,7 @@ venv/
 ENV/
 
 # 数据库文件（使用 volume 挂载）
-*.db
+**/*.db
 
 # IDE
 .idea/
