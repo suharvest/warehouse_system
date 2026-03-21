@@ -9,8 +9,12 @@ from pypinyin import lazy_pinyin, Style
 class FuzzyMatcher:
     """模糊匹配器，支持文本编辑距离和中文拼音相似度"""
 
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
+    def __init__(self, get_conn):
+        """
+        Args:
+            get_conn: 返回数据库连接的可调用对象，每次需要时调用并在用完后关闭
+        """
+        self._get_conn = get_conn
         self._cache = None
 
     def _load_entities(self) -> list[dict]:
@@ -18,51 +22,55 @@ class FuzzyMatcher:
         if self._cache is not None:
             return self._cache
 
-        entities = []
-        cursor = self._conn.cursor()
+        conn = self._get_conn()
+        try:
+            entities = []
+            cursor = conn.cursor()
 
-        # materials: name + sku
-        cursor.execute(
-            'SELECT id, name, sku, category FROM materials WHERE is_disabled = 0'
-        )
-        for row in cursor.fetchall():
-            entities.append({
-                'name': row['name'],
-                'entity_type': 'material',
-                'entity_id': row['id'],
-                'extra': {'sku': row['sku'], 'category': row['category']},
-            })
+            # materials: name + sku
+            cursor.execute(
+                'SELECT id, name, sku, category FROM materials WHERE is_disabled = 0'
+            )
+            for row in cursor.fetchall():
+                entities.append({
+                    'name': row['name'],
+                    'entity_type': 'material',
+                    'entity_id': row['id'],
+                    'extra': {'sku': row['sku'], 'category': row['category']},
+                })
 
-        # contacts: name
-        cursor.execute(
-            'SELECT id, name, is_supplier, is_customer FROM contacts WHERE is_disabled = 0'
-        )
-        for row in cursor.fetchall():
-            entities.append({
-                'name': row['name'],
-                'entity_type': 'contact',
-                'entity_id': row['id'],
-                'extra': {
-                    'is_supplier': bool(row['is_supplier']),
-                    'is_customer': bool(row['is_customer']),
-                },
-            })
+            # contacts: name
+            cursor.execute(
+                'SELECT id, name, is_supplier, is_customer FROM contacts WHERE is_disabled = 0'
+            )
+            for row in cursor.fetchall():
+                entities.append({
+                    'name': row['name'],
+                    'entity_type': 'contact',
+                    'entity_id': row['id'],
+                    'extra': {
+                        'is_supplier': bool(row['is_supplier']),
+                        'is_customer': bool(row['is_customer']),
+                    },
+                })
 
-        # operators: display_name + username
-        cursor.execute(
-            'SELECT id, username, display_name FROM users WHERE is_disabled = 0'
-        )
-        for row in cursor.fetchall():
-            name = row['display_name'] or row['username']
-            entities.append({
-                'name': name,
-                'entity_type': 'operator',
-                'entity_id': row['id'],
-                'extra': None,
-            })
+            # operators: display_name + username
+            cursor.execute(
+                'SELECT id, username, display_name FROM users WHERE is_disabled = 0'
+            )
+            for row in cursor.fetchall():
+                name = row['display_name'] or row['username']
+                entities.append({
+                    'name': name,
+                    'entity_type': 'operator',
+                    'entity_id': row['id'],
+                    'extra': None,
+                })
 
-        self._cache = entities
-        return entities
+            self._cache = entities
+            return entities
+        finally:
+            conn.close()
 
     @staticmethod
     def _get_pinyin(text: str) -> str:

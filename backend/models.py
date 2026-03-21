@@ -66,15 +66,6 @@ class MaterialItem(BaseModel):
     status_text: str
 
 
-class XiaozhiItem(BaseModel):
-    """xiaozhi物料项"""
-    name: str
-    sku: str
-    quantity: int
-    unit: str
-    category: str
-    location: str
-
 
 class ProductStats(BaseModel):
     """产品统计数据"""

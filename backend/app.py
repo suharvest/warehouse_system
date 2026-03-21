@@ -218,12 +218,8 @@ def get_db():
 # FuzzyMatcher 全局实例
 def get_fuzzy_matcher() -> FuzzyMatcher:
     """获取或创建 FuzzyMatcher 实例"""
-    conn = get_db_connection()
     if not hasattr(app.state, 'fuzzy_matcher'):
-        app.state.fuzzy_matcher = FuzzyMatcher(conn)
-    else:
-        # 更新连接（连接可能已关闭）
-        app.state.fuzzy_matcher._conn = conn
+        app.state.fuzzy_matcher = FuzzyMatcher(get_db_connection)
     return app.state.fuzzy_matcher
 
 
@@ -1617,46 +1613,76 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, page, page_size):
         count_query += ' AND category = ?'
         params.append(category)
 
-    # Status filter
+    # Status filter — computed in Python, so when active we fetch all rows and paginate manually
     status_filter = status.split(',') if status else None
 
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()['total']
-
-    base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
-    offset = (page - 1) * page_size
-    params.extend([page_size, offset])
-
-    cursor.execute(base_query, params)
-    rows = cursor.fetchall()
-
-    items = []
-    for row in rows:
-        qty = row['quantity']
-        ss = row['safe_stock']
-        if qty >= ss:
-            item_status = 'normal'
-        elif qty >= ss * 0.5:
-            item_status = 'warning'
-        else:
-            item_status = 'danger'
-
-        if status_filter and item_status not in status_filter:
-            continue
-
-        if fmt == "brief":
-            items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
-        else:
-            items.append({
-                "id": row['id'], "name": row['name'], "sku": row['sku'],
-                "category": row['category'], "quantity": qty, "unit": row['unit'],
-                "safe_stock": ss, "location": row['location'], "status": item_status,
-            })
-
     if status_filter:
-        total = len(items)  # Approximate for filtered results
+        # Fetch all matching rows (no SQL pagination), filter by computed status in Python
+        base_query += ' ORDER BY name ASC'
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
 
-    total_pages = math.ceil(total / page_size) if total > 0 else 1
+        all_items = []
+        for row in rows:
+            qty = row['quantity']
+            ss = row['safe_stock']
+            if qty >= ss:
+                item_status = 'normal'
+            elif qty >= ss * 0.5:
+                item_status = 'warning'
+            else:
+                item_status = 'danger'
+
+            if item_status not in status_filter:
+                continue
+
+            if fmt == "brief":
+                all_items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
+            else:
+                all_items.append({
+                    "id": row['id'], "name": row['name'], "sku": row['sku'],
+                    "category": row['category'], "quantity": qty, "unit": row['unit'],
+                    "safe_stock": ss, "location": row['location'], "status": item_status,
+                })
+
+        total = len(all_items)
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+        offset = (page - 1) * page_size
+        items = all_items[offset:offset + page_size]
+    else:
+        # No status filter — use SQL pagination
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        items = []
+        for row in rows:
+            qty = row['quantity']
+            ss = row['safe_stock']
+            if qty >= ss:
+                item_status = 'normal'
+            elif qty >= ss * 0.5:
+                item_status = 'warning'
+            else:
+                item_status = 'danger'
+
+            if fmt == "brief":
+                items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
+            else:
+                items.append({
+                    "id": row['id'], "name": row['name'], "sku": row['sku'],
+                    "category": row['category'], "quantity": qty, "unit": row['unit'],
+                    "safe_stock": ss, "location": row['location'], "status": item_status,
+                })
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
     return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
 
 

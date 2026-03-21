@@ -39,4 +39,5 @@ logs/
 # Node.js / npm
 frontend/node_modules/
 frontend/dist/
-frontend/package-lock.jsonCLAUDE.md
+frontend/package-lock.json
+CLAUDE.md
