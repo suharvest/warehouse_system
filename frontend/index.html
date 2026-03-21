@@ -1093,6 +1093,19 @@
             </div>
             <div class="modal-body">
                 <form id="add-record-form">
+                    <div class="form-group">
+                        <label><span data-i18n="operationType">操作类型</span> <span class="required">*</span></label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="record-type" value="in" checked>
+                                <span data-i18n="inbound">入库</span>
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="record-type" value="out">
+                                <span data-i18n="outbound">出库</span>
+                            </label>
+                        </div>
+                    </div>
                     <div class="form-group" id="record-product-group">
                         <label><span data-i18n="selectProduct">选择产品</span> <span class="required">*</span></label>
                         <div id="record-product-wrapper" class="searchable-select">
@@ -1107,19 +1120,6 @@
                     <div class="form-group" id="record-product-display-group" style="display: none;">
                         <label data-i18n="productName">产品名称</label>
                         <input type="text" id="record-product-display" readonly disabled>
-                    </div>
-                    <div class="form-group">
-                        <label><span data-i18n="operationType">操作类型</span> <span class="required">*</span></label>
-                        <div class="radio-group">
-                            <label class="radio-label">
-                                <input type="radio" name="record-type" value="in" checked>
-                                <span data-i18n="inbound">入库</span>
-                            </label>
-                            <label class="radio-label">
-                                <input type="radio" name="record-type" value="out">
-                                <span data-i18n="outbound">出库</span>
-                            </label>
-                        </div>
                     </div>
                     <div class="form-group">
                         <label><span data-i18n="quantity">数量</span> <span class="required">*</span></label>

@@ -174,7 +174,10 @@ function populateProductSelector() {
         products: allProducts.filter(p => !p.is_disabled),
         includeDisabled: false,
         showStock: true,
-        onSelect: null,
+        onSelect: () => {
+            const qty = document.getElementById('record-quantity');
+            if (qty) qty.focus();
+        },
         placeholder: t('searchPlaceholder') || '搜索产品名称或编码...'
     });
 }

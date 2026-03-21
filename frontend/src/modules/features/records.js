@@ -213,6 +213,7 @@ export function showAddRecordModal() {
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
         radio.onchange = () => loadContactsForRecord(radio.value);
     });
+    setupFormEnterNavigation();
 }
 
 export function showAddRecordModalForProduct() {
@@ -228,6 +229,7 @@ export function showAddRecordModalForProduct() {
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
         radio.onchange = () => loadContactsForRecord(radio.value);
     });
+    setupFormEnterNavigation();
 }
 
 async function loadContactsForRecord(recordType) {
@@ -247,6 +249,39 @@ async function loadContactsForRecord(recordType) {
     } catch (error) {
         console.error('加载联系方列表失败:', error);
     }
+}
+
+// Enter 键跳转到下一个输入框（兼容扫码机自动换行）
+function setupFormEnterNavigation() {
+    const form = document.getElementById('add-record-form');
+    if (!form) return;
+
+    // 移除旧监听器（防止重复绑定）
+    if (form._enterNavHandler) {
+        form.removeEventListener('keydown', form._enterNavHandler);
+    }
+
+    const handler = function (e) {
+        if (e.key !== 'Enter') return;
+
+        const active = document.activeElement;
+        if (!active || !form.contains(active)) return;
+
+        // 产品搜索框由 dropdown.js 处理 Enter（选中 + onSelect 回调跳转），这里不干预
+        if (active.id === 'record-product-input') return;
+
+        e.preventDefault();
+
+        if (active.id === 'record-quantity') {
+            document.getElementById('record-reason')?.focus();
+        } else if (active.id === 'record-reason') {
+            document.getElementById('record-contact')?.focus();
+        }
+        // record-contact 上按 Enter 不做任何操作，需要手动点提交
+    };
+
+    form._enterNavHandler = handler;
+    form.addEventListener('keydown', handler);
 }
 
 export function closeAddRecordModal() {
