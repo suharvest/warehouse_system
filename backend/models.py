@@ -66,15 +66,6 @@ class MaterialItem(BaseModel):
     status_text: str
 
 
-class XiaozhiItem(BaseModel):
-    """xiaozhi物料项"""
-    name: str
-    sku: str
-    quantity: int
-    unit: str
-    category: str
-    location: str
-
 
 class ProductStats(BaseModel):
     """产品统计数据"""
@@ -110,6 +101,7 @@ class StockOperationRequest(BaseModel):
     reason: Optional[str] = None
     operator: Optional[str] = "MCP系统"
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
+    fuzzy: bool = True  # 是否启用模糊匹配
 
 
 class StockOperationProduct(BaseModel):
@@ -449,6 +441,7 @@ class StockInResponse(BaseModel):
     message: str
     warning: Optional[str] = None
     error: Optional[str] = None
+    resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
 
 
 class StockOutResponse(BaseModel):
@@ -460,6 +453,7 @@ class StockOutResponse(BaseModel):
     message: str
     warning: Optional[str] = None
     error: Optional[str] = None
+    resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
 
 
 class BatchItem(BaseModel):
@@ -536,3 +530,24 @@ class MCPConnectionResponse(BaseModel):
     success: bool
     message: str
     connection: Optional[MCPConnectionItem] = None
+
+
+# ============ Fuzzy Match Models ============
+
+class FuzzyMatchCandidate(BaseModel):
+    """模糊匹配候选项"""
+    name: str
+    score: float
+    entity_type: str  # "material" | "contact" | "operator"
+    entity_id: int
+    extra: Optional[dict] = None
+
+
+
+class FuzzyMatchResponse(BaseModel):
+    """模糊匹配响应"""
+    query: str
+    candidates: List[FuzzyMatchCandidate]
+    best_match: Optional[FuzzyMatchCandidate] = None
+    confident: bool
+    message: str

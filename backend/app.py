@@ -26,7 +26,7 @@ from database import (
 )
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
-    MaterialItem, XiaozhiItem, ProductStats, ProductRecord,
+    MaterialItem, ProductStats, ProductRecord,
     StockOperationRequest, StockOperationResponse, StockOperationProduct,
     ImportPreviewItem, ExcelImportPreviewResponse, ExcelImportConfirm,
     ExcelImportResponse, ManualRecordRequest, MissingSkuItem,
@@ -47,8 +47,11 @@ from models import (
     DatabaseClearRequest, DatabaseOperationResponse,
     # MCP models
     CreateMCPConnectionRequest, UpdateMCPConnectionRequest,
-    MCPConnectionItem, MCPConnectionResponse
+    MCPConnectionItem, MCPConnectionResponse,
+    # Fuzzy match models
+    FuzzyMatchCandidate, FuzzyMatchResponse,
 )
+from fuzzy_match import FuzzyMatcher
 import math
 import uuid
 
@@ -210,6 +213,14 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
+
+# FuzzyMatcher 全局实例
+def get_fuzzy_matcher() -> FuzzyMatcher:
+    """获取或创建 FuzzyMatcher 实例"""
+    if not hasattr(app.state, 'fuzzy_matcher'):
+        app.state.fuzzy_matcher = FuzzyMatcher(get_db_connection)
+    return app.state.fuzzy_matcher
 
 
 # 自定义异常处理（保持响应格式兼容）
@@ -570,6 +581,7 @@ async def create_user(
 
         user_id = cursor.lastrowid
         conn.commit()
+        get_fuzzy_matcher().invalidate_cache()
 
         return UserListItem(
             id=user_id,
@@ -635,6 +647,7 @@ async def update_user(
                 UPDATE users SET {', '.join(updates)} WHERE id = ?
             ''', params)
             conn.commit()
+            get_fuzzy_matcher().invalidate_cache()
 
         cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
         updated = cursor.fetchone()
@@ -668,6 +681,7 @@ async def delete_user(
         cursor.execute('UPDATE users SET is_disabled = 1 WHERE id = ?', (user_id,))
         cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
         conn.commit()
+        get_fuzzy_matcher().invalidate_cache()
 
         return {"success": True, "message": "用户已禁用"}
 
@@ -1014,13 +1028,14 @@ async def clear_database(
 
 # ============ Contact Management APIs ============
 
-@app.get("/api/contacts", response_model=PaginatedContactsResponse)
+@app.get("/api/contacts")
 async def list_contacts(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=10, le=100, description="每页条数"),
     name: Optional[str] = Query(None, description="名称模糊搜索"),
     contact_type: Optional[str] = Query(None, description="类型: supplier/customer/all"),
-    include_disabled: bool = Query(False, description="是否包含禁用的联系方")
+    include_disabled: bool = Query(False, description="是否包含禁用的联系方"),
+    format: Optional[str] = Query(None, description="brief时精简返回"),
 ):
     """获取联系方列表（分页）"""
     with get_db() as conn:
@@ -1061,31 +1076,34 @@ async def list_contacts(
         cursor.execute(base_query, params)
         rows = cursor.fetchall()
 
-        items = [
-            ContactItem(
-                id=row['id'],
-                name=row['name'],
-                address=row['address'],
-                phone=row['phone'],
-                email=row['email'],
-                is_supplier=bool(row['is_supplier']),
-                is_customer=bool(row['is_customer']),
-                notes=row['notes'],
-                is_disabled=bool(row['is_disabled']),
-                created_at=row['created_at']
-            )
-            for row in rows
-        ]
+        if format == "brief":
+            items = [{"id": row['id'], "name": row['name']} for row in rows]
+        else:
+            items = [
+                ContactItem(
+                    id=row['id'],
+                    name=row['name'],
+                    address=row['address'],
+                    phone=row['phone'],
+                    email=row['email'],
+                    is_supplier=bool(row['is_supplier']),
+                    is_customer=bool(row['is_customer']),
+                    notes=row['notes'],
+                    is_disabled=bool(row['is_disabled']),
+                    created_at=row['created_at']
+                )
+                for row in rows
+            ]
 
         total_pages = math.ceil(total / page_size) if total > 0 else 1
 
-        return PaginatedContactsResponse(
-            items=items,
-            page=page,
-            page_size=page_size,
-            total=total,
-            total_pages=total_pages
-        )
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
 
 
 @app.get("/api/contacts/suppliers", response_model=List[ContactListItem])
@@ -1212,6 +1230,7 @@ async def create_contact(
 
         contact_id = cursor.lastrowid
         conn.commit()
+        get_fuzzy_matcher().invalidate_cache()
 
         return ContactItem(
             id=contact_id,
@@ -1276,6 +1295,7 @@ async def update_contact(
                 UPDATE contacts SET {', '.join(updates)} WHERE id = ?
             ''', params)
             conn.commit()
+            get_fuzzy_matcher().invalidate_cache()
 
         cursor.execute('''
             SELECT id, name, address, phone, email, is_supplier, is_customer,
@@ -1313,6 +1333,7 @@ async def delete_contact(
 
         cursor.execute('UPDATE contacts SET is_disabled = 1 WHERE id = ?', (contact_id,))
         conn.commit()
+        get_fuzzy_matcher().invalidate_cache()
 
         return {"success": True, "message": "联系方已禁用"}
 
@@ -1503,33 +1524,272 @@ def get_low_stock_alert():
         ]
 
 
-# ============ Materials APIs ============
+# ============ Fuzzy Match & Search APIs ============
 
-@app.get("/api/materials/xiaozhi", response_model=List[XiaozhiItem])
-def get_xiaozhi_stock():
-    """获取 watcher-xiaozhi 相关库存"""
+@app.get("/api/fuzzy-match", response_model=FuzzyMatchResponse)
+def fuzzy_match_endpoint(
+    q: str = Query(..., description="搜索文本"),
+    entity_type: str = Query("all", description="实体类型: material/contact/operator/all"),
+    top_k: int = Query(5, ge=1, le=50, description="返回前k个结果"),
+    threshold: float = Query(50.0, ge=0, le=100, description="最低分数阈值")
+):
+    """模糊匹配搜索"""
+    matcher = get_fuzzy_matcher()
+    result = matcher.resolve(q, entity_type=entity_type)
+    candidates_raw = matcher.search(q, entity_type=entity_type, top_k=top_k, threshold=threshold)
+
+    candidates = [FuzzyMatchCandidate(**c) for c in candidates_raw]
+    best_match = FuzzyMatchCandidate(**result['best_match']) if result['best_match'] else None
+
+    if result['confident'] and best_match:
+        message = f"找到最佳匹配: {best_match.name} (置信度: {best_match.score})"
+    elif candidates:
+        message = f"找到 {len(candidates)} 个候选项，请确认选择"
+    else:
+        message = f"未找到与 '{q}' 匹配的结果"
+
+    return FuzzyMatchResponse(
+        query=q,
+        candidates=candidates,
+        best_match=best_match,
+        confident=result['confident'],
+        message=message
+    )
+
+
+@app.get("/api/search")
+def unified_search(
+    q: str = Query(None, description="搜索文本"),
+    entity_type: str = Query("material", description="实体类型: material/contact/operator"),
+    category: str = Query(None, description="分类（仅material）"),
+    status: str = Query(None, description="状态（仅material，逗号分隔）"),
+    contact_type: str = Query(None, description="联系方类型: supplier/customer"),
+    fuzzy: bool = Query(True, description="是否开启模糊匹配"),
+    format: str = Query(None, description="brief时只返回核心字段"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数"),
+):
+    """统一搜索端点"""
     with get_db() as conn:
         cursor = conn.cursor()
 
-        cursor.execute('''
-            SELECT name, sku, quantity, unit, category, location
-            FROM materials
-            WHERE name LIKE '%xiaozhi%' OR name LIKE '%watcher%'
-            ORDER BY quantity DESC
-        ''')
+        if entity_type == "material":
+            return _search_materials(cursor, q, category, status, fuzzy, format, page, page_size)
+        elif entity_type == "contact":
+            return _search_contacts(cursor, q, contact_type, fuzzy, format, page, page_size)
+        elif entity_type == "operator":
+            return _search_operators(cursor, q, fuzzy, format, page, page_size)
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
 
-        return [
-            XiaozhiItem(
-                name=row['name'],
-                sku=row['sku'],
-                quantity=row['quantity'],
-                unit=row['unit'],
-                category=row['category'],
-                location=row['location']
-            )
-            for row in cursor.fetchall()
-        ]
 
+def _search_materials(cursor, q, category, status, fuzzy, fmt, page, page_size):
+    """搜索物料"""
+    # 获取匹配的 material IDs (fuzzy mode)
+    matched_ids = None
+    if q and fuzzy:
+        matcher = get_fuzzy_matcher()
+        results = matcher.search(q, entity_type="material", top_k=100, threshold=50.0)
+        matched_ids = [r['entity_id'] for r in results]
+        if not matched_ids:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
+
+    base_query = 'SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled FROM materials WHERE is_disabled = 0'
+    count_query = 'SELECT COUNT(*) as total FROM materials WHERE is_disabled = 0'
+    params = []
+
+    if matched_ids is not None:
+        placeholders = ','.join('?' * len(matched_ids))
+        base_query += f' AND id IN ({placeholders})'
+        count_query += f' AND id IN ({placeholders})'
+        params.extend(matched_ids)
+    elif q and not fuzzy:
+        base_query += ' AND (name LIKE ? OR sku LIKE ?)'
+        count_query += ' AND (name LIKE ? OR sku LIKE ?)'
+        params.extend([f'%{q}%', f'%{q}%'])
+
+    if category:
+        base_query += ' AND category = ?'
+        count_query += ' AND category = ?'
+        params.append(category)
+
+    # Status filter — computed in Python, so when active we fetch all rows and paginate manually
+    status_filter = status.split(',') if status else None
+
+    if status_filter:
+        # Fetch all matching rows (no SQL pagination), filter by computed status in Python
+        base_query += ' ORDER BY name ASC'
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        all_items = []
+        for row in rows:
+            qty = row['quantity']
+            ss = row['safe_stock']
+            if qty >= ss:
+                item_status = 'normal'
+            elif qty >= ss * 0.5:
+                item_status = 'warning'
+            else:
+                item_status = 'danger'
+
+            if item_status not in status_filter:
+                continue
+
+            if fmt == "brief":
+                all_items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
+            else:
+                all_items.append({
+                    "id": row['id'], "name": row['name'], "sku": row['sku'],
+                    "category": row['category'], "quantity": qty, "unit": row['unit'],
+                    "safe_stock": ss, "location": row['location'], "status": item_status,
+                })
+
+        total = len(all_items)
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+        offset = (page - 1) * page_size
+        items = all_items[offset:offset + page_size]
+    else:
+        # No status filter — use SQL pagination
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        items = []
+        for row in rows:
+            qty = row['quantity']
+            ss = row['safe_stock']
+            if qty >= ss:
+                item_status = 'normal'
+            elif qty >= ss * 0.5:
+                item_status = 'warning'
+            else:
+                item_status = 'danger'
+
+            if fmt == "brief":
+                items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
+            else:
+                items.append({
+                    "id": row['id'], "name": row['name'], "sku": row['sku'],
+                    "category": row['category'], "quantity": qty, "unit": row['unit'],
+                    "safe_stock": ss, "location": row['location'], "status": item_status,
+                })
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+    return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
+
+
+def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size):
+    """搜索联系方"""
+    matched_ids = None
+    if q and fuzzy:
+        matcher = get_fuzzy_matcher()
+        results = matcher.search(q, entity_type="contact", top_k=100, threshold=50.0)
+        matched_ids = [r['entity_id'] for r in results]
+        if not matched_ids:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
+
+    base_query = 'SELECT id, name, address, phone, email, is_supplier, is_customer, notes, is_disabled, created_at FROM contacts WHERE is_disabled = 0'
+    count_query = 'SELECT COUNT(*) as total FROM contacts WHERE is_disabled = 0'
+    params = []
+
+    if matched_ids is not None:
+        placeholders = ','.join('?' * len(matched_ids))
+        base_query += f' AND id IN ({placeholders})'
+        count_query += f' AND id IN ({placeholders})'
+        params.extend(matched_ids)
+    elif q and not fuzzy:
+        base_query += ' AND name LIKE ?'
+        count_query += ' AND name LIKE ?'
+        params.append(f'%{q}%')
+
+    if contact_type == 'supplier':
+        base_query += ' AND is_supplier = 1'
+        count_query += ' AND is_supplier = 1'
+    elif contact_type == 'customer':
+        base_query += ' AND is_customer = 1'
+        count_query += ' AND is_customer = 1'
+
+    cursor.execute(count_query, params)
+    total = cursor.fetchone()['total']
+
+    base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+    offset = (page - 1) * page_size
+    params.extend([page_size, offset])
+
+    cursor.execute(base_query, params)
+    rows = cursor.fetchall()
+
+    if fmt == "brief":
+        items = [{"id": row['id'], "name": row['name']} for row in rows]
+    else:
+        items = [{
+            "id": row['id'], "name": row['name'], "address": row['address'],
+            "phone": row['phone'], "email": row['email'],
+            "is_supplier": bool(row['is_supplier']), "is_customer": bool(row['is_customer']),
+            "notes": row['notes'], "is_disabled": bool(row['is_disabled']),
+            "created_at": row['created_at'],
+        } for row in rows]
+
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
+
+
+def _search_operators(cursor, q, fuzzy, fmt, page, page_size):
+    """搜索操作员"""
+    matched_ids = None
+    if q and fuzzy:
+        matcher = get_fuzzy_matcher()
+        results = matcher.search(q, entity_type="operator", top_k=100, threshold=50.0)
+        matched_ids = [r['entity_id'] for r in results]
+        if not matched_ids:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
+
+    base_query = 'SELECT id, username, display_name FROM users WHERE is_disabled = 0'
+    count_query = 'SELECT COUNT(*) as total FROM users WHERE is_disabled = 0'
+    params = []
+
+    if matched_ids is not None:
+        placeholders = ','.join('?' * len(matched_ids))
+        base_query += f' AND id IN ({placeholders})'
+        count_query += f' AND id IN ({placeholders})'
+        params.extend(matched_ids)
+    elif q and not fuzzy:
+        base_query += ' AND (username LIKE ? OR display_name LIKE ?)'
+        count_query += ' AND (username LIKE ? OR display_name LIKE ?)'
+        params.extend([f'%{q}%', f'%{q}%'])
+
+    cursor.execute(count_query, params)
+    total = cursor.fetchone()['total']
+
+    base_query += ' ORDER BY username ASC LIMIT ? OFFSET ?'
+    offset = (page - 1) * page_size
+    params.extend([page_size, offset])
+
+    cursor.execute(base_query, params)
+    rows = cursor.fetchall()
+
+    if fmt == "brief":
+        items = [{"id": row['id'], "name": row['display_name'] or row['username']} for row in rows]
+    else:
+        items = [{
+            "id": row['id'], "username": row['username'],
+            "display_name": row['display_name'],
+            "name": row['display_name'] or row['username'],
+        } for row in rows]
+
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
+
+
+# ============ Materials APIs ============
 
 @app.get("/api/materials/all", response_model=List[MaterialItem])
 def get_all_materials():
@@ -1575,13 +1835,18 @@ def get_all_materials():
         return result
 
 
-@app.get("/api/materials/list", response_model=PaginatedMaterialsResponse)
+@app.get("/api/materials/list")
 def get_materials_list(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=10, le=100, description="每页条数"),
     name: Optional[str] = Query(None, description="名称/SKU模糊搜索"),
     category: Optional[str] = Query(None, description="分类"),
-    status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)")
+    status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)"),
+    min_stock: Optional[int] = Query(None, description="最小库存过滤"),
+    max_stock: Optional[int] = Query(None, description="最大库存过滤"),
+    location: Optional[str] = Query(None, description="位置模糊匹配"),
+    fuzzy: bool = Query(True, description="名称模糊匹配开关"),
+    format: Optional[str] = Query(None, description="brief时精简返回"),
 ):
     """获取物料列表（分页+筛选）"""
     with get_db() as conn:
@@ -1590,9 +1855,18 @@ def get_materials_list(
         # 解析状态筛选
         status_filter = status.split(',') if status else None
 
+        # Fuzzy name search: get matching IDs
+        fuzzy_ids = None
+        if name and fuzzy:
+            matcher = get_fuzzy_matcher()
+            results = matcher.search(name, entity_type="material", top_k=100, threshold=50.0)
+            fuzzy_ids = [r['entity_id'] for r in results]
+            if not fuzzy_ids:
+                return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
+
         # 构建基础查询
         base_query = '''
-            SELECT name, sku, category, quantity, unit, safe_stock, location, is_disabled
+            SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled
             FROM materials
             WHERE 1=1
         '''
@@ -1605,7 +1879,12 @@ def get_materials_list(
             count_query += ' AND is_disabled = 0'
 
         # 名称/SKU搜索
-        if name:
+        if fuzzy_ids is not None:
+            placeholders = ','.join('?' * len(fuzzy_ids))
+            base_query += f' AND id IN ({placeholders})'
+            count_query += f' AND id IN ({placeholders})'
+            params.extend(fuzzy_ids)
+        elif name and not fuzzy:
             base_query += ' AND (name LIKE ? OR sku LIKE ?)'
             count_query += ' AND (name LIKE ? OR sku LIKE ?)'
             params.extend([f'%{name}%', f'%{name}%'])
@@ -1615,6 +1894,22 @@ def get_materials_list(
             base_query += ' AND category = ?'
             count_query += ' AND category = ?'
             params.append(category)
+
+        # 库存范围筛选
+        if min_stock is not None:
+            base_query += ' AND quantity >= ?'
+            count_query += ' AND quantity >= ?'
+            params.append(min_stock)
+        if max_stock is not None:
+            base_query += ' AND quantity <= ?'
+            count_query += ' AND quantity <= ?'
+            params.append(max_stock)
+
+        # 位置模糊匹配
+        if location:
+            base_query += ' AND location LIKE ?'
+            count_query += ' AND location LIKE ?'
+            params.append(f'%{location}%')
 
         # 获取总数
         cursor.execute(count_query, params)
@@ -1631,17 +1926,17 @@ def get_materials_list(
         result = []
         for row in rows:
             quantity = row['quantity']
-            safe_stock = row['safe_stock']
+            safe_stock_val = row['safe_stock']
             is_disabled = bool(row['is_disabled'])
 
             # 判断状态
             if is_disabled:
                 item_status = 'disabled'
                 status_text = '禁用'
-            elif quantity >= safe_stock:
+            elif quantity >= safe_stock_val:
                 item_status = 'normal'
                 status_text = '正常'
-            elif quantity >= safe_stock * 0.5:
+            elif quantity >= safe_stock_val * 0.5:
                 item_status = 'warning'
                 status_text = '偏低'
             else:
@@ -1652,36 +1947,38 @@ def get_materials_list(
             if status_filter and item_status not in status_filter:
                 continue
 
-            result.append(MaterialItemWithDisabled(
-                name=row['name'],
-                sku=row['sku'],
-                category=row['category'],
-                quantity=quantity,
-                unit=row['unit'],
-                safe_stock=safe_stock,
-                location=row['location'],
-                status=item_status,
-                status_text=status_text,
-                is_disabled=is_disabled
-            ))
+            if format == "brief":
+                result.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
+            else:
+                result.append(MaterialItemWithDisabled(
+                    name=row['name'],
+                    sku=row['sku'],
+                    category=row['category'],
+                    quantity=quantity,
+                    unit=row['unit'],
+                    safe_stock=safe_stock_val,
+                    location=row['location'],
+                    status=item_status,
+                    status_text=status_text,
+                    is_disabled=is_disabled
+                ))
 
         # 如果有状态筛选，重新计算总数
         if status_filter:
-            # 需要重新查询不带分页的结果来计算正确的总数
             base_query_no_limit = base_query.replace(' LIMIT ? OFFSET ?', '')
             cursor.execute(base_query_no_limit, params[:-2])
             all_rows = cursor.fetchall()
             filtered_count = 0
             for row in all_rows:
                 quantity = row['quantity']
-                safe_stock = row['safe_stock']
+                safe_stock_val = row['safe_stock']
                 is_disabled = bool(row['is_disabled'])
 
                 if is_disabled:
                     item_status = 'disabled'
-                elif quantity >= safe_stock:
+                elif quantity >= safe_stock_val:
                     item_status = 'normal'
-                elif quantity >= safe_stock * 0.5:
+                elif quantity >= safe_stock_val * 0.5:
                     item_status = 'warning'
                 else:
                     item_status = 'danger'
@@ -1692,13 +1989,13 @@ def get_materials_list(
 
         total_pages = math.ceil(total / page_size) if total > 0 else 1
 
-        return PaginatedMaterialsResponse(
-            items=result,
-            page=page,
-            page_size=page_size,
-            total=total,
-            total_pages=total_pages
-        )
+        return {
+            "items": result,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
 
 
 @app.get("/api/materials/categories", response_model=List[str])
@@ -1912,7 +2209,7 @@ def get_product_records(
         )
 
 
-@app.get("/api/inventory/records", response_model=PaginatedRecordsResponse)
+@app.get("/api/inventory/records")
 def get_inventory_records_paginated(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=10, le=100, description="每页条数"),
@@ -1924,7 +2221,10 @@ def get_inventory_records_paginated(
     status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)"),
     contact_id: Optional[int] = Query(None, description="联系方ID筛选"),
     operator_user_id: Optional[int] = Query(None, description="操作员用户ID筛选"),
-    reason: Optional[str] = Query(None, description="原因关键词搜索")
+    reason: Optional[str] = Query(None, description="原因关键词搜索"),
+    sort_by: str = Query("created_at", description="排序字段: created_at/quantity/material_name"),
+    sort_order: str = Query("desc", description="排序方向: asc/desc"),
+    format: Optional[str] = Query(None, description="brief时精简返回"),
 ):
     """获取所有进出库记录（分页+筛选）"""
     with get_db() as conn:
@@ -2007,7 +2307,14 @@ def get_inventory_records_paginated(
         total = cursor.fetchone()['total']
 
         # 排序和分页
-        base_query += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?'
+        sort_column_map = {
+            'created_at': 'r.created_at',
+            'quantity': 'r.quantity',
+            'material_name': 'm.name',
+        }
+        sort_col = sort_column_map.get(sort_by, 'r.created_at')
+        sort_dir = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
+        base_query += f' ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?'
         offset = (page - 1) * page_size
         params.extend([page_size, offset])
 
@@ -2038,9 +2345,9 @@ def get_inventory_records_paginated(
             # 获取批次详情
             batch_details = None
             record_id = row['id']
-            record_type = row['type']
+            record_type_val = row['type']
 
-            if record_type == 'out':
+            if record_type_val == 'out':
                 # 出库记录：查询批次消耗详情
                 cursor.execute('''
                     SELECT b.batch_no, bc.quantity
@@ -2057,26 +2364,35 @@ def get_inventory_records_paginated(
             # 操作员名称：优先使用用户表中的显示名称，否则使用旧的operator字段
             operator_name = row['operator_display_name'] or row['operator_username'] or row['operator']
 
-            result.append(InventoryRecordItem(
-                id=record_id,
-                material_name=row['material_name'],
-                material_sku=row['material_sku'],
-                category=row['category'],
-                type=record_type,
-                quantity=row['quantity'],
-                operator=row['operator'],
-                operator_user_id=row['operator_user_id'],
-                operator_name=operator_name,
-                reason=row['reason'],
-                created_at=row['created_at'],
-                material_status=material_status,
-                is_disabled=is_disabled,
-                contact_id=row['contact_id'],
-                contact_name=row['contact_name'],
-                batch_id=row['batch_id'],
-                batch_no=row['batch_no'],
-                batch_details=batch_details
-            ))
+            if format == "brief":
+                result.append({
+                    "id": record_id,
+                    "material_name": row['material_name'],
+                    "type": record_type_val,
+                    "quantity": row['quantity'],
+                    "created_at": row['created_at'],
+                })
+            else:
+                result.append(InventoryRecordItem(
+                    id=record_id,
+                    material_name=row['material_name'],
+                    material_sku=row['material_sku'],
+                    category=row['category'],
+                    type=record_type_val,
+                    quantity=row['quantity'],
+                    operator=row['operator'],
+                    operator_user_id=row['operator_user_id'],
+                    operator_name=operator_name,
+                    reason=row['reason'],
+                    created_at=row['created_at'],
+                    material_status=material_status,
+                    is_disabled=is_disabled,
+                    contact_id=row['contact_id'],
+                    contact_name=row['contact_name'],
+                    batch_id=row['batch_id'],
+                    batch_no=row['batch_no'],
+                    batch_details=batch_details
+                ))
             filtered_count += 1
 
         # 如果有状态筛选，需要重新计算总数
@@ -2122,6 +2438,8 @@ def get_inventory_records_paginated(
 
         total_pages = math.ceil(total / page_size) if total > 0 else 1
 
+        if format == "brief":
+            return {"items": result, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
         return PaginatedRecordsResponse(
             items=result,
             page=page,
@@ -2138,14 +2456,13 @@ async def stock_in(
     request: StockOperationRequest,
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
-    """入库操作（需要operate权限）- 自动创建批次"""
+    """入库操作（需要operate权限）- 自动创建批次，支持模糊匹配"""
     product_name = request.product_name
     quantity = request.quantity
     reason = request.reason or "采购入库"
-    # 优先使用请求中的operator，否则使用当前用户名
     operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
-    # 获取操作员用户ID（用于关联用户表）
     operator_user_id = current_user.id
+    resolved_from = None
 
     if quantity <= 0:
         return StockInResponse(
@@ -2157,9 +2474,26 @@ async def stock_in(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 查询产品（获取单位用于展示）
+        # 查询产品（先精确匹配）
         cursor.execute('SELECT id, unit FROM materials WHERE name = ?', (product_name,))
         row = cursor.fetchone()
+
+        # 模糊匹配
+        if not row and request.fuzzy:
+            matcher = get_fuzzy_matcher()
+            result = matcher.resolve(product_name, entity_type="material")
+
+            if result['confident'] and result['best_match']:
+                resolved_from = product_name
+                product_name = result['best_match']['name']
+                cursor.execute('SELECT id, unit FROM materials WHERE name = ?', (product_name,))
+                row = cursor.fetchone()
+            elif result['candidates']:
+                raise HTTPException(status_code=400, detail={
+                    "error": "ambiguous_name",
+                    "message": f"无法确定产品 '{product_name}'，请从候选中选择",
+                    "candidates": result['candidates']
+                })
 
         if not row:
             return StockInResponse(
@@ -2171,25 +2505,15 @@ async def stock_in(
         material_id = row['id']
         unit = row['unit']
 
-        # 原子化更新，避免并发覆盖
-        cursor.execute('''
-            UPDATE materials
-            SET quantity = quantity + ?
-            WHERE id = ?
-        ''', (quantity, material_id))
+        # 原子化更新
+        cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?', (quantity, material_id))
         if cursor.rowcount == 0:
-            return StockInResponse(
-                success=False,
-                error="入库失败",
-                message="入库操作未生效，请重试"
-            )
+            return StockInResponse(success=False, error="入库失败", message="入库操作未生效，请重试")
 
-        # 获取更新后的库存，反推更新前数值用于响应
         cursor.execute('SELECT quantity FROM materials WHERE id = ?', (material_id,))
         new_quantity = cursor.fetchone()['quantity']
         old_quantity = new_quantity - quantity
 
-        # 生成批次号并创建批次记录
         batch_no = generate_batch_no(material_id)
         cursor.execute('''
             INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, created_at)
@@ -2197,7 +2521,6 @@ async def stock_in(
         ''', (batch_no, material_id, quantity, quantity, request.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         batch_id = cursor.lastrowid
 
-        # 记录入库（含联系方、批次和操作员用户ID）
         cursor.execute('''
             INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, batch_id, created_at)
             VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?)
@@ -2205,13 +2528,16 @@ async def stock_in(
 
         conn.commit()
 
-        # 审计日志
+        # 写操作后清除缓存
+        get_fuzzy_matcher().invalidate_cache()
+
         audit_log("STOCK_IN", current_user.id, current_user.username, {
             "product": product_name,
             "quantity": quantity,
             "batch_no": batch_no,
             "old_qty": old_quantity,
-            "new_qty": new_quantity
+            "new_qty": new_quantity,
+            "resolved_from": resolved_from,
         })
 
         return StockInResponse(
@@ -2224,12 +2550,9 @@ async def stock_in(
                 new_quantity=new_quantity,
                 unit=unit
             ),
-            batch=BatchInfo(
-                batch_no=batch_no,
-                batch_id=batch_id,
-                quantity=quantity
-            ),
-            message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}"
+            batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity),
+            message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}",
+            resolved_from=resolved_from,
         )
 
 
@@ -2240,14 +2563,13 @@ async def stock_out(
     stock_data: StockOperationRequest,
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
-    """出库操作（需要operate权限）- FIFO批次消耗"""
+    """出库操作（需要operate权限）- FIFO批次消耗，支持模糊匹配"""
     product_name = stock_data.product_name
     quantity = stock_data.quantity
     reason = stock_data.reason or "销售出库"
-    # 优先使用请求中的operator，否则使用当前用户名
     operator = stock_data.operator if stock_data.operator and stock_data.operator != "MCP系统" else current_user.get_operator_name()
-    # 获取操作员用户ID（用于关联用户表）
     operator_user_id = current_user.id
+    resolved_from = None
 
     if quantity <= 0:
         return StockOutResponse(
@@ -2259,9 +2581,26 @@ async def stock_out(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 查询产品
+        # 先精确匹配
         cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
         row = cursor.fetchone()
+
+        # 模糊匹配
+        if not row and stock_data.fuzzy:
+            matcher = get_fuzzy_matcher()
+            result = matcher.resolve(product_name, entity_type="material")
+
+            if result['confident'] and result['best_match']:
+                resolved_from = product_name
+                product_name = result['best_match']['name']
+                cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
+                row = cursor.fetchone()
+            elif result['candidates']:
+                raise HTTPException(status_code=400, detail={
+                    "error": "ambiguous_name",
+                    "message": f"无法确定产品 '{product_name}'，请从候选中选择",
+                    "candidates": result['candidates']
+                })
 
         if not row:
             return StockOutResponse(
@@ -2276,13 +2615,10 @@ async def stock_out(
 
         # 原子化更新，防止并发扣减导致负库存
         cursor.execute('''
-            UPDATE materials
-            SET quantity = quantity - ?
-            WHERE id = ? AND quantity >= ?
+            UPDATE materials SET quantity = quantity - ? WHERE id = ? AND quantity >= ?
         ''', (quantity, material_id, quantity))
 
         if cursor.rowcount == 0:
-            # 查询当前库存以返回提示
             cursor.execute('SELECT quantity FROM materials WHERE id = ?', (material_id,))
             current_qty_row = cursor.fetchone()
             current_qty = current_qty_row['quantity'] if current_qty_row else 0
@@ -2296,7 +2632,6 @@ async def stock_out(
         new_quantity = cursor.fetchone()['quantity']
         old_quantity = new_quantity + quantity
 
-        # 记录出库（含联系方和操作员用户ID，batch_id留空因为出库可能涉及多批次）
         cursor.execute('''
             INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, created_at)
             VALUES (?, 'out', ?, ?, ?, ?, ?, ?)
@@ -2307,7 +2642,6 @@ async def stock_out(
         batch_consumptions = []
         remaining_to_consume = quantity
 
-        # 获取未耗尽的批次，按创建时间升序（FIFO）
         cursor.execute('''
             SELECT id, batch_no, quantity FROM batches
             WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0
@@ -2323,42 +2657,38 @@ async def stock_out(
             batch_no = batch['batch_no']
             batch_qty = batch['quantity']
 
-            # 计算从该批次消耗的数量
             consume_qty = min(batch_qty, remaining_to_consume)
             new_batch_qty = batch_qty - consume_qty
             remaining_to_consume -= consume_qty
 
-            # 更新批次剩余数量
             is_exhausted = 1 if new_batch_qty == 0 else 0
-            cursor.execute('''
-                UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?
-            ''', (new_batch_qty, is_exhausted, batch_id))
+            cursor.execute('UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?',
+                           (new_batch_qty, is_exhausted, batch_id))
 
-            # 记录批次消耗
             cursor.execute('''
                 INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
                 VALUES (?, ?, ?, ?)
             ''', (record_id, batch_id, consume_qty, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
             batch_consumptions.append(BatchConsumption(
-                batch_no=batch_no,
-                batch_id=batch_id,
-                quantity=consume_qty,
-                remaining=new_batch_qty
+                batch_no=batch_no, batch_id=batch_id,
+                quantity=consume_qty, remaining=new_batch_qty
             ))
 
         conn.commit()
 
-        # 审计日志
+        # 写操作后清除缓存
+        get_fuzzy_matcher().invalidate_cache()
+
         audit_log("STOCK_OUT", current_user.id, current_user.username, {
             "product": product_name,
             "quantity": quantity,
             "old_qty": old_quantity,
             "new_qty": new_quantity,
+            "resolved_from": resolved_from,
             "batches": [bc.batch_no for bc in batch_consumptions] if batch_consumptions else []
         })
 
-        # 检查是否低于安全库存
         warning = ""
         if new_quantity < safe_stock:
             if new_quantity < safe_stock * 0.5:
@@ -2366,7 +2696,6 @@ async def stock_out(
             else:
                 warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
 
-        # 构建批次消耗信息
         batch_details = ""
         if batch_consumptions:
             details = [f"{bc.batch_no}×{bc.quantity}" for bc in batch_consumptions]
@@ -2376,16 +2705,14 @@ async def stock_out(
             success=True,
             operation="stock_out",
             product=StockOperationProduct(
-                name=product_name,
-                old_quantity=old_quantity,
-                out_quantity=quantity,
-                new_quantity=new_quantity,
-                unit=unit,
-                safe_stock=safe_stock
+                name=product_name, old_quantity=old_quantity,
+                out_quantity=quantity, new_quantity=new_quantity,
+                unit=unit, safe_stock=safe_stock
             ),
             batch_consumptions=batch_consumptions if batch_consumptions else None,
             message=f"出库成功：{product_name} 出库 {quantity} {unit}{batch_details}，库存从 {old_quantity} 更新到 {new_quantity} {unit}",
-            warning=warning if warning else None
+            warning=warning if warning else None,
+            resolved_from=resolved_from,
         )
 
 
@@ -2921,6 +3248,7 @@ async def confirm_import_excel(
                     records_created += 1
 
         conn.commit()
+        get_fuzzy_matcher().invalidate_cache()
 
     warning_text = f" {' '.join(warnings)}" if warnings else ""
     return ExcelImportResponse(
