@@ -4,9 +4,9 @@
 
 提供通用的库存管理功能：
 - 名称模糊解析（resolve_name）
-- 库存查询（query_stock）
-- 入库/出库操作（stock_in / stock_out）
-- 物料搜索（search_materials）
+- 库存查询（query_stock，内建模糊匹配）
+- 入库/出库操作（stock_in / stock_out，内建模糊匹配）
+- 统一搜索（search，支持物料/联系方/操作员）
 - 当天统计（get_today_statistics）
 
 注意：本服务通过调用后端 API 实现所有操作，不直接操作数据库。
@@ -109,20 +109,27 @@ def api_post(endpoint: str, data: dict) -> dict:
 
 
 @mcp.tool()
-def resolve_name(text: str, entity_type: str = "material") -> dict:
+def resolve_name(text: str, entity_type: str = "all") -> dict:
     """
-    将语音识别或模糊文本解析为精确的实体名称。
+    将模糊文本（语音识别、用户口语输入等）解析为系统中精确的实体名称。
 
-    在对产品名称不确定时使用此工具。返回候选列表和置信度分数。
-    当 confident=true 时，best_match 可以直接使用。
-    当 confident=false 时，需要从 candidates 中选择最合适的。
+    适用场景：
+    - 用户说了一个不确定的名称，需要先确认再操作
+    - 需要同时搜索物料、联系方、操作员（entity_type="all"）
+    - 需要获取候选列表让用户选择
+
+    注意：query_stock、stock_in、stock_out 已内建模糊匹配，
+    大多数情况下可直接调用，无需先调 resolve_name。
+    仅在需要「先确认名称再决定下一步」时才需要本工具。
 
     参数:
-        text: 需要解析的文本（如 ASR 识别结果）
-        entity_type: 实体类型，"material"(物料) | "contact"(联系方) | "operator"(操作员) | "all"(全部)
+        text: 需要解析的文本（如语音识别结果"螺丝钉"、"张三"等）
+        entity_type: 实体类型，"material" | "contact" | "operator" | "all"（默认搜索全部类型）
 
     返回:
-        包含 best_match, confident, candidates 的字典
+        best_match: 最佳匹配（含 name, score, entity_type）
+        confident: 是否高置信度（true 时可直接使用 best_match）
+        candidates: 候选列表（confident=false 时需从中选择）
     """
     return api_get("/fuzzy-match", params={"q": text, "entity_type": entity_type})
 
@@ -130,22 +137,53 @@ def resolve_name(text: str, entity_type: str = "material") -> dict:
 @mcp.tool()
 def query_stock(product_name: str) -> dict:
     """
-    查询指定产品的库存详情，包括当前库存、安全库存、今日出入库等。
+    查询产品库存详情。支持模糊名称输入，内建自动解析。
+
+    可直接传入不精确的名称（如语音识别结果），工具会自动模糊匹配。
+    无需先调用 resolve_name。
 
     参数:
-        product_name: 产品名称（精确名称，如不确定请先用 resolve_name 解析）
+        product_name: 产品名称（支持模糊输入，如"螺丝"、"luo si"等）
 
     返回:
-        产品库存详情，包含 name, sku, current_stock, unit, safe_stock, location,
-        today_in, today_out, total_in, total_out 等字段
+        success=true 时：产品库存详情（name, sku, current_stock, unit, safe_stock,
+        location, today_in, today_out, status 等）
+        success=false 时：如有候选项会在 candidates 中列出
     """
+    # 先尝试精确查询
     data = api_get("/materials/product-stats", params={"name": product_name})
+
+    # 精确查询失败时，自动走模糊匹配
     if "error" in data:
-        return {
-            "success": False,
-            "error": data["error"],
-            "message": f"产品 '{product_name}' 不存在，请用 resolve_name 工具确认名称"
-        }
+        resolve_result = api_get("/fuzzy-match", params={"q": product_name, "entity_type": "material"})
+
+        if resolve_result.get("confident") and resolve_result.get("best_match"):
+            resolved_name = resolve_result["best_match"]["name"]
+            data = api_get("/materials/product-stats", params={"name": resolved_name})
+            if "error" in data:
+                return {
+                    "success": False,
+                    "error": data["error"],
+                    "message": f"产品 '{resolved_name}' 查询失败"
+                }
+            # 标记名称经过了模糊解析
+            data["resolved_from"] = product_name
+        else:
+            # 模糊匹配也无法确定，返回候选列表
+            candidates = resolve_result.get("candidates", [])
+            if candidates:
+                names = [c["name"] for c in candidates[:5]]
+                return {
+                    "success": False,
+                    "error": f"名称 '{product_name}' 不够明确",
+                    "candidates": candidates[:5],
+                    "message": f"找到多个候选：{', '.join(names)}，请指定更精确的名称"
+                }
+            return {
+                "success": False,
+                "error": f"未找到与 '{product_name}' 匹配的产品",
+                "message": f"系统中没有与 '{product_name}' 相似的产品"
+            }
 
     quantity = data["current_stock"]
     safe_stock = data["safe_stock"]
@@ -167,17 +205,18 @@ def query_stock(product_name: str) -> dict:
 def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
              operator: str = "MCP系统", fuzzy: bool = True) -> dict:
     """
-    产品入库操作。默认启用模糊匹配，自动解析不精确的产品名称。
+    产品入库。可直接传入模糊名称，自动解析为精确产品。
 
     参数:
-        product_name: 产品名称（支持模糊输入，如语音识别结果）
-        quantity: 入库数量（必须大于0）
-        reason: 入库原因
-        operator: 操作人
-        fuzzy: 是否启用模糊名称解析（默认开启）
+        product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
+        quantity: 入库数量（正整数）
+        reason: 入库原因（默认"采购入库"）
+        operator: 操作人（默认"MCP系统"）
+        fuzzy: 是否启用模糊匹配（默认 true）
 
     返回:
-        操作结果，包含产品信息和批次详情。如名称被模糊解析，会包含 resolved_from 字段。
+        success=true 时：入库成功，含批次信息和产品详情
+        success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
     result = api_post("/materials/stock-in", {
         "product_name": product_name,
@@ -199,17 +238,18 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
 def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
               operator: str = "MCP系统", fuzzy: bool = True) -> dict:
     """
-    产品出库操作。默认启用模糊匹配。
+    产品出库。可直接传入模糊名称，自动解析为精确产品。按 FIFO 消耗批次。
 
     参数:
-        product_name: 产品名称（支持模糊输入）
-        quantity: 出库数量（必须大于0）
-        reason: 出库原因
-        operator: 操作人
-        fuzzy: 是否启用模糊名称解析（默认开启）
+        product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
+        quantity: 出库数量（正整数）
+        reason: 出库原因（默认"销售出库"）
+        operator: 操作人（默认"MCP系统"）
+        fuzzy: 是否启用模糊匹配（默认 true）
 
     返回:
-        操作结果，包含批次消耗详情（FIFO）。
+        success=true 时：出库成功，含批次消耗详情
+        success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
     result = api_post("/materials/stock-out", {
         "product_name": product_name,
@@ -228,27 +268,40 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
 
 
 @mcp.tool()
-def search_materials(query: str = None, category: str = None,
-                     status: str = None, fuzzy: bool = True) -> dict:
+def search(query: str = None, entity_type: str = "material",
+           category: str = None, status: str = None,
+           contact_type: str = None, fuzzy: bool = True) -> dict:
     """
-    搜索库存物料，支持多条件组合和模糊匹配。
+    统一搜索工具，可搜索物料、联系方、操作员。支持模糊匹配。
+
+    常见用法：
+    - 搜物料："帮我找螺丝相关的产品" → search(query="螺丝", entity_type="material")
+    - 查库存告急："哪些产品库存不足" → search(status="danger,warning", entity_type="material")
+    - 找供应商："搜索张三" → search(query="张三", entity_type="contact", contact_type="supplier")
+    - 找操作员："小李是谁" → search(query="小李", entity_type="operator")
 
     参数:
-        query: 物料名称或SKU关键词（支持模糊搜索）
-        category: 物料分类（精确匹配）
-        status: 库存状态 (normal=正常, warning=偏低, danger=告急)，多个用逗号分隔
-        fuzzy: 是否启用模糊匹配（默认开启）
+        query: 搜索关键词（支持模糊输入，如语音识别结果）
+        entity_type: 搜索类型 "material"(物料) | "contact"(联系方) | "operator"(操作员)
+        category: 物料分类过滤（仅 material 有效，精确匹配）
+        status: 库存状态过滤（仅 material 有效），可选值：
+                "normal"(正常) / "warning"(偏低) / "danger"(告急)，多个用逗号分隔
+        contact_type: 联系方类型过滤（仅 contact 有效），"supplier"(供应商) / "customer"(客户)
+        fuzzy: 是否启用模糊匹配（默认 true）
 
     返回:
-        符合条件的物料列表
+        items: 匹配结果列表
+        total: 总匹配数
     """
-    params = {"page": 1, "page_size": 100, "fuzzy": str(fuzzy).lower()}
+    params = {"entity_type": entity_type, "page": 1, "page_size": 100, "fuzzy": fuzzy}
     if query:
         params["q"] = query
     if category:
         params["category"] = category
     if status:
         params["status"] = status
+    if contact_type:
+        params["contact_type"] = contact_type
 
     data = api_get("/search", params=params)
 
@@ -256,18 +309,24 @@ def search_materials(query: str = None, category: str = None,
         return {"success": False, "error": data["error"], "message": f"搜索失败: {data['error']}"}
 
     items = data.get("items", [])
+    type_label = {"material": "物料", "contact": "联系方", "operator": "操作员"}.get(entity_type, entity_type)
     return {
         "success": True,
         "count": len(items),
         "total": data.get("total", 0),
-        "materials": items,
-        "message": f"搜索成功，找到 {data.get('total', 0)} 条匹配记录"
+        "items": items,
+        "message": f"搜索{type_label}成功，找到 {data.get('total', 0)} 条匹配记录"
     }
 
 
 @mcp.tool()
 def get_today_statistics() -> dict:
-    """查询当天的仓库统计数据，包括入库数量、出库数量、库存总量。"""
+    """
+    查询当天仓库统计概览。无需参数，直接调用即可。
+
+    返回：今日入库量、出库量、库存总量、低库存数量、净变化量。
+    适用于：「今天仓库情况怎么样」「今日出入库汇总」等问题。
+    """
     try:
         from datetime import datetime
 
