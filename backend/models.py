@@ -110,7 +110,7 @@ class StockOperationRequest(BaseModel):
     reason: Optional[str] = None
     operator: Optional[str] = "MCP系统"
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
-    fuzzy: bool = False  # 是否启用模糊名称解析
+    fuzzy: bool = True  # 是否启用模糊匹配
 
 
 class StockOperationProduct(BaseModel):
@@ -450,6 +450,7 @@ class StockInResponse(BaseModel):
     message: str
     warning: Optional[str] = None
     error: Optional[str] = None
+    resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
 
 
 class StockOutResponse(BaseModel):
@@ -461,6 +462,7 @@ class StockOutResponse(BaseModel):
     message: str
     warning: Optional[str] = None
     error: Optional[str] = None
+    resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
 
 
 class BatchItem(BaseModel):
@@ -548,6 +550,8 @@ class FuzzyMatchCandidate(BaseModel):
     entity_type: str  # "material" | "contact" | "operator"
     entity_id: int
     extra: Optional[dict] = None
+
+
 
 class FuzzyMatchResponse(BaseModel):
     """模糊匹配响应"""
