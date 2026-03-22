@@ -11,11 +11,12 @@ dependencies = [
     "requests>=2.32.5",
     "openpyxl>=3.1.0",
     "python-multipart>=0.0.6",
+    # 模糊匹配依赖
+    "rapidfuzz>=3.0.0",
+    "pypinyin>=0.50.0",
     # 生产安全依赖
     "bcrypt>=4.1.0",
     "slowapi>=0.1.9",
-    "rapidfuzz>=3.0.0",
-    "pypinyin>=0.50.0",
 ]
 
 [project.optional-dependencies]
