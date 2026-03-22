@@ -67,7 +67,10 @@ def api_get(endpoint: str, params: dict = None) -> dict:
     try:
         headers = {"X-API-Key": API_KEY} if API_KEY else {}
         response = requests.get(f"{API_BASE_URL}{endpoint}", params=params, headers=headers, timeout=10)
-        return response.json()
+        data = response.json()
+        if response.status_code >= 400:
+            return {"success": False, "error": data.get("detail", str(data)), "message": f"API 返回错误 ({response.status_code})"}
+        return data
     except requests.exceptions.ConnectionError:
         return {
             "success": False,
@@ -87,7 +90,10 @@ def api_post(endpoint: str, data: dict) -> dict:
     try:
         headers = {"X-API-Key": API_KEY} if API_KEY else {}
         response = requests.post(f"{API_BASE_URL}{endpoint}", json=data, headers=headers, timeout=10)
-        return response.json()
+        data = response.json()
+        if response.status_code >= 400:
+            return {"success": False, "error": data.get("detail", str(data)), "detail": data.get("detail"), "message": f"API 返回错误 ({response.status_code})"}
+        return data
     except requests.exceptions.ConnectionError:
         return {
             "success": False,
