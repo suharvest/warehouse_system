@@ -10,8 +10,12 @@ from pypinyin import lazy_pinyin, Style
 class FuzzyMatcher:
     """模糊匹配器，支持文本编辑距离和中文拼音相似度两层匹配"""
 
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
+    def __init__(self, get_conn):
+        """
+        Args:
+            get_conn: 返回数据库连接的可调用对象，每次需要时调用并在用完后关闭
+        """
+        self._get_conn = get_conn
         self._index: list[dict] | None = None
         self._dirty = True
 
@@ -22,72 +26,76 @@ class FuzzyMatcher:
     def _build_index(self):
         """从数据库加载所有可搜索实体名称，构建索引（含拼音）"""
         index = []
-        cursor = self._conn.cursor()
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
 
-        # 索引 materials: name 和 sku 都作为可搜索名称
-        cursor.execute(
-            "SELECT id, name, sku, category FROM materials WHERE is_disabled = 0"
-        )
-        for row in cursor.fetchall():
-            mid, name, sku, category = row
-            extra = {"sku": sku, "category": category}
-            # 索引 name
-            index.append({
-                "name": name,
-                "entity_type": "material",
-                "entity_id": mid,
-                "extra": extra,
-                "pinyin": self._get_pinyin(name),
-            })
-            # 索引 sku（如果 sku 与 name 不同）
-            if sku and sku != name:
+            # 索引 materials: name 和 sku 都作为可搜索名称
+            cursor.execute(
+                "SELECT id, name, sku, category FROM materials WHERE is_disabled = 0"
+            )
+            for row in cursor.fetchall():
+                mid, name, sku, category = row['id'], row['name'], row['sku'], row['category']
+                extra = {"sku": sku, "category": category}
+                # 索引 name
                 index.append({
-                    "name": sku,
+                    "name": name,
                     "entity_type": "material",
                     "entity_id": mid,
                     "extra": extra,
-                    "pinyin": self._get_pinyin(sku),
+                    "pinyin": self._get_pinyin(name),
+                })
+                # 索引 sku（如果 sku 与 name 不同）
+                if sku and sku != name:
+                    index.append({
+                        "name": sku,
+                        "entity_type": "material",
+                        "entity_id": mid,
+                        "extra": extra,
+                        "pinyin": self._get_pinyin(sku),
+                    })
+
+            # 索引 contacts: name
+            cursor.execute(
+                "SELECT id, name, is_supplier, is_customer FROM contacts WHERE is_disabled = 0"
+            )
+            for row in cursor.fetchall():
+                cid, name = row['id'], row['name']
+                index.append({
+                    "name": name,
+                    "entity_type": "contact",
+                    "entity_id": cid,
+                    "extra": {"is_supplier": bool(row['is_supplier']), "is_customer": bool(row['is_customer'])},
+                    "pinyin": self._get_pinyin(name),
                 })
 
-        # 索引 contacts: name
-        cursor.execute(
-            "SELECT id, name, is_supplier, is_customer FROM contacts WHERE is_disabled = 0"
-        )
-        for row in cursor.fetchall():
-            cid, name, is_supplier, is_customer = row
-            index.append({
-                "name": name,
-                "entity_type": "contact",
-                "entity_id": cid,
-                "extra": {"is_supplier": bool(is_supplier), "is_customer": bool(is_customer)},
-                "pinyin": self._get_pinyin(name),
-            })
-
-        # 索引 users: display_name 和 username（仅 operate/admin 且未禁用）
-        cursor.execute(
-            "SELECT id, username, display_name FROM users "
-            "WHERE is_disabled = 0 AND role IN ('operate', 'admin')"
-        )
-        for row in cursor.fetchall():
-            uid, username, display_name = row
-            # 索引 display_name（如果有）
-            if display_name:
-                index.append({
-                    "name": display_name,
-                    "entity_type": "operator",
-                    "entity_id": uid,
-                    "extra": {},
-                    "pinyin": self._get_pinyin(display_name),
-                })
-            # 索引 username（如果与 display_name 不同）
-            if username != display_name:
-                index.append({
-                    "name": username,
-                    "entity_type": "operator",
-                    "entity_id": uid,
-                    "extra": {},
-                    "pinyin": self._get_pinyin(username),
-                })
+            # 索引 users: display_name 和 username（仅 operate/admin 且未禁用）
+            cursor.execute(
+                "SELECT id, username, display_name FROM users "
+                "WHERE is_disabled = 0 AND role IN ('operate', 'admin')"
+            )
+            for row in cursor.fetchall():
+                uid, username, display_name = row['id'], row['username'], row['display_name']
+                # 索引 display_name（如果有）
+                if display_name:
+                    index.append({
+                        "name": display_name,
+                        "entity_type": "operator",
+                        "entity_id": uid,
+                        "extra": {},
+                        "pinyin": self._get_pinyin(display_name),
+                    })
+                # 索引 username（如果与 display_name 不同）
+                if username != display_name:
+                    index.append({
+                        "name": username,
+                        "entity_type": "operator",
+                        "entity_id": uid,
+                        "extra": {},
+                        "pinyin": self._get_pinyin(username),
+                    })
+        finally:
+            conn.close()
 
         self._index = index
 
