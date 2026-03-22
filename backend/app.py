@@ -26,7 +26,7 @@ from database import (
 )
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
-    MaterialItem, XiaozhiItem, ProductStats, ProductRecord,
+    MaterialItem, ProductStats, ProductRecord,
     StockOperationRequest, StockOperationResponse, StockOperationProduct,
     ImportPreviewItem, ExcelImportPreviewResponse, ExcelImportConfirm,
     ExcelImportResponse, ManualRecordRequest, MissingSkuItem,
@@ -47,7 +47,9 @@ from models import (
     DatabaseClearRequest, DatabaseOperationResponse,
     # MCP models
     CreateMCPConnectionRequest, UpdateMCPConnectionRequest,
-    MCPConnectionItem, MCPConnectionResponse
+    MCPConnectionItem, MCPConnectionResponse,
+    # Fuzzy match models
+    FuzzyMatchCandidate, FuzzyMatchResponse
 )
 import math
 import uuid
@@ -1503,33 +1505,194 @@ def get_low_stock_alert():
         ]
 
 
-# ============ Materials APIs ============
+# ============ Fuzzy Match / Search APIs ============
 
-@app.get("/api/materials/xiaozhi", response_model=List[XiaozhiItem])
-def get_xiaozhi_stock():
-    """获取 watcher-xiaozhi 相关库存"""
+
+def _compute_similarity(query: str, target: str) -> float:
+    """计算两个字符串的相似度分数 (0-100)，使用简单的子串匹配和编辑距离"""
+    q = query.lower().strip()
+    t = target.lower().strip()
+    if not q or not t:
+        return 0.0
+    # 精确匹配
+    if q == t:
+        return 100.0
+    # 包含匹配
+    if q in t:
+        return 80.0 + (len(q) / len(t)) * 15
+    if t in q:
+        return 70.0 + (len(t) / len(q)) * 15
+    # 简单字符重叠比率
+    q_chars = set(q)
+    t_chars = set(t)
+    if not q_chars or not t_chars:
+        return 0.0
+    overlap = len(q_chars & t_chars)
+    score = (overlap / max(len(q_chars), len(t_chars))) * 70
+    return round(score, 1)
+
+
+@app.get("/api/fuzzy-match", response_model=FuzzyMatchResponse)
+def fuzzy_match(
+    q: str = Query(..., description="搜索文本"),
+    entity_type: str = Query("all", description="实体类型: material|contact|operator|all"),
+    top_k: int = Query(5, ge=1, le=20, description="返回候选数"),
+    threshold: float = Query(50.0, ge=0, le=100, description="最低分数阈值"),
+):
+    """模糊匹配实体名称，返回候选列表和置信度"""
+    candidates = []
+
     with get_db() as conn:
         cursor = conn.cursor()
 
-        cursor.execute('''
-            SELECT name, sku, quantity, unit, category, location
-            FROM materials
-            WHERE name LIKE '%xiaozhi%' OR name LIKE '%watcher%'
-            ORDER BY quantity DESC
-        ''')
+        if entity_type in ("material", "all"):
+            cursor.execute('SELECT id, name, sku, category FROM materials WHERE is_disabled = 0')
+            for row in cursor.fetchall():
+                score = max(_compute_similarity(q, row['name']),
+                           _compute_similarity(q, row['sku']) * 0.9 if row['sku'] else 0)
+                if score >= threshold:
+                    candidates.append(FuzzyMatchCandidate(
+                        name=row['name'], score=round(score, 1),
+                        entity_type="material", entity_id=row['id'],
+                        extra={"sku": row['sku'], "category": row['category']}
+                    ))
 
-        return [
-            XiaozhiItem(
-                name=row['name'],
-                sku=row['sku'],
-                quantity=row['quantity'],
-                unit=row['unit'],
-                category=row['category'],
-                location=row['location']
-            )
-            for row in cursor.fetchall()
-        ]
+        if entity_type in ("contact", "all"):
+            cursor.execute('SELECT id, name, is_supplier, is_customer FROM contacts')
+            for row in cursor.fetchall():
+                score = _compute_similarity(q, row['name'])
+                if score >= threshold:
+                    candidates.append(FuzzyMatchCandidate(
+                        name=row['name'], score=round(score, 1),
+                        entity_type="contact", entity_id=row['id'],
+                        extra={"is_supplier": bool(row['is_supplier']),
+                               "is_customer": bool(row['is_customer'])}
+                    ))
 
+        if entity_type in ("operator", "all"):
+            cursor.execute("SELECT id, username, display_name FROM users WHERE is_disabled = 0 AND role IN ('operate', 'admin')")
+            for row in cursor.fetchall():
+                name = row['display_name'] or row['username']
+                score = max(_compute_similarity(q, name),
+                           _compute_similarity(q, row['username']) * 0.9)
+                if score >= threshold:
+                    candidates.append(FuzzyMatchCandidate(
+                        name=name, score=round(score, 1),
+                        entity_type="operator", entity_id=row['id']
+                    ))
+
+    # 按分数降序排列
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    candidates = candidates[:top_k]
+
+    best = candidates[0] if candidates else None
+    second_score = candidates[1].score if len(candidates) > 1 else 0
+    confident = best is not None and best.score > 85 and (best.score - second_score) > 15
+
+    if not candidates:
+        message = f"未找到与 '{q}' 匹配的结果"
+    elif confident:
+        message = f"精确匹配：{best.name}（分数 {best.score}）"
+    else:
+        message = f"找到 {len(candidates)} 个候选，请确认"
+
+    return FuzzyMatchResponse(
+        query=q, candidates=candidates, best_match=best,
+        confident=confident, message=message
+    )
+
+
+@app.get("/api/search")
+def search_entities(
+    q: Optional[str] = Query(None, description="搜索关键词"),
+    entity_type: str = Query("material", description="实体类型"),
+    category: Optional[str] = Query(None, description="分类筛选"),
+    status: Optional[str] = Query(None, description="状态筛选"),
+    fuzzy: bool = Query(True, description="是否模糊匹配"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """统一搜索端点，支持模糊匹配"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        base_query = '''
+            SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled
+            FROM materials WHERE is_disabled = 0
+        '''
+        count_query = 'SELECT COUNT(*) as total FROM materials WHERE is_disabled = 0'
+        params = []
+
+        if q:
+            if fuzzy:
+                base_query += ' AND (name LIKE ? OR sku LIKE ?)'
+                count_query += ' AND (name LIKE ? OR sku LIKE ?)'
+                params.extend([f'%{q}%', f'%{q}%'])
+            else:
+                base_query += ' AND (name = ? OR sku = ?)'
+                count_query += ' AND (name = ? OR sku = ?)'
+                params.extend([q, q])
+
+        if category:
+            base_query += ' AND category = ?'
+            count_query += ' AND category = ?'
+            params.append(category)
+
+        # 获取总数
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()['total']
+
+        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+
+        items = []
+        for row in rows:
+            quantity = row['quantity']
+            safe_stock = row['safe_stock']
+            if quantity >= safe_stock:
+                item_status = 'normal'
+                status_text = '正常'
+            elif quantity >= safe_stock * 0.5:
+                item_status = 'warning'
+                status_text = '偏低'
+            else:
+                item_status = 'danger'
+                status_text = '告急'
+
+            if status:
+                status_list = status.split(',')
+                if item_status not in status_list:
+                    continue
+
+            items.append({
+                "id": row['id'],
+                "name": row['name'],
+                "sku": row['sku'],
+                "category": row['category'],
+                "quantity": quantity,
+                "unit": row['unit'],
+                "safe_stock": safe_stock,
+                "location": row['location'],
+                "status": item_status,
+                "status_text": status_text,
+            })
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
+
+
+# ============ Materials APIs ============
 
 @app.get("/api/materials/all", response_model=List[MaterialItem])
 def get_all_materials():
@@ -2154,12 +2317,44 @@ async def stock_in(
             message=f"入库失败：数量 {quantity} 无效"
         )
 
+    resolved_from = None
+
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 查询产品（获取单位用于展示）
-        cursor.execute('SELECT id, unit FROM materials WHERE name = ?', (product_name,))
+        cursor.execute('SELECT id, unit, name FROM materials WHERE name = ?', (product_name,))
         row = cursor.fetchone()
+
+        # 模糊匹配：精确名称未找到时尝试模糊解析
+        if not row and request.fuzzy:
+            cursor.execute('SELECT id, name, sku FROM materials WHERE is_disabled = 0')
+            all_materials = cursor.fetchall()
+            scored = []
+            for m in all_materials:
+                score = max(_compute_similarity(product_name, m['name']),
+                           _compute_similarity(product_name, m['sku']) * 0.9 if m['sku'] else 0)
+                if score >= 50:
+                    scored.append((m, score))
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            if scored:
+                best = scored[0]
+                second_score = scored[1][1] if len(scored) > 1 else 0
+                if best[1] > 85 and (best[1] - second_score) > 15:
+                    # confident match
+                    resolved_from = product_name
+                    product_name = best[0]['name']
+                    cursor.execute('SELECT id, unit, name FROM materials WHERE id = ?', (best[0]['id'],))
+                    row = cursor.fetchone()
+                else:
+                    # ambiguous: return candidates
+                    candidates = [{"name": m['name'], "score": round(s, 1)} for m, s in scored[:5]]
+                    return StockInResponse(
+                        success=False,
+                        error=f"名称 '{product_name}' 不够明确",
+                        message=f"入库失败：名称不明确，候选：{', '.join(c['name'] for c in candidates)}",
+                    )
 
         if not row:
             return StockInResponse(
@@ -2211,8 +2406,13 @@ async def stock_in(
             "quantity": quantity,
             "batch_no": batch_no,
             "old_qty": old_quantity,
-            "new_qty": new_quantity
+            "new_qty": new_quantity,
+            "resolved_from": resolved_from
         })
+
+        msg = f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}"
+        if resolved_from:
+            msg = f"[模糊匹配: '{resolved_from}' → '{product_name}'] " + msg
 
         return StockInResponse(
             success=True,
@@ -2229,7 +2429,7 @@ async def stock_in(
                 batch_id=batch_id,
                 quantity=quantity
             ),
-            message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}"
+            message=msg
         )
 
 
@@ -2256,12 +2456,42 @@ async def stock_out(
             message=f"出库失败：数量 {quantity} 无效"
         )
 
+    resolved_from = None
+
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 查询产品
         cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
         row = cursor.fetchone()
+
+        # 模糊匹配：精确名称未找到时尝试模糊解析
+        if not row and stock_data.fuzzy:
+            cursor.execute('SELECT id, name, sku FROM materials WHERE is_disabled = 0')
+            all_materials = cursor.fetchall()
+            scored = []
+            for m in all_materials:
+                score = max(_compute_similarity(product_name, m['name']),
+                           _compute_similarity(product_name, m['sku']) * 0.9 if m['sku'] else 0)
+                if score >= 50:
+                    scored.append((m, score))
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            if scored:
+                best = scored[0]
+                second_score = scored[1][1] if len(scored) > 1 else 0
+                if best[1] > 85 and (best[1] - second_score) > 15:
+                    resolved_from = product_name
+                    product_name = best[0]['name']
+                    cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE id = ?', (best[0]['id'],))
+                    row = cursor.fetchone()
+                else:
+                    candidates = [{"name": m['name'], "score": round(s, 1)} for m, s in scored[:5]]
+                    return StockOutResponse(
+                        success=False,
+                        error=f"名称 '{product_name}' 不够明确",
+                        message=f"出库失败：名称不明确，候选：{', '.join(c['name'] for c in candidates)}",
+                    )
 
         if not row:
             return StockOutResponse(
