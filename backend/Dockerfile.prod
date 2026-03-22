@@ -1,13 +1,10 @@
-# 生产环境 Dockerfile
+# 生产环境 Dockerfile (优化版)
 FROM python:3.12-slim
 
-# 创建非root用户
-RUN useradd -m -u 1000 appuser
+# 创建非root用户和数据目录
+RUN useradd -m -u 1000 appuser && mkdir -p /data
 
 WORKDIR /app
-
-# 安装 uv 和依赖
-RUN pip install uv
 
 # 复制项目文件
 COPY pyproject.toml uv.lock ./
@@ -15,13 +12,16 @@ COPY backend/ ./backend/
 COPY mcp/ ./mcp/
 COPY run_backend.py ./
 
-# 安装依赖
-RUN uv sync --frozen
+# 安装依赖后删除 uv，减少镜像大小
+RUN pip install --no-cache-dir uv && \
+    uv sync --frozen && \
+    pip uninstall -y uv && \
+    pip cache purge && \
+    rm -rf /root/.cache
 
-# 创建数据目录并设置权限
-RUN mkdir -p /data && chown -R appuser:appuser /data /app
+# 设置权限（单独一层，避免复制大文件）
+RUN chown -R appuser:appuser /data /app
 
-# 切换到非root用户
 USER appuser
 
 # 生产环境变量
@@ -36,8 +36,7 @@ ENV LOG_LEVEL=INFO
 
 EXPOSE 2124
 
-# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:2124/api/dashboard/stats', timeout=5)" || exit 1
 
-CMD ["uv", "run", "python", "run_backend.py"]
+CMD [".venv/bin/python", "run_backend.py"]

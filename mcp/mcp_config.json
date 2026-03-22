@@ -2,8 +2,8 @@
   "mcpServers": {
     "warehouse-system": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["run", "python", "-m", "warehouse_mcp"]
+      "command": "/app/.venv/bin/python",
+      "args": ["/app/mcp/warehouse_mcp.py"]
     }
   }
 }
