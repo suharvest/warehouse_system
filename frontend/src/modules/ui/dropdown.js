@@ -260,6 +260,9 @@ export function initSearchableSelect(config) {
             e.preventDefault();
             if (wrapper._highlightIndex >= 0 && options[wrapper._highlightIndex]) {
                 options[wrapper._highlightIndex].click();
+            } else if (options.length === 1) {
+                // 扫码枪场景：只有唯一匹配时自动选中
+                options[0].click();
             }
         } else if (e.key === 'Escape') {
             closeSearchableDropdown(wrapper);

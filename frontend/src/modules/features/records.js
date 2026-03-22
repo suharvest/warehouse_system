@@ -210,8 +210,12 @@ export function showAddRecordModal() {
     document.getElementById('add-record-form').reset();
     clearRecordProductSelector();
     loadContactsForRecord('in');
+    updateLocationFieldVisibility('in');
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
-        radio.onchange = () => loadContactsForRecord(radio.value);
+        radio.onchange = () => {
+            loadContactsForRecord(radio.value);
+            updateLocationFieldVisibility(radio.value);
+        };
     });
     setupFormEnterNavigation();
 }
@@ -226,8 +230,12 @@ export function showAddRecordModalForProduct() {
     document.getElementById('add-record-form').reset();
     document.getElementById('record-product-display').value = currentProductName;
     loadContactsForRecord('in');
+    updateLocationFieldVisibility('in');
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
-        radio.onchange = () => loadContactsForRecord(radio.value);
+        radio.onchange = () => {
+            loadContactsForRecord(radio.value);
+            updateLocationFieldVisibility(radio.value);
+        };
     });
     setupFormEnterNavigation();
 }
@@ -248,6 +256,14 @@ async function loadContactsForRecord(recordType) {
         }
     } catch (error) {
         console.error('加载联系方列表失败:', error);
+    }
+}
+
+// 根据操作类型显示/隐藏库位字段（仅入库显示）
+function updateLocationFieldVisibility(type) {
+    const locationGroup = document.getElementById('record-location-group');
+    if (locationGroup) {
+        locationGroup.style.display = type === 'in' ? 'block' : 'none';
     }
 }
 
@@ -276,8 +292,16 @@ function setupFormEnterNavigation() {
             document.getElementById('record-reason')?.focus();
         } else if (active.id === 'record-reason') {
             document.getElementById('record-contact')?.focus();
+        } else if (active.id === 'record-contact') {
+            const locationGroup = document.getElementById('record-location-group');
+            if (locationGroup && locationGroup.style.display !== 'none') {
+                document.getElementById('record-location')?.focus();
+            } else {
+                document.querySelector('[data-action="submitAddRecord"]')?.click();
+            }
+        } else if (active.id === 'record-location') {
+            document.querySelector('[data-action="submitAddRecord"]')?.click();
         }
-        // record-contact 上按 Enter 不做任何操作，需要手动点提交
     };
 
     form._enterNavHandler = handler;
@@ -298,6 +322,8 @@ export async function submitAddRecord() {
     const quantity = parseInt(document.getElementById('record-quantity').value);
     const reason = document.getElementById('record-reason').value.trim();
     const contactId = document.getElementById('record-contact')?.value || null;
+    const locationInput = document.getElementById('record-location');
+    const location = (type === 'in' && locationInput) ? locationInput.value.trim() : null;
 
     if (!productName || !type || !document.getElementById('record-quantity').value || !reason) {
         alert(t('fillAllFields'));
@@ -309,14 +335,30 @@ export async function submitAddRecord() {
         return;
     }
 
+    // 如果填了库位，检查是否与现有库位不同
+    if (location) {
+        const product = allProducts.find(p => p.name === productName);
+        if (product && product.location && product.location !== location) {
+            const confirmed = confirm(
+                `该产品当前库位为「${product.location}」，是否覆盖为「${location}」？`
+            );
+            if (!confirmed) return;
+        }
+    }
+
     try {
-        const data = await recordsApi.create({
+        const requestData = {
             product_name: productName,
             type: type,
             quantity: quantity,
             reason: reason,
             contact_id: contactId ? parseInt(contactId) : null
-        });
+        };
+        if (location) {
+            requestData.location = location;
+        }
+
+        const data = await recordsApi.create(requestData);
 
         if (data.success) {
             alert(data.message);

@@ -190,6 +190,7 @@ class ManualRecordRequest(BaseModel):
     operator: Optional[str] = None  # 可选，如不提供则使用当前登录用户
     reason: str
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
+    location: Optional[str] = None  # 入库时可选更新库位
 
 
 # ============ Pagination Models ============

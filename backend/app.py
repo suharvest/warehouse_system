@@ -3376,7 +3376,7 @@ async def add_inventory_record(
     operator = request.operator if request.operator else current_user.get_operator_name()
 
     if request.type == 'in':
-        return await stock_in(
+        result = await stock_in(
             StockOperationRequest(
                 product_name=request.product_name,
                 quantity=request.quantity,
@@ -3386,6 +3386,15 @@ async def add_inventory_record(
             ),
             current_user
         )
+        # 入库成功且填写了库位时，更新产品库位
+        if result.success and request.location:
+            with get_db() as conn:
+                conn.execute(
+                    'UPDATE materials SET location = ? WHERE name = ?',
+                    (request.location, request.product_name)
+                )
+                conn.commit()
+        return result
     elif request.type == 'out':
         return await stock_out(
             http_request,
