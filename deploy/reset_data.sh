@@ -52,15 +52,16 @@ log "Restored database from backup"
 log "Starting warehouse container..."
 docker-compose -f "$COMPOSE_FILE" start warehouse
 
-# 等待健康检查
-sleep 10
-
-# 验证服务
-if curl -s http://localhost:1024/api/dashboard/stats > /dev/null 2>&1; then
-    log "Service is healthy"
-else
-    log "WARNING: Health check failed, attempting full restart..."
-    docker-compose -f "$COMPOSE_FILE" restart warehouse
-fi
+# 等待容器健康检查通过
+log "Waiting for health check..."
+for i in $(seq 1 12); do
+    STATUS=$(docker inspect --format='{{.State.Health.Status}}' smart-wms 2>/dev/null || echo "unknown")
+    if [ "$STATUS" = "healthy" ]; then
+        log "Service is healthy"
+        break
+    fi
+    [ "$i" -eq 12 ] && log "WARNING: Health check not passed after 60s, attempting restart..." && docker-compose -f "$COMPOSE_FILE" restart warehouse
+    sleep 5
+done
 
 log "Database reset completed successfully!"

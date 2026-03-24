@@ -70,14 +70,17 @@ docker-compose -f "$COMPOSE_FILE" up -d
 log_info "Waiting for service to start..."
 sleep 10
 
-# 8. 健康检查
-log_info "Running health check..."
-HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:1024/api/dashboard/stats 2>/dev/null || echo "000")
-if [ "$HEALTH" = "200" ]; then
-    log_info "Service: OK"
-else
-    log_warn "Service: HTTP $HEALTH (may still be starting...)"
-fi
+# 8. 健康检查（使用 docker 内置健康状态，不依赖端口号）
+log_info "Waiting for health check..."
+for i in $(seq 1 12); do
+    STATUS=$(docker inspect --format='{{.State.Health.Status}}' smart-wms 2>/dev/null || echo "unknown")
+    if [ "$STATUS" = "healthy" ]; then
+        log_info "Service: OK"
+        break
+    fi
+    [ "$i" -eq 12 ] && log_warn "Health check not passed after 60s (may still be starting...)"
+    sleep 5
+done
 
 # 9. 设置定时任务
 log_info "Setting up cron job for daily data reset..."
@@ -100,7 +103,8 @@ log_info "Container:"
 docker-compose -f "$COMPOSE_FILE" ps
 
 echo ""
-echo "Access: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_SERVER_IP'):1024"
+HOST_PORT=$(docker port smart-wms 2>/dev/null | head -1 | sed 's/.*://' || echo "1024")
+echo "Access: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_SERVER_IP'):${HOST_PORT}"
 echo ""
 echo "Login credentials:"
 echo "  Username: seeed"
