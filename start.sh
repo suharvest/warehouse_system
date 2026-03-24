@@ -116,7 +116,7 @@ else
     echo "提示: 使用 --vite 参数启用前端热更新模式"
 fi
 echo ""
-echo "如需启动 MCP 服务，请运行: cd mcp && ./start_mcp.sh"
+echo "MCP 智能体可在 Web 界面「智能体配置」中管理"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
 echo ""

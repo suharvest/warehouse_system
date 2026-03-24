@@ -3,7 +3,9 @@ MCP 连接进程管理器
 管理 mcp_pipe.py 子进程的生命周期
 """
 import asyncio
+import atexit
 import os
+import signal
 import sys
 import logging
 from dataclasses import dataclass, field
@@ -39,6 +41,7 @@ class MCPProcessManager:
     def __init__(self):
         self.connections: Dict[str, MCPProcess] = {}
         self._monitor_task: Optional[asyncio.Task] = None
+        atexit.register(self._cleanup_on_exit)
 
     async def start_monitor(self):
         """启动后台监控任务"""
@@ -87,7 +90,8 @@ class MCPProcessManager:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=mcp_dir
+                cwd=mcp_dir,
+                start_new_session=True,
             )
 
             mcp_proc = MCPProcess(
@@ -128,11 +132,18 @@ class MCPProcessManager:
         proc = self.connections[conn_id]
         if proc.process and proc.process.returncode is None:
             try:
-                proc.process.terminate()
+                # 杀整个进程组（mcp_pipe + warehouse_mcp 子进程）
+                pgid = os.getpgid(proc.process.pid)
+                os.killpg(pgid, signal.SIGTERM)
                 await asyncio.wait_for(proc.process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                proc.process.kill()
+                try:
+                    os.killpg(os.getpgid(proc.process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 await proc.process.wait()
+            except ProcessLookupError:
+                pass
             except Exception as e:
                 logger.error(f"Error stopping connection '{conn_id}': {e}")
 
@@ -198,6 +209,16 @@ class MCPProcessManager:
         for conn_id in list(self.connections.keys()):
             await self.stop_connection(conn_id)
         await self.stop_monitor()
+
+    def _cleanup_on_exit(self):
+        """atexit 兜底：同步杀掉所有残留子进程组"""
+        for proc in self.connections.values():
+            if proc.process and proc.process.returncode is None:
+                try:
+                    pgid = os.getpgid(proc.process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
 
     def _get_mcp_pipe_path(self) -> Optional[str]:
         """获取 mcp_pipe.py 的路径"""
