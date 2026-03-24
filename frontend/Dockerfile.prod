@@ -18,12 +18,16 @@ FROM nginx:alpine
 # 复制构建产物
 COPY --from=builder /build/dist /usr/share/nginx/html
 
-# 复制 nginx 配置
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# 复制 nginx 配置模板（运行时 envsubst 替换变量）
+COPY frontend/nginx.conf /etc/nginx/templates/default.conf.template
 
-EXPOSE 2125
+# 可配置端口和后端地址（支持多实例部署）
+ENV LISTEN_PORT=2125
+ENV BACKEND_URL=http://backend:2124
+
+EXPOSE ${LISTEN_PORT}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -q --spider http://localhost:2125/ || exit 1
+    CMD wget -q --spider http://localhost:${LISTEN_PORT}/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

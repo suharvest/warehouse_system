@@ -1,0 +1,99 @@
+# 多实例部署：同一套镜像，多个独立仓库
+# 使用方式: docker-compose -f docker-compose.multi.yml up -d
+#
+# 默认 3 个实例:
+#   - 仓库A: http://localhost:1024
+#   - 仓库B: http://localhost:1025
+#   - 仓库C: http://localhost:1026
+#
+# 每个实例 = 1 backend + 1 frontend，独立数据库 volume。
+# 需要更多实例？复制一组 backend-x + frontend-x，改端口和 volume 名。
+
+x-backend-base: &backend-base
+  build:
+    context: .
+    dockerfile: backend/Dockerfile.prod
+  restart: unless-stopped
+  environment: &backend-env
+    DATABASE_PATH: /data/warehouse.db
+    SQLITE_PRODUCTION_MODE: "true"
+    INIT_MOCK_DATA: "false"
+    BCRYPT_ENABLED: "true"
+    ENABLE_AUDIT_LOG: "true"
+    LOG_LEVEL: INFO
+  deploy:
+    resources:
+      limits:
+        cpus: '1'
+        memory: 512M
+
+x-frontend-base: &frontend-base
+  build:
+    context: .
+    dockerfile: frontend/Dockerfile.prod
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        cpus: '0.5'
+        memory: 128M
+
+services:
+  # ======== 仓库 A (端口 1024) ========
+  backend-a:
+    <<: *backend-base
+    container_name: warehouse-a-backend
+    volumes:
+      - data_a:/data
+
+  frontend-a:
+    <<: *frontend-base
+    container_name: warehouse-a-frontend
+    ports:
+      - "1024:1024"
+    environment:
+      LISTEN_PORT: 1024
+      BACKEND_URL: http://backend-a:2124
+    depends_on:
+      - backend-a
+
+  # ======== 仓库 B (端口 1025) ========
+  backend-b:
+    <<: *backend-base
+    container_name: warehouse-b-backend
+    volumes:
+      - data_b:/data
+
+  frontend-b:
+    <<: *frontend-base
+    container_name: warehouse-b-frontend
+    ports:
+      - "1025:1025"
+    environment:
+      LISTEN_PORT: 1025
+      BACKEND_URL: http://backend-b:2124
+    depends_on:
+      - backend-b
+
+  # ======== 仓库 C (端口 1026) ========
+  backend-c:
+    <<: *backend-base
+    container_name: warehouse-c-backend
+    volumes:
+      - data_c:/data
+
+  frontend-c:
+    <<: *frontend-base
+    container_name: warehouse-c-frontend
+    ports:
+      - "1026:1026"
+    environment:
+      LISTEN_PORT: 1026
+      BACKEND_URL: http://backend-c:2124
+    depends_on:
+      - backend-c
+
+volumes:
+  data_a:
+  data_b:
+  data_c:

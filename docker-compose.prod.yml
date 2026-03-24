@@ -53,6 +53,7 @@ services:
     ports:
       - "2125:2125"
     environment:
+      - LISTEN_PORT=2125
       - BACKEND_URL=http://backend:2124
     depends_on:
       backend:
