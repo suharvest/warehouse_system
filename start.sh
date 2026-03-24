@@ -29,85 +29,74 @@ if [ "$USE_VITE" = true ]; then
         echo "错误: 未找到 npm，请先安装 Node.js"
         exit 1
     fi
-    # 检查是否需要安装依赖
     if [ ! -d "frontend/node_modules" ]; then
         echo "正在安装前端依赖..."
         cd frontend && npm install && cd ..
     fi
 fi
 
+# 确保前端已构建（非 vite 模式需要 dist 目录）
+if [ "$USE_VITE" = false ] && [ ! -f "frontend/dist/index.html" ]; then
+    echo "前端未构建，正在构建..."
+    if ! command -v npm &> /dev/null; then
+        echo "错误: 未找到 npm，请先安装 Node.js 或使用 --vite 模式"
+        exit 1
+    fi
+    if [ ! -d "frontend/node_modules" ]; then
+        cd frontend && npm install && cd ..
+    fi
+    cd frontend && npm run build && cd ..
+    echo "前端构建完成！"
+fi
+
 # 初始化数据库（仅当数据库不存在时）
 if [ ! -f "backend/warehouse.db" ]; then
     echo "正在初始化数据库..."
-    cd backend
-    uv run python database.py
-    if [ $? -ne 0 ]; then
-        echo "数据库初始化失败"
-        exit 1
-    fi
-    cd ..
+    cd backend && uv run python database.py && cd ..
     echo "数据库初始化完成！"
 else
     echo "数据库已存在，跳过初始化"
 fi
 
-# 清理函数 - 确保所有子进程都被终止
+# 清理函数
 cleanup() {
     echo ''
     echo '正在停止服务...'
-
-    # 终止已知的 PID
     [ -n "$BACKEND_PID" ] && kill $BACKEND_PID 2>/dev/null
-    [ -n "$FRONTEND_PID" ] && kill $FRONTEND_PID 2>/dev/null
-
-    # 等待一下让进程正常退出
+    [ -n "$VITE_PID" ] && kill $VITE_PID 2>/dev/null
     sleep 1
-
-    # 强制终止可能残留的进程（按端口）
     lsof -ti:2124 | xargs kill -9 2>/dev/null
-    lsof -ti:2125 | xargs kill -9 2>/dev/null
-
-    # 强制终止可能残留的进程（按名称）
+    [ "$USE_VITE" = true ] && lsof -ti:2125 | xargs kill -9 2>/dev/null
     pkill -9 -f "run_backend.py" 2>/dev/null
-    pkill -9 -f "frontend/server.py" 2>/dev/null
-    pkill -9 -f "vite" 2>/dev/null
-
     echo '所有服务已停止'
     exit 0
 }
 
-# 在启动服务前设置信号处理
 trap cleanup INT TERM EXIT
 
 echo ""
 echo "启动服务..."
 echo ""
 
-# 先清理可能残留的进程
+# 清理残留进程
 lsof -ti:2124 | xargs kill -9 2>/dev/null
-lsof -ti:2125 | xargs kill -9 2>/dev/null
 sleep 1
 
-# 启动后端服务
+# 启动后端（同时 serve 前端静态文件）
 echo "启动后端服务 (端口 2124)..."
 uv run python run_backend.py &
 BACKEND_PID=$!
 
 sleep 2
 
-# 启动前端服务
-echo "启动前端服务 (端口 2125)..."
 if [ "$USE_VITE" = true ]; then
-    echo "使用 Vite 开发服务器 (热更新模式)..."
+    # Vite 开发模式：前端走 Vite（热更新），API 走后端
+    echo "启动 Vite 开发服务器 (端口 2125, 热更新)..."
     cd frontend && npm run dev &
-    FRONTEND_PID=$!
+    VITE_PID=$!
     cd ..
-else
-    python3 frontend/server.py &
-    FRONTEND_PID=$!
+    sleep 2
 fi
-
-sleep 2
 
 echo ""
 echo "================================"
@@ -116,21 +105,20 @@ echo "================================"
 echo ""
 echo "后端 API: http://localhost:2124"
 echo "API 文档: http://localhost:2124/docs"
-echo "前端页面: http://localhost:2125"
-echo ""
 if [ "$USE_VITE" = true ]; then
-    echo "前端模式: Vite 开发服务器 (支持热更新)"
+    echo "前端页面: http://localhost:2125 (Vite 热更新)"
+    echo ""
+    echo "请在浏览器中打开: http://localhost:2125"
 else
-    echo "前端模式: Python 静态服务器"
-    echo "提示: 使用 --vite 参数启用热更新模式"
+    echo "前端页面: http://localhost:2124 (后端直接服务)"
+    echo ""
+    echo "请在浏览器中打开: http://localhost:2124"
+    echo "提示: 使用 --vite 参数启用前端热更新模式"
 fi
-echo ""
-echo "请在浏览器中打开: http://localhost:2125"
 echo ""
 echo "如需启动 MCP 服务，请运行: cd mcp && ./start_mcp.sh"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
 echo ""
 
-# 等待子进程
 wait
