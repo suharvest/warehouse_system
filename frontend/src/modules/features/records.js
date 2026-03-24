@@ -262,8 +262,12 @@ async function loadContactsForRecord(recordType) {
 // 根据操作类型显示/隐藏库位字段（仅入库显示）
 function updateLocationFieldVisibility(type) {
     const locationGroup = document.getElementById('record-location-group');
+    const batchGroup = document.getElementById('record-batch-group');
     if (locationGroup) {
         locationGroup.style.display = type === 'in' ? 'block' : 'none';
+    }
+    if (batchGroup) {
+        batchGroup.style.display = type === 'in' ? 'block' : 'none';
     }
 }
 
@@ -324,6 +328,8 @@ export async function submitAddRecord() {
     const contactId = document.getElementById('record-contact')?.value || null;
     const locationInput = document.getElementById('record-location');
     const location = (type === 'in' && locationInput) ? locationInput.value.trim() : null;
+    const batchNoInput = document.getElementById('record-batch-no');
+    const batchNo = (type === 'in' && batchNoInput) ? batchNoInput.value.trim() || null : null;
 
     if (!productName || !type || !document.getElementById('record-quantity').value || !reason) {
         alert(t('fillAllFields'));
@@ -356,6 +362,9 @@ export async function submitAddRecord() {
         };
         if (location) {
             requestData.location = location;
+        }
+        if (batchNo) {
+            requestData.batch_no = batchNo;
         }
 
         const data = await recordsApi.create(requestData);

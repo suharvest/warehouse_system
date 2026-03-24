@@ -102,6 +102,7 @@ class StockOperationRequest(BaseModel):
     operator: Optional[str] = "MCP系统"
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 批次存放位置
+    batch_no: Optional[str] = None  # 自定义批次号（留空自动生成）
     fuzzy: bool = True  # 是否启用模糊匹配
 
 
@@ -200,6 +201,7 @@ class ManualRecordRequest(BaseModel):
     reason: str
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 入库时可选更新库位
+    batch_no: Optional[str] = None  # 入库时可选指定批次号（留空自动生成）
 
 
 # ============ Pagination Models ============

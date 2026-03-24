@@ -432,7 +432,7 @@
                         <div class="filter-bar">
                             <div class="filter-group">
                                 <label data-i18n="filterProduct">名称/编码</label>
-                                <input type="text" id="filter-inventory-name" data-i18n="filterProduct"
+                                <input type="search" id="filter-inventory-name" data-i18n="filterProduct"
                                     placeholder="名称/编码">
                             </div>
                             <div class="filter-group">
@@ -1156,6 +1156,10 @@
                         <select id="record-contact">
                             <option value="" data-i18n="pleaseSelect">-- 请选择 --</option>
                         </select>
+                    </div>
+                    <div class="form-group" id="record-batch-group">
+                        <label data-i18n="batchNo">批次号</label>
+                        <input type="text" id="record-batch-no" data-i18n-placeholder="batchNoPlaceholder" placeholder="留空自动生成">
                     </div>
                     <div class="form-group" id="record-location-group">
                         <label data-i18n="location">存放位置</label>

@@ -2523,7 +2523,7 @@ async def stock_in(
         new_quantity = cursor.fetchone()['quantity']
         old_quantity = new_quantity - quantity
 
-        batch_no = generate_batch_no(material_id)
+        batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id)
         cursor.execute('''
             INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -3524,7 +3524,8 @@ async def add_inventory_record(
                 reason=request.reason,
                 operator=operator,
                 contact_id=request.contact_id,
-                location=request.location
+                location=request.location,
+                batch_no=request.batch_no,
             ),
             current_user
         )
