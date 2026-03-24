@@ -75,6 +75,9 @@ ENABLE_AUDIT_LOG = os.environ.get('ENABLE_AUDIT_LOG', 'true').lower() == 'true'
 # Excel上传限制
 MAX_UPLOAD_SIZE_MB = int(os.environ.get('MAX_UPLOAD_SIZE_MB', '10'))
 MAX_IMPORT_ROWS = int(os.environ.get('MAX_IMPORT_ROWS', '10000'))
+# 模糊匹配置信度阈值
+FUZZY_CONFIDENT_SCORE = float(os.environ.get('FUZZY_CONFIDENT_SCORE', '85'))
+FUZZY_CONFIDENT_GAP = float(os.environ.get('FUZZY_CONFIDENT_GAP', '10'))
 
 # 配置日志
 logging.basicConfig(
@@ -219,7 +222,11 @@ def get_db():
 def get_fuzzy_matcher() -> FuzzyMatcher:
     """获取或创建 FuzzyMatcher 实例"""
     if not hasattr(app.state, 'fuzzy_matcher'):
-        app.state.fuzzy_matcher = FuzzyMatcher(get_db_connection)
+        app.state.fuzzy_matcher = FuzzyMatcher(
+            get_db_connection,
+            confident_score=FUZZY_CONFIDENT_SCORE,
+            confident_gap=FUZZY_CONFIDENT_GAP,
+        )
     return app.state.fuzzy_matcher
 
 

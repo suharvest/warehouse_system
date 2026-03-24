@@ -11,12 +11,17 @@ from pypinyin import lazy_pinyin, Style
 class FuzzyMatcher:
     """模糊匹配器，支持文本编辑距离和中文拼音相似度两层匹配"""
 
-    def __init__(self, get_conn):
+    def __init__(self, get_conn, *, confident_score: float = 85.0,
+                 confident_gap: float = 10.0):
         """
         Args:
             get_conn: 返回数据库连接的可调用对象，每次需要时调用并在用完后关闭
+            confident_score: 最高分超过此值才可能判为 confident
+            confident_gap: 最高分与第二名差距超过此值才判为 confident
         """
         self._get_conn = get_conn
+        self._confident_score = confident_score
+        self._confident_gap = confident_gap
         self._index: list[dict] | None = None
         self._dirty = True
 
@@ -166,7 +171,7 @@ class FuzzyMatcher:
         """
         解析模糊文本为最佳匹配。
 
-        置信度判定: 最高分 > 85 且与第二名差距 > 10 → confident=True
+        置信度判定: 最高分 > confident_score 且与第二名差距 > confident_gap → confident=True
         """
         candidates = self.search(query, entity_type=entity_type, top_k=5, threshold=50.0)
 
@@ -180,7 +185,7 @@ class FuzzyMatcher:
         best = candidates[0]
         second_score = candidates[1]["score"] if len(candidates) > 1 else 0
         gap = best["score"] - second_score
-        confident = best["score"] > 85 and gap > 10
+        confident = best["score"] > self._confident_score and gap > self._confident_gap
 
         return {
             "best_match": best,
