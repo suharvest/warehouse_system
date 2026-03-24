@@ -768,14 +768,14 @@
   }
 
   .searchable-select-clear {
-    @apply absolute top-1/2 w-4 h-4 border-none bg-text-muted text-white rounded-full
-           cursor-pointer text-xs leading-[14px] hidden items-center justify-center;
-    right: 30px;
+    @apply absolute top-1/2 w-5 h-5 border-none bg-transparent text-text-muted
+           cursor-pointer text-base leading-5 hidden items-center justify-center;
+    right: 28px;
     transform: translateY(-50%);
   }
 
   .searchable-select-clear:hover {
-    @apply bg-text-secondary;
+    @apply text-text-primary;
   }
 
   .searchable-select.has-value .searchable-select-clear {
