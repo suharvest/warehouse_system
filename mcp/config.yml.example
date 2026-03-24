@@ -1,9 +1,41 @@
 # MCP 服务配置文件
 # 复制此文件为 config.yml 并填入实际配置
 
-# 后端 API 地址
+# ── WMS Provider（可选，默认 "default"） ──
+# 切换不同 WMS 后端，只需修改此字段并实现对应 Provider
+# provider: "default"
+
+# ── 后端 API 地址 ──
 api_base_url: "http://localhost:2124/api"
 
-# API 密钥（用于身份验证）
-# 在后端管理界面创建密钥后填入此处
-api_key: "your-api-key-here"
+# ── 认证配置 ──
+# 支持多种认证方式，根据 WMS 后端选择
+
+# API Key 认证（默认）
+auth:
+  type: api_key
+  # header: X-API-Key           # 可选，自定义 header 名称
+  key: "your-api-key-here"
+
+# Bearer Token 认证
+# auth:
+#   type: bearer
+#   token: "your-bearer-token"
+
+# Basic Auth 认证
+# auth:
+#   type: basic
+#   username: "admin"
+#   password: "secret"
+
+# 自定义签名认证（由 Provider 代码处理）
+# auth:
+#   type: custom
+#   app_key: "your-app-key"
+#   app_secret: "your-app-secret"
+
+# ── 旧格式兼容（仍可使用，但推荐用 auth 配置） ──
+# api_key: "your-api-key-here"
+
+# ── 请求超时（秒） ──
+# timeout: 10
