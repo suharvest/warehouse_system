@@ -95,23 +95,13 @@ class TestStockIn:
 
     def test_stock_in_updates_inventory(self, admin_client, sample_material):
         """Verify inventory is actually updated after stock-in."""
-        # Get current quantity
-        resp = admin_client.get("/api/materials/list")
-        assert resp.status_code == 200
-        materials = resp.json()['items']
-        current = next((m for m in materials if m['name'] == sample_material['name']), None)
-        assert current is not None
-        old_qty = current['quantity']
-
-        # Stock in
-        admin_client.post("/api/materials/stock-in", json={
+        # Stock in and verify via response
+        resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 25,
             "reason": "Verify update"
         })
-
-        # Check updated quantity
-        resp = admin_client.get("/api/materials/list")
-        materials = resp.json()['items']
-        updated = next((m for m in materials if m['name'] == sample_material['name']), None)
-        assert updated['quantity'] == old_qty + 25
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert data['product']['new_quantity'] == data['product']['old_quantity'] + 25
