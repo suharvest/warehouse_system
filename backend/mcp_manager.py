@@ -65,11 +65,14 @@ class MCPProcessManager:
             if existing.process and existing.process.returncode is None:
                 await self.stop_connection(conn_id)
 
-        # 确定 mcp_pipe.py 路径
+        # 确定 mcp_pipe.py 和 warehouse_mcp.py 路径
         mcp_pipe_path = self._get_mcp_pipe_path()
         if not mcp_pipe_path:
             logger.error("mcp_pipe.py not found")
             return False
+
+        mcp_dir = os.path.dirname(mcp_pipe_path)
+        warehouse_mcp_path = os.path.join(mcp_dir, 'warehouse_mcp.py')
 
         # 设置环境变量
         env = os.environ.copy()
@@ -78,12 +81,13 @@ class MCPProcessManager:
         env['WAREHOUSE_API_URL'] = 'http://localhost:2124/api'
 
         try:
+            # 传 warehouse_mcp.py 路径作为参数，避免依赖 mcp_config.json 的硬编码路径
             process = await asyncio.create_subprocess_exec(
-                sys.executable, mcp_pipe_path,
+                sys.executable, mcp_pipe_path, warehouse_mcp_path,
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.path.dirname(mcp_pipe_path)
+                cwd=mcp_dir
             )
 
             mcp_proc = MCPProcess(
