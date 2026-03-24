@@ -188,24 +188,35 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE batches ADD COLUMN location TEXT')
 
-    # 历史数据清洗：为有库存但无活跃批次的物料创建遗留批次
+    # 历史数据清洗：为无批次覆盖的库存创建 LEGACY 批次
+    # 比较 materials.quantity 与 SUM(active batch qty)，差值部分补 LEGACY 批次
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute('''
-        SELECT m.id, m.quantity, m.location FROM materials m
+        SELECT m.id, m.quantity, m.location,
+               COALESCE(SUM(CASE WHEN b.is_exhausted = 0 THEN b.quantity ELSE 0 END), 0) as batch_total
+        FROM materials m
+        LEFT JOIN batches b ON b.material_id = m.id
         WHERE m.quantity > 0
-        AND NOT EXISTS (
-            SELECT 1 FROM batches b
-            WHERE b.material_id = m.id AND b.is_exhausted = 0
-        )
+        GROUP BY m.id
+        HAVING m.quantity > batch_total
     ''')
     orphans = cursor.fetchall()
     for m in orphans:
+        gap = m['quantity'] - m['batch_total']
+        if gap <= 0:
+            continue
         batch_no = f"LEGACY-{m['id']:04d}"
         cursor.execute('''
             INSERT OR IGNORE INTO batches
             (batch_no, material_id, quantity, initial_quantity, location, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (batch_no, m['id'], m['quantity'], m['quantity'], m['location'], now))
+        ''', (batch_no, m['id'], gap, gap, m['location'], now))
+        # 如果 LEGACY 批次已存在但数量不对，更新它
+        if cursor.rowcount == 0:
+            cursor.execute('''
+                UPDATE batches SET quantity = quantity + ?, initial_quantity = initial_quantity + ?
+                WHERE batch_no = ? AND material_id = ?
+            ''', (gap, gap, batch_no, m['id']))
 
     # 回填：将 materials.location 填入已有的无 location 批次
     cursor.execute('''
