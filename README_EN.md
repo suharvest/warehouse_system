@@ -22,12 +22,12 @@ A warehouse management system based on FastAPI + SQLite, with voice control supp
 ### Quick Deploy (Pre-built Image)
 
 ```bash
-docker run -d -p 2125:2124 \
+docker run -d -p 1024:1024 \
   -v warehouse_data:/app/data \
   sensecraft-missionpack.seeed.cn/solution/warehouse:latest
 ```
 
-Visit http://localhost:2125. First visit requires registering an admin account.
+Visit http://localhost:1024. First visit requires registering an admin account.
 
 ### Docker Deployment (Build from Source)
 
