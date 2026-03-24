@@ -218,6 +218,7 @@ export function showAddRecordModal() {
         };
     });
     setupFormEnterNavigation();
+    setTimeout(() => document.getElementById('record-product-input')?.focus(), 100);
 }
 
 export function showAddRecordModalForProduct() {
