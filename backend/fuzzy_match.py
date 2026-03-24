@@ -1,6 +1,7 @@
 """
 模糊匹配核心模块 - 基于 rapidfuzz + pypinyin 实现两层模糊匹配
 """
+import re
 import sqlite3
 
 from rapidfuzz import fuzz
@@ -18,6 +19,11 @@ class FuzzyMatcher:
         self._get_conn = get_conn
         self._index: list[dict] | None = None
         self._dirty = True
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """去除空格和横杠，统一比较基准"""
+        return re.sub(r'[\s\-]+', '', text)
 
     def _get_pinyin(self, text: str) -> str:
         """将文本转为无声调拼音字符串"""
@@ -113,20 +119,24 @@ class FuzzyMatcher:
         """
         模糊搜索，返回 top_k 个候选。
 
-        算法: score = max(text_similarity, pinyin_similarity * 0.9)
+        算法: normalize 后用 fuzz.ratio 计算文本相似度，
+        再与拼音相似度 * 0.9 取较大值。
         过滤 score < threshold 的结果，按 score 降序排序。
         """
         self._ensure_index()
 
-        query_pinyin = self._get_pinyin(query)
+        norm_query = self._normalize(query)
+        query_pinyin = self._get_pinyin(norm_query)
         results = []
 
         for entry in self._index:
             if entity_type != "all" and entry["entity_type"] != entity_type:
                 continue
 
-            text_score = fuzz.token_sort_ratio(query, entry["name"])
-            pinyin_score = fuzz.token_sort_ratio(query_pinyin, entry["pinyin"]) * 0.9
+            norm_name = self._normalize(entry["name"])
+            text_score = fuzz.ratio(norm_query, norm_name)
+            norm_pinyin = self._get_pinyin(norm_name)
+            pinyin_score = fuzz.ratio(query_pinyin, norm_pinyin) * 0.9
             score = max(text_score, pinyin_score)
 
             if score >= threshold:
@@ -156,7 +166,7 @@ class FuzzyMatcher:
         """
         解析模糊文本为最佳匹配。
 
-        置信度判定: 最高分 > 85 且与第二名差距 > 15 → confident=True
+        置信度判定: 最高分 > 85 且与第二名差距 > 10 → confident=True
         """
         candidates = self.search(query, entity_type=entity_type, top_k=5, threshold=50.0)
 
@@ -170,7 +180,7 @@ class FuzzyMatcher:
         best = candidates[0]
         second_score = candidates[1]["score"] if len(candidates) > 1 else 0
         gap = best["score"] - second_score
-        confident = best["score"] > 85 and gap > 15
+        confident = best["score"] > 85 and gap > 10
 
         return {
             "best_match": best,
