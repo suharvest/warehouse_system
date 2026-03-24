@@ -19,15 +19,23 @@ A warehouse management system based on FastAPI + SQLite, with voice control supp
 
 ## Quick Start
 
-### Docker Deployment (Recommended)
+### Quick Deploy (Pre-built Image)
+
+```bash
+docker run -d -p 2125:2124 \
+  -v warehouse_data:/app/data \
+  sensecraft-missionpack.seeed.cn/solution/warehouse:latest
+```
+
+Visit http://localhost:2125. First visit requires registering an admin account.
+
+### Docker Deployment (Build from Source)
 
 ```bash
 git clone https://github.com/suharvest/warehouse_system.git
 cd warehouse_system
 docker-compose -f docker-compose.prod.yml up -d
 ```
-
-Visit http://localhost:2125. First visit requires registering an admin account.
 
 **Common Commands:**
 ```bash
@@ -74,6 +82,7 @@ irm https://astral.sh/uv/install.ps1 | iex
 ## Documentation
 
 - [MCP Integration Guide](docs/MCP_External_System_Integration.md)
+- [WMS Provider Development Guide](docs/WMS_Provider_Development.md) — Integrate with third-party WMS
 - [System User Guide](docs/Warehouse_System_Guide.md)
 - [Changelog](CHANGELOG_EN.md)
 

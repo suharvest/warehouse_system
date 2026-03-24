@@ -19,15 +19,23 @@
 
 ## 快速开始
 
-### Docker 部署（推荐）
+### 一键部署（预构建镜像）
+
+```bash
+docker run -d -p 2125:2124 \
+  -v warehouse_data:/app/data \
+  sensecraft-missionpack.seeed.cn/solution/warehouse:latest
+```
+
+访问 http://localhost:2125，首次需注册管理员账户。
+
+### Docker 部署（从源码构建）
 
 ```bash
 git clone https://github.com/suharvest/warehouse_system.git
 cd warehouse_system
 docker-compose -f docker-compose.prod.yml up -d
 ```
-
-访问 http://localhost:2125，首次需注册管理员账户。
 
 **常用命令：**
 ```bash
@@ -74,6 +82,7 @@ irm https://astral.sh/uv/install.ps1 | iex
 ## 文档
 
 - [MCP 集成指南](docs/MCP_External_System_Integration.md)
+- [WMS Provider 开发指南](docs/WMS_Provider_Development.md) — 对接第三方 WMS 系统
 - [系统使用指南](docs/Warehouse_System_Guide.md)
 - [更新记录](CHANGELOG.md)
 
