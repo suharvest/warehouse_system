@@ -34,7 +34,8 @@ def load_config():
     config_path = os.path.join(os.path.dirname(__file__), 'config.yml')
     config = {
         'api_base_url': 'http://localhost:2124/api',
-        'api_key': ''
+        'api_key': '',
+        'max_results': 30,  # MCP 搜索结果上限
     }
 
     # 尝试读取配置文件
@@ -57,6 +58,7 @@ def load_config():
 _config = load_config()
 API_BASE_URL = _config['api_base_url']
 API_KEY = _config['api_key']
+MAX_RESULTS = int(_config.get('max_results', 30))
 
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
@@ -135,7 +137,7 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 
 
 @mcp.tool()
-def query_stock(product_name: str) -> dict:
+def query_stock(product_name: str, show_batches: bool = False) -> dict:
     """
     查询产品库存详情。支持模糊名称输入，内建自动解析。
 
@@ -144,10 +146,14 @@ def query_stock(product_name: str) -> dict:
 
     参数:
         product_name: 产品名称（支持模糊输入，如"螺丝"、"luo si"等）
+        show_batches: 是否同时返回批次明细（默认 false）。
+                      当用户询问「在哪里」「什么位置」「库位」「哪个货架」等位置相关问题时，
+                      建议设为 true，因为不同批次可能存放在不同位置。
 
     返回:
         success=true 时：产品库存详情（name, sku, current_stock, unit, safe_stock,
-        location, today_in, today_out, status 等）
+        location, today_in, today_out, status 等）。若 show_batches=true，额外包含
+        batches 列表（每个批次含 batch_no, quantity, location, contact_name）。
         success=false 时：如有候选项会在 candidates 中列出
     """
     # 先尝试精确查询
@@ -194,16 +200,35 @@ def query_stock(product_name: str) -> dict:
     else:
         status = "告急"
 
-    return {
+    location = data.get("location", "")
+    loc_info = f"，位置：{location}" if location else ""
+    msg = f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}，状态：{status}{loc_info}"
+
+    result = {
         "success": True,
         "product": {**data, "status": status},
-        "message": f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}，状态：{status}"
+        "message": msg
     }
+
+    if show_batches:
+        batches_data = api_get("/materials/batches", params={"name": data["name"]})
+        if isinstance(batches_data, dict) and "error" not in batches_data:
+            batches_list = batches_data.get("batches", [])
+            result["batches"] = batches_list
+            if batches_list:
+                details = [f"{b['batch_no']}: {b['quantity']}{data['unit']} @ {b['location'] or '未指定'}"
+                           for b in batches_list]
+                result["message"] += f"\n批次明细：\n" + "\n".join(f"  - {d}" for d in details)
+        else:
+            result["batches"] = []
+
+    return result
 
 
 @mcp.tool()
 def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
-             operator: str = "MCP系统", fuzzy: bool = True) -> dict:
+             operator: str = "MCP系统", fuzzy: bool = True,
+             location: str = None, contact_id: int = None) -> dict:
     """
     产品入库。可直接传入模糊名称，自动解析为精确产品。
 
@@ -213,18 +238,26 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
         reason: 入库原因（默认"采购入库"）
         operator: 操作人（默认"MCP系统"）
         fuzzy: 是否启用模糊匹配（默认 true）
+        location: 存放位置（可选，如"A区-01架"）
+        contact_id: 关联联系方 ID（可选，如供应商 ID）
 
     返回:
         success=true 时：入库成功，含批次信息和产品详情
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
-    result = api_post("/materials/stock-in", {
+    payload = {
         "product_name": product_name,
         "quantity": quantity,
         "reason": reason,
         "operator": operator,
         "fuzzy": fuzzy
-    })
+    }
+    if location is not None:
+        payload["location"] = location
+    if contact_id is not None:
+        payload["contact_id"] = contact_id
+
+    result = api_post("/materials/stock-in", payload)
 
     if not result.get("success") and "candidates" in result.get("detail", {}):
         candidates = result["detail"]["candidates"]
@@ -270,7 +303,9 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
 @mcp.tool()
 def search(query: str = None, entity_type: str = "material",
            category: str = None, status: str = None,
-           contact_type: str = None, fuzzy: bool = True) -> dict:
+           contact_type: str = None, fuzzy: bool = True,
+           include_batches: bool = False,
+           max_results: int = 0) -> dict:
     """
     统一搜索工具，可搜索物料、联系方、操作员。支持模糊匹配。
 
@@ -288,12 +323,15 @@ def search(query: str = None, entity_type: str = "material",
                 "normal"(正常) / "warning"(偏低) / "danger"(告急)，多个用逗号分隔
         contact_type: 联系方类型过滤（仅 contact 有效），"supplier"(供应商) / "customer"(客户)
         fuzzy: 是否启用模糊匹配（默认 true）
+        include_batches: 搜索物料时是否附带每个物料的批次列表（默认 false，仅 entity_type="material" 有效）
+        max_results: 返回结果上限（0 表示使用配置默认值，当前默认 {MAX_RESULTS}）
 
     返回:
-        items: 匹配结果列表
-        total: 总匹配数
+        items: 匹配结果列表（include_batches=true 时每个物料含 batches 字段）
+        total: 总匹配数（可能大于返回的 items 数量）
     """
-    params = {"entity_type": entity_type, "page": 1, "page_size": 100, "fuzzy": fuzzy}
+    limit = max_results if max_results > 0 else MAX_RESULTS
+    params = {"entity_type": entity_type, "page": 1, "page_size": limit, "fuzzy": fuzzy}
     if query:
         params["q"] = query
     if category:
@@ -309,13 +347,28 @@ def search(query: str = None, entity_type: str = "material",
         return {"success": False, "error": data["error"], "message": f"搜索失败: {data['error']}"}
 
     items = data.get("items", [])
+
+    if include_batches and entity_type == "material":
+        for item in items:
+            item_name = item.get("name")
+            if item_name:
+                batches_data = api_get("/materials/batches", params={"name": item_name})
+                if isinstance(batches_data, dict) and "error" not in batches_data:
+                    item["batches"] = batches_data.get("batches", batches_data)
+                else:
+                    item["batches"] = []
+
     type_label = {"material": "物料", "contact": "联系方", "operator": "操作员"}.get(entity_type, entity_type)
+    total = data.get("total", 0)
+    msg = f"搜索{type_label}成功，找到 {total} 条匹配记录"
+    if total > len(items):
+        msg += f"（已返回前 {len(items)} 条，可通过 max_results 参数调整上限）"
     return {
         "success": True,
         "count": len(items),
-        "total": data.get("total", 0),
+        "total": total,
         "items": items,
-        "message": f"搜索{type_label}成功，找到 {data.get('total', 0)} 条匹配记录"
+        "message": msg
     }
 
 
