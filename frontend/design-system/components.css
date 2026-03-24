@@ -425,7 +425,7 @@
      ============================================ */
 
   .status-badge {
-    @apply py-1 px-2 rounded text-xs font-medium;
+    @apply py-1 px-2 rounded text-xs font-medium whitespace-nowrap;
   }
 
   .status-badge.status-normal {
@@ -631,6 +631,56 @@
 
   .warning-box {
     @apply bg-[#fffbe6] border border-[#ffe58f] p-3 rounded-lg mt-4;
+  }
+
+  /* Missing SKUs area in import modal */
+  .missing-skus-area {
+    @apply mt-4 mb-5 border border-[#ffe58f] rounded-lg overflow-hidden bg-[#fffbe6];
+  }
+
+  .missing-skus-header {
+    @apply flex items-center justify-between p-3 cursor-pointer select-none;
+  }
+
+  .missing-skus-header:hover {
+    @apply bg-[#fff8d6];
+  }
+
+  .missing-skus-title {
+    @apply flex items-center gap-2 text-sm text-[#ad6800];
+  }
+
+  .missing-skus-toggle {
+    @apply text-[#ad6800] transition-transform duration-200;
+  }
+
+  .missing-skus-area.expanded .missing-skus-toggle {
+    @apply rotate-180;
+  }
+
+  .missing-skus-list {
+    @apply max-h-0 overflow-hidden transition-all duration-200;
+  }
+
+  .missing-skus-area.expanded .missing-skus-list {
+    @apply max-h-[300px] overflow-y-auto border-t border-[#ffe58f];
+  }
+
+  /* Import preview area */
+  #preview-area h4 {
+    @apply text-base font-semibold text-text-primary mb-3;
+  }
+
+  .preview-summary {
+    @apply flex gap-4 mb-4 text-sm text-text-secondary;
+  }
+
+  .preview-table-container {
+    @apply mb-4;
+  }
+
+  .import-form {
+    @apply mt-4;
   }
 
   /* ============================================
