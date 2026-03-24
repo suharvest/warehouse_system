@@ -140,10 +140,11 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    def query_stock(self, product_name: str) -> dict:
+    def query_stock(self, product_name: str, show_batches: bool = False) -> dict:
         """查询产品库存。
 
         返回: {success, product, message}
+        show_batches=True 时额外返回 batches 列表
         """
         ...
 
@@ -155,6 +156,8 @@ class BaseProvider(ABC):
         reason: str,
         operator: str,
         fuzzy: bool,
+        location: str | None = None,
+        contact_id: int | None = None,
     ) -> dict:
         """产品入库。
 
@@ -186,10 +189,14 @@ class BaseProvider(ABC):
         status: str | None,
         contact_type: str | None,
         fuzzy: bool,
+        include_batches: bool = False,
+        max_results: int = 0,
     ) -> dict:
         """统一搜索。
 
         返回: {success, count, total, items, message}
+        include_batches=True 时物料结果附带 batches 字段
+        max_results=0 表示使用配置默认值
         """
         ...
 

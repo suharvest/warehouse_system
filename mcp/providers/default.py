@@ -28,11 +28,12 @@ class DefaultProvider(BaseProvider):
                 "key": config["api_key"],
             }
         super().__init__(config)
+        self.max_results = int(config.get("max_results", 30))
 
     def resolve_name(self, text, entity_type="all"):
         return self.http_get("/fuzzy-match", params={"q": text, "entity_type": entity_type})
 
-    def query_stock(self, product_name):
+    def query_stock(self, product_name, show_batches=False):
         # 先尝试精确查询
         data = self.http_get("/materials/product-stats", params={"name": product_name})
 
@@ -79,23 +80,47 @@ class DefaultProvider(BaseProvider):
         else:
             status = "告急"
 
-        return {
+        location = data.get("location", "")
+        loc_info = f"，位置：{location}" if location else ""
+        msg = f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}，状态：{status}{loc_info}"
+
+        result = {
             "success": True,
             "product": {**data, "status": status},
-            "message": f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}，状态：{status}",
+            "message": msg,
         }
 
-    def stock_in(self, product_name, quantity, reason, operator, fuzzy):
-        result = self.http_post(
-            "/materials/stock-in",
-            {
-                "product_name": product_name,
-                "quantity": quantity,
-                "reason": reason,
-                "operator": operator,
-                "fuzzy": fuzzy,
-            },
-        )
+        if show_batches:
+            batches_data = self.http_get("/materials/batches", params={"name": data["name"]})
+            if isinstance(batches_data, dict) and "error" not in batches_data:
+                batches_list = batches_data.get("batches", [])
+                result["batches"] = batches_list
+                if batches_list:
+                    details = [
+                        f"{b['batch_no']}: {b['quantity']}{data['unit']} @ {b['location'] or '未指定'}"
+                        for b in batches_list
+                    ]
+                    result["message"] += f"\n批次明细：\n" + "\n".join(f"  - {d}" for d in details)
+            else:
+                result["batches"] = []
+
+        return result
+
+    def stock_in(self, product_name, quantity, reason, operator, fuzzy,
+                 location=None, contact_id=None):
+        payload = {
+            "product_name": product_name,
+            "quantity": quantity,
+            "reason": reason,
+            "operator": operator,
+            "fuzzy": fuzzy,
+        }
+        if location is not None:
+            payload["location"] = location
+        if contact_id is not None:
+            payload["contact_id"] = contact_id
+
+        result = self.http_post("/materials/stock-in", payload)
 
         if not result.get("success") and "candidates" in result.get("detail", {}):
             candidates = result["detail"]["candidates"]
@@ -127,8 +152,10 @@ class DefaultProvider(BaseProvider):
 
         return result
 
-    def search(self, query, entity_type, category, status, contact_type, fuzzy):
-        params = {"entity_type": entity_type, "page": 1, "page_size": 100, "fuzzy": fuzzy}
+    def search(self, query, entity_type, category, status, contact_type, fuzzy,
+               include_batches=False, max_results=0):
+        limit = max_results if max_results > 0 else self.max_results
+        params = {"entity_type": entity_type, "page": 1, "page_size": limit, "fuzzy": fuzzy}
         if query:
             params["q"] = query
         if category:
@@ -144,15 +171,30 @@ class DefaultProvider(BaseProvider):
             return {"success": False, "error": data["error"], "message": f"搜索失败: {data['error']}"}
 
         items = data.get("items", [])
+
+        if include_batches and entity_type == "material":
+            for item in items:
+                item_name = item.get("name")
+                if item_name:
+                    batches_data = self.http_get("/materials/batches", params={"name": item_name})
+                    if isinstance(batches_data, dict) and "error" not in batches_data:
+                        item["batches"] = batches_data.get("batches", batches_data)
+                    else:
+                        item["batches"] = []
+
         type_label = {"material": "物料", "contact": "联系方", "operator": "操作员"}.get(
             entity_type, entity_type
         )
+        total = data.get("total", 0)
+        msg = f"搜索{type_label}成功，找到 {total} 条匹配记录"
+        if total > len(items):
+            msg += f"（已返回前 {len(items)} 条，可通过 max_results 参数调整上限）"
         return {
             "success": True,
             "count": len(items),
-            "total": data.get("total", 0),
+            "total": total,
             "items": items,
-            "message": f"搜索{type_label}成功，找到 {data.get('total', 0)} 条匹配记录",
+            "message": msg,
         }
 
     def get_today_statistics(self):
