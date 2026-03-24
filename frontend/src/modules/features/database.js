@@ -55,6 +55,13 @@ export async function confirmImportDatabase() {
             body: formData,
             credentials: 'include'
         });
+
+        if (response.status === 401 || response.status === 403) {
+            errorDiv.textContent = t('noPermission') || '权限不足，请先登录或联系管理员';
+            errorDiv.style.display = 'block';
+            return;
+        }
+
         const data = await response.json();
 
         if (data.success) {
@@ -115,6 +122,13 @@ async function executeClearDatabase() {
             credentials: 'include',
             body: JSON.stringify({ confirm: true })
         });
+
+        if (response.status === 401 || response.status === 403) {
+            errorDiv.textContent = t('noPermission') || '权限不足，请先登录或联系管理员';
+            errorDiv.style.display = 'block';
+            return;
+        }
+
         const data = await response.json();
 
         if (data.success) {

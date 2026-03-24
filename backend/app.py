@@ -3209,7 +3209,7 @@ async def confirm_import_excel(
 
         def _create_batch(material_id, quantity, location, contact_id):
             """创建新批次并返回 batch_id"""
-            batch_no = generate_batch_no(material_id)
+            batch_no = generate_batch_no(material_id, cursor=cursor)
             cursor.execute('''
                 INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)

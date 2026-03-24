@@ -246,23 +246,37 @@ def init_database():
     conn.close()
 
 
-def generate_batch_no(material_id: int) -> str:
-    """生成批次号: YYYYMMDD-XXX (globally unique)"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def generate_batch_no(material_id: int, cursor=None) -> str:
+    """生成批次号: YYYYMMDD-XXX (globally unique)
+
+    传入 cursor 可在同一事务内看到未提交的批次（避免批量创建时序号冲突）。
+    """
+    own_conn = cursor is None
+    if own_conn:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
     today = datetime.now().strftime('%Y%m%d')
 
-    # 查询今天所有批次数量（batch_no 有全局唯一约束）
+    # 查询今天最大序号
     cursor.execute('''
-        SELECT COUNT(*) as count FROM batches
+        SELECT batch_no FROM batches
         WHERE batch_no LIKE ?
+        ORDER BY batch_no DESC LIMIT 1
     ''', (f'{today}-%',))
-    count = cursor.fetchone()['count']
-    conn.close()
+    row = cursor.fetchone()
 
-    # 生成序号（3位数字）
-    seq = count + 1
+    if own_conn:
+        conn.close()
+
+    if row:
+        try:
+            last_seq = int(row['batch_no'].split('-')[-1])
+        except (ValueError, IndexError):
+            last_seq = 0
+        seq = last_seq + 1
+    else:
+        seq = 1
     return f'{today}-{seq:03d}'
 
 

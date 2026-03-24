@@ -272,7 +272,8 @@ const translations = {
         batchDetail: '批次明细',
         batchMode: '批次模式',
         newContacts: '新联系方',
-        noBatchData: '暂无批次数据'
+        noBatchData: '暂无批次数据',
+        noPermission: '权限不足，请先登录或联系管理员',
     },
     en: {
         pageTitle: 'Smart Warehouse - Dashboard',
@@ -536,7 +537,8 @@ const translations = {
         batchDetail: 'Batch Details',
         batchMode: 'Batch Mode',
         newContacts: 'New Contacts',
-        noBatchData: 'No batch data'
+        noBatchData: 'No batch data',
+        noPermission: 'Permission denied. Please login or contact admin.',
     }
 };
 

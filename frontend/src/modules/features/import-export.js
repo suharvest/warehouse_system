@@ -94,8 +94,15 @@ export async function handleFileSelect(event) {
     try {
         const response = await fetch(`${API_BASE_URL}/materials/import-excel/preview`, {
             method: 'POST',
-            body: formData
+            body: formData,
+            credentials: 'include'
         });
+
+        if (response.status === 401 || response.status === 403) {
+            alert(t('noPermission') || '权限不足，请先登录或联系管理员');
+            return;
+        }
+
         const data = await response.json();
 
         if (data.success) {
@@ -398,6 +405,11 @@ async function executeImport(confirmNewSkusFlag) {
                 is_batch_mode: importPreviewData.is_batch_mode || false
             })
         });
+
+        if (response.status === 401 || response.status === 403) {
+            alert(t('noPermission') || '权限不足，请先登录或联系管理员');
+            return;
+        }
 
         const data = await response.json();
 
