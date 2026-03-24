@@ -19,4 +19,5 @@ os.chdir(backend_dir)
 from app import app
 
 if __name__ == '__main__':
-    uvicorn.run(app, host='0.0.0.0', port=2124)
+    port = int(os.environ.get('PORT', 2124))
+    uvicorn.run(app, host='0.0.0.0', port=port)

@@ -3906,8 +3906,41 @@ async def get_mcp_connection_logs(
     return {"logs": logs}
 
 
+# ============ 前端静态文件（all-in-one 部署）============
+
+STATIC_DIR = os.environ.get('STATIC_DIR', '')
+if not STATIC_DIR:
+    # 自动检测：Docker 环境 /app/static 或开发环境 ../frontend/dist
+    for candidate in ['/app/static', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'frontend', 'dist')]:
+        if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, 'index.html')):
+            STATIC_DIR = candidate
+            break
+
+if STATIC_DIR and os.path.isdir(STATIC_DIR):
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+
+    _index_html = os.path.join(STATIC_DIR, 'index.html')
+
+    # /assets 静态资源（带缓存）
+    _assets_dir = os.path.join(STATIC_DIR, 'assets')
+    if os.path.isdir(_assets_dir):
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="static-assets")
+
+    # SPA catch-all: 非 /api 非 /assets 的请求都返回 index.html
+    @app.get("/{path:path}")
+    async def serve_spa(path: str):
+        # 先尝试精确匹配静态文件（如 favicon.ico）
+        file_path = os.path.join(STATIC_DIR, path)
+        if path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(_index_html)
+
+    logger.info(f"Serving frontend from {STATIC_DIR}")
+
+
 # ============ 启动配置 ============
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=2124)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get('PORT', 2124)))
