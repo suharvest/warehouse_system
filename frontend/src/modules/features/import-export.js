@@ -234,6 +234,10 @@ function renderImportPreview(data) {
     tbody.innerHTML = '';
 
     const isBatchMode = data.is_batch_mode || false;
+    const table = document.getElementById('preview-table');
+    if (table) {
+        table.classList.toggle('batch-mode', isBatchMode);
+    }
 
     // 更新表头
     if (thead) {

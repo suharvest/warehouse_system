@@ -676,8 +676,31 @@
   }
 
   .preview-table-container {
-    @apply mb-4;
+    @apply mb-4 overflow-x-auto;
   }
+
+  #preview-table {
+    table-layout: fixed;
+    width: 100%;
+  }
+
+  #preview-table th,
+  #preview-table td {
+    @apply whitespace-nowrap overflow-hidden text-ellipsis;
+  }
+
+  /* 简化模式列宽: 编码 | 名称 | 当前库存 | 导入数量 | 差异 | 操作 */
+  #preview-table th:nth-child(1) { width: 18%; }
+  #preview-table th:nth-child(2) { width: 32%; }
+  #preview-table th:nth-child(3) { width: 12%; }
+  #preview-table th:nth-child(4) { width: 12%; }
+  #preview-table th:nth-child(5) { width: 10%; }
+  #preview-table th:nth-child(6) { width: 10%; }
+
+  /* 批次模式列更多，切回自动布局 */
+  #preview-table.batch-mode { table-layout: auto; }
+  #preview-table.batch-mode th,
+  #preview-table.batch-mode td { white-space: nowrap; }
 
   .import-form {
     @apply mt-4;
