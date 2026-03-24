@@ -2505,11 +2505,13 @@ async def stock_in(
                 cursor.execute('SELECT id, unit FROM materials WHERE name = ?', (product_name,))
                 row = cursor.fetchone()
             elif result['candidates']:
-                raise HTTPException(status_code=400, detail={
-                    "error": "ambiguous_name",
-                    "message": f"无法确定产品 '{product_name}'，请从候选中选择",
-                    "candidates": result['candidates']
-                })
+                names = [c['name'] for c in result['candidates'][:5]]
+                return StockInResponse(
+                    success=False,
+                    error="ambiguous_name",
+                    message=f"无法确定产品 '{product_name}'，候选：{', '.join(names)}",
+                    candidates=result['candidates'],
+                )
 
         if not row:
             return StockInResponse(
@@ -2612,11 +2614,13 @@ async def stock_out(
                 cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
                 row = cursor.fetchone()
             elif result['candidates']:
-                raise HTTPException(status_code=400, detail={
-                    "error": "ambiguous_name",
-                    "message": f"无法确定产品 '{product_name}'，请从候选中选择",
-                    "candidates": result['candidates']
-                })
+                names = [c['name'] for c in result['candidates'][:5]]
+                return StockOutResponse(
+                    success=False,
+                    error="ambiguous_name",
+                    message=f"无法确定产品 '{product_name}'，候选：{', '.join(names)}",
+                    candidates=result['candidates'],
+                )
 
         if not row:
             return StockOutResponse(

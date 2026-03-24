@@ -457,6 +457,7 @@ class StockInResponse(BaseModel):
     warning: Optional[str] = None
     error: Optional[str] = None
     resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
+    candidates: Optional[list] = None  # 模糊匹配候选列表
 
 
 class StockOutResponse(BaseModel):
@@ -469,6 +470,7 @@ class StockOutResponse(BaseModel):
     warning: Optional[str] = None
     error: Optional[str] = None
     resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
+    candidates: Optional[list] = None  # 模糊匹配候选列表
 
 
 class BatchItem(BaseModel):

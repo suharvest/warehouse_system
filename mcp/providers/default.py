@@ -120,19 +120,10 @@ class DefaultProvider(BaseProvider):
         if contact_id is not None:
             payload["contact_id"] = contact_id
 
-        result = self.http_post("/materials/stock-in", payload)
-
-        if not result.get("success") and "candidates" in result.get("detail", {}):
-            candidates = result["detail"]["candidates"]
-            names = [c["name"] for c in candidates[:5]]
-            result["message"] = (
-                f"名称 '{product_name}' 不够明确，候选：{', '.join(names)}。请用精确名称重试。"
-            )
-
-        return result
+        return self.http_post("/materials/stock-in", payload)
 
     def stock_out(self, product_name, quantity, reason, operator, fuzzy):
-        result = self.http_post(
+        return self.http_post(
             "/materials/stock-out",
             {
                 "product_name": product_name,
@@ -142,15 +133,6 @@ class DefaultProvider(BaseProvider):
                 "fuzzy": fuzzy,
             },
         )
-
-        if not result.get("success") and "candidates" in result.get("detail", {}):
-            candidates = result["detail"]["candidates"]
-            names = [c["name"] for c in candidates[:5]]
-            result["message"] = (
-                f"名称 '{product_name}' 不够明确，候选：{', '.join(names)}。请用精确名称重试。"
-            )
-
-        return result
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,
                include_batches=False, max_results=0):
