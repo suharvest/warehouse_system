@@ -39,7 +39,6 @@ logs/
 # Node.js / npm
 frontend/node_modules/
 frontend/dist/
-frontend/package-lock.json
 CLAUDE.md
 
 # Worktrees
