@@ -46,7 +46,8 @@ export async function loadProductDetail() {
         await Promise.all([
             loadProductStats(),
             loadProductTrend(),
-            loadProductRecords()
+            loadProductRecords(),
+            loadProductBatches()
         ]);
     } catch (error) {
         console.error('加载产品详情失败:', error);
@@ -167,6 +168,39 @@ export function loadDetailPieChart(totalIn, totalOut) {
     };
 
     detailPieChart.setOption(option, true);
+}
+
+// ============ 批次明细 ============
+async function loadProductBatches() {
+    const tbody = document.getElementById('batch-detail-tbody');
+    if (!tbody) return;
+
+    try {
+        const data = await productApi.getBatches(currentProductName);
+        const batches = data.batches || data || [];
+
+        tbody.innerHTML = '';
+
+        if (!Array.isArray(batches) || batches.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #999;">${t('noBatchData')}</td></tr>`;
+            return;
+        }
+
+        batches.forEach(batch => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${batch.batch_no || '-'}</td>
+                <td>${batch.quantity != null ? batch.quantity : '-'}</td>
+                <td>${batch.location || '-'}</td>
+                <td>${batch.contact_name || '-'}</td>
+                <td>${batch.created_at || '-'}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (error) {
+        console.error('加载批次明细失败:', error);
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #999;">${t('noBatchData')}</td></tr>`;
+    }
 }
 
 // ============ 产品记录列表 ============

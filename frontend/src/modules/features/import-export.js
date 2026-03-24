@@ -170,6 +170,26 @@ function renderMissingSkus(missingSkus, totalMissing) {
     `;
 }
 
+function renderNewContactsBanner(newContacts) {
+    let banner = document.getElementById('new-contacts-banner');
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'new-contacts-banner';
+        banner.className = 'info-banner';
+        const previewArea = document.getElementById('preview-area');
+        previewArea.insertBefore(banner, previewArea.firstChild);
+    }
+
+    if (!newContacts || newContacts.length === 0) {
+        banner.style.display = 'none';
+        return;
+    }
+
+    banner.style.display = 'block';
+    const names = newContacts.map(c => typeof c === 'string' ? c : c.name).join(', ');
+    banner.innerHTML = `\u2139\uFE0F ${t('newContacts')}: ${newContacts.length} - ${names}`;
+}
+
 function renderImportPreview(data) {
     document.getElementById('preview-area').style.display = 'block';
     document.getElementById('preview-in').textContent = data.total_in;
@@ -206,8 +226,44 @@ function renderImportPreview(data) {
     // 渲染缺失SKU列表
     renderMissingSkus(data.missing_skus || [], totalMissing);
 
+    // 渲染新联系方提示
+    renderNewContactsBanner(data.new_contacts || []);
+
     const tbody = document.getElementById('preview-tbody');
+    const thead = document.getElementById('preview-thead');
     tbody.innerHTML = '';
+
+    const isBatchMode = data.is_batch_mode || false;
+
+    // 更新表头
+    if (thead) {
+        if (isBatchMode) {
+            thead.innerHTML = `
+                <tr>
+                    <th>${t('materialCode')}</th>
+                    <th>${t('materialName')}</th>
+                    <th>${t('batchNo')}</th>
+                    <th>${t('currentStockCol')}</th>
+                    <th>${t('importQty')}</th>
+                    <th>${t('difference')}</th>
+                    <th>${t('location')}</th>
+                    <th>${t('contact')}</th>
+                    <th>${t('operation')}</th>
+                </tr>
+            `;
+        } else {
+            thead.innerHTML = `
+                <tr>
+                    <th>${t('materialCode')}</th>
+                    <th>${t('materialName')}</th>
+                    <th>${t('currentStockCol')}</th>
+                    <th>${t('importQty')}</th>
+                    <th>${t('difference')}</th>
+                    <th>${t('operation')}</th>
+                </tr>
+            `;
+        }
+    }
 
     data.preview.forEach(item => {
         const tr = document.createElement('tr');
@@ -230,14 +286,28 @@ function renderImportPreview(data) {
         const currentQty = item.current_quantity !== null ? item.current_quantity : '-';
         const diffDisplay = item.difference > 0 ? `+${item.difference}` : item.difference;
 
-        tr.innerHTML = `
-            <td>${item.sku}</td>
-            <td>${item.name}</td>
-            <td>${currentQty}</td>
-            <td>${item.import_quantity}</td>
-            <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>
-            <td><span class="type-badge ${opClass}">${opText}</span></td>
-        `;
+        if (isBatchMode) {
+            tr.innerHTML = `
+                <td>${item.sku}</td>
+                <td>${item.name}</td>
+                <td>${item.batch_no || '-'}</td>
+                <td>${currentQty}</td>
+                <td>${item.import_quantity}</td>
+                <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>
+                <td>${item.location || '-'}</td>
+                <td>${item.contact_name || '-'}</td>
+                <td><span class="type-badge ${opClass}">${opText}</span></td>
+            `;
+        } else {
+            tr.innerHTML = `
+                <td>${item.sku}</td>
+                <td>${item.name}</td>
+                <td>${currentQty}</td>
+                <td>${item.import_quantity}</td>
+                <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>
+                <td><span class="type-badge ${opClass}">${opText}</span></td>
+            `;
+        }
         tbody.appendChild(tr);
     });
 
@@ -320,7 +390,8 @@ async function executeImport(confirmNewSkusFlag) {
                 changes: importPreviewData.preview,
                 reason: reason,
                 confirm_new_skus: confirmNewSkusFlag,
-                confirm_disable_missing_skus: confirmDisableMissing
+                confirm_disable_missing_skus: confirmDisableMissing,
+                is_batch_mode: importPreviewData.is_batch_mode || false
             })
         });
 

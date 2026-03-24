@@ -2103,6 +2103,41 @@ def get_product_stats(name: str = Query(..., description="产品名称")):
         )
 
 
+@app.get("/api/materials/batches")
+def get_material_batches(name: str = Query(..., description="产品名称")):
+    """获取物料的活跃批次列表"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM materials WHERE name = ?', (name,))
+        material = cursor.fetchone()
+        if not material:
+            raise HTTPException(status_code=404, detail="产品不存在")
+
+        cursor.execute('''
+            SELECT b.batch_no, b.quantity, b.location, b.created_at, c.name as contact_name
+            FROM batches b
+            LEFT JOIN contacts c ON b.contact_id = c.id
+            WHERE b.material_id = ? AND b.is_exhausted = 0
+            ORDER BY b.created_at ASC
+        ''', (material['id'],))
+        batches = cursor.fetchall()
+
+        total_quantity = sum(b['quantity'] for b in batches)
+        return {
+            "batches": [
+                {
+                    "batch_no": b['batch_no'],
+                    "quantity": b['quantity'],
+                    "location": b['location'] or '',
+                    "contact_name": b['contact_name'] or '',
+                    "created_at": b['created_at'],
+                }
+                for b in batches
+            ],
+            "total_quantity": total_quantity,
+        }
+
+
 @app.get("/api/materials/product-trend", response_model=WeeklyTrend)
 def get_product_trend(name: str = Query(..., description="产品名称")):
     """获取单个产品的近7天趋势"""
@@ -2516,9 +2551,9 @@ async def stock_in(
 
         batch_no = generate_batch_no(material_id)
         cursor.execute('''
-            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (batch_no, material_id, quantity, quantity, request.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (batch_no, material_id, quantity, quantity, request.contact_id, request.location, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         batch_id = cursor.lastrowid
 
         cursor.execute('''
@@ -2724,18 +2759,18 @@ def export_materials_excel(
     category: Optional[str] = Query(None, description="分类"),
     status: Optional[str] = Query(None, description="状态(逗号分隔)")
 ):
-    """导出库存数据为Excel（支持筛选）"""
+    """导出库存数据为Excel — 一行一批次，含批次号、位置、联系方"""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # 基础查询
         query = '''
-            SELECT name, sku, category, quantity, unit, safe_stock, location, is_disabled
+            SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled
             FROM materials
             WHERE 1=1
         '''
         params = []
-        
+
         # 解析状态筛选
         status_filter = status.split(',') if status else None
 
@@ -2754,68 +2789,93 @@ def export_materials_excel(
             params.append(category)
 
         query += ' ORDER BY name ASC'
-        
+
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        
-    # 需要在应用层过滤状态，因为状态是动态计算的
-    materials = []
-    for row in rows:
-        quantity = row['quantity']
-        safe_stock = row['safe_stock']
-        is_disabled = bool(row['is_disabled'])
 
-        # 计算状态
-        if is_disabled:
-            item_status = 'disabled'
-            status_text = '禁用'
-        elif quantity >= safe_stock:
-            item_status = 'normal'
-            status_text = '正常'
-        elif quantity >= safe_stock * 0.5:
-            item_status = 'warning'
-            status_text = '偏低'
-        else:
-            item_status = 'danger'
-            status_text = '告急'
+    # 构建导出行（一行一批次）
+    export_rows = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for row in rows:
+            quantity = row['quantity']
+            safe_stock = row['safe_stock']
+            is_disabled = bool(row['is_disabled'])
 
-        # 状态筛选
-        if status_filter and item_status not in status_filter:
-            continue
-            
-        materials.append({
-            'name': row['name'],
-            'sku': row['sku'],
-            'category': row['category'],
-            'quantity': row['quantity'],
-            'unit': row['unit'],
-            'safe_stock': row['safe_stock'],
-            'location': row['location'],
-            'status_text': status_text
-        })
+            # 计算状态
+            if is_disabled:
+                item_status = 'disabled'
+            elif quantity >= safe_stock:
+                item_status = 'normal'
+            elif quantity >= safe_stock * 0.5:
+                item_status = 'warning'
+            else:
+                item_status = 'danger'
+
+            # 状态筛选
+            if status_filter and item_status not in status_filter:
+                continue
+
+            material_base = {
+                'name': row['name'],
+                'sku': row['sku'],
+                'category': row['category'],
+                'unit': row['unit'],
+                'safe_stock': row['safe_stock'],
+            }
+
+            # 查询活跃批次
+            cursor.execute('''
+                SELECT b.batch_no, b.quantity, b.location, c.name as contact_name
+                FROM batches b
+                LEFT JOIN contacts c ON b.contact_id = c.id
+                WHERE b.material_id = ? AND b.is_exhausted = 0
+                ORDER BY b.created_at ASC
+            ''', (row['id'],))
+            batches = cursor.fetchall()
+
+            if batches:
+                for batch in batches:
+                    export_rows.append({
+                        **material_base,
+                        'batch_no': batch['batch_no'],
+                        'quantity': batch['quantity'],
+                        'location': batch['location'] or '',
+                        'contact_name': batch['contact_name'] or '',
+                    })
+            else:
+                # 无活跃批次（库存为0的物料）
+                export_rows.append({
+                    **material_base,
+                    'batch_no': '',
+                    'quantity': 0,
+                    'location': row['location'] or '',
+                    'contact_name': '',
+                })
 
     wb = Workbook()
     ws = wb.active
     ws.title = "库存数据"
 
     # 表头
-    headers = ['物料名称', '物料编码(SKU)', '分类', '状态', '当前库存', '单位', '安全库存', '存放位置']
+    headers = ['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '库存', '存放位置', '联系方']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
     # 数据
-    for row_idx, material in enumerate(materials, 2):
-        ws.cell(row=row_idx, column=1, value=material['name'])
-        ws.cell(row=row_idx, column=2, value=material['sku'])
-        ws.cell(row=row_idx, column=3, value=material['category'])
-        ws.cell(row=row_idx, column=4, value=material['status_text'])
-        ws.cell(row=row_idx, column=5, value=material['quantity'])
-        ws.cell(row=row_idx, column=6, value=material['unit'])
-        ws.cell(row=row_idx, column=7, value=material['safe_stock'])
-        ws.cell(row=row_idx, column=8, value=material['location'])
+    for row_idx, item in enumerate(export_rows, 2):
+        ws.cell(row=row_idx, column=1, value=item['name'])
+        ws.cell(row=row_idx, column=2, value=item['sku'])
+        ws.cell(row=row_idx, column=3, value=item['category'])
+        ws.cell(row=row_idx, column=4, value=item['unit'])
+        ws.cell(row=row_idx, column=5, value=item['safe_stock'])
+        ws.cell(row=row_idx, column=6, value=item['batch_no'])
+        ws.cell(row=row_idx, column=7, value=item['quantity'])
+        ws.cell(row=row_idx, column=8, value=item['location'])
+        ws.cell(row=row_idx, column=9, value=item['contact_name'])
 
     # 设置列宽
-    column_widths = [22, 18, 14, 10, 12, 8, 12, 14]
+    column_widths = [22, 18, 14, 8, 12, 18, 10, 16, 16]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -2838,57 +2898,33 @@ async def preview_import_excel(
     file: UploadFile = File(...),
     current_user: CurrentUser = Depends(get_current_user)  # 需要登录
 ):
-    """预览Excel导入内容，计算差异"""
+    """预览Excel导入内容，自动检测简化模式/批次模式"""
+    def _error_resp(msg):
+        return ExcelImportPreviewResponse(
+            success=False, preview=[], new_skus=[], total_in=0, total_out=0, total_new=0, message=msg
+        )
+
     # 文件大小检查
     contents = await file.read()
     file_size_mb = len(contents) / (1024 * 1024)
     if file_size_mb > MAX_UPLOAD_SIZE_MB:
-        return ExcelImportPreviewResponse(
-            success=False,
-            preview=[],
-            new_skus=[],
-            total_in=0,
-            total_out=0,
-            total_new=0,
-            message=f"文件大小 ({file_size_mb:.1f}MB) 超过限制 ({MAX_UPLOAD_SIZE_MB}MB)"
-        )
+        return _error_resp(f"文件大小 ({file_size_mb:.1f}MB) 超过限制 ({MAX_UPLOAD_SIZE_MB}MB)")
 
     try:
         wb = load_workbook(filename=BytesIO(contents))
         ws = wb.active
     except Exception as e:
-        return ExcelImportPreviewResponse(
-            success=False,
-            preview=[],
-            new_skus=[],
-            total_in=0,
-            total_out=0,
-            total_new=0,
-            message=f"文件解析失败: {str(e)}"
-        )
+        return _error_resp(f"文件解析失败: {str(e)}")
 
-    preview_items = []
-    new_skus = []
-    total_in = 0
-    total_out = 0
-    total_new = 0
-    row_count = 0
-
-    # 读取表头，自动识别列位置（支持系统导出的格式）
+    # 读取表头，自动识别列位置
     header_row = [str(cell).strip() if cell else "" for cell in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
 
-    # 定义列名映射（支持多种可能的表头名称）
     col_mapping = {
-        'name': None,      # 物料名称
-        'sku': None,       # SKU/物料编码
-        'category': None,  # 分类
-        'quantity': None,  # 数量/库存
-        'unit': None,      # 单位
-        'safe_stock': None,# 安全库存
-        'location': None   # 位置
+        'name': None, 'sku': None, 'category': None, 'quantity': None,
+        'unit': None, 'safe_stock': None, 'location': None,
+        'batch_no': None, 'contact_name': None,
     }
 
-    # 识别列位置
     for idx, header in enumerate(header_row):
         header_lower = header.lower()
         if '名称' in header or 'name' in header_lower:
@@ -2898,7 +2934,7 @@ async def preview_import_excel(
         elif '分类' in header or 'category' in header_lower:
             col_mapping['category'] = idx
         elif '库存' in header or 'quantity' in header_lower or '数量' in header:
-            if '安全' not in header:  # 排除"安全库存"
+            if '安全' not in header and '批次' not in header:
                 col_mapping['quantity'] = idx
         elif '单位' in header or 'unit' in header_lower:
             col_mapping['unit'] = idx
@@ -2906,160 +2942,200 @@ async def preview_import_excel(
             col_mapping['safe_stock'] = idx
         elif '位置' in header or 'location' in header_lower:
             col_mapping['location'] = idx
+        elif '批次' in header or 'batch' in header_lower:
+            col_mapping['batch_no'] = idx
+        elif '联系方' in header or 'contact' in header_lower or '供应商' in header:
+            col_mapping['contact_name'] = idx
 
-    # 检查必须的列是否存在
     if col_mapping['sku'] is None:
-        return ExcelImportPreviewResponse(
-            success=False,
-            preview=[],
-            new_skus=[],
-            total_in=0,
-            total_out=0,
-            total_new=0,
-            message="Excel格式错误：找不到SKU/物料编码列"
-        )
+        return _error_resp("Excel格式错误：找不到SKU/物料编码列")
     if col_mapping['quantity'] is None:
-        return ExcelImportPreviewResponse(
-            success=False,
-            preview=[],
-            new_skus=[],
-            total_in=0,
-            total_out=0,
-            total_new=0,
-            message="Excel格式错误：找不到库存/数量列"
-        )
+        return _error_resp("Excel格式错误：找不到库存/数量列")
+
+    is_batch_mode = col_mapping['batch_no'] is not None
+
+    def _read_cell(row, key):
+        ci = col_mapping[key]
+        if ci is None or ci >= len(row) or row[ci] is None:
+            return None
+        return str(row[ci]).strip()
+
+    def _read_int(row, key, default=0):
+        ci = col_mapping[key]
+        if ci is None or ci >= len(row) or row[ci] is None:
+            return default
+        return int(row[ci])
+
+    preview_items = []
+    new_skus = []
+    new_contacts_set = set()
+    seen_skus_simple = set()  # 简化模式下追踪已见SKU，检测同SKU多行
+    total_in = 0
+    total_out = 0
+    total_new = 0
+    row_count = 0
 
     with get_db() as conn:
         cursor = conn.cursor()
 
+        # 联系方解析辅助
+        def resolve_contact(name):
+            if not name:
+                return None, None
+            cursor.execute('SELECT id FROM contacts WHERE name = ? AND is_disabled = 0', (name,))
+            r = cursor.fetchone()
+            if r:
+                return r['id'], name
+            new_contacts_set.add(name)
+            return None, name
+
         for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-            # 跳过空行
-            sku_col = col_mapping['sku']
-            if not row[sku_col]:  # SKU为空则跳过
+            if not row[col_mapping['sku']]:
                 continue
 
-            # 行数限制检查
             row_count += 1
             if row_count > MAX_IMPORT_ROWS:
-                return ExcelImportPreviewResponse(
-                    success=False,
-                    preview=[],
-                    new_skus=[],
-                    total_in=0,
-                    total_out=0,
-                    total_new=0,
-                    message=f"数据行数 ({row_count}) 超过限制 ({MAX_IMPORT_ROWS}行)"
-                )
+                return _error_resp(f"数据行数 ({row_count}) 超过限制 ({MAX_IMPORT_ROWS}行)")
 
-            # 根据列映射读取数据
-            name = str(row[col_mapping['name']]).strip() if col_mapping['name'] is not None and row[col_mapping['name']] else ""
-            sku = str(row[col_mapping['sku']]).strip()
-            category = str(row[col_mapping['category']]).strip() if col_mapping['category'] is not None and row[col_mapping['category']] else "未分类"
+            name = _read_cell(row, 'name') or ""
+            sku = _read_cell(row, 'sku')
+            category = _read_cell(row, 'category') or "未分类"
+            unit = _read_cell(row, 'unit') or "个"
+            location = _read_cell(row, 'location') or ""
+            batch_no_val = _read_cell(row, 'batch_no') or ""
+            contact_name_val = _read_cell(row, 'contact_name') or ""
 
-            qty_col = col_mapping['quantity']
             try:
-                import_qty = int(row[qty_col]) if row[qty_col] is not None else 0
+                import_qty = _read_int(row, 'quantity', 0)
             except (ValueError, TypeError):
-                return ExcelImportPreviewResponse(
-                    success=False,
-                    preview=[],
-                    new_skus=[],
-                    total_in=0,
-                    total_out=0,
-                    total_new=0,
-                    message=f"第 {idx} 行【库存数量】格式错误：需要整数，当前值为 '{row[qty_col]}'，请修改后重新上传"
-                )
+                return _error_resp(f"第 {idx} 行【库存数量】格式错误：需要整数，当前值为 '{row[col_mapping['quantity']]}'")
 
-            unit = str(row[col_mapping['unit']]).strip() if col_mapping['unit'] is not None and row[col_mapping['unit']] else "个"
-
-            safe_stock_col = col_mapping['safe_stock']
             try:
-                safe_stock = int(row[safe_stock_col]) if safe_stock_col is not None and row[safe_stock_col] is not None else 20
+                safe_stock = _read_int(row, 'safe_stock', 20)
             except (ValueError, TypeError):
-                return ExcelImportPreviewResponse(
-                    success=False,
-                    preview=[],
-                    new_skus=[],
-                    total_in=0,
-                    total_out=0,
-                    total_new=0,
-                    message=f"第 {idx} 行【安全库存】格式错误：需要整数，当前值为 '{row[safe_stock_col]}'，请修改后重新上传"
-                )
+                return _error_resp(f"第 {idx} 行【安全库存】格式错误：需要整数，当前值为 '{row[col_mapping['safe_stock']]}'")
 
-            location_col = col_mapping['location']
-            location = str(row[location_col]).strip() if location_col is not None and row[location_col] else ""
+            contact_id, contact_name = resolve_contact(contact_name_val) if contact_name_val else (None, None)
 
-            # 查询当前库存
+            # 查询物料
             cursor.execute('SELECT id, name, quantity FROM materials WHERE sku = ?', (sku,))
             material = cursor.fetchone()
 
-            if material:
-                # 已存在的物料
-                current_qty = material['quantity']
-                difference = import_qty - current_qty
-
-                if difference > 0:
-                    operation = 'in'
-                    total_in += difference
-                elif difference < 0:
-                    operation = 'out'
-                    total_out += abs(difference)
+            if is_batch_mode:
+                # === 批次模式：每行 = 一个批次 ===
+                if material:
+                    material_id = material['id']
+                    if batch_no_val:
+                        # 查找已有批次
+                        cursor.execute('SELECT id, quantity FROM batches WHERE batch_no = ? AND material_id = ?', (batch_no_val, material_id))
+                        batch = cursor.fetchone()
+                        if batch:
+                            current_qty = batch['quantity']
+                            difference = import_qty - current_qty
+                            if difference > 0:
+                                operation = 'in'
+                                total_in += difference
+                            elif difference < 0:
+                                operation = 'out'
+                                total_out += abs(difference)
+                            else:
+                                operation = 'none'
+                            preview_items.append(ImportPreviewItem(
+                                sku=sku, name=material['name'], category=category, unit=unit,
+                                safe_stock=safe_stock, location=location,
+                                current_quantity=current_qty, import_quantity=import_qty,
+                                difference=difference, operation=operation,
+                                batch_no=batch_no_val, contact_name=contact_name, contact_id=contact_id,
+                            ))
+                        else:
+                            return _error_resp(f"第 {idx} 行：批次号 '{batch_no_val}' 在物料 '{sku}' 中不存在")
+                    else:
+                        # 新批次
+                        total_in += import_qty
+                        preview_items.append(ImportPreviewItem(
+                            sku=sku, name=material['name'], category=category, unit=unit,
+                            safe_stock=safe_stock, location=location,
+                            current_quantity=0, import_quantity=import_qty,
+                            difference=import_qty, operation='in',
+                            is_batch_new=True, contact_name=contact_name, contact_id=contact_id,
+                        ))
                 else:
-                    operation = 'none'
-
-                preview_items.append(ImportPreviewItem(
-                    sku=sku,
-                    name=material['name'],
-                    category=category,
-                    unit=unit,
-                    safe_stock=safe_stock,
-                    location=location,
-                    current_quantity=current_qty,
-                    import_quantity=import_qty,
-                    difference=difference,
-                    operation=operation,
-                    is_new=False
-                ))
+                    # 新SKU + 新批次
+                    total_new += 1
+                    total_in += import_qty
+                    new_item = ImportPreviewItem(
+                        sku=sku, name=name, category=category, unit=unit,
+                        safe_stock=safe_stock, location=location,
+                        current_quantity=None, import_quantity=import_qty,
+                        difference=import_qty, operation='new', is_new=True,
+                        is_batch_new=True, contact_name=contact_name, contact_id=contact_id,
+                    )
+                    preview_items.append(new_item)
+                    new_skus.append(new_item)
             else:
-                # 新SKU
-                total_new += 1
-                new_item = ImportPreviewItem(
-                    sku=sku,
-                    name=name,
-                    category=category,
-                    unit=unit,
-                    safe_stock=safe_stock,
-                    location=location,
-                    current_quantity=None,
-                    import_quantity=import_qty,
-                    difference=import_qty,
-                    operation='new',
-                    is_new=True
-                )
-                preview_items.append(new_item)
-                new_skus.append(new_item)
+                # === 简化模式 ===
+                # 同一 SKU 出现多次 → 每行作为新批次（不同位置/联系方）
+                sku_is_duplicate = sku in seen_skus_simple
+                seen_skus_simple.add(sku)
+
+                if sku_is_duplicate:
+                    # 重复的 SKU 行：作为新批次入库
+                    mat_name = material['name'] if material else name
+                    total_in += import_qty
+                    preview_items.append(ImportPreviewItem(
+                        sku=sku, name=mat_name, category=category, unit=unit,
+                        safe_stock=safe_stock, location=location,
+                        current_quantity=0, import_quantity=import_qty,
+                        difference=import_qty, operation='in',
+                        is_batch_new=True,
+                        contact_name=contact_name, contact_id=contact_id,
+                    ))
+                elif material:
+                    current_qty = material['quantity']
+                    difference = import_qty - current_qty
+                    if difference > 0:
+                        operation = 'in'
+                        total_in += difference
+                    elif difference < 0:
+                        operation = 'out'
+                        total_out += abs(difference)
+                    else:
+                        operation = 'none'
+                    preview_items.append(ImportPreviewItem(
+                        sku=sku, name=material['name'], category=category, unit=unit,
+                        safe_stock=safe_stock, location=location,
+                        current_quantity=current_qty, import_quantity=import_qty,
+                        difference=difference, operation=operation,
+                        contact_name=contact_name, contact_id=contact_id,
+                    ))
+                else:
+                    total_new += 1
+                    new_item = ImportPreviewItem(
+                        sku=sku, name=name, category=category, unit=unit,
+                        safe_stock=safe_stock, location=location,
+                        current_quantity=None, import_quantity=import_qty,
+                        difference=import_qty, operation='new', is_new=True,
+                        contact_name=contact_name, contact_id=contact_id,
+                    )
+                    preview_items.append(new_item)
+                    new_skus.append(new_item)
 
         # 查找缺失的SKU（系统中有但导入文件中没有的，且未被禁用的）
         import_skus = {item.sku for item in preview_items}
-        cursor.execute('''
-            SELECT sku, name, category, quantity
-            FROM materials
-            WHERE is_disabled = 0
-        ''')
+        cursor.execute('SELECT sku, name, category, quantity FROM materials WHERE is_disabled = 0')
         all_system_skus = cursor.fetchall()
 
         missing_skus = []
         for row in all_system_skus:
             if row['sku'] not in import_skus:
                 missing_skus.append(MissingSkuItem(
-                    sku=row['sku'],
-                    name=row['name'],
-                    category=row['category'] or '未分类',
-                    current_quantity=row['quantity']
+                    sku=row['sku'], name=row['name'],
+                    category=row['category'] or '未分类', current_quantity=row['quantity']
                 ))
 
         total_missing = len(missing_skus)
 
+    mode_label = "批次模式" if is_batch_mode else "简化模式"
     return ExcelImportPreviewResponse(
         success=True,
         preview=preview_items,
@@ -3069,7 +3145,11 @@ async def preview_import_excel(
         total_out=total_out,
         total_new=total_new,
         total_missing=total_missing,
-        message=f'共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条' + (f'，有 {total_missing} 个SKU不在导入文件中' if total_missing > 0 else '')
+        is_batch_mode=is_batch_mode,
+        new_contacts=sorted(new_contacts_set),
+        message=f'[{mode_label}] 共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条'
+                + (f'，有 {total_missing} 个SKU不在导入文件中' if total_missing > 0 else '')
+                + (f'，将创建 {len(new_contacts_set)} 个新联系方' if new_contacts_set else '')
     )
 
 
@@ -3078,7 +3158,7 @@ async def confirm_import_excel(
     request: ExcelImportConfirm,
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
-    """确认导入，执行变更单（需要operate权限）"""
+    """确认导入，执行变更单（需要operate权限）— 统一创建批次"""
     in_count = 0
     out_count = 0
     new_count = 0
@@ -3086,6 +3166,7 @@ async def confirm_import_excel(
     warnings = []
     operator_user_id = current_user.id
     operator = request.operator if request.operator else current_user.get_operator_name()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3097,155 +3178,241 @@ async def confirm_import_excel(
         if import_skus:
             placeholders = ','.join(['?' for _ in import_skus])
             if request.confirm_disable_missing_skus:
-                cursor.execute(f'''
-                    UPDATE materials SET is_disabled = 1
-                    WHERE sku NOT IN ({placeholders})
-                ''', list(import_skus))
+                cursor.execute(f'UPDATE materials SET is_disabled = 1 WHERE sku NOT IN ({placeholders})', list(import_skus))
             else:
                 warnings.append("已跳过禁用导入文件之外的SKU，如需禁用请勾选确认选项后重试。")
+            cursor.execute(f'UPDATE materials SET is_disabled = 0 WHERE sku IN ({placeholders})', list(import_skus))
 
-            # 无论是否禁用，都确保导入文件中的SKU被启用
-            cursor.execute(f'''
-                UPDATE materials SET is_disabled = 0
-                WHERE sku IN ({placeholders})
-            ''', list(import_skus))
-
+        # 前置：创建新联系方
+        contact_name_to_id = {}
         for item in request.changes:
-            if item.operation == 'none':
-                continue
+            if item.contact_name and not item.contact_id:
+                if item.contact_name not in contact_name_to_id:
+                    # 再查一次（可能预览后用户已手动创建）
+                    cursor.execute('SELECT id FROM contacts WHERE name = ? AND is_disabled = 0', (item.contact_name,))
+                    existing = cursor.fetchone()
+                    if existing:
+                        contact_name_to_id[item.contact_name] = existing['id']
+                    else:
+                        cursor.execute(
+                            'INSERT INTO contacts (name, is_supplier, created_at) VALUES (?, 1, ?)',
+                            (item.contact_name, now)
+                        )
+                        contact_name_to_id[item.contact_name] = cursor.lastrowid
 
-            if item.is_new:
-                # 新SKU - 只有当confirm_new_skus为True时才创建
-                if not request.confirm_new_skus:
-                    continue
+        def _get_contact_id(item):
+            if item.contact_id:
+                return item.contact_id
+            if item.contact_name and item.contact_name in contact_name_to_id:
+                return contact_name_to_id[item.contact_name]
+            return None
 
-                # 创建新物料
-                cursor.execute('''
-                    INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    item.name,
-                    item.sku,
-                    item.category or '未分类',
-                    item.import_quantity,
-                    item.unit or '个',
-                    item.safe_stock or 20,
-                    item.location or '',
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                ))
+        def _create_batch(material_id, quantity, location, contact_id):
+            """创建新批次并返回 batch_id"""
+            batch_no = generate_batch_no(material_id)
+            cursor.execute('''
+                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (batch_no, material_id, quantity, quantity, contact_id, location, now))
+            return cursor.lastrowid
 
-                # 获取新创建物料的ID
-                material_id = cursor.lastrowid
+        def _create_record(material_id, rec_type, quantity, reason_suffix, batch_id=None, contact_id=None):
+            """创建出入库记录"""
+            cursor.execute('''
+                INSERT INTO inventory_records
+                (material_id, type, quantity, operator, operator_user_id, reason, contact_id, batch_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (material_id, rec_type, quantity, operator, operator_user_id,
+                  f"Excel导入: {request.reason}{reason_suffix}", contact_id, batch_id, now))
 
-                # 如果有初始库存，创建入库记录
-                if item.import_quantity != 0:
-                    record_type = 'in' if item.import_quantity > 0 else 'out'
-                    cursor.execute('''
-                        INSERT INTO inventory_records
-                        (material_id, type, quantity, operator, operator_user_id, reason, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        material_id,
-                        record_type,
-                        abs(item.import_quantity),
-                        operator,
-                        operator_user_id,
-                        f"Excel导入: {request.reason} (新建物料)",
-                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    ))
-                    records_created += 1
-
-                new_count += 1
-            else:
-                # 已存在的物料
-                cursor.execute('SELECT id, quantity FROM materials WHERE sku = ?', (item.sku,))
-                material = cursor.fetchone()
-
-                if not material:
-                    continue
-
-                material_id = material['id']
-                current_qty = material['quantity']
-
-                # 一致性校验：当前库存须与预览时一致，否则提示重新预览
-                if item.current_quantity is not None and current_qty != item.current_quantity:
-                    return ExcelImportResponse(
-                        success=False,
-                        in_count=in_count,
-                        out_count=out_count,
-                        new_count=new_count,
-                        records_created=records_created,
-                        message=f"库存已变化，SKU {item.sku} 当前库存 {current_qty} 与预览值 {item.current_quantity} 不一致，请重新预览后再导入。"
-                    )
-
-                # 无论是否有库存变动，都更新基本信息（安全库存、分类、单位、位置）
-                # 注意：这里我们信任导入文件中的信息为最新
-                cursor.execute('''
-                    UPDATE materials 
-                    SET safe_stock = ?, category = ?, unit = ?, location = ?
-                    WHERE id = ?
-                ''', (
-                    item.safe_stock if item.safe_stock is not None else 20,
-                    item.category or '未分类',
-                    item.unit or '个',
-                    item.location or '',
-                    material_id
-                ))
-
+        if request.is_batch_mode:
+            # === 批次模式 ===
+            for item in request.changes:
                 if item.operation == 'none':
+                    # 无变动，仅更新 batch location
+                    if item.batch_no and item.location:
+                        cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                        mat = cursor.fetchone()
+                        if mat:
+                            cursor.execute('UPDATE batches SET location = ? WHERE batch_no = ? AND material_id = ?',
+                                           (item.location, item.batch_no, mat['id']))
                     continue
 
-                abs_diff = abs(item.difference)
+                contact_id = _get_contact_id(item)
 
-                if item.operation == 'in':
-                    # 入库
-                    new_qty = current_qty + abs_diff
-                    cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
-                                 (new_qty, material_id))
+                if item.is_new:
+                    # 新SKU + 新批次
+                    if not request.confirm_new_skus:
+                        continue
                     cursor.execute('''
-                        INSERT INTO inventory_records
-                        (material_id, type, quantity, operator, operator_user_id, reason, created_at)
-                        VALUES (?, 'in', ?, ?, ?, ?, ?)
-                    ''', (
-                        material_id,
-                        abs_diff,
-                        operator,
-                        operator_user_id,
-                        f"Excel导入: {request.reason}",
-                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    ))
+                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
+                        VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+                    ''', (item.name, item.sku, item.category or '未分类', item.unit or '个',
+                          item.safe_stock or 20, item.location or '', now))
+                    if cursor.rowcount == 0:
+                        cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                        material_id = cursor.fetchone()['id']
+                    else:
+                        material_id = cursor.lastrowid
+                        new_count += 1
+
+                    if item.import_quantity > 0:
+                        batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
+                        cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
+                                       (item.import_quantity, material_id))
+                        _create_record(material_id, 'in', item.import_quantity, ' (新建物料)', batch_id, contact_id)
+                        in_count += 1
+                        records_created += 1
+                elif item.is_batch_new:
+                    # 已有SKU，新批次
+                    cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                    mat = cursor.fetchone()
+                    if not mat:
+                        continue
+                    material_id = mat['id']
+                    batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
+                    cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
+                                   (item.import_quantity, material_id))
+                    _create_record(material_id, 'in', item.import_quantity, ' (新批次)', batch_id, contact_id)
                     in_count += 1
                     records_created += 1
+                else:
+                    # 已有批次有变动
+                    cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                    mat = cursor.fetchone()
+                    if not mat:
+                        continue
+                    material_id = mat['id']
+                    cursor.execute('SELECT id, quantity FROM batches WHERE batch_no = ? AND material_id = ?',
+                                   (item.batch_no, material_id))
+                    batch = cursor.fetchone()
+                    if not batch:
+                        continue
 
-                elif item.operation == 'out':
-                    # 出库（不允许负库存）
-                    if current_qty - abs_diff < 0:
-                        return ExcelImportResponse(
-                            success=False,
-                            in_count=in_count,
-                            out_count=out_count,
-                            new_count=new_count,
-                            records_created=records_created,
-                            message=f"出库失败：SKU {item.sku} 出库 {abs_diff} 超过当前库存 {current_qty}，已终止导入。"
-                        )
+                    diff = item.difference
+                    cursor.execute('UPDATE batches SET quantity = ?, location = ? WHERE id = ?',
+                                   (item.import_quantity, item.location or '', batch['id']))
+                    cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
+                                   (diff, material_id))
 
-                    new_qty = current_qty - abs_diff
-                    cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
-                                 (new_qty, material_id))
-                    cursor.execute('''
-                        INSERT INTO inventory_records
-                        (material_id, type, quantity, operator, operator_user_id, reason, created_at)
-                        VALUES (?, 'out', ?, ?, ?, ?, ?)
-                    ''', (
-                        material_id,
-                        abs_diff,
-                        operator,
-                        operator_user_id,
-                        f"Excel导入: {request.reason}",
-                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    ))
-                    out_count += 1
+                    rec_type = 'in' if diff > 0 else 'out'
+                    _create_record(material_id, rec_type, abs(diff), '', batch['id'], contact_id)
+                    if diff > 0:
+                        in_count += 1
+                    else:
+                        out_count += 1
                     records_created += 1
+
+                # 更新 materials.location 为最新
+                if item.location:
+                    cursor.execute('UPDATE materials SET location = ? WHERE sku = ?', (item.location, item.sku))
+        else:
+            # === 简化模式（统一创建批次）===
+            for item in request.changes:
+                contact_id = _get_contact_id(item)
+
+                if item.is_new:
+                    if not request.confirm_new_skus:
+                        continue
+
+                    cursor.execute('''
+                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (item.name, item.sku, item.category or '未分类', item.import_quantity,
+                          item.unit or '个', item.safe_stock or 20, item.location or '', now))
+
+                    if cursor.rowcount == 0:
+                        # SKU已存在，按已有物料处理
+                        cursor.execute('SELECT id, quantity FROM materials WHERE sku = ?', (item.sku,))
+                        existing = cursor.fetchone()
+                        if existing and item.import_quantity != existing['quantity']:
+                            material_id = existing['id']
+                            diff = item.import_quantity - existing['quantity']
+                            cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?', (item.import_quantity, material_id))
+                            rec_type = 'in' if diff > 0 else 'out'
+                            if diff > 0:
+                                batch_id = _create_batch(material_id, abs(diff), item.location, contact_id)
+                            else:
+                                batch_id = None
+                            _create_record(material_id, rec_type, abs(diff), ' (SKU已存在，调整库存)', batch_id, contact_id)
+                            records_created += 1
+                        new_count += 1
+                        continue
+
+                    material_id = cursor.lastrowid
+                    if item.import_quantity > 0:
+                        batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
+                        _create_record(material_id, 'in', item.import_quantity, ' (新建物料)', batch_id, contact_id)
+                        records_created += 1
+                    new_count += 1
+                else:
+                    cursor.execute('SELECT id, quantity FROM materials WHERE sku = ?', (item.sku,))
+                    material = cursor.fetchone()
+                    if not material:
+                        continue
+
+                    material_id = material['id']
+                    current_qty = material['quantity']
+
+                    # 更新基本信息
+                    cursor.execute('''
+                        UPDATE materials SET safe_stock = ?, category = ?, unit = ?, location = ? WHERE id = ?
+                    ''', (item.safe_stock if item.safe_stock is not None else 20,
+                          item.category or '未分类', item.unit or '个', item.location or '', material_id))
+
+                    if item.operation == 'none':
+                        continue
+
+                    abs_diff = abs(item.difference)
+
+                    if item.operation == 'in':
+                        batch_id = _create_batch(material_id, abs_diff, item.location, contact_id)
+                        cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
+                                       (current_qty + abs_diff, material_id))
+                        _create_record(material_id, 'in', abs_diff, '', batch_id, contact_id)
+                        in_count += 1
+                        records_created += 1
+                    elif item.operation == 'out':
+                        if current_qty - abs_diff < 0:
+                            return ExcelImportResponse(
+                                success=False, in_count=in_count, out_count=out_count,
+                                new_count=new_count, records_created=records_created,
+                                message=f"出库失败：SKU {item.sku} 出库 {abs_diff} 超过当前库存 {current_qty}，已终止导入。"
+                            )
+                        # FIFO 消耗批次
+                        remaining = abs_diff
+                        cursor.execute('''
+                            SELECT id, quantity FROM batches
+                            WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0
+                            ORDER BY created_at ASC
+                        ''', (material_id,))
+                        available_batches = cursor.fetchall()
+
+                        cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
+                                       (current_qty - abs_diff, material_id))
+                        cursor.execute('''
+                            INSERT INTO inventory_records
+                            (material_id, type, quantity, operator, operator_user_id, reason, contact_id, created_at)
+                            VALUES (?, 'out', ?, ?, ?, ?, ?, ?)
+                        ''', (material_id, abs_diff, operator, operator_user_id,
+                              f"Excel导入: {request.reason}", contact_id, now))
+                        record_id = cursor.lastrowid
+
+                        for batch in available_batches:
+                            if remaining <= 0:
+                                break
+                            consume = min(batch['quantity'], remaining)
+                            new_batch_qty = batch['quantity'] - consume
+                            remaining -= consume
+                            cursor.execute('UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?',
+                                           (new_batch_qty, 1 if new_batch_qty == 0 else 0, batch['id']))
+                            cursor.execute('''
+                                INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
+                                VALUES (?, ?, ?, ?)
+                            ''', (record_id, batch['id'], consume, now))
+
+                        out_count += 1
+                        records_created += 1
 
         conn.commit()
         get_fuzzy_matcher().invalidate_cache()
@@ -3382,11 +3549,12 @@ async def add_inventory_record(
                 quantity=request.quantity,
                 reason=request.reason,
                 operator=operator,
-                contact_id=request.contact_id
+                contact_id=request.contact_id,
+                location=request.location
             ),
             current_user
         )
-        # 入库成功且填写了库位时，更新产品库位
+        # 入库成功且填写了库位时，更新产品汇总库位
         if result.success and request.location:
             with get_db() as conn:
                 conn.execute(

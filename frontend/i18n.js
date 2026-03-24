@@ -266,7 +266,13 @@ const translations = {
         mcpSaveAndStart: '保存并启动',
         mcpConfirmDelete: '确定要删除智能体 "{name}" 吗？',
         mcpNoConnections: '暂无智能体连接，点击"添加智能体"开始配置',
-        mcpNoLogs: '暂无日志'
+        mcpNoLogs: '暂无日志',
+
+        // 批次
+        batchDetail: '批次明细',
+        batchMode: '批次模式',
+        newContacts: '新联系方',
+        noBatchData: '暂无批次数据'
     },
     en: {
         pageTitle: 'Smart Warehouse - Dashboard',
@@ -524,7 +530,13 @@ const translations = {
         mcpSaveAndStart: 'Save & Start',
         mcpConfirmDelete: 'Are you sure you want to delete agent "{name}"?',
         mcpNoConnections: 'No agent connections. Click "Add Agent" to get started.',
-        mcpNoLogs: 'No logs available'
+        mcpNoLogs: 'No logs available',
+
+        // Batch
+        batchDetail: 'Batch Details',
+        batchMode: 'Batch Mode',
+        newContacts: 'New Contacts',
+        noBatchData: 'No batch data'
     }
 };
 

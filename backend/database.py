@@ -182,6 +182,38 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_user_id INTEGER REFERENCES users(id)')
 
+    # 检查并添加 location 字段到 batches（批次级别存放位置）
+    try:
+        cursor.execute('SELECT location FROM batches LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE batches ADD COLUMN location TEXT')
+
+    # 历史数据清洗：为有库存但无活跃批次的物料创建遗留批次
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute('''
+        SELECT m.id, m.quantity, m.location FROM materials m
+        WHERE m.quantity > 0
+        AND NOT EXISTS (
+            SELECT 1 FROM batches b
+            WHERE b.material_id = m.id AND b.is_exhausted = 0
+        )
+    ''')
+    orphans = cursor.fetchall()
+    for m in orphans:
+        batch_no = f"LEGACY-{m['id']:04d}"
+        cursor.execute('''
+            INSERT OR IGNORE INTO batches
+            (batch_no, material_id, quantity, initial_quantity, location, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (batch_no, m['id'], m['quantity'], m['quantity'], m['location'], now))
+
+    # 回填：将 materials.location 填入已有的无 location 批次
+    cursor.execute('''
+        UPDATE batches SET location = (
+            SELECT m.location FROM materials m WHERE m.id = batches.material_id
+        ) WHERE location IS NULL
+    ''')
+
     # 创建MCP连接表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mcp_connections (

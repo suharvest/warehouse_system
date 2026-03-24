@@ -101,6 +101,7 @@ class StockOperationRequest(BaseModel):
     reason: Optional[str] = None
     operator: Optional[str] = "MCP系统"
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
+    location: Optional[str] = None  # 批次存放位置
     fuzzy: bool = True  # 是否启用模糊匹配
 
 
@@ -135,11 +136,16 @@ class ImportPreviewItem(BaseModel):
     unit: Optional[str] = None
     safe_stock: Optional[int] = None
     location: Optional[str] = None
-    current_quantity: Optional[int] = None  # None表示新SKU
+    current_quantity: Optional[int] = None  # None表示新SKU（简化模式=物料总量，批次模式=该批次当前库存）
     import_quantity: int
     difference: int
     operation: str  # 'in' | 'out' | 'none' | 'new'
     is_new: bool = False
+    # 批次相关字段
+    batch_no: Optional[str] = None        # 批次号（有值=匹配已有批次，空=新批次）
+    contact_name: Optional[str] = None     # 联系方名称
+    contact_id: Optional[int] = None       # 解析后的联系方ID
+    is_batch_new: bool = False             # 是否为新批次
 
 
 class MissingSkuItem(BaseModel):
@@ -161,6 +167,8 @@ class ExcelImportPreviewResponse(BaseModel):
     total_new: int
     total_missing: int = 0  # 缺失SKU数量
     message: str
+    is_batch_mode: bool = False            # Excel 是否包含批次列
+    new_contacts: List[str] = []           # 将自动创建的联系方名称
 
 
 class ExcelImportConfirm(BaseModel):
@@ -170,6 +178,7 @@ class ExcelImportConfirm(BaseModel):
     reason: str
     confirm_new_skus: bool = False  # 是否确认创建新SKU
     confirm_disable_missing_skus: bool = False  # 是否确认禁用导入文件以外的SKU
+    is_batch_mode: bool = False  # 是否为批次模式导入
 
 
 class ExcelImportResponse(BaseModel):

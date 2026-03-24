@@ -629,6 +629,27 @@
                                 </div>
                             </div>
 
+                            <!-- 批次明细 -->
+                            <div class="card" id="batch-detail-card">
+                                <div class="card-header">
+                                    <h4 data-i18n="batchDetail">批次明细</h4>
+                                </div>
+                                <div class="table-container">
+                                    <table id="batch-detail-table">
+                                        <thead>
+                                            <tr>
+                                                <th data-i18n="batchNo">批次号</th>
+                                                <th data-i18n="quantity">库存</th>
+                                                <th data-i18n="location">存放位置</th>
+                                                <th data-i18n="contact">联系方</th>
+                                                <th data-i18n="time">入库时间</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="batch-detail-tbody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
                             <!-- 操作按钮 -->
                             <!-- 产品记录表格 -->
                             <div class="table-container">
@@ -1023,7 +1044,7 @@
                     </div>
                     <div class="preview-table-container">
                         <table id="preview-table">
-                            <thead>
+                            <thead id="preview-thead">
                                 <tr>
                                     <th data-i18n="materialCode">编码</th>
                                     <th data-i18n="materialName">名称</th>

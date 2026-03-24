@@ -213,6 +213,11 @@ export const productApi = {
   async exportRecords(productName) {
     const response = await request(`/materials/product-records/export?name=${encodeURIComponent(productName)}`);
     return response.blob();
+  },
+
+  // 获取产品批次列表
+  async getBatches(name) {
+    return fetchJson(`/materials/batches?name=${encodeURIComponent(name)}`);
   }
 };
 
