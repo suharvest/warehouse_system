@@ -2,6 +2,9 @@
 """
 仓库管理系统 MCP 服务器
 
+支持可插拔 WMS 后端，通过 config.yml 的 provider 字段切换。
+默认使用自有后端（DefaultProvider），也可对接第三方 WMS。
+
 提供通用的库存管理功能：
 - 名称模糊解析（resolve_name）
 - 库存查询（query_stock，内建模糊匹配）
@@ -9,15 +12,13 @@
 - 统一搜索（search，支持物料/联系方/操作员）
 - 当天统计（get_today_statistics）
 
-注意：本服务通过调用后端 API 实现所有操作，不直接操作数据库。
-确保后端服务（端口 2124）已启动后再使用 MCP 服务。
+注意：本服务通过 Provider 调用后端 API 实现所有操作，不直接操作数据库。
 """
 
 from fastmcp import FastMCP
 import sys
 import os
 import logging
-import requests
 import yaml
 
 # 配置日志
@@ -27,6 +28,7 @@ logger = logging.getLogger('WarehouseMCP')
 if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8')
     sys.stdout.reconfigure(encoding='utf-8')
+
 
 # 加载配置文件
 def load_config():
@@ -51,61 +53,22 @@ def load_config():
         config['api_base_url'] = os.environ.get("WAREHOUSE_API_URL")
     if os.environ.get("WAREHOUSE_API_KEY"):
         config['api_key'] = os.environ.get("WAREHOUSE_API_KEY")
+    if os.environ.get("WAREHOUSE_PROVIDER"):
+        config['provider'] = os.environ.get("WAREHOUSE_PROVIDER")
 
     return config
 
+
 _config = load_config()
-API_BASE_URL = _config['api_base_url']
-API_KEY = _config['api_key']
+
+# 确保能找到 providers 包（直接运行 warehouse_mcp.py 时需要）
+sys.path.insert(0, os.path.dirname(__file__))
+from providers import load_provider  # noqa: E402
+
+_provider = load_provider(_config)
 
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
-
-
-def api_get(endpoint: str, params: dict = None) -> dict:
-    """发送 GET 请求到后端 API"""
-    try:
-        headers = {"X-API-Key": API_KEY} if API_KEY else {}
-        response = requests.get(f"{API_BASE_URL}{endpoint}", params=params, headers=headers, timeout=10)
-        data = response.json()
-        if response.status_code >= 400:
-            return {"success": False, "error": data.get("detail", str(data)), "message": f"API 返回错误 ({response.status_code})"}
-        return data
-    except requests.exceptions.ConnectionError:
-        return {
-            "success": False,
-            "error": "无法连接到后端服务",
-            "message": "请确保后端服务（端口 2124）已启动"
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"API 请求失败: {str(e)}"
-        }
-
-
-def api_post(endpoint: str, data: dict) -> dict:
-    """发送 POST 请求到后端 API"""
-    try:
-        headers = {"X-API-Key": API_KEY} if API_KEY else {}
-        response = requests.post(f"{API_BASE_URL}{endpoint}", json=data, headers=headers, timeout=10)
-        data = response.json()
-        if response.status_code >= 400:
-            return {"success": False, "error": data.get("detail", str(data)), "detail": data.get("detail"), "message": f"API 返回错误 ({response.status_code})"}
-        return data
-    except requests.exceptions.ConnectionError:
-        return {
-            "success": False,
-            "error": "无法连接到后端服务",
-            "message": "请确保后端服务（端口 2124）已启动"
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"API 请求失败: {str(e)}"
-        }
 
 
 @mcp.tool()
@@ -131,7 +94,7 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
         confident: 是否高置信度（true 时可直接使用 best_match）
         candidates: 候选列表（confident=false 时需从中选择）
     """
-    return api_get("/fuzzy-match", params={"q": text, "entity_type": entity_type})
+    return _provider.resolve_name(text, entity_type)
 
 
 @mcp.tool()
@@ -150,55 +113,7 @@ def query_stock(product_name: str) -> dict:
         location, today_in, today_out, status 等）
         success=false 时：如有候选项会在 candidates 中列出
     """
-    # 先尝试精确查询
-    data = api_get("/materials/product-stats", params={"name": product_name})
-
-    # 精确查询失败时，自动走模糊匹配
-    if "error" in data:
-        resolve_result = api_get("/fuzzy-match", params={"q": product_name, "entity_type": "material"})
-
-        if resolve_result.get("confident") and resolve_result.get("best_match"):
-            resolved_name = resolve_result["best_match"]["name"]
-            data = api_get("/materials/product-stats", params={"name": resolved_name})
-            if "error" in data:
-                return {
-                    "success": False,
-                    "error": data["error"],
-                    "message": f"产品 '{resolved_name}' 查询失败"
-                }
-            # 标记名称经过了模糊解析
-            data["resolved_from"] = product_name
-        else:
-            # 模糊匹配也无法确定，返回候选列表
-            candidates = resolve_result.get("candidates", [])
-            if candidates:
-                names = [c["name"] for c in candidates[:5]]
-                return {
-                    "success": False,
-                    "error": f"名称 '{product_name}' 不够明确",
-                    "candidates": candidates[:5],
-                    "message": f"找到多个候选：{', '.join(names)}，请指定更精确的名称"
-                }
-            return {
-                "success": False,
-                "error": f"未找到与 '{product_name}' 匹配的产品",
-                "message": f"系统中没有与 '{product_name}' 相似的产品"
-            }
-
-    quantity = data["current_stock"]
-    safe_stock = data["safe_stock"]
-    if quantity >= safe_stock:
-        status = "正常"
-    elif quantity >= safe_stock * 0.5:
-        status = "偏低"
-    else:
-        status = "告急"
-
-    return {
-        "success": True,
-        "product": {**data, "status": status},
-        "message": f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}，状态：{status}"
-    }
+    return _provider.query_stock(product_name)
 
 
 @mcp.tool()
@@ -218,20 +133,7 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
         success=true 时：入库成功，含批次信息和产品详情
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
-    result = api_post("/materials/stock-in", {
-        "product_name": product_name,
-        "quantity": quantity,
-        "reason": reason,
-        "operator": operator,
-        "fuzzy": fuzzy
-    })
-
-    if not result.get("success") and "candidates" in result.get("detail", {}):
-        candidates = result["detail"]["candidates"]
-        names = [c["name"] for c in candidates[:5]]
-        result["message"] = f"名称 '{product_name}' 不够明确，候选：{', '.join(names)}。请用精确名称重试。"
-
-    return result
+    return _provider.stock_in(product_name, quantity, reason, operator, fuzzy)
 
 
 @mcp.tool()
@@ -251,20 +153,7 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
         success=true 时：出库成功，含批次消耗详情
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
-    result = api_post("/materials/stock-out", {
-        "product_name": product_name,
-        "quantity": quantity,
-        "reason": reason,
-        "operator": operator,
-        "fuzzy": fuzzy
-    })
-
-    if not result.get("success") and "candidates" in result.get("detail", {}):
-        candidates = result["detail"]["candidates"]
-        names = [c["name"] for c in candidates[:5]]
-        result["message"] = f"名称 '{product_name}' 不够明确，候选：{', '.join(names)}。请用精确名称重试。"
-
-    return result
+    return _provider.stock_out(product_name, quantity, reason, operator, fuzzy)
 
 
 @mcp.tool()
@@ -293,30 +182,7 @@ def search(query: str = None, entity_type: str = "material",
         items: 匹配结果列表
         total: 总匹配数
     """
-    params = {"entity_type": entity_type, "page": 1, "page_size": 100, "fuzzy": fuzzy}
-    if query:
-        params["q"] = query
-    if category:
-        params["category"] = category
-    if status:
-        params["status"] = status
-    if contact_type:
-        params["contact_type"] = contact_type
-
-    data = api_get("/search", params=params)
-
-    if isinstance(data, dict) and "error" in data:
-        return {"success": False, "error": data["error"], "message": f"搜索失败: {data['error']}"}
-
-    items = data.get("items", [])
-    type_label = {"material": "物料", "contact": "联系方", "operator": "操作员"}.get(entity_type, entity_type)
-    return {
-        "success": True,
-        "count": len(items),
-        "total": data.get("total", 0),
-        "items": items,
-        "message": f"搜索{type_label}成功，找到 {data.get('total', 0)} 条匹配记录"
-    }
+    return _provider.search(query, entity_type, category, status, contact_type, fuzzy)
 
 
 @mcp.tool()
@@ -327,40 +193,7 @@ def get_today_statistics() -> dict:
     返回：今日入库量、出库量、库存总量、低库存数量、净变化量。
     适用于：「今天仓库情况怎么样」「今日出入库汇总」等问题。
     """
-    try:
-        from datetime import datetime
-
-        data = api_get("/dashboard/stats")
-
-        if isinstance(data, dict) and "error" in data:
-            return {
-                "success": False,
-                "error": data["error"],
-                "message": f"查询统计数据失败: {data['error']}"
-            }
-
-        today = datetime.now().strftime('%Y-%m-%d')
-
-        return {
-            "success": True,
-            "date": today,
-            "statistics": {
-                "today_in": data.get("today_in", 0),
-                "today_out": data.get("today_out", 0),
-                "total_stock": data.get("total_stock", 0),
-                "low_stock_count": data.get("low_stock_count", 0),
-                "net_change": data.get("today_in", 0) - data.get("today_out", 0)
-            },
-            "message": f"查询成功：{today} 入库 {data.get('today_in', 0)} 件，出库 {data.get('today_out', 0)} 件，当前库存总量 {data.get('total_stock', 0)} 件"
-        }
-
-    except Exception as e:
-        logger.error(f"查询统计数据失败: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"查询统计数据失败: {str(e)}"
-        }
+    return _provider.get_today_statistics()
 
 
 # 启动服务器
