@@ -223,17 +223,20 @@ class PaginatedRecordsResponse(BaseModel):
 
 
 class MaterialItemWithDisabled(BaseModel):
-    """物料项（含禁用状态）"""
+    """物料项（含禁用状态，一行一批次）"""
     name: str
     sku: str
     category: str
-    quantity: int
+    quantity: int  # 批次库存
     unit: str
     safe_stock: int
-    location: str
+    location: str  # 批次位置
     status: str  # 'normal' | 'warning' | 'danger' | 'disabled'
     status_text: str
     is_disabled: bool = False
+    batch_no: Optional[str] = None
+    contact_name: Optional[str] = None
+    total_quantity: Optional[int] = None  # 物料总库存（所有批次之和）
 
 
 class InventoryRecordItem(BaseModel):

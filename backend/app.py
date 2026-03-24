@@ -1848,14 +1848,13 @@ def get_materials_list(
     fuzzy: bool = Query(True, description="名称模糊匹配开关"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
 ):
-    """获取物料列表（分页+筛选）"""
+    """获取物料列表（分页+筛选）— 一行一批次"""
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 解析状态筛选
         status_filter = status.split(',') if status else None
 
-        # Fuzzy name search: get matching IDs
+        # Fuzzy name search
         fuzzy_ids = None
         if name and fuzzy:
             matcher = get_fuzzy_matcher()
@@ -1864,130 +1863,105 @@ def get_materials_list(
             if not fuzzy_ids:
                 return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
-        # 构建基础查询
-        base_query = '''
-            SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled
-            FROM materials
-            WHERE 1=1
-        '''
-        count_query = 'SELECT COUNT(*) as total FROM materials WHERE 1=1'
+        # 构建物料筛选条件
+        where_clauses = []
         params = []
 
-        # 如果没有指定状态筛选，或者状态筛选中不包含disabled，则只查询未禁用的
         if not status_filter or 'disabled' not in status_filter:
-            base_query += ' AND is_disabled = 0'
-            count_query += ' AND is_disabled = 0'
+            where_clauses.append('m.is_disabled = 0')
 
-        # 名称/SKU搜索
         if fuzzy_ids is not None:
             placeholders = ','.join('?' * len(fuzzy_ids))
-            base_query += f' AND id IN ({placeholders})'
-            count_query += f' AND id IN ({placeholders})'
+            where_clauses.append(f'm.id IN ({placeholders})')
             params.extend(fuzzy_ids)
         elif name and not fuzzy:
-            base_query += ' AND (name LIKE ? OR sku LIKE ?)'
-            count_query += ' AND (name LIKE ? OR sku LIKE ?)'
+            where_clauses.append('(m.name LIKE ? OR m.sku LIKE ?)')
             params.extend([f'%{name}%', f'%{name}%'])
 
-        # 分类筛选
         if category:
-            base_query += ' AND category = ?'
-            count_query += ' AND category = ?'
+            where_clauses.append('m.category = ?')
             params.append(category)
 
-        # 库存范围筛选
-        if min_stock is not None:
-            base_query += ' AND quantity >= ?'
-            count_query += ' AND quantity >= ?'
-            params.append(min_stock)
-        if max_stock is not None:
-            base_query += ' AND quantity <= ?'
-            count_query += ' AND quantity <= ?'
-            params.append(max_stock)
-
-        # 位置模糊匹配
         if location:
-            base_query += ' AND location LIKE ?'
-            count_query += ' AND location LIKE ?'
-            params.append(f'%{location}%')
+            where_clauses.append('(b.location LIKE ? OR m.location LIKE ?)')
+            params.extend([f'%{location}%', f'%{location}%'])
 
-        # 获取总数
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()['total']
+        where_sql = ' AND '.join(where_clauses) if where_clauses else '1=1'
 
-        # 排序和分页
-        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
-        offset = (page - 1) * page_size
-        params.extend([page_size, offset])
+        # 查询：一行一批次（LEFT JOIN batches）
+        # 对于有批次的物料，每个活跃批次一行
+        # 对于无批次的物料（quantity=0），显示一行空批次
+        base_query = f'''
+            SELECT m.id as material_id, m.name, m.sku, m.category, m.quantity as total_quantity,
+                   m.unit, m.safe_stock, m.location as material_location, m.is_disabled,
+                   b.batch_no, b.quantity as batch_quantity, b.location as batch_location,
+                   c.name as contact_name
+            FROM materials m
+            LEFT JOIN batches b ON b.material_id = m.id AND b.is_exhausted = 0
+            LEFT JOIN contacts c ON b.contact_id = c.id
+            WHERE {where_sql}
+            ORDER BY m.name ASC, b.created_at ASC
+        '''
 
         cursor.execute(base_query, params)
-        rows = cursor.fetchall()
+        all_rows = cursor.fetchall()
 
-        result = []
-        for row in rows:
-            quantity = row['quantity']
+        # 应用状态筛选和库存范围筛选（在应用层做，因为状态是计算值）
+        filtered = []
+        for row in all_rows:
+            total_qty = row['total_quantity']
             safe_stock_val = row['safe_stock']
             is_disabled = bool(row['is_disabled'])
 
-            # 判断状态
             if is_disabled:
                 item_status = 'disabled'
-                status_text = '禁用'
-            elif quantity >= safe_stock_val:
+            elif total_qty >= safe_stock_val:
                 item_status = 'normal'
-                status_text = '正常'
-            elif quantity >= safe_stock_val * 0.5:
+            elif total_qty >= safe_stock_val * 0.5:
                 item_status = 'warning'
-                status_text = '偏低'
             else:
                 item_status = 'danger'
-                status_text = '告急'
 
-            # 状态筛选
             if status_filter and item_status not in status_filter:
                 continue
+            if min_stock is not None and total_qty < min_stock:
+                continue
+            if max_stock is not None and total_qty > max_stock:
+                continue
+
+            filtered.append((row, item_status))
+
+        total = len(filtered)
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
+        offset = (page - 1) * page_size
+        page_rows = filtered[offset:offset + page_size]
+
+        result = []
+        for row, item_status in page_rows:
+            is_disabled = bool(row['is_disabled'])
+            status_text_map = {'normal': '正常', 'warning': '偏低', 'danger': '告急', 'disabled': '禁用'}
+
+            batch_qty = row['batch_quantity'] if row['batch_quantity'] is not None else row['total_quantity']
+            batch_loc = row['batch_location'] if row['batch_location'] else (row['material_location'] or '')
 
             if format == "brief":
-                result.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
+                result.append({"id": row['material_id'], "name": row['name'], "sku": row['sku']})
             else:
                 result.append(MaterialItemWithDisabled(
                     name=row['name'],
                     sku=row['sku'],
                     category=row['category'],
-                    quantity=quantity,
+                    quantity=batch_qty,
                     unit=row['unit'],
-                    safe_stock=safe_stock_val,
-                    location=row['location'],
+                    safe_stock=row['safe_stock'],
+                    location=batch_loc,
                     status=item_status,
-                    status_text=status_text,
-                    is_disabled=is_disabled
+                    status_text=status_text_map.get(item_status, ''),
+                    is_disabled=is_disabled,
+                    batch_no=row['batch_no'] or '',
+                    contact_name=row['contact_name'] or '',
+                    total_quantity=row['total_quantity'],
                 ))
-
-        # 如果有状态筛选，重新计算总数
-        if status_filter:
-            base_query_no_limit = base_query.replace(' LIMIT ? OFFSET ?', '')
-            cursor.execute(base_query_no_limit, params[:-2])
-            all_rows = cursor.fetchall()
-            filtered_count = 0
-            for row in all_rows:
-                quantity = row['quantity']
-                safe_stock_val = row['safe_stock']
-                is_disabled = bool(row['is_disabled'])
-
-                if is_disabled:
-                    item_status = 'disabled'
-                elif quantity >= safe_stock_val:
-                    item_status = 'normal'
-                elif quantity >= safe_stock_val * 0.5:
-                    item_status = 'warning'
-                else:
-                    item_status = 'danger'
-
-                if item_status in status_filter:
-                    filtered_count += 1
-            total = filtered_count
-
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
 
         return {
             "items": result,

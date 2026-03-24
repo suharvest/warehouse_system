@@ -44,7 +44,7 @@ function renderInventoryTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: #999;">${t('noData')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: #999;">${t('noData')}</td></tr>`;
         return;
     }
 
@@ -71,11 +71,12 @@ function renderInventoryTable(items) {
             <td>${item.name}</td>
             <td>${item.sku}</td>
             <td>${item.category}</td>
+            <td>${item.batch_no || '-'}</td>
             <td><strong>${item.quantity}</strong></td>
             <td>${item.unit}</td>
             <td>${item.safe_stock}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-            <td>${item.location}</td>
+            <td>${item.location || '-'}</td>
         `;
 
         tr.addEventListener('click', function () {
