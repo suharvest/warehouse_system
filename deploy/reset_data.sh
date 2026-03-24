@@ -5,13 +5,15 @@
 set -e
 
 # 配置
-DATA_DIR="/opt/smart_wms/data"
+DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${DEPLOY_DIR}/../data"
 BACKUP_DB="${DATA_DIR}/warehouse_backup.db"
 CURRENT_DB="${DATA_DIR}/warehouse.db"
-LOG_FILE="/opt/smart_wms/logs/reset.log"
+LOG_FILE="${DEPLOY_DIR}/../logs/reset.log"
+COMPOSE_FILE="${DEPLOY_DIR}/docker-compose.server.yml"
 
 # 确保日志目录存在
-mkdir -p /opt/smart_wms/logs
+mkdir -p "$(dirname "$LOG_FILE")"
 
 # 记录日志
 log() {
@@ -26,10 +28,9 @@ if [ ! -f "$BACKUP_DB" ]; then
     exit 1
 fi
 
-# 停止后端容器（确保数据库不被锁定）
-log "Stopping backend container..."
-cd /opt/smart_wms
-docker-compose -f deploy/docker-compose.server.yml stop backend || true
+# 停止容器（确保数据库不被锁定）
+log "Stopping warehouse container..."
+docker-compose -f "$COMPOSE_FILE" stop warehouse || true
 
 # 等待容器完全停止
 sleep 3
@@ -45,21 +46,21 @@ fi
 # 复制备份到当前
 cp "$BACKUP_DB" "$CURRENT_DB"
 chmod 666 "$CURRENT_DB"
-log "Restored database from backup (permissions set to 666)"
+log "Restored database from backup"
 
-# 重启后端容器
-log "Restarting backend container..."
-docker-compose -f deploy/docker-compose.server.yml start backend
+# 重启容器
+log "Starting warehouse container..."
+docker-compose -f "$COMPOSE_FILE" start warehouse
 
 # 等待健康检查
 sleep 10
 
 # 验证服务
-if curl -s http://localhost:2124/api/dashboard/stats > /dev/null 2>&1; then
-    log "Backend service is healthy"
+if curl -s http://localhost:1024/api/dashboard/stats > /dev/null 2>&1; then
+    log "Service is healthy"
 else
-    log "WARNING: Backend health check failed, attempting full restart..."
-    docker-compose -f deploy/docker-compose.server.yml restart backend
+    log "WARNING: Health check failed, attempting full restart..."
+    docker-compose -f "$COMPOSE_FILE" restart warehouse
 fi
 
 log "Database reset completed successfully!"
