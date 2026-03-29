@@ -74,7 +74,7 @@ function renderInventoryTable(items) {
             <td>${item.batch_no || '-'}</td>
             <td><strong>${item.quantity}</strong></td>
             <td>${item.unit}</td>
-            <td>${item.safe_stock}</td>
+            <td>${item.safe_stock != null ? item.safe_stock : '-'}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
             <td>${item.location || '-'}</td>
         `;

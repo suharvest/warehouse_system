@@ -48,7 +48,7 @@ def init_database():
             category TEXT NOT NULL,
             quantity INTEGER DEFAULT 0,
             unit TEXT DEFAULT '个',
-            safe_stock INTEGER DEFAULT 20,
+            safe_stock INTEGER DEFAULT NULL,
             location TEXT,
             is_disabled INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

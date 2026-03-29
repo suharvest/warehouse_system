@@ -68,7 +68,25 @@ async function loadProductStats() {
     document.getElementById('detail-stock-unit').textContent = data.unit;
     document.getElementById('detail-today-in').textContent = data.today_in.toLocaleString();
     document.getElementById('detail-today-out').textContent = data.today_out.toLocaleString();
-    document.getElementById('detail-safe-stock').textContent = data.safe_stock.toLocaleString();
+    const safeStockElem = document.getElementById('detail-safe-stock');
+    const statusElem = document.getElementById('detail-stock-status');
+    if (data.safe_stock != null) {
+        safeStockElem.textContent = data.safe_stock.toLocaleString();
+        if (data.current_stock >= data.safe_stock) {
+            statusElem.textContent = t('statusNormal');
+            statusElem.style.color = '#52c41a';
+        } else if (data.current_stock >= data.safe_stock * 0.5) {
+            statusElem.textContent = t('statusWarning');
+            statusElem.style.color = '#faad14';
+        } else {
+            statusElem.textContent = t('statusDanger');
+            statusElem.style.color = '#f5222d';
+        }
+    } else {
+        safeStockElem.textContent = '-';
+        statusElem.textContent = '-';
+        statusElem.style.color = '#999';
+    }
 
     const inChange = document.getElementById('detail-in-change');
     inChange.textContent = (data.in_change >= 0 ? '+' : '') + data.in_change + '%';
@@ -77,19 +95,6 @@ async function loadProductStats() {
     const outChange = document.getElementById('detail-out-change');
     outChange.textContent = (data.out_change >= 0 ? '+' : '') + data.out_change + '%';
     outChange.className = data.out_change >= 0 ? 'stat-change positive' : 'stat-change negative';
-
-    // 更新库存状态
-    const statusElem = document.getElementById('detail-stock-status');
-    if (data.current_stock >= data.safe_stock) {
-        statusElem.textContent = t('statusNormal');
-        statusElem.style.color = '#52c41a';
-    } else if (data.current_stock >= data.safe_stock * 0.5) {
-        statusElem.textContent = t('statusWarning');
-        statusElem.style.color = '#faad14';
-    } else {
-        statusElem.textContent = t('statusDanger');
-        statusElem.style.color = '#f5222d';
-    }
 
     loadDetailPieChart(data.total_in, data.total_out);
 }
@@ -273,12 +278,16 @@ export function refreshProductDetailForLanguage() {
         loadDetailPieChart(lastProductStats.total_in, lastProductStats.total_out);
 
         const statusElem = document.getElementById('detail-stock-status');
-        if (lastProductStats.current_stock >= lastProductStats.safe_stock) {
-            statusElem.textContent = t('statusNormal');
-        } else if (lastProductStats.current_stock >= lastProductStats.safe_stock * 0.5) {
-            statusElem.textContent = t('statusWarning');
+        if (lastProductStats.safe_stock != null) {
+            if (lastProductStats.current_stock >= lastProductStats.safe_stock) {
+                statusElem.textContent = t('statusNormal');
+            } else if (lastProductStats.current_stock >= lastProductStats.safe_stock * 0.5) {
+                statusElem.textContent = t('statusWarning');
+            } else {
+                statusElem.textContent = t('statusDanger');
+            }
         } else {
-            statusElem.textContent = t('statusDanger');
+            statusElem.textContent = '-';
         }
     }
 }

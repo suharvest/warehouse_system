@@ -1380,7 +1380,7 @@ def get_dashboard_stats():
         cursor.execute('''
             SELECT COUNT(*) as count
             FROM materials
-            WHERE quantity < safe_stock AND is_disabled = 0
+            WHERE safe_stock IS NOT NULL AND quantity < safe_stock AND is_disabled = 0
         ''')
         low_stock_count = cursor.fetchone()['count']
 
@@ -1512,7 +1512,7 @@ def get_low_stock_alert():
         cursor.execute('''
             SELECT name, sku, category, quantity, safe_stock, location
             FROM materials
-            WHERE quantity < safe_stock
+            WHERE safe_stock IS NOT NULL AND quantity < safe_stock AND is_disabled = 0
             ORDER BY (quantity - safe_stock) ASC
             LIMIT 20
         ''')
@@ -1633,12 +1633,15 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, page, page_size):
         for row in rows:
             qty = row['quantity']
             ss = row['safe_stock']
-            if qty >= ss:
-                item_status = 'normal'
-            elif qty >= ss * 0.5:
-                item_status = 'warning'
+            if ss is not None:
+                if qty >= ss:
+                    item_status = 'normal'
+                elif qty >= ss * 0.5:
+                    item_status = 'warning'
+                else:
+                    item_status = 'danger'
             else:
-                item_status = 'danger'
+                item_status = 'normal'
 
             if item_status not in status_filter:
                 continue
@@ -1672,12 +1675,15 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, page, page_size):
         for row in rows:
             qty = row['quantity']
             ss = row['safe_stock']
-            if qty >= ss:
-                item_status = 'normal'
-            elif qty >= ss * 0.5:
-                item_status = 'warning'
+            if ss is not None:
+                if qty >= ss:
+                    item_status = 'normal'
+                elif qty >= ss * 0.5:
+                    item_status = 'warning'
+                else:
+                    item_status = 'danger'
             else:
-                item_status = 'danger'
+                item_status = 'normal'
 
             if fmt == "brief":
                 items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
@@ -1817,15 +1823,19 @@ def get_all_materials():
             safe_stock = row['safe_stock']
 
             # 判断状态
-            if quantity >= safe_stock:
+            if safe_stock is not None:
+                if quantity >= safe_stock:
+                    status = 'normal'
+                    status_text = '正常'
+                elif quantity >= safe_stock * 0.5:
+                    status = 'warning'
+                    status_text = '偏低'
+                else:
+                    status = 'danger'
+                    status_text = '告急'
+            else:
                 status = 'normal'
                 status_text = '正常'
-            elif quantity >= safe_stock * 0.5:
-                status = 'warning'
-                status_text = '偏低'
-            else:
-                status = 'danger'
-                status_text = '告急'
 
             result.append(MaterialItem(
                 name=row['name'],
@@ -1922,12 +1932,15 @@ def get_materials_list(
 
             if is_disabled:
                 item_status = 'disabled'
-            elif total_qty >= safe_stock_val:
-                item_status = 'normal'
-            elif total_qty >= safe_stock_val * 0.5:
-                item_status = 'warning'
+            elif safe_stock_val is not None:
+                if total_qty >= safe_stock_val:
+                    item_status = 'normal'
+                elif total_qty >= safe_stock_val * 0.5:
+                    item_status = 'warning'
+                else:
+                    item_status = 'danger'
             else:
-                item_status = 'danger'
+                item_status = 'normal'
 
             if status_filter and item_status not in status_filter:
                 continue
@@ -2347,12 +2360,15 @@ def get_inventory_records_paginated(
             # 计算物料当前状态
             if is_disabled:
                 material_status = 'disabled'
-            elif quantity >= safe_stock:
-                material_status = 'normal'
-            elif quantity >= safe_stock * 0.5:
-                material_status = 'warning'
+            elif safe_stock is not None:
+                if quantity >= safe_stock:
+                    material_status = 'normal'
+                elif quantity >= safe_stock * 0.5:
+                    material_status = 'warning'
+                else:
+                    material_status = 'danger'
             else:
-                material_status = 'danger'
+                material_status = 'normal'
 
             # 状态筛选
             if status_filter and material_status not in status_filter:
@@ -2443,12 +2459,15 @@ def get_inventory_records_paginated(
                 dis = bool(r['is_disabled'])
                 if dis:
                     s = 'disabled'
-                elif qty >= ss:
-                    s = 'normal'
-                elif qty >= ss * 0.5:
-                    s = 'warning'
+                elif ss is not None:
+                    if qty >= ss:
+                        s = 'normal'
+                    elif qty >= ss * 0.5:
+                        s = 'warning'
+                    else:
+                        s = 'danger'
                 else:
-                    s = 'danger'
+                    s = 'normal'
                 if s in status_filter:
                     total += 1
 
@@ -2710,7 +2729,7 @@ async def stock_out(
         })
 
         warning = ""
-        if new_quantity < safe_stock:
+        if safe_stock is not None and new_quantity < safe_stock:
             if new_quantity < safe_stock * 0.5:
                 warning = f"⚠️ 警告：库存告急！当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit} 的50%"
             else:
@@ -2790,12 +2809,15 @@ def export_materials_excel(
             # 计算状态
             if is_disabled:
                 item_status = 'disabled'
-            elif quantity >= safe_stock:
-                item_status = 'normal'
-            elif quantity >= safe_stock * 0.5:
-                item_status = 'warning'
+            elif safe_stock is not None:
+                if quantity >= safe_stock:
+                    item_status = 'normal'
+                elif quantity >= safe_stock * 0.5:
+                    item_status = 'warning'
+                else:
+                    item_status = 'danger'
             else:
-                item_status = 'danger'
+                item_status = 'normal'
 
             # 状态筛选
             if status_filter and item_status not in status_filter:
@@ -2996,7 +3018,7 @@ async def preview_import_excel(
                 return _error_resp(f"第 {idx} 行【库存数量】格式错误：需要整数，当前值为 '{row[col_mapping['quantity']]}'")
 
             try:
-                safe_stock = _read_int(row, 'safe_stock', 20)
+                safe_stock = _read_int(row, 'safe_stock', None)
             except (ValueError, TypeError):
                 return _error_resp(f"第 {idx} 行【安全库存】格式错误：需要整数，当前值为 '{row[col_mapping['safe_stock']]}'")
 
@@ -3233,7 +3255,7 @@ async def confirm_import_excel(
                         INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
                         VALUES (?, ?, ?, 0, ?, ?, ?, ?)
                     ''', (item.name, item.sku, item.category or '未分类', item.unit or '个',
-                          item.safe_stock or 20, item.location or '', now))
+                          item.safe_stock, item.location or '', now))
                     if cursor.rowcount == 0:
                         cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
                         material_id = cursor.fetchone()['id']
@@ -3304,7 +3326,7 @@ async def confirm_import_excel(
                         INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (item.name, item.sku, item.category or '未分类', item.import_quantity,
-                          item.unit or '个', item.safe_stock or 20, item.location or '', now))
+                          item.unit or '个', item.safe_stock, item.location or '', now))
 
                     if cursor.rowcount == 0:
                         # SKU已存在，按已有物料处理
@@ -3342,7 +3364,7 @@ async def confirm_import_excel(
                     # 更新基本信息
                     cursor.execute('''
                         UPDATE materials SET safe_stock = ?, category = ?, unit = ?, location = ? WHERE id = ?
-                    ''', (item.safe_stock if item.safe_stock is not None else 20,
+                    ''', (item.safe_stock,
                           item.category or '未分类', item.unit or '个', item.location or '', material_id))
 
                     if item.operation == 'none':
