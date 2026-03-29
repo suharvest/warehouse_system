@@ -72,21 +72,33 @@ class DefaultProvider(BaseProvider):
                 }
 
         quantity = data["current_stock"]
-        safe_stock = data["safe_stock"]
-        if quantity >= safe_stock:
-            status = "正常"
-        elif quantity >= safe_stock * 0.5:
-            status = "偏低"
+        safe_stock = data.get("safe_stock")
+
+        if safe_stock is not None:
+            if quantity >= safe_stock:
+                status = "正常"
+            elif quantity >= safe_stock * 0.5:
+                status = "偏低"
+            else:
+                status = "告急"
         else:
-            status = "告急"
+            status = None
 
         location = data.get("location", "")
         loc_info = f"，位置：{location}" if location else ""
-        msg = f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}，状态：{status}{loc_info}"
+        status_info = f"，状态：{status}" if status else ""
+        msg = f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}{status_info}{loc_info}"
+
+        product_data = {**data}
+        if status:
+            product_data["status"] = status
+        else:
+            product_data.pop("safe_stock", None)
+            product_data.pop("status", None)
 
         result = {
             "success": True,
-            "product": {**data, "status": status},
+            "product": product_data,
             "message": msg,
         }
 

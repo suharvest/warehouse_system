@@ -46,7 +46,7 @@ class LowStockItem(BaseModel):
     sku: str
     category: str
     quantity: int
-    safe_stock: int
+    safe_stock: Optional[int] = None
     location: str
     shortage: int
 
@@ -60,7 +60,7 @@ class MaterialItem(BaseModel):
     category: str
     quantity: int
     unit: str
-    safe_stock: int
+    safe_stock: Optional[int] = None
     location: str
     status: str
     status_text: str
@@ -73,7 +73,7 @@ class ProductStats(BaseModel):
     sku: str
     current_stock: int
     unit: str
-    safe_stock: int
+    safe_stock: Optional[int] = None
     location: str
     today_in: int
     today_out: int
@@ -231,7 +231,7 @@ class MaterialItemWithDisabled(BaseModel):
     category: str
     quantity: int  # 批次库存
     unit: str
-    safe_stock: int
+    safe_stock: Optional[int] = None
     location: str  # 批次位置
     status: str  # 'normal' | 'warning' | 'danger' | 'disabled'
     status_text: str
