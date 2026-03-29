@@ -15,8 +15,8 @@ RUN npm run build
 # ---- Stage 2: 构建 Python 依赖 ----
 FROM python:3.12-alpine AS python-builder
 
-# 安装编译依赖（bcrypt、rapidfuzz 等需要）
-RUN apk add --no-cache gcc musl-dev libffi-dev
+# 安装编译依赖（bcrypt、rapidfuzz 等 C 扩展需要）
+RUN apk add --no-cache gcc musl-dev libffi-dev make
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
@@ -39,8 +39,10 @@ RUN pip install --no-cache-dir uv && \
 # ---- Stage 3: 最终运行时镜像 ----
 FROM python:3.12-alpine
 
-# websockets 的 C 扩展需要 libffi，bcrypt 需要 libgcc
-RUN apk add --no-cache libffi libgcc
+# libffi: cffi/cryptography 运行时需要
+# libgcc: bcrypt 等 C 扩展需要
+# ca-certificates: requests/websockets HTTPS 连接需要
+RUN apk add --no-cache libffi libgcc ca-certificates
 
 RUN adduser -D -u 1000 appuser && mkdir -p /data
 WORKDIR /app
