@@ -1,5 +1,5 @@
 # All-in-one 生产镜像：uvicorn 同时 serve API + 前端静态文件
-# 无 nginx，单进程，简单可靠
+# 优化版：Alpine 多阶段构建，最小化镜像体积（适合树莓派等小存储设备）
 #
 # 构建: docker build -t warehouse .
 # 运行: docker run -p 1024:1024 -e PORT=1024 -v data:/data warehouse
@@ -12,24 +12,46 @@ RUN npm ci --prefer-offline 2>/dev/null || npm install
 COPY frontend/ ./
 RUN npm run build
 
-# ---- Stage 2: 运行时 ----
-FROM python:3.12-slim
+# ---- Stage 2: 构建 Python 依赖 ----
+FROM python:3.12-alpine AS python-builder
 
-RUN useradd -m -u 1000 appuser && mkdir -p /data
+# 安装编译依赖（bcrypt、rapidfuzz 等需要）
+RUN apk add --no-cache gcc musl-dev libffi-dev
+
 WORKDIR /app
-
-# 安装 Python 依赖
 COPY pyproject.toml uv.lock ./
 COPY backend/ ./backend/
 COPY mcp/ ./mcp/
-COPY run_backend.py ./
+
+# 用 uv 安装依赖，完成后 uv 不会留在最终镜像
 RUN pip install --no-cache-dir uv && \
     uv sync --frozen && \
-    pip uninstall -y uv && \
-    pip cache purge && \
-    rm -rf /root/.cache
+    # 清理 .venv 中不需要的文件，节省空间
+    find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
+    find .venv -type f -name "*.pyc" -delete 2>/dev/null; \
+    find .venv -type f -name "*.pyo" -delete 2>/dev/null; \
+    find .venv -type d -name "*.dist-info" -exec sh -c 'for d; do find "$d" -not -name "METADATA" -not -name "RECORD" -not -name "top_level.txt" -not -name "entry_points.txt" -not -name "direct_url.json" -type f -delete; done' _ {} + 2>/dev/null; \
+    find .venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null; \
+    find .venv -type d -name "test" -exec rm -rf {} + 2>/dev/null; \
+    find .venv -type f -name "*.so" -exec strip -s {} + 2>/dev/null; \
+    true
 
-# 复制前端构建产物到 /app/static
+# ---- Stage 3: 最终运行时镜像 ----
+FROM python:3.12-alpine
+
+# websockets 的 C 扩展需要 libffi，bcrypt 需要 libgcc
+RUN apk add --no-cache libffi libgcc
+
+RUN adduser -D -u 1000 appuser && mkdir -p /data
+WORKDIR /app
+
+# 只复制运行时需要的文件
+COPY --from=python-builder /app/.venv /app/.venv
+COPY backend/ ./backend/
+COPY mcp/ ./mcp/
+COPY run_backend.py ./
+
+# 复制前端构建产物
 COPY --from=frontend-builder /build/dist /app/static
 
 RUN chown -R appuser:appuser /data /app
