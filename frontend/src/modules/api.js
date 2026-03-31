@@ -112,6 +112,7 @@ export const inventoryApi = {
     if (params.status && params.status.length > 0) {
       query.set('status', params.status.join(','));
     }
+    query.set('fuzzy', 'false');
     return fetchJson(`/materials/list?${query.toString()}`);
   },
 

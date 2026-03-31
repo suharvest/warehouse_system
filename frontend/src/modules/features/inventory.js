@@ -44,7 +44,7 @@ function renderInventoryTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: #999;">${t('noData')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: #999;">${t('noData')}</td></tr>`;
         return;
     }
 
@@ -72,6 +72,7 @@ function renderInventoryTable(items) {
             <td>${item.sku}</td>
             <td>${item.category}</td>
             <td>${item.batch_no || '-'}</td>
+            <td>${item.variant || '-'}</td>
             <td><strong>${item.quantity}</strong></td>
             <td>${item.unit}</td>
             <td>${item.safe_stock != null ? item.safe_stock : '-'}</td>
@@ -107,6 +108,17 @@ export function changeInventoryPageSize(size) {
     setInventoryPageSize(parseInt(size));
     setInventoryCurrentPage(1);
     loadInventory();
+}
+
+// 搜索框 Enter 触发筛选
+const nameInput = document.getElementById('filter-inventory-name');
+if (nameInput) {
+    nameInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            applyInventoryFilter();
+        }
+    });
 }
 
 // ============ 筛选 ============
