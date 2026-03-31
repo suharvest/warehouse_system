@@ -4037,7 +4037,8 @@ if STATIC_DIR and os.path.isdir(STATIC_DIR):
         file_path = os.path.join(STATIC_DIR, path)
         if path and os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(_index_html)
+        # index.html 禁止缓存，确保部署后用户立即获取新版本
+        return FileResponse(_index_html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
     logger.info(f"Serving frontend from {STATIC_DIR}")
 
