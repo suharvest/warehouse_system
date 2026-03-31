@@ -187,7 +187,7 @@ async function loadProductBatches() {
         tbody.innerHTML = '';
 
         if (!Array.isArray(batches) || batches.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #999;">${t('noBatchData')}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #999;">${t('noBatchData')}</td></tr>`;
             return;
         }
 
@@ -195,6 +195,7 @@ async function loadProductBatches() {
             const tr = document.createElement('tr');
             tr.innerHTML = `
                 <td>${batch.batch_no || '-'}</td>
+                <td>${batch.variant || '-'}</td>
                 <td>${batch.quantity != null ? batch.quantity : '-'}</td>
                 <td>${batch.location || '-'}</td>
                 <td>${batch.contact_name || '-'}</td>
@@ -204,7 +205,7 @@ async function loadProductBatches() {
         });
     } catch (error) {
         console.error('加载批次明细失败:', error);
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #999;">${t('noBatchData')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #999;">${t('noBatchData')}</td></tr>`;
     }
 }
 
@@ -224,7 +225,7 @@ function renderDetailRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -238,6 +239,7 @@ function renderDetailRecordsTable(items) {
             <td>${item.created_at}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
             <td><strong>${item.quantity}</strong></td>
+            <td>${item.variant || '-'}</td>
             <td>${item.operator}</td>
             <td>${item.reason || '-'}</td>
         `;

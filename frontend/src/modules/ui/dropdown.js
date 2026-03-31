@@ -156,10 +156,15 @@ function renderSearchableOptions(wrapper, query) {
     if (!dropdown || !config.products) return;
 
     const queryLower = query.toLowerCase();
+    // 按物料名称去重（一行一批次会导致同名物料重复），先过滤再去重
+    const seen = new Set();
     const filtered = config.products.filter(p => {
-        if (!query) return true;
-        return p.name.toLowerCase().includes(queryLower) ||
-            p.sku.toLowerCase().includes(queryLower);
+        if (!query || p.name.toLowerCase().includes(queryLower) || p.sku.toLowerCase().includes(queryLower)) {
+            if (seen.has(p.name)) return false;
+            seen.add(p.name);
+            return true;
+        }
+        return false;
     });
 
     if (filtered.length === 0) {

@@ -66,7 +66,7 @@ function renderRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="12" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -107,6 +107,7 @@ function renderRecordsTable(items) {
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
             <td><strong>${item.quantity}</strong></td>
             <td>${batchDisplay}</td>
+            <td>${item.variant || '-'}</td>
             <td>${item.contact_name || '-'}</td>
             <td>${item.operator_name || item.operator}</td>
             <td>${item.reason || '-'}</td>

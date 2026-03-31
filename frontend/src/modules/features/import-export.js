@@ -254,6 +254,7 @@ function renderImportPreview(data) {
                     <th>${t('materialCode')}</th>
                     <th>${t('materialName')}</th>
                     <th>${t('batchNo')}</th>
+                    <th>${t('variant')}</th>
                     <th>${t('currentStockCol')}</th>
                     <th>${t('importQty')}</th>
                     <th>${t('difference')}</th>
@@ -302,6 +303,7 @@ function renderImportPreview(data) {
                 <td>${item.sku}</td>
                 <td>${item.name}</td>
                 <td>${item.batch_no || '-'}</td>
+                <td>${item.variant || '-'}</td>
                 <td>${currentQty}</td>
                 <td>${item.import_quantity}</td>
                 <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>
@@ -310,9 +312,10 @@ function renderImportPreview(data) {
                 <td><span class="type-badge ${opClass}">${opText}</span></td>
             `;
         } else {
+            const nameDisplay = item.variant ? `${item.name} <span style="color:#888">[${item.variant}]</span>` : item.name;
             tr.innerHTML = `
                 <td>${item.sku}</td>
-                <td>${item.name}</td>
+                <td>${nameDisplay}</td>
                 <td>${currentQty}</td>
                 <td>${item.import_quantity}</td>
                 <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>

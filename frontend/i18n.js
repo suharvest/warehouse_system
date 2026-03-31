@@ -64,6 +64,7 @@ const translations = {
         reason: '原因',
         batch: '批次',
         batchNo: '批次号',
+        variant: '变体',
         batchDetails: '批次消耗',
 
         // 状态文本
@@ -333,6 +334,7 @@ const translations = {
         reason: 'Reason',
         batch: 'Batch',
         batchNo: 'Batch No.',
+        variant: 'Variant',
         batchDetails: 'Batch Consumption',
 
         statusNormal: 'Normal',
