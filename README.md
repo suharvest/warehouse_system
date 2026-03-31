@@ -22,12 +22,12 @@
 ### 一键部署（预构建镜像）
 
 ```bash
-docker run -d -p 1024:1024 \
+docker run -d -p 1025:1025 \
   -v warehouse_data:/app/data \
   sensecraft-missionpack.seeed.cn/solution/warehouse:latest
 ```
 
-访问 http://localhost:1024，首次需注册管理员账户。
+访问 http://localhost:1025，首次需注册管理员账户。
 
 ### Docker 部署（从源码构建）
 

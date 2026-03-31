@@ -103,7 +103,7 @@ log_info "Container:"
 docker-compose -f "$COMPOSE_FILE" ps
 
 echo ""
-HOST_PORT=$(docker port smart-wms 2>/dev/null | head -1 | sed 's/.*://' || echo "1024")
+HOST_PORT=$(docker port smart-wms 2>/dev/null | head -1 | sed 's/.*://' || echo "1025")
 echo "Access: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_SERVER_IP'):${HOST_PORT}"
 echo ""
 echo "Login credentials:"

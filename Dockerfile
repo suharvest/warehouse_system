@@ -2,7 +2,7 @@
 # 优化版：Alpine 多阶段构建，最小化镜像体积（适合树莓派等小存储设备）
 #
 # 构建: docker build -t warehouse .
-# 运行: docker run -p 1024:1024 -e PORT=1024 -v data:/data warehouse
+# 运行: docker run -p 1025:1025 -e PORT=1025 -v data:/data warehouse
 
 # ---- Stage 1: 构建前端 ----
 FROM node:20-alpine AS frontend-builder
@@ -60,7 +60,7 @@ RUN chown -R appuser:appuser /data /app
 USER appuser
 
 # 环境变量
-ENV PORT=1024
+ENV PORT=1025
 ENV STATIC_DIR=/app/static
 ENV DATABASE_PATH=/data/warehouse.db
 ENV PYTHONUNBUFFERED=1
@@ -73,6 +73,6 @@ ENV LOG_LEVEL=INFO
 EXPOSE ${PORT}
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",1024)}/api/dashboard/stats', timeout=5)" || exit 1
+    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",1025)}/api/dashboard/stats', timeout=5)" || exit 1
 
 CMD .venv/bin/python run_backend.py
