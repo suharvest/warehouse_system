@@ -1912,7 +1912,7 @@ def get_materials_list(
             SELECT m.id as material_id, m.name, m.sku, m.category, m.quantity as total_quantity,
                    m.unit, m.safe_stock, m.location as material_location, m.is_disabled,
                    b.batch_no, b.quantity as batch_quantity, b.location as batch_location,
-                   c.name as contact_name
+                   b.variant, c.name as contact_name
             FROM materials m
             LEFT JOIN batches b ON b.material_id = m.id AND b.is_exhausted = 0
             LEFT JOIN contacts c ON b.contact_id = c.id
@@ -1981,6 +1981,7 @@ def get_materials_list(
                     batch_no=row['batch_no'] or '',
                     contact_name=row['contact_name'] or '',
                     total_quantity=row['total_quantity'],
+                    variant=row['variant'] or '',
                 ))
 
         return {
@@ -2108,7 +2109,7 @@ def get_material_batches(name: str = Query(..., description="产品名称")):
             raise HTTPException(status_code=404, detail="产品不存在")
 
         cursor.execute('''
-            SELECT b.batch_no, b.quantity, b.location, b.created_at, c.name as contact_name
+            SELECT b.batch_no, b.quantity, b.location, b.created_at, b.variant, c.name as contact_name
             FROM batches b
             LEFT JOIN contacts c ON b.contact_id = c.id
             WHERE b.material_id = ? AND b.is_exhausted = 0
@@ -2125,6 +2126,7 @@ def get_material_batches(name: str = Query(..., description="产品名称")):
                     "location": b['location'] or '',
                     "contact_name": b['contact_name'] or '',
                     "created_at": b['created_at'],
+                    "variant": b['variant'] or '',
                 }
                 for b in batches
             ],
@@ -2209,10 +2211,12 @@ def get_product_records(
         # 分页查询
         offset = (page - 1) * page_size
         cursor.execute('''
-            SELECT type, quantity, operator, reason, created_at
-            FROM inventory_records
-            WHERE material_id = ?
-            ORDER BY created_at DESC
+            SELECT r.type, r.quantity, r.operator, r.reason, r.created_at,
+                   b.variant, b.batch_no
+            FROM inventory_records r
+            LEFT JOIN batches b ON r.batch_id = b.id
+            WHERE r.material_id = ?
+            ORDER BY r.created_at DESC
             LIMIT ? OFFSET ?
         ''', (material_id, page_size, offset))
 
@@ -2222,7 +2226,9 @@ def get_product_records(
                 quantity=row['quantity'],
                 operator=row['operator'],
                 reason=row['reason'],
-                created_at=row['created_at']
+                created_at=row['created_at'],
+                variant=row['variant'] or '',
+                batch_no=row['batch_no'] or '',
             )
             for row in cursor.fetchall()
         ]
@@ -2268,7 +2274,7 @@ def get_inventory_records_paginated(
                    r.type, r.quantity, r.operator, r.operator_user_id, r.reason, r.created_at,
                    m.quantity as current_quantity, m.safe_stock, m.is_disabled,
                    r.contact_id, c.name as contact_name,
-                   r.batch_id, b.batch_no,
+                   r.batch_id, b.batch_no, b.variant,
                    u.display_name as operator_display_name, u.username as operator_username
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
@@ -2423,7 +2429,8 @@ def get_inventory_records_paginated(
                     contact_name=row['contact_name'],
                     batch_id=row['batch_id'],
                     batch_no=row['batch_no'],
-                    batch_details=batch_details
+                    batch_details=batch_details,
+                    variant=row['variant'] or '',
                 ))
             filtered_count += 1
 
@@ -2553,9 +2560,9 @@ async def stock_in(
 
         batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id)
         cursor.execute('''
-            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (batch_no, material_id, quantity, quantity, request.contact_id, request.location, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (batch_no, material_id, quantity, quantity, request.contact_id, request.location, request.variant, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         batch_id = cursor.lastrowid
 
         cursor.execute('''
@@ -2587,7 +2594,7 @@ async def stock_in(
                 new_quantity=new_quantity,
                 unit=unit
             ),
-            batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity),
+            batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity, variant=request.variant),
             message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}",
             resolved_from=resolved_from,
         )
@@ -2677,15 +2684,22 @@ async def stock_out(
         ''', (material_id, quantity, operator, operator_user_id, reason, stock_data.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         record_id = cursor.lastrowid
 
-        # FIFO批次消耗
+        # FIFO批次消耗（可选按 variant 过滤）
         batch_consumptions = []
         remaining_to_consume = quantity
 
-        cursor.execute('''
-            SELECT id, batch_no, quantity FROM batches
-            WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0
-            ORDER BY created_at ASC
-        ''', (material_id,))
+        if stock_data.variant:
+            cursor.execute('''
+                SELECT id, batch_no, quantity, variant FROM batches
+                WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0 AND variant = ?
+                ORDER BY created_at ASC
+            ''', (material_id, stock_data.variant))
+        else:
+            cursor.execute('''
+                SELECT id, batch_no, quantity, variant FROM batches
+                WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0
+                ORDER BY created_at ASC
+            ''', (material_id,))
         available_batches = cursor.fetchall()
 
         for batch in available_batches:
@@ -2711,7 +2725,8 @@ async def stock_out(
 
             batch_consumptions.append(BatchConsumption(
                 batch_no=batch_no, batch_id=batch_id,
-                quantity=consume_qty, remaining=new_batch_qty
+                quantity=consume_qty, remaining=new_batch_qty,
+                variant=batch['variant'],
             ))
 
         conn.commit()
@@ -2833,7 +2848,7 @@ def export_materials_excel(
 
             # 查询活跃批次
             cursor.execute('''
-                SELECT b.batch_no, b.quantity, b.location, c.name as contact_name
+                SELECT b.batch_no, b.quantity, b.location, b.variant, c.name as contact_name
                 FROM batches b
                 LEFT JOIN contacts c ON b.contact_id = c.id
                 WHERE b.material_id = ? AND b.is_exhausted = 0
@@ -2849,6 +2864,7 @@ def export_materials_excel(
                         'quantity': batch['quantity'],
                         'location': batch['location'] or '',
                         'contact_name': batch['contact_name'] or '',
+                        'variant': batch['variant'] or '',
                     })
             else:
                 # 无活跃批次（库存为0的物料）
@@ -2858,6 +2874,7 @@ def export_materials_excel(
                     'quantity': 0,
                     'location': row['location'] or '',
                     'contact_name': '',
+                    'variant': '',
                 })
 
     wb = Workbook()
@@ -2865,7 +2882,7 @@ def export_materials_excel(
     ws.title = "库存数据"
 
     # 表头
-    headers = ['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '库存', '存放位置', '联系方']
+    headers = ['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '变体', '库存', '存放位置', '联系方']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
@@ -2877,12 +2894,13 @@ def export_materials_excel(
         ws.cell(row=row_idx, column=4, value=item['unit'])
         ws.cell(row=row_idx, column=5, value=item['safe_stock'])
         ws.cell(row=row_idx, column=6, value=item['batch_no'])
-        ws.cell(row=row_idx, column=7, value=item['quantity'])
-        ws.cell(row=row_idx, column=8, value=item['location'])
-        ws.cell(row=row_idx, column=9, value=item['contact_name'])
+        ws.cell(row=row_idx, column=7, value=item['variant'])
+        ws.cell(row=row_idx, column=8, value=item['quantity'])
+        ws.cell(row=row_idx, column=9, value=item['location'])
+        ws.cell(row=row_idx, column=10, value=item['contact_name'])
 
     # 设置列宽
-    column_widths = [22, 18, 14, 8, 12, 18, 10, 16, 16]
+    column_widths = [22, 18, 14, 8, 12, 18, 10, 10, 16, 16]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -2896,6 +2914,28 @@ def export_materials_excel(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+def extract_variants(names: list) -> tuple:
+    """从同SKU的多个名称中提取公共前缀和变体。
+
+    返回 (common_name, [variant_or_None, ...])。
+    如果所有名称相同，variant 为 None。
+    """
+    unique_names = set(names)
+    if len(unique_names) <= 1:
+        return names[0], [None] * len(names)
+
+    prefix = os.path.commonprefix(list(unique_names))
+    min_len = min(len(n) for n in unique_names)
+
+    # 公共前缀太短（<30%），不做拆分
+    if len(prefix) < min_len * 0.3:
+        return names[0], [n if n != names[0] else None for n in names]
+
+    common_name = prefix.rstrip()
+    variants = [n[len(prefix):].strip() or None for n in names]
+    return common_name, variants
 
 
 @app.post("/api/materials/import-excel/preview", response_model=ExcelImportPreviewResponse)
@@ -2929,7 +2969,7 @@ async def preview_import_excel(
     col_mapping = {
         'name': None, 'sku': None, 'category': None, 'quantity': None,
         'unit': None, 'safe_stock': None, 'location': None,
-        'batch_no': None, 'contact_name': None,
+        'batch_no': None, 'contact_name': None, 'variant': None,
     }
 
     for idx, header in enumerate(header_row):
@@ -2953,6 +2993,8 @@ async def preview_import_excel(
             col_mapping['batch_no'] = idx
         elif '联系方' in header or 'contact' in header_lower or '供应商' in header:
             col_mapping['contact_name'] = idx
+        elif '变体' in header or 'variant' in header_lower:
+            col_mapping['variant'] = idx
 
     if col_mapping['sku'] is None:
         return _error_resp("Excel格式错误：找不到SKU/物料编码列")
@@ -2977,6 +3019,8 @@ async def preview_import_excel(
     new_skus = []
     new_contacts_set = set()
     seen_skus_simple = set()  # 简化模式下追踪已见SKU，检测同SKU多行
+    sku_excel_names = {}  # SKU → [(preview_item_index, excel_name), ...] 用于后处理提取 variant
+    has_variant_col = col_mapping['variant'] is not None
     total_in = 0
     total_out = 0
     total_new = 0
@@ -3022,6 +3066,7 @@ async def preview_import_excel(
             except (ValueError, TypeError):
                 return _error_resp(f"第 {idx} 行【安全库存】格式错误：需要整数，当前值为 '{row[col_mapping['safe_stock']]}'")
 
+            variant_val = _read_cell(row, 'variant') or ""
             contact_id, contact_name = resolve_contact(contact_name_val) if contact_name_val else (None, None)
 
             # 查询物料
@@ -3053,6 +3098,7 @@ async def preview_import_excel(
                                 current_quantity=current_qty, import_quantity=import_qty,
                                 difference=difference, operation=operation,
                                 batch_no=batch_no_val, contact_name=contact_name, contact_id=contact_id,
+                                variant=variant_val or None,
                             ))
                         else:
                             return _error_resp(f"第 {idx} 行：批次号 '{batch_no_val}' 在物料 '{sku}' 中不存在")
@@ -3065,6 +3111,7 @@ async def preview_import_excel(
                             current_quantity=0, import_quantity=import_qty,
                             difference=import_qty, operation='in',
                             is_batch_new=True, contact_name=contact_name, contact_id=contact_id,
+                            variant=variant_val or None,
                         ))
                 else:
                     # 新SKU + 新批次
@@ -3076,6 +3123,7 @@ async def preview_import_excel(
                         current_quantity=None, import_quantity=import_qty,
                         difference=import_qty, operation='new', is_new=True,
                         is_batch_new=True, contact_name=contact_name, contact_id=contact_id,
+                        variant=variant_val or None,
                     )
                     preview_items.append(new_item)
                     new_skus.append(new_item)
@@ -3084,6 +3132,9 @@ async def preview_import_excel(
                 # 同一 SKU 出现多次 → 每行作为新批次（不同位置/联系方）
                 sku_is_duplicate = sku in seen_skus_simple
                 seen_skus_simple.add(sku)
+
+                # 显式 variant 列优先
+                explicit_variant = variant_val if has_variant_col and variant_val else None
 
                 if sku_is_duplicate:
                     # 重复的 SKU 行：作为新批次入库
@@ -3096,6 +3147,7 @@ async def preview_import_excel(
                         difference=import_qty, operation='in',
                         is_batch_new=True,
                         contact_name=contact_name, contact_id=contact_id,
+                        variant=explicit_variant,
                     ))
                 elif material:
                     current_qty = material['quantity']
@@ -3114,6 +3166,7 @@ async def preview_import_excel(
                         current_quantity=current_qty, import_quantity=import_qty,
                         difference=difference, operation=operation,
                         contact_name=contact_name, contact_id=contact_id,
+                        variant=explicit_variant,
                     ))
                 else:
                     total_new += 1
@@ -3123,9 +3176,25 @@ async def preview_import_excel(
                         current_quantity=None, import_quantity=import_qty,
                         difference=import_qty, operation='new', is_new=True,
                         contact_name=contact_name, contact_id=contact_id,
+                        variant=explicit_variant,
                     )
                     preview_items.append(new_item)
                     new_skus.append(new_item)
+
+                # 记录 Excel 原始名称，用于后处理自动提取 variant
+                if not has_variant_col:
+                    sku_excel_names.setdefault(sku, []).append((len(preview_items) - 1, name))
+
+        # 后处理：自动从同SKU不同名称中提取 variant
+        if not has_variant_col:
+            for sku, entries in sku_excel_names.items():
+                names = [e[1] for e in entries]
+                if len(set(names)) <= 1:
+                    continue  # 所有名称相同，无需提取
+                common_name, variants = extract_variants(names)
+                for (item_idx, _), variant in zip(entries, variants):
+                    preview_items[item_idx].variant = variant
+                    preview_items[item_idx].name = common_name
 
         # 查找缺失的SKU（系统中有但导入文件中没有的，且未被禁用的）
         import_skus = {item.sku for item in preview_items}
@@ -3214,13 +3283,13 @@ async def confirm_import_excel(
                 return contact_name_to_id[item.contact_name]
             return None
 
-        def _create_batch(material_id, quantity, location, contact_id):
+        def _create_batch(material_id, quantity, location, contact_id, variant=None):
             """创建新批次并返回 batch_id"""
             batch_no = generate_batch_no(material_id, cursor=cursor)
             cursor.execute('''
-                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (batch_no, material_id, quantity, quantity, contact_id, location, now))
+                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (batch_no, material_id, quantity, quantity, contact_id, location, variant, now))
             return cursor.lastrowid
 
         def _create_record(material_id, rec_type, quantity, reason_suffix, batch_id=None, contact_id=None):
@@ -3264,7 +3333,7 @@ async def confirm_import_excel(
                         new_count += 1
 
                     if item.import_quantity > 0:
-                        batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
+                        batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant)
                         cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
                                        (item.import_quantity, material_id))
                         _create_record(material_id, 'in', item.import_quantity, ' (新建物料)', batch_id, contact_id)
@@ -3277,7 +3346,7 @@ async def confirm_import_excel(
                     if not mat:
                         continue
                     material_id = mat['id']
-                    batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
+                    batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant)
                     cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
                                    (item.import_quantity, material_id))
                     _create_record(material_id, 'in', item.import_quantity, ' (新批次)', batch_id, contact_id)
@@ -3297,8 +3366,8 @@ async def confirm_import_excel(
                         continue
 
                     diff = item.difference
-                    cursor.execute('UPDATE batches SET quantity = ?, location = ? WHERE id = ?',
-                                   (item.import_quantity, item.location or '', batch['id']))
+                    cursor.execute('UPDATE batches SET quantity = ?, location = ?, variant = ? WHERE id = ?',
+                                   (item.import_quantity, item.location or '', item.variant, batch['id']))
                     cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
                                    (diff, material_id))
 
@@ -3338,7 +3407,7 @@ async def confirm_import_excel(
                             cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?', (item.import_quantity, material_id))
                             rec_type = 'in' if diff > 0 else 'out'
                             if diff > 0:
-                                batch_id = _create_batch(material_id, abs(diff), item.location, contact_id)
+                                batch_id = _create_batch(material_id, abs(diff), item.location, contact_id, item.variant)
                             else:
                                 batch_id = None
                             _create_record(material_id, rec_type, abs(diff), ' (SKU已存在，调整库存)', batch_id, contact_id)
@@ -3361,10 +3430,10 @@ async def confirm_import_excel(
                     material_id = material['id']
                     current_qty = material['quantity']
 
-                    # 更新基本信息
+                    # 更新基本信息（含 variant 提取后可能变更的物料名称）
                     cursor.execute('''
-                        UPDATE materials SET safe_stock = ?, category = ?, unit = ?, location = ? WHERE id = ?
-                    ''', (item.safe_stock,
+                        UPDATE materials SET name = ?, safe_stock = ?, category = ?, unit = ?, location = ? WHERE id = ?
+                    ''', (item.name, item.safe_stock,
                           item.category or '未分类', item.unit or '个', item.location or '', material_id))
 
                     if item.operation == 'none':
@@ -3373,7 +3442,7 @@ async def confirm_import_excel(
                     abs_diff = abs(item.difference)
 
                     if item.operation == 'in':
-                        batch_id = _create_batch(material_id, abs_diff, item.location, contact_id)
+                        batch_id = _create_batch(material_id, abs_diff, item.location, contact_id, item.variant)
                         cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
                                        (current_qty + abs_diff, material_id))
                         _create_record(material_id, 'in', abs_diff, '', batch_id, contact_id)
@@ -3448,7 +3517,7 @@ def export_inventory_records(
 
         query = '''
             SELECT r.id, m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.operator_user_id, r.reason, r.created_at,
-                   c.name as contact_name, r.batch_id, b.batch_no,
+                   c.name as contact_name, r.batch_id, b.batch_no, b.variant,
                    u.display_name as operator_display_name, u.username as operator_username
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
@@ -3497,7 +3566,7 @@ def export_inventory_records(
     ws = wb.active
     ws.title = "出入库记录"
 
-    headers = ['物料名称', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '操作人', '原因', '时间']
+    headers = ['物料名称', '物料编码', '商品类型', '记录类型', '数量', '批次', '变体', '联系方', '操作人', '原因', '时间']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
@@ -3515,15 +3584,16 @@ def export_inventory_records(
         ws.cell(row=row_idx, column=4, value='入库' if record['type'] == 'in' else '出库')
         ws.cell(row=row_idx, column=5, value=record['quantity'])
         ws.cell(row=row_idx, column=6, value=batch_info)
-        ws.cell(row=row_idx, column=7, value=record['contact_name'] or '')
+        ws.cell(row=row_idx, column=7, value=record['variant'] or '')
+        ws.cell(row=row_idx, column=8, value=record['contact_name'] or '')
         # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段
         operator_name = record['operator_display_name'] or record['operator_username'] or record['operator']
-        ws.cell(row=row_idx, column=8, value=operator_name)
-        ws.cell(row=row_idx, column=9, value=record['reason'])
-        ws.cell(row=row_idx, column=10, value=record['created_at'])
+        ws.cell(row=row_idx, column=9, value=operator_name)
+        ws.cell(row=row_idx, column=10, value=record['reason'])
+        ws.cell(row=row_idx, column=11, value=record['created_at'])
 
     # 设置列宽
-    column_widths = [22, 18, 14, 12, 10, 28, 16, 14, 24, 22]
+    column_widths = [22, 18, 14, 12, 10, 28, 10, 16, 14, 24, 22]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
