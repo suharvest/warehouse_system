@@ -158,6 +158,7 @@ class BaseProvider(ABC):
         fuzzy: bool,
         location: str | None = None,
         contact_id: int | None = None,
+        variant: str | None = None,
     ) -> dict:
         """产品入库。
 
@@ -173,6 +174,7 @@ class BaseProvider(ABC):
         reason: str,
         operator: str,
         fuzzy: bool,
+        variant: str | None = None,
     ) -> dict:
         """产品出库。
 

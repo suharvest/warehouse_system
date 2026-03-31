@@ -110,12 +110,14 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
         product_name: 产品名称（支持模糊输入，如"螺丝"、"luo si"等）
         show_batches: 是否同时返回批次明细（默认 false）。
                       当用户询问「在哪里」「什么位置」「库位」「哪个货架」等位置相关问题时，
-                      建议设为 true，因为不同批次可能存放在不同位置。
+                      或提到「颜色」「规格」「型号」「变体」等区分信息时，
+                      建议设为 true，因为不同批次可能存放在不同位置或属于不同变体。
 
     返回:
         success=true 时：产品库存详情（name, sku, current_stock, unit, safe_stock,
         location, today_in, today_out, status 等）。若 show_batches=true，额外包含
-        batches 列表（每个批次含 batch_no, quantity, location, contact_name）。
+        batches 列表（每个批次含 batch_no, quantity, location, contact_name, variant）。
+        variant 为变体标识（如颜色"红"、规格"大号"），无变体时为空字符串。
         success=false 时：如有候选项会在 candidates 中列出
     """
     return _provider.query_stock(product_name, show_batches)
@@ -124,7 +126,8 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
 @mcp.tool()
 def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
              operator: str = "MCP系统", fuzzy: bool = True,
-             location: str = None, contact_id: int = None) -> dict:
+             location: str = None, contact_id: int = None,
+             variant: str = None) -> dict:
     """
     产品入库。可直接传入模糊名称，自动解析为精确产品。
 
@@ -136,20 +139,24 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
         fuzzy: 是否启用模糊匹配（默认 true）
         location: 存放位置（可选，如"A区-01架"）
         contact_id: 关联联系方 ID（可选，如供应商 ID）
+        variant: 变体标识（可选，如"红"、"大号"等）。
+                 同一产品可能有多个变体（如不同颜色），入库时可指定变体以区分批次。
 
     返回:
-        success=true 时：入库成功，含批次信息和产品详情
+        success=true 时：入库成功，含批次信息（含 variant）和产品详情
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
     return _provider.stock_in(product_name, quantity, reason, operator, fuzzy,
-                              location, contact_id)
+                              location, contact_id, variant)
 
 
 @mcp.tool()
 def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
-              operator: str = "MCP系统", fuzzy: bool = True) -> dict:
+              operator: str = "MCP系统", fuzzy: bool = True,
+              variant: str = None) -> dict:
     """
-    产品出库。可直接传入模糊名称，自动解析为精确产品。按 FIFO 消耗批次。
+    产品出库。可直接传入模糊名称，自动解析为精确产品。
+    默认按 FIFO 消耗批次；若指定 variant，则仅从匹配变体的批次中 FIFO 消耗。
 
     参数:
         product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
@@ -157,12 +164,14 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
         reason: 出库原因（默认"销售出库"）
         operator: 操作人（默认"MCP系统"）
         fuzzy: 是否启用模糊匹配（默认 true）
+        variant: 变体过滤（可选，如"红"）。指定后仅消耗该变体的批次。
+                 例如"出库2个红色指示灯"时设为"红"。
 
     返回:
-        success=true 时：出库成功，含批次消耗详情
+        success=true 时：出库成功，含批次消耗详情（每个消耗批次含 variant 字段）
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
-    return _provider.stock_out(product_name, quantity, reason, operator, fuzzy)
+    return _provider.stock_out(product_name, quantity, reason, operator, fuzzy, variant)
 
 
 @mcp.tool()
@@ -177,6 +186,7 @@ def search(query: str = None, entity_type: str = "material",
     常见用法：
     - 搜物料："帮我找螺丝相关的产品" → search(query="螺丝", entity_type="material")
     - 查库存告急："哪些产品库存不足" → search(status="danger,warning", entity_type="material")
+    - 查变体："指示灯有哪些颜色" → search(query="指示灯", include_batches=True)
     - 找供应商："搜索张三" → search(query="张三", entity_type="contact", contact_type="supplier")
     - 找操作员："小李是谁" → search(query="小李", entity_type="operator")
 
@@ -192,7 +202,8 @@ def search(query: str = None, entity_type: str = "material",
         max_results: 返回结果上限（0 表示使用配置默认值）
 
     返回:
-        items: 匹配结果列表（include_batches=true 时每个物料含 batches 字段）
+        items: 匹配结果列表（include_batches=true 时每个物料含 batches 字段，
+               每个批次含 variant 变体标识）
         total: 总匹配数（可能大于返回的 items 数量）
     """
     return _provider.search(query, entity_type, category, status, contact_type, fuzzy,
