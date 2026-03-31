@@ -140,7 +140,7 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    def query_stock(self, product_name: str, show_batches: bool = False) -> dict:
+    def query_stock(self, product_name: str, show_batches: bool = False, variant: str | None = None) -> dict:
         """查询产品库存。
 
         返回: {success, product, message}
