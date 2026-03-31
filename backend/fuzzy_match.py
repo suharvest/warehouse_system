@@ -54,7 +54,7 @@ class FuzzyMatcher:
                     "entity_type": "material",
                     "entity_id": mid,
                     "extra": extra,
-                    "pinyin": self._get_pinyin(name),
+                    "pinyin": self._get_pinyin(self._normalize(name)),
                 })
                 # 索引 sku（如果 sku 与 name 不同）
                 if sku and sku != name:
@@ -63,7 +63,7 @@ class FuzzyMatcher:
                         "entity_type": "material",
                         "entity_id": mid,
                         "extra": extra,
-                        "pinyin": self._get_pinyin(sku),
+                        "pinyin": self._get_pinyin(self._normalize(sku)),
                     })
 
             # 索引 contacts: name
@@ -77,7 +77,7 @@ class FuzzyMatcher:
                     "entity_type": "contact",
                     "entity_id": cid,
                     "extra": {"is_supplier": bool(row['is_supplier']), "is_customer": bool(row['is_customer'])},
-                    "pinyin": self._get_pinyin(name),
+                    "pinyin": self._get_pinyin(self._normalize(name)),
                 })
 
             # 索引 users: display_name 和 username（仅 operate/admin 且未禁用）
@@ -94,7 +94,7 @@ class FuzzyMatcher:
                         "entity_type": "operator",
                         "entity_id": uid,
                         "extra": {},
-                        "pinyin": self._get_pinyin(display_name),
+                        "pinyin": self._get_pinyin(self._normalize(display_name)),
                     })
                 # 索引 username（如果与 display_name 不同）
                 if username != display_name:
@@ -103,7 +103,7 @@ class FuzzyMatcher:
                         "entity_type": "operator",
                         "entity_id": uid,
                         "extra": {},
-                        "pinyin": self._get_pinyin(username),
+                        "pinyin": self._get_pinyin(self._normalize(username)),
                     })
         finally:
             conn.close()
@@ -119,13 +119,38 @@ class FuzzyMatcher:
         """写操作后调用以使缓存失效"""
         self._dirty = True
 
+    def _calc_score(self, norm_query: str, query_pinyin: str,
+                    norm_name: str, name_pinyin: str) -> float:
+        """计算综合匹配分数。
+
+        策略:
+        1. 文本包含（query⊂name 或 name⊂query）→ 95 分（最强信号）
+        2. 文本相似度: ratio * 0.4 + partial_ratio * 0.6（partial 容易虚高，降权混合）
+        3. 拼音相似度: max(ratio * 0.85, token_sort_ratio * 0.8)
+        取 2 和 3 的较大值。
+        """
+        # 文本包含检查
+        if norm_query in norm_name or norm_name in norm_query:
+            return 95.0
+
+        # 文本层
+        text_ratio = fuzz.ratio(norm_query, norm_name)
+        text_partial = fuzz.partial_ratio(norm_query, norm_name)
+        text_score = text_ratio * 0.4 + text_partial * 0.6
+
+        # 拼音层
+        pinyin_ratio = fuzz.ratio(query_pinyin, name_pinyin) * 0.85
+        pinyin_token = fuzz.token_sort_ratio(query_pinyin, name_pinyin) * 0.8
+        pinyin_score = max(pinyin_ratio, pinyin_token)
+
+        return max(text_score, pinyin_score)
+
     def search(self, query: str, entity_type: str = "all",
                top_k: int = 5, threshold: float = 50.0) -> list[dict]:
         """
         模糊搜索，返回 top_k 个候选。
 
-        算法: normalize 后用 fuzz.ratio 计算文本相似度，
-        再与拼音相似度 * 0.9 取较大值。
+        算法: 文本包含 > 文本相似度(ratio+partial混合) > 拼音相似度(ratio+token_sort)
         过滤 score < threshold 的结果，按 score 降序排序。
         """
         self._ensure_index()
@@ -139,10 +164,8 @@ class FuzzyMatcher:
                 continue
 
             norm_name = self._normalize(entry["name"])
-            text_score = fuzz.ratio(norm_query, norm_name)
-            norm_pinyin = self._get_pinyin(norm_name)
-            pinyin_score = fuzz.ratio(query_pinyin, norm_pinyin) * 0.9
-            score = max(text_score, pinyin_score)
+            name_pinyin = entry["pinyin"]
+            score = self._calc_score(norm_query, query_pinyin, norm_name, name_pinyin)
 
             if score >= threshold:
                 results.append({
@@ -183,9 +206,13 @@ class FuzzyMatcher:
             }
 
         best = candidates[0]
-        second_score = candidates[1]["score"] if len(candidates) > 1 else 0
-        gap = best["score"] - second_score
-        confident = best["score"] > self._confident_score and gap > self._confident_gap
+        if len(candidates) == 1:
+            # 唯一候选，无歧义，降低门槛
+            confident = best["score"] >= 50.0
+        else:
+            second_score = candidates[1]["score"]
+            gap = best["score"] - second_score
+            confident = best["score"] > self._confident_score and gap > self._confident_gap
 
         return {
             "best_match": best,
