@@ -99,28 +99,34 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 
 
 @mcp.tool()
-def query_stock(product_name: str, show_batches: bool = False) -> dict:
+def query_stock(product_name: str, show_batches: bool = False,
+                variant: str = None) -> dict:
     """
     查询产品库存详情。支持模糊名称输入，内建自动解析。
 
     可直接传入不精确的名称（如语音识别结果），工具会自动模糊匹配。
     无需先调用 resolve_name。
 
+    注意：同一产品可能有多个变体（如不同规格型号），也可能分布在不同位置。
+    当有多个批次时，返回结果会自动包含每个批次的数量和位置明细。
+
     参数:
-        product_name: 产品名称（支持模糊输入，如"螺丝"、"luo si"等）
-        show_batches: 是否同时返回批次明细（默认 false）。
-                      当用户询问「在哪里」「什么位置」「库位」「哪个货架」等位置相关问题时，
-                      或提到「颜色」「规格」「型号」「变体」等区分信息时，
-                      建议设为 true，因为不同批次可能存放在不同位置或属于不同变体。
+        product_name: 产品名称（支持模糊输入，如"螺丝"、"luo si"等）。
+                      不要把变体/规格型号放在名称里，应使用 variant 参数。
+                      例如查"空气开关 D10A2P"时：product_name="空气开关", variant="D10A2P"
+        show_batches: 是否在返回结果中包含完整批次列表（默认 false）。
+                      多批次时消息中已自动包含明细，此参数控制是否额外返回结构化数据。
+        variant: 变体/规格型号筛选（可选，如"D10A2P"、"红"等）。
+                 指定后只统计匹配变体的库存，其他变体不计入。
+                 当用户提到具体型号、颜色、规格时使用此参数。
 
     返回:
         success=true 时：产品库存详情（name, sku, current_stock, unit, safe_stock,
-        location, today_in, today_out, status 等）。若 show_batches=true，额外包含
-        batches 列表（每个批次含 batch_no, quantity, location, contact_name, variant）。
-        variant 为变体标识（如颜色"红"、规格"大号"），无变体时为空字符串。
+        location, today_in, today_out, status 等）。多批次时消息自动包含每批明细。
+        指定 variant 时，current_stock 为该变体的库存。
         success=false 时：如有候选项会在 candidates 中列出
     """
-    return _provider.query_stock(product_name, show_batches)
+    return _provider.query_stock(product_name, show_batches, variant)
 
 
 @mcp.tool()

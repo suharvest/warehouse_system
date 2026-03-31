@@ -33,7 +33,7 @@ class DefaultProvider(BaseProvider):
     def resolve_name(self, text, entity_type="all"):
         return self.http_get("/fuzzy-match", params={"q": text, "entity_type": entity_type})
 
-    def query_stock(self, product_name, show_batches=False):
+    def query_stock(self, product_name, show_batches=False, variant=None):
         # 先尝试精确查询
         data = self.http_get("/materials/product-stats", params={"name": product_name})
 
@@ -71,9 +71,29 @@ class DefaultProvider(BaseProvider):
                     "message": f"系统中没有与 '{product_name}' 相似的产品",
                 }
 
-        quantity = data["current_stock"]
-        safe_stock = data.get("safe_stock")
+        unit = data["unit"]
 
+        # 始终获取批次明细（用于变体筛选和多位置展示）
+        batches_data = self.http_get("/materials/batches", params={"name": data["name"]})
+        batches_list = []
+        if isinstance(batches_data, dict) and "error" not in batches_data:
+            batches_list = batches_data.get("batches", [])
+
+        # 变体筛选
+        if variant and batches_list:
+            variant_lower = variant.replace(" ", "").lower()
+            batches_list = [
+                b for b in batches_list
+                if b.get("variant") and b["variant"].replace(" ", "").lower() == variant_lower
+            ]
+
+        # 计算库存（变体筛选后的，或总库存）
+        if variant:
+            quantity = sum(b["quantity"] for b in batches_list)
+        else:
+            quantity = data["current_stock"]
+
+        safe_stock = data.get("safe_stock")
         if safe_stock is not None:
             if quantity >= safe_stock:
                 status = "正常"
@@ -84,12 +104,36 @@ class DefaultProvider(BaseProvider):
         else:
             status = None
 
-        location = data.get("location", "")
-        loc_info = f"，位置：{location}" if location else ""
+        # 构建消息
+        name_display = data["name"]
+        if variant:
+            name_display += f" [{variant}]"
+
         status_info = f"，状态：{status}" if status else ""
-        msg = f"查询成功：{data['name']} 当前库存 {quantity} {data['unit']}{status_info}{loc_info}"
+
+        # 多批次时展示每批明细（位置、变体），单批次时只显示位置
+        if len(batches_list) > 1:
+            msg = f"查询成功：{name_display} 当前库存 {quantity} {unit}{status_info}"
+            details = []
+            for b in batches_list:
+                label = b["batch_no"]
+                if b.get("variant"):
+                    label += f" [{b['variant']}]"
+                details.append(f"{label}: {b['quantity']}{unit} @ {b['location'] or '未指定'}")
+            msg += f"\n批次明细：\n" + "\n".join(f"  - {d}" for d in details)
+        elif len(batches_list) == 1:
+            loc = batches_list[0].get("location", "")
+            loc_info = f"，位置：{loc}" if loc else ""
+            msg = f"查询成功：{name_display} 当前库存 {quantity} {unit}{status_info}{loc_info}"
+        else:
+            location = data.get("location", "")
+            loc_info = f"，位置：{location}" if location else ""
+            msg = f"查询成功：{name_display} 当前库存 {quantity} {unit}{status_info}{loc_info}"
 
         product_data = {**data}
+        if variant:
+            product_data["variant"] = variant
+            product_data["current_stock"] = quantity
         if status:
             product_data["status"] = status
         else:
@@ -102,21 +146,8 @@ class DefaultProvider(BaseProvider):
             "message": msg,
         }
 
-        if show_batches:
-            batches_data = self.http_get("/materials/batches", params={"name": data["name"]})
-            if isinstance(batches_data, dict) and "error" not in batches_data:
-                batches_list = batches_data.get("batches", [])
-                result["batches"] = batches_list
-                if batches_list:
-                    details = []
-                    for b in batches_list:
-                        label = b['batch_no']
-                        if b.get('variant'):
-                            label += f" [{b['variant']}]"
-                        details.append(f"{label}: {b['quantity']}{data['unit']} @ {b['location'] or '未指定'}")
-                    result["message"] += f"\n批次明细：\n" + "\n".join(f"  - {d}" for d in details)
-            else:
-                result["batches"] = []
+        if show_batches or variant:
+            result["batches"] = batches_list
 
         return result
 
