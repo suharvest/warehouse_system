@@ -81,7 +81,8 @@ class MCPProcessManager:
         env = os.environ.copy()
         env['MCP_ENDPOINT'] = endpoint
         env['WAREHOUSE_API_KEY'] = api_key
-        env['WAREHOUSE_API_URL'] = 'http://localhost:2124/api'
+        port = os.environ.get('PORT', '2124')
+        env['WAREHOUSE_API_URL'] = f'http://localhost:{port}/api'
 
         try:
             # 传 warehouse_mcp.py 路径作为参数，避免依赖 mcp_config.json 的硬编码路径

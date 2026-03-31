@@ -2,9 +2,9 @@
 # 使用方式: docker-compose -f docker-compose.multi.yml up -d
 #
 # 默认 3 个实例（一个容器 = 一个完整仓库）:
-#   - 仓库A: http://localhost:1024
-#   - 仓库B: http://localhost:1025
-#   - 仓库C: http://localhost:1026
+#   - 仓库A: http://localhost:1025
+#   - 仓库B: http://localhost:1026
+#   - 仓库C: http://localhost:1027
 #
 # 需要更多实例？复制一个 service 块，改端口和 volume 名。
 
@@ -22,31 +22,31 @@ services:
     <<: *warehouse-base
     container_name: warehouse-a
     ports:
-      - "1024:1024"
+      - "1025:1025"
     volumes:
       - data_a:/data
     environment:
-      PORT: 1024
+      PORT: 1025
 
   warehouse-b:
     <<: *warehouse-base
     container_name: warehouse-b
     ports:
-      - "1025:1025"
+      - "1026:1026"
     volumes:
       - data_b:/data
     environment:
-      PORT: 1025
+      PORT: 1026
 
   warehouse-c:
     <<: *warehouse-base
     container_name: warehouse-c
     ports:
-      - "1026:1026"
+      - "1027:1027"
     volumes:
       - data_c:/data
     environment:
-      PORT: 1026
+      PORT: 1027
 
 volumes:
   data_a:

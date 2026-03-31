@@ -7,11 +7,11 @@ services:
     image: sensecraft-missionpack.seeed.cn/solution/warehouse:latest
     container_name: smart-wms
     ports:
-      - "1024:1024"
+      - "1025:1025"
     volumes:
       - ../data:/data
     environment:
-      - PORT=1024
+      - PORT=1025
       - DATABASE_PATH=/data/warehouse.db
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-10}
@@ -26,7 +26,7 @@ services:
           cpus: '0.25'
           memory: 128M
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:1024/api/dashboard/stats', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:1025/api/dashboard/stats', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
