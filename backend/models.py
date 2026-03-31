@@ -90,6 +90,8 @@ class ProductRecord(BaseModel):
     operator: str
     reason: Optional[str]
     created_at: str
+    variant: Optional[str] = None
+    batch_no: Optional[str] = None
 
 
 # ============ Stock Operation Models ============
@@ -103,6 +105,7 @@ class StockOperationRequest(BaseModel):
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 批次存放位置
     batch_no: Optional[str] = None  # 自定义批次号（留空自动生成）
+    variant: Optional[str] = None   # 变体标识（如颜色"红"），写入批次
     fuzzy: bool = True  # 是否启用模糊匹配
 
 
@@ -147,6 +150,7 @@ class ImportPreviewItem(BaseModel):
     contact_name: Optional[str] = None     # 联系方名称
     contact_id: Optional[int] = None       # 解析后的联系方ID
     is_batch_new: bool = False             # 是否为新批次
+    variant: Optional[str] = None          # 变体标识（如颜色"红"、规格"大号"）
 
 
 class MissingSkuItem(BaseModel):
@@ -202,6 +206,7 @@ class ManualRecordRequest(BaseModel):
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 入库时可选更新库位
     batch_no: Optional[str] = None  # 入库时可选指定批次号（留空自动生成）
+    variant: Optional[str] = None   # 变体标识（如颜色"红"），入库时写入批次
 
 
 # ============ Pagination Models ============
@@ -239,6 +244,7 @@ class MaterialItemWithDisabled(BaseModel):
     batch_no: Optional[str] = None
     contact_name: Optional[str] = None
     total_quantity: Optional[int] = None  # 物料总库存（所有批次之和）
+    variant: Optional[str] = None
 
 
 class InventoryRecordItem(BaseModel):
@@ -261,6 +267,7 @@ class InventoryRecordItem(BaseModel):
     batch_id: Optional[int] = None
     batch_no: Optional[str] = None
     batch_details: Optional[str] = None  # 出库时的批次消耗详情
+    variant: Optional[str] = None
 
 
 class PaginatedProductRecordsResponse(BaseModel):
@@ -437,6 +444,7 @@ class BatchInfo(BaseModel):
     batch_no: str
     batch_id: int
     quantity: int
+    variant: Optional[str] = None
 
 
 class BatchConsumption(BaseModel):
@@ -445,6 +453,7 @@ class BatchConsumption(BaseModel):
     batch_id: int
     quantity: int  # 从该批次消耗的数量
     remaining: int  # 该批次剩余数量
+    variant: Optional[str] = None
 
 
 class StockInResponse(BaseModel):
@@ -485,6 +494,7 @@ class BatchItem(BaseModel):
     contact_name: Optional[str] = None
     is_exhausted: bool
     created_at: str
+    variant: Optional[str] = None
 
 
 class OperatorListItem(BaseModel):

@@ -188,6 +188,12 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE batches ADD COLUMN location TEXT')
 
+    # 检查并添加 variant 字段到 batches（批次级别变体标识，如颜色/规格）
+    try:
+        cursor.execute('SELECT variant FROM batches LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE batches ADD COLUMN variant TEXT')
+
     # 历史数据清洗：为无批次覆盖的库存创建 LEGACY 批次
     # 比较 materials.quantity 与 SUM(active batch qty)，差值部分补 LEGACY 批次
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
