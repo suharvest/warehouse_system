@@ -108,10 +108,12 @@ class DefaultProvider(BaseProvider):
                 batches_list = batches_data.get("batches", [])
                 result["batches"] = batches_list
                 if batches_list:
-                    details = [
-                        f"{b['batch_no']}: {b['quantity']}{data['unit']} @ {b['location'] or '未指定'}"
-                        for b in batches_list
-                    ]
+                    details = []
+                    for b in batches_list:
+                        label = b['batch_no']
+                        if b.get('variant'):
+                            label += f" [{b['variant']}]"
+                        details.append(f"{label}: {b['quantity']}{data['unit']} @ {b['location'] or '未指定'}")
                     result["message"] += f"\n批次明细：\n" + "\n".join(f"  - {d}" for d in details)
             else:
                 result["batches"] = []
@@ -119,7 +121,7 @@ class DefaultProvider(BaseProvider):
         return result
 
     def stock_in(self, product_name, quantity, reason, operator, fuzzy,
-                 location=None, contact_id=None):
+                 location=None, contact_id=None, variant=None):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
@@ -131,20 +133,23 @@ class DefaultProvider(BaseProvider):
             payload["location"] = location
         if contact_id is not None:
             payload["contact_id"] = contact_id
+        if variant is not None:
+            payload["variant"] = variant
 
         return self.http_post("/materials/stock-in", payload)
 
-    def stock_out(self, product_name, quantity, reason, operator, fuzzy):
-        return self.http_post(
-            "/materials/stock-out",
-            {
-                "product_name": product_name,
-                "quantity": quantity,
-                "reason": reason,
-                "operator": operator,
-                "fuzzy": fuzzy,
-            },
-        )
+    def stock_out(self, product_name, quantity, reason, operator, fuzzy,
+                  variant=None):
+        payload = {
+            "product_name": product_name,
+            "quantity": quantity,
+            "reason": reason,
+            "operator": operator,
+            "fuzzy": fuzzy,
+        }
+        if variant is not None:
+            payload["variant"] = variant
+        return self.http_post("/materials/stock-out", payload)
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,
                include_batches=False, max_results=0):
