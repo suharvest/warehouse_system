@@ -211,6 +211,9 @@ class FuzzyMatcher:
         if len(candidates) == 1:
             # 唯一候选，无歧义，降低门槛
             confident = best["score"] >= 50.0
+        elif best["score"] >= 95.0:
+            # 强匹配（近似完全包含），直接确认，不被短子串干扰
+            confident = True
         else:
             second_score = candidates[1]["score"]
             gap = best["score"] - second_score
