@@ -27,8 +27,8 @@ class FuzzyMatcher:
 
     @staticmethod
     def _normalize(text: str) -> str:
-        """去除空格、横杠、斜杠、括号等干扰字符，统一比较基准"""
-        return re.sub(r'[\s\-/\(\)（）\[\]【】]+', '', text)
+        """去除空格、横杠、斜杠、括号、逗号等干扰字符，统一比较基准"""
+        return re.sub(r'[\s\-/\(\)（）\[\]【】,，、]+', '', text)
 
     def _get_pinyin(self, text: str) -> str:
         """将文本转为无声调拼音字符串"""
