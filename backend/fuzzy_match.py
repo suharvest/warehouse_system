@@ -222,7 +222,11 @@ class FuzzyMatcher:
         else:
             second_score = candidates[1]["score"]
             gap = best["score"] - second_score
-            confident = best["score"] > self._confident_score and gap > self._confident_gap
+            # 梯度 gap：score 越高要求的差距越小
+            if best["score"] >= 90.0:
+                confident = gap > 5.0
+            else:
+                confident = best["score"] > self._confident_score and gap > self._confident_gap
 
         return {
             "best_match": best,
