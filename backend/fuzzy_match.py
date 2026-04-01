@@ -28,7 +28,7 @@ class FuzzyMatcher:
     @staticmethod
     def _normalize(text: str) -> str:
         """去除空格、横杠、斜杠、括号、逗号等干扰字符，统一比较基准"""
-        return re.sub(r'[\s\-－/／\(\)（）\[\]【】,，、]+', '', text)
+        return re.sub(r'[\s\-－/／\(\)（）\[\]【】,，、]+', '', text).lower()
 
     def _get_pinyin(self, text: str) -> str:
         """将文本转为无声调拼音字符串"""
@@ -213,7 +213,10 @@ class FuzzyMatcher:
             }
 
         best = candidates[0]
-        if len(candidates) == 1:
+        if len(candidates) >= 2 and best["score"] == candidates[1]["score"]:
+            # 并列第一，无法区分，交给 LLM 判断
+            confident = False
+        elif len(candidates) == 1:
             # 唯一候选，无歧义，但仍需足够相似
             confident = best["score"] >= 75.0
         elif best["score"] >= 95.0:
