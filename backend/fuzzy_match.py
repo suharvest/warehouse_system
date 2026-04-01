@@ -11,7 +11,7 @@ from pypinyin import lazy_pinyin, Style
 class FuzzyMatcher:
     """模糊匹配器，支持文本编辑距离和中文拼音相似度两层匹配"""
 
-    def __init__(self, get_conn, *, confident_score: float = 85.0,
+    def __init__(self, get_conn, *, confident_score: float = 80.0,
                  confident_gap: float = 10.0):
         """
         Args:
