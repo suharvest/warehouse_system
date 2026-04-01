@@ -161,6 +161,8 @@ class FuzzyMatcher:
         self._ensure_index()
 
         norm_query = self._normalize(query)
+        if not norm_query:
+            return []
         query_pinyin = self._get_pinyin(norm_query)
         results = []
 
@@ -212,8 +214,8 @@ class FuzzyMatcher:
 
         best = candidates[0]
         if len(candidates) == 1:
-            # 唯一候选，无歧义，降低门槛
-            confident = best["score"] >= 50.0
+            # 唯一候选，无歧义，但仍需足够相似
+            confident = best["score"] >= 75.0
         elif best["score"] >= 95.0:
             # 强匹配（近似完全包含），直接确认，不被短子串干扰
             confident = True
