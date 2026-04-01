@@ -129,11 +129,14 @@ class FuzzyMatcher:
         3. 拼音相似度: max(ratio * 0.85, token_sort_ratio * 0.8)
         取 2 和 3 的较大值。
         """
-        # 文本包含检查：长度越接近得分越高（90-100），避免短名称和长名称同分
-        if norm_query in norm_name or norm_name in norm_query:
-            longer = max(len(norm_query), len(norm_name))
-            shorter = min(len(norm_query), len(norm_name))
-            return 90.0 + 10.0 * (shorter / longer)
+        # 文本包含检查
+        if norm_query in norm_name:
+            # query ⊂ name（如 "轴承6309" ⊂ "轴承6309AEMC3"）→ 强信号 90-100
+            return 90.0 + 10.0 * (len(norm_query) / len(norm_name))
+        if norm_name in norm_query:
+            # name ⊂ query（如 "轴承" ⊂ "轴承22062RS"）→ 弱信号，按长度比降权
+            ratio = len(norm_name) / len(norm_query)
+            return 50.0 + 30.0 * ratio  # 50-80 分区间
 
         # 文本层
         text_ratio = fuzz.ratio(norm_query, norm_name)
