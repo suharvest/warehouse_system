@@ -2011,12 +2011,12 @@ def get_product_stats(name: str = Query(..., description="产品名称")):
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 查询产品基本信息
+        # 查询产品基本信息（支持 name 或 SKU）
         cursor.execute('''
             SELECT id, name, sku, quantity, unit, safe_stock, location
             FROM materials
-            WHERE name = ?
-        ''', (name,))
+            WHERE name = ? OR sku = ?
+        ''', (name, name))
 
         product = cursor.fetchone()
         if not product:
