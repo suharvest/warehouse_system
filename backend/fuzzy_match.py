@@ -195,6 +195,11 @@ class FuzzyMatcher:
                 seen.add(key)
                 deduped.append(r)
 
+        # 过滤掉与第一名差距过大的候选（超过 20 分视为噪音）
+        if deduped:
+            top_score = deduped[0]["score"]
+            deduped = [r for r in deduped if top_score - r["score"] <= 20]
+
         return deduped[:top_k]
 
     def resolve(self, query: str, entity_type: str = "all") -> dict:

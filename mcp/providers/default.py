@@ -58,12 +58,12 @@ class DefaultProvider(BaseProvider):
                 # 模糊匹配也无法确定，返回候选列表
                 candidates = resolve_result.get("candidates", [])
                 if candidates:
-                    names = [c["name"] for c in candidates[:5]]
+                    ranked = [f"{c['name']}({c['score']}分)" for c in candidates[:5]]
                     return {
                         "success": False,
                         "error": f"名称 '{product_name}' 不够明确",
                         "candidates": candidates[:5],
-                        "message": f"找到多个候选：{', '.join(names)}。请根据上下文和候选分数判断最佳匹配，如无法确定再询问用户",
+                        "message": f"按相似度排序的候选：{', '.join(ranked)}。请根据分数和上下文判断最佳匹配，优先选择高分项，如无法确定再询问用户",
                     }
                 return {
                     "success": False,
