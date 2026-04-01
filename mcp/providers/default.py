@@ -63,7 +63,7 @@ class DefaultProvider(BaseProvider):
                         "success": False,
                         "error": f"名称 '{product_name}' 不够明确",
                         "candidates": candidates[:5],
-                        "message": f"找到多个候选：{', '.join(names)}，请指定更精确的名称",
+                        "message": f"找到多个候选：{', '.join(names)}。请根据上下文和候选分数判断最佳匹配，如无法确定再询问用户",
                     }
                 return {
                     "success": False,
