@@ -1,5 +1,6 @@
 # All-in-one 生产镜像：uvicorn 同时 serve API + 前端静态文件
 # 优化版：Alpine 多阶段构建，最小化镜像体积（适合树莓派等小存储设备）
+# 分层策略：依赖层(很少变) → 前端层(偶尔变) → 后端代码层(频繁变)
 #
 # 构建: docker build -t warehouse .
 # 运行: docker run -p 1025:1025 -e PORT=1025 -v data:/data warehouse
@@ -12,20 +13,20 @@ RUN npm ci --prefer-offline 2>/dev/null || npm install
 COPY frontend/ ./
 RUN npm run build
 
-# ---- Stage 2: 构建 Python 依赖 ----
+# ---- Stage 2: 构建 Python 依赖（不含业务代码） ----
 FROM python:3.12-alpine AS python-builder
 
 # 安装编译依赖（bcrypt、rapidfuzz 等 C 扩展需要）
 RUN apk add --no-cache gcc musl-dev libffi-dev make
 
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
-COPY backend/ ./backend/
-COPY mcp/ ./mcp/
 
-# 用 uv 安装依赖，完成后 uv 不会留在最终镜像
+# 只复制依赖声明文件（不含业务代码 → 改 .py 不会破坏此层缓存）
+COPY pyproject.toml uv.lock ./
+
+# 用 uv 安装依赖，--no-install-project 跳过项目本身（无需源码）
 RUN pip install --no-cache-dir uv && \
-    uv sync --frozen && \
+    uv sync --frozen --no-install-project && \
     # 清理 .venv 中不需要的文件，节省空间
     find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
     find .venv -type f -name "*.pyc" -delete 2>/dev/null; \
@@ -47,14 +48,16 @@ RUN apk add --no-cache libffi libgcc ca-certificates
 RUN adduser -D -u 1000 appuser && mkdir -p /data
 WORKDIR /app
 
-# 只复制运行时需要的文件
+# Layer 1: Python 依赖（最稳定，几乎不变）
 COPY --from=python-builder /app/.venv /app/.venv
+
+# Layer 2: 前端构建产物（偶尔变）
+COPY --from=frontend-builder /build/dist /app/static
+
+# Layer 3: 后端代码（最常变，放最后 → 只改 .py 时只推/拉这几层）
 COPY backend/ ./backend/
 COPY mcp/ ./mcp/
 COPY run_backend.py ./
-
-# 复制前端构建产物
-COPY --from=frontend-builder /build/dist /app/static
 
 RUN chown -R appuser:appuser /data /app
 USER appuser
@@ -75,4 +78,4 @@ EXPOSE ${PORT}
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",1025)}/api/dashboard/stats', timeout=5)" || exit 1
 
-CMD .venv/bin/python run_backend.py
+CMD [".venv/bin/python", "run_backend.py"]
