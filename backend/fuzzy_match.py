@@ -229,7 +229,7 @@ class FuzzyMatcher:
             if best["score"] >= 90.0:
                 confident = gap > 5.0
             else:
-                confident = best["score"] > self._confident_score and gap > self._confident_gap
+                confident = best["score"] >= self._confident_score and gap > self._confident_gap
 
         return {
             "best_match": best,

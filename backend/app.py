@@ -76,7 +76,7 @@ ENABLE_AUDIT_LOG = os.environ.get('ENABLE_AUDIT_LOG', 'true').lower() == 'true'
 MAX_UPLOAD_SIZE_MB = int(os.environ.get('MAX_UPLOAD_SIZE_MB', '10'))
 MAX_IMPORT_ROWS = int(os.environ.get('MAX_IMPORT_ROWS', '10000'))
 # 模糊匹配置信度阈值
-FUZZY_CONFIDENT_SCORE = float(os.environ.get('FUZZY_CONFIDENT_SCORE', '85'))
+FUZZY_CONFIDENT_SCORE = float(os.environ.get('FUZZY_CONFIDENT_SCORE', '80'))
 FUZZY_CONFIDENT_GAP = float(os.environ.get('FUZZY_CONFIDENT_GAP', '10'))
 
 # 配置日志
