@@ -44,7 +44,14 @@ class DefaultProvider(BaseProvider):
             )
 
             if resolve_result.get("confident") and resolve_result.get("best_match"):
-                resolved_name = resolve_result["best_match"]["name"]
+                best = resolve_result["best_match"]
+                extra = best.get("extra", {})
+                resolved_variant = extra.get("variant")
+                # name+variant 组合匹配时，用原始物料名查询
+                if resolved_variant:
+                    resolved_name = best["name"].replace(f" {resolved_variant}", "").strip()
+                else:
+                    resolved_name = best["name"]
                 data = self.http_get("/materials/product-stats", params={"name": resolved_name})
                 if "error" in data:
                     return {
@@ -54,6 +61,8 @@ class DefaultProvider(BaseProvider):
                     }
                 # 标记名称经过了模糊解析
                 data["resolved_from"] = product_name
+                if resolved_variant:
+                    data["resolved_variant"] = resolved_variant
             else:
                 # 模糊匹配也无法确定，返回候选列表
                 candidates = resolve_result.get("candidates", [])
@@ -73,12 +82,18 @@ class DefaultProvider(BaseProvider):
 
         unit = data["unit"]
         quantity = data["current_stock"]
+        resolved_variant = data.pop("resolved_variant", None)
 
         # 始终获取批次明细（用于多位置/多变体展示）
         batches_data = self.http_get("/materials/batches", params={"name": data["name"]})
         batches_list = []
         if isinstance(batches_data, dict) and "error" not in batches_data:
             batches_list = batches_data.get("batches", [])
+
+        # 按 variant 过滤批次并重算库存
+        if resolved_variant and batches_list:
+            batches_list = [b for b in batches_list if b.get("variant") == resolved_variant]
+            quantity = sum(b["quantity"] for b in batches_list)
 
         safe_stock = data.get("safe_stock")
         if safe_stock is not None:
@@ -92,10 +107,11 @@ class DefaultProvider(BaseProvider):
             status = None
 
         status_info = f"，状态：{status}" if status else ""
+        display_name = f"{data['name']} [{resolved_variant}]" if resolved_variant else data['name']
 
         # 多批次时自动展示每批明细（位置、变体），单批次只显示位置
         if len(batches_list) > 1:
-            msg = f"查询成功：{data['name']} 当前库存 {quantity} {unit}{status_info}"
+            msg = f"查询成功：{display_name} 当前库存 {quantity} {unit}{status_info}"
             details = []
             for b in batches_list:
                 label = b["batch_no"]
@@ -108,11 +124,11 @@ class DefaultProvider(BaseProvider):
             v = batches_list[0].get("variant", "")
             loc_info = f"，位置：{loc}" if loc else ""
             var_info = f"，变体：{v}" if v else ""
-            msg = f"查询成功：{data['name']} 当前库存 {quantity} {unit}{status_info}{var_info}{loc_info}"
+            msg = f"查询成功：{display_name} 当前库存 {quantity} {unit}{status_info}{var_info}{loc_info}"
         else:
             location = data.get("location", "")
             loc_info = f"，位置：{location}" if location else ""
-            msg = f"查询成功：{data['name']} 当前库存 {quantity} {unit}{status_info}{loc_info}"
+            msg = f"查询成功：{display_name} 当前库存 {quantity} {unit}{status_info}{loc_info}"
 
         product_data = {**data}
         if status:
