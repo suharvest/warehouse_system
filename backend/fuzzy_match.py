@@ -66,6 +66,25 @@ class FuzzyMatcher:
                         "pinyin": self._get_pinyin(self._normalize(sku)),
                     })
 
+            # 索引 "name + variant" 组合，让 "七彩灯A" 能直接匹配
+            cursor.execute(
+                "SELECT DISTINCT m.id, m.name, m.sku, m.category, b.variant "
+                "FROM batches b JOIN materials m ON b.material_id = m.id "
+                "WHERE m.is_disabled = 0 AND b.variant IS NOT NULL AND b.variant != ''"
+            )
+            for row in cursor.fetchall():
+                mid, name, sku, category, variant = (
+                    row['id'], row['name'], row['sku'], row['category'], row['variant']
+                )
+                combined = f"{name} {variant}"
+                index.append({
+                    "name": combined,
+                    "entity_type": "material",
+                    "entity_id": mid,
+                    "extra": {"sku": sku, "category": category, "variant": variant},
+                    "pinyin": self._get_pinyin(self._normalize(combined)),
+                })
+
             # 索引 contacts: name
             cursor.execute(
                 "SELECT id, name, is_supplier, is_customer FROM contacts WHERE is_disabled = 0"

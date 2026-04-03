@@ -1573,6 +1573,7 @@ def unified_search(
     contact_type: str = Query(None, description="联系方类型: supplier/customer"),
     fuzzy: bool = Query(True, description="是否开启模糊匹配"),
     format: str = Query(None, description="brief时只返回核心字段"),
+    include_batches: bool = Query(False, description="是否附带批次列表（仅material）"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页条数"),
 ):
@@ -1581,7 +1582,7 @@ def unified_search(
         cursor = conn.cursor()
 
         if entity_type == "material":
-            return _search_materials(cursor, q, category, status, fuzzy, format, page, page_size)
+            return _search_materials(cursor, q, category, status, fuzzy, format, include_batches, page, page_size)
         elif entity_type == "contact":
             return _search_contacts(cursor, q, contact_type, fuzzy, format, page, page_size)
         elif entity_type == "operator":
@@ -1590,7 +1591,7 @@ def unified_search(
             raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
 
 
-def _search_materials(cursor, q, category, status, fuzzy, fmt, page, page_size):
+def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size):
     """搜索物料"""
     # 获取匹配的 material IDs (fuzzy mode)
     matched_ids = None
@@ -1695,6 +1696,31 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, page, page_size):
                 })
 
         total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+    # 批量加载批次信息（一次 SQL 替代 N 次 HTTP）
+    if include_batches and items:
+        material_ids = [item['id'] for item in items]
+        placeholders = ','.join('?' * len(material_ids))
+        cursor.execute(f'''
+            SELECT b.material_id, b.batch_no, b.quantity, b.location, b.variant,
+                   c.name as contact_name
+            FROM batches b
+            LEFT JOIN contacts c ON b.contact_id = c.id
+            WHERE b.material_id IN ({placeholders}) AND b.is_exhausted = 0 AND b.quantity > 0
+            ORDER BY b.created_at ASC
+        ''', material_ids)
+        batches_by_material = {}
+        for row in cursor.fetchall():
+            mid = row['material_id']
+            batches_by_material.setdefault(mid, []).append({
+                'batch_no': row['batch_no'],
+                'quantity': row['quantity'],
+                'location': row['location'] or '',
+                'variant': row['variant'] or '',
+                'contact_name': row['contact_name'] or '',
+            })
+        for item in items:
+            item['batches'] = batches_by_material.get(item['id'], [])
 
     return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
 
