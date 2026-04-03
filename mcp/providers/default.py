@@ -175,6 +175,8 @@ class DefaultProvider(BaseProvider):
             params["status"] = status
         if contact_type:
             params["contact_type"] = contact_type
+        if include_batches:
+            params["include_batches"] = True
 
         data = self.http_get("/search", params=params)
 
@@ -182,16 +184,6 @@ class DefaultProvider(BaseProvider):
             return {"success": False, "error": data["error"], "message": f"搜索失败: {data['error']}"}
 
         items = data.get("items", [])
-
-        if include_batches and entity_type == "material":
-            for item in items:
-                item_name = item.get("name")
-                if item_name:
-                    batches_data = self.http_get("/materials/batches", params={"name": item_name})
-                    if isinstance(batches_data, dict) and "error" not in batches_data:
-                        item["batches"] = batches_data.get("batches", batches_data)
-                    else:
-                        item["batches"] = []
 
         type_label = {"material": "物料", "contact": "联系方", "operator": "操作员"}.get(
             entity_type, entity_type
