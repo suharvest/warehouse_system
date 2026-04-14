@@ -1,12 +1,35 @@
 // ============ API 请求封装 ============
 
+import { currentWarehouse } from './state.js';
+
 export const API_BASE_URL = '/api';
+
+// 不需要注入 warehouse_id 的路径前缀
+const WAREHOUSE_EXEMPT_PREFIXES = [
+  '/auth/', '/users', '/api-keys', '/contacts', '/operators',
+  '/warehouses', '/database/', '/system/'
+];
 
 // 全局 session 过期回调
 let onSessionExpired = null;
 
 export function setSessionExpiredHandler(handler) {
   onSessionExpired = handler;
+}
+
+/**
+ * 自动为 URL 注入 warehouse_id 查询参数
+ * - 仓库无关的接口（auth/users/contacts等）不注入
+ * - currentWarehouse 为 null 时不注入（全局视图）
+ */
+function injectWarehouseParam(url) {
+  if (!currentWarehouse) return url;
+  // 检查是否是仓库无关的接口
+  for (const prefix of WAREHOUSE_EXEMPT_PREFIXES) {
+    if (url.startsWith(prefix)) return url;
+  }
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}warehouse_id=${currentWarehouse.id}`;
 }
 
 // 通用请求封装
@@ -19,7 +42,8 @@ async function request(url, options = {}) {
     }
   };
 
-  const response = await fetch(`${API_BASE_URL}${url}`, {
+  const finalUrl = injectWarehouseParam(url);
+  const response = await fetch(`${API_BASE_URL}${finalUrl}`, {
     ...defaultOptions,
     ...options
   });
@@ -161,6 +185,7 @@ export const recordsApi = {
     if (params.endDate) query.set('end_date', params.endDate);
     if (params.operatorUserId) query.set('operator_user_id', params.operatorUserId);
     if (params.contactId) query.set('contact_id', params.contactId);
+    if (params.reasonCategory) query.set('reason_category', params.reasonCategory);
     if (params.reason) query.set('reason', params.reason);
     if (params.status && params.status.length > 0) {
       query.set('status', params.status.join(','));
@@ -345,3 +370,60 @@ export const operatorsApi = {
     return fetchJson('/operators');
   }
 };
+
+// ============ 仓库管理 API ============
+export const warehousesApi = {
+  // 获取仓库列表
+  async getList(includeDisabled = false) {
+    const query = includeDisabled ? '?include_disabled=true' : '';
+    return fetchJson(`/warehouses${query}`);
+  },
+
+  // 创建仓库
+  async create(data) {
+    return fetchJson('/warehouses', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 更新仓库
+  async update(warehouseId, data) {
+    return fetchJson(`/warehouses/${warehouseId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 删除仓库
+  async delete(warehouseId) {
+    return fetchJson(`/warehouses/${warehouseId}`, {
+      method: 'DELETE'
+    });
+  },
+
+  // 获取当前用户可访问的仓库
+  async getMyWarehouses() {
+    return fetchJson('/auth/warehouses');
+  },
+
+  // 获取用户的仓库授权
+  async getUserWarehouses(userId) {
+    return fetchJson(`/users/${userId}/warehouses`);
+  },
+
+  // 设置用户的仓库授权
+  async setUserWarehouses(userId, warehouseIds) {
+    return fetchJson(`/users/${userId}/warehouses`, {
+      method: 'PUT',
+      body: JSON.stringify({ warehouse_ids: warehouseIds })
+    });
+  }
+};
+
+/**
+ * 获取当前仓库ID（供写操作使用，注入到请求体中）
+ */
+export function getCurrentWarehouseId() {
+  return currentWarehouse ? currentWarehouse.id : null;
+}

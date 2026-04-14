@@ -69,10 +69,10 @@ function renderInventoryTable(items) {
 
         tr.innerHTML = `
             <td>${item.name}</td>
+            <td>${item.variant || '-'}</td>
             <td>${item.sku}</td>
             <td>${item.category}</td>
             <td>${item.batch_no || '-'}</td>
-            <td>${item.variant || '-'}</td>
             <td><strong>${item.quantity}</strong></td>
             <td>${item.unit}</td>
             <td>${item.safe_stock != null ? item.safe_stock : '-'}</td>

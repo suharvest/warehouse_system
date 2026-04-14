@@ -5,7 +5,8 @@ import {
     countdownInterval, setCountdownInterval,
     trendChart, categoryChart, topStockChart,
     detailTrendChart, detailPieChart,
-    currentProductName
+    currentProductName,
+    currentWarehouse, setCurrentWarehouse, allWarehouses, setAllWarehouses
 } from '../state.js';
 
 // 功能模块引用（由 main.js 设置）
@@ -36,6 +37,11 @@ export function switchTab(tabId, filters = {}) {
     // 离开 MCP tab 时停止刷新
     if (tabId !== 'mcp' && modules.stopMCPRefresh) {
         modules.stopMCPRefresh();
+    }
+
+    // 离开 users tab 时停止 ERP 刷新
+    if (tabId !== 'users' && modules.stopERPRefresh) {
+        modules.stopERPRefresh();
     }
 
     // 加载对应数据
@@ -74,6 +80,8 @@ export function switchTab(tabId, filters = {}) {
         case 'users':
             if (modules.loadUsers) modules.loadUsers();
             if (modules.loadApiKeys) modules.loadApiKeys();
+            if (modules.loadERPStatus) modules.loadERPStatus();
+            if (modules.startERPRefresh) modules.startERPRefresh();
             break;
         case 'mcp':
             if (modules.loadMCPConnections) modules.loadMCPConnections();
@@ -94,8 +102,11 @@ function updateUrlHash(tabId, filters = {}) {
     window.location.hash = params.toString();
 }
 
-// 从URL hash初始化
+// 从URL初始化（路径 + hash）
 export function initFromHash() {
+    // 解析路径中的仓库上下文: /w/<slug>/
+    initWarehouseFromPath();
+
     const hash = window.location.hash;
     if (hash) {
         const params = new URLSearchParams(hash.substring(1));
@@ -113,6 +124,111 @@ export function initFromHash() {
     }
     // 默认加载看板
     if (modules.loadDashboardData) modules.loadDashboardData();
+}
+
+// 从 URL path 解析仓库上下文
+function initWarehouseFromPath() {
+    const path = window.location.pathname;
+    const match = path.match(/^\/w\/([a-z0-9][a-z0-9\-]*)\/?\s*$/);
+    if (match && allWarehouses.length > 0) {
+        const slug = match[1];
+        const wh = allWarehouses.find(w => w.slug === slug);
+        if (wh) {
+            setCurrentWarehouse(wh);
+            updateWarehouseSwitcherDisplay();
+            return;
+        }
+    }
+    // 全局视图或未匹配
+    setCurrentWarehouse(null);
+    updateWarehouseSwitcherDisplay();
+}
+
+// ============ 仓库切换 ============
+
+export function switchWarehouse(warehouse) {
+    setCurrentWarehouse(warehouse);
+    updateWarehouseSwitcherDisplay();
+
+    // 更新 URL 路径
+    if (warehouse) {
+        const newPath = `/w/${warehouse.slug}/`;
+        if (window.location.pathname !== newPath) {
+            window.history.pushState(null, '', newPath + window.location.hash);
+        }
+    } else {
+        if (window.location.pathname !== '/') {
+            window.history.pushState(null, '', '/' + window.location.hash);
+        }
+    }
+
+    // 重新加载当前tab的数据（仓库上下文变了）
+    refreshCurrentTab();
+    // 刷新分类和产品列表
+    if (modules.loadCategories) modules.loadCategories();
+    if (modules.loadAllProducts) modules.loadAllProducts();
+}
+
+export function updateWarehouseSwitcherDisplay() {
+    const nameEl = document.getElementById('currentWarehouseName');
+    if (nameEl) {
+        nameEl.textContent = currentWarehouse ? currentWarehouse.name : (modules.t ? modules.t('allWarehouses') : '全部仓库');
+    }
+}
+
+export function renderWarehouseSwitcher() {
+    const switcher = document.getElementById('warehouseSwitcher');
+    if (!switcher) return;
+
+    // 只有多个仓库时才显示切换器
+    if (allWarehouses.length <= 1) {
+        switcher.style.display = 'none';
+        // 单仓库时自动选中默认仓库
+        if (allWarehouses.length === 1 && !currentWarehouse) {
+            setCurrentWarehouse(allWarehouses[0]);
+        }
+        return;
+    }
+
+    switcher.style.display = '';
+    updateWarehouseSwitcherDisplay();
+
+    // 渲染下拉列表
+    const dropdown = document.getElementById('warehouseDropdown');
+    if (!dropdown) return;
+
+    const t = modules.t || (k => k);
+    let html = `<div class="warehouse-option${!currentWarehouse ? ' active' : ''}" data-action="selectWarehouse" data-slug="">
+        ${t('allWarehouses')}
+    </div>`;
+
+    for (const wh of allWarehouses) {
+        const active = currentWarehouse && currentWarehouse.id === wh.id ? ' active' : '';
+        html += `<div class="warehouse-option${active}" data-action="selectWarehouse" data-slug="${wh.slug}">
+            ${wh.name}${wh.is_default ? ' ★' : ''}
+        </div>`;
+    }
+
+    dropdown.innerHTML = html;
+}
+
+export function toggleWarehouseSwitcher() {
+    const dropdown = document.getElementById('warehouseDropdown');
+    if (dropdown) {
+        dropdown.classList.toggle('show');
+    }
+}
+
+export function selectWarehouse(slug) {
+    const dropdown = document.getElementById('warehouseDropdown');
+    if (dropdown) dropdown.classList.remove('show');
+
+    if (!slug) {
+        switchWarehouse(null);
+    } else {
+        const wh = allWarehouses.find(w => w.slug === slug);
+        if (wh) switchWarehouse(wh);
+    }
 }
 
 // ============ 自动刷新 ============

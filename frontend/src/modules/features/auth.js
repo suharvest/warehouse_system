@@ -127,6 +127,7 @@ export function updatePermissionUI() {
     if (mcpNav) {
         mcpNav.style.display = role === 'admin' ? 'flex' : 'none';
     }
+
 }
 
 // 显示登录模态框

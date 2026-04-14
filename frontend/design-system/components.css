@@ -112,6 +112,41 @@
   }
 
   /* Header Controls */
+  .warehouse-switcher {
+    @apply relative;
+  }
+
+  .warehouse-btn {
+    @apply flex items-center gap-1.5 py-1.5 px-3 bg-transparent
+           border border-border rounded cursor-pointer text-13
+           text-text-secondary transition-all duration-200 h-8;
+  }
+
+  .warehouse-btn:hover {
+    @apply border-primary text-primary bg-primary-light;
+  }
+
+  .warehouse-dropdown {
+    @apply hidden absolute top-full right-0 mt-1 bg-white
+           border border-border rounded shadow-md z-modal min-w-[140px];
+  }
+
+  .warehouse-dropdown.show {
+    @apply block;
+  }
+
+  .warehouse-option {
+    @apply py-2 px-3 text-13 cursor-pointer text-text-primary;
+  }
+
+  .warehouse-option:hover {
+    @apply bg-hover text-primary;
+  }
+
+  .warehouse-option.active {
+    @apply text-primary font-semibold bg-primary-light;
+  }
+
   .lang-dropdown {
     @apply relative;
   }
