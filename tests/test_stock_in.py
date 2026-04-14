@@ -12,7 +12,8 @@ class TestStockIn:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 50,
-            "reason": "Purchase"
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -27,7 +28,8 @@ class TestStockIn:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 30,
-            "reason": "Test batch creation"
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -42,7 +44,8 @@ class TestStockIn:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 0,
-            "reason": "Invalid"
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -53,18 +56,20 @@ class TestStockIn:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": -10,
-            "reason": "Invalid"
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data['success'] is False
 
-    def test_stock_in_nonexistent_product(self, admin_client):
+    def test_stock_in_nonexistent_product(self, admin_client, default_warehouse_id):
         """Stock-in for non-existent product should fail."""
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": "NonexistentProduct_XYZ",
             "quantity": 10,
-            "reason": "Test"
+            "reason_category": "purchase",
+            "warehouse_id": default_warehouse_id
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -85,8 +90,9 @@ class TestStockIn:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 20,
-            "reason": "Supplier delivery",
-            "contact_id": contact_id
+            "reason_category": "purchase",
+            "contact_id": contact_id,
+            "warehouse_id": sample_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -99,7 +105,8 @@ class TestStockIn:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 25,
-            "reason": "Verify update"
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()

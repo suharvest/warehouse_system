@@ -22,9 +22,10 @@ def material_with_batch(admin_client, material_with_legacy_batch):
     resp = admin_client.post("/api/materials/stock-in", json={
         "product_name": mat['name'],
         "quantity": 50,
-        "reason": "Test batch creation",
+        "reason_category": "purchase",
         "location": "A区-01",
         "fuzzy": False,
+        "warehouse_id": mat['warehouse_id'],
     })
     data = resp.json()
     assert data['success'] is True
@@ -193,9 +194,10 @@ class TestStockInLocation:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 10,
-            "reason": "Test location",
+            "reason_category": "purchase",
             "location": "B区-05",
             "fuzzy": False,
+            "warehouse_id": sample_material['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True
@@ -215,9 +217,10 @@ class TestStockInLocation:
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 5,
-            "reason": "Test contact",
+            "reason_category": "purchase",
             "contact_id": sample_contact['id'],
             "fuzzy": False,
+            "warehouse_id": sample_material['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True
@@ -238,7 +241,7 @@ class TestBatchAwareExport:
     """Test that Excel export includes batch columns."""
 
     def test_export_has_batch_columns(self, admin_client, sample_material):
-        """Exported Excel should have 9 columns including batch_no, location, contact."""
+        """Exported Excel should have 10 columns including batch_no, variant, location, contact."""
         resp = admin_client.get("/api/materials/export-excel")
         assert resp.status_code == 200
 
@@ -248,7 +251,7 @@ class TestBatchAwareExport:
         assert '批次号' in headers
         assert '存放位置' in headers
         assert '联系方' in headers
-        assert len(headers) == 9
+        assert len(headers) == 10
 
     def test_export_one_row_per_batch(self, admin_client, material_with_batch, material_with_legacy_batch):
         """A material with 2 batches (LEGACY + stock-in) should produce 2 rows."""
@@ -376,16 +379,20 @@ class TestImportPreviewBatchMode:
         assert item['is_batch_new'] is True
         assert item['operation'] == 'in'
 
-    def test_batch_mode_invalid_batch_no(self, admin_client, material_with_batch):
-        """Non-existent batch_no should return error."""
+    def test_batch_mode_unknown_batch_no_treated_as_new(self, admin_client, material_with_batch):
+        """Non-existent batch_no should be treated as a new batch import."""
         excel = _make_excel(
             [[material_with_batch['name'], material_with_batch['sku'], 'Test', '个', 20,
               'FAKE-BATCH-999', 50, '', '']],
             headers=['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '库存', '存放位置', '联系方']
         )
         data = _upload_preview(admin_client, excel)
-        assert data['success'] is False
-        assert 'FAKE-BATCH-999' in data['message']
+        assert data['success'] is True
+        assert len(data['preview']) == 1
+        item = data['preview'][0]
+        assert item['batch_no'] == 'FAKE-BATCH-999'
+        assert item['is_batch_new'] is True
+        assert item['operation'] == 'in'
 
 
 # ============ Import Confirm Tests ============
@@ -417,8 +424,9 @@ class TestImportConfirmSimpleMode:
                 "difference": 30,
                 "operation": "in",
             }],
-            "reason": "Test batch creation",
+            "reason_category": "purchase",
             "is_batch_mode": False,
+            "warehouse_id": sample_material['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True
@@ -459,8 +467,9 @@ class TestImportConfirmSimpleMode:
                 "difference": -5,
                 "operation": "out",
             }],
-            "reason": "Test FIFO out",
+            "reason_category": "sell",
             "is_batch_mode": False,
+            "warehouse_id": mat['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True
@@ -472,7 +481,7 @@ class TestImportConfirmSimpleMode:
         cursor.execute('''
             SELECT COUNT(*) as c FROM batch_consumptions bc
             JOIN inventory_records r ON bc.record_id = r.id
-            WHERE r.material_id = ? AND r.reason LIKE '%Test FIFO out%'
+            WHERE r.material_id = ? AND r.reason_category = 'sell'
         ''', (mat['id'],))
         count = cursor.fetchone()['c']
         conn.close()
@@ -496,8 +505,9 @@ class TestImportConfirmSimpleMode:
                 "operation": "in",
                 "contact_name": "AutoCreated Supplier",
             }],
-            "reason": "Test auto contact",
+            "reason_category": "purchase",
             "is_batch_mode": False,
+            "warehouse_id": sample_material['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True
@@ -539,8 +549,9 @@ class TestImportConfirmBatchMode:
                 "operation": "in",
                 "is_batch_new": True,
             }],
-            "reason": "Test new batch",
+            "reason_category": "purchase",
             "is_batch_mode": True,
+            "warehouse_id": material_with_batch['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True
@@ -578,8 +589,9 @@ class TestImportConfirmBatchMode:
                 "operation": "in",
                 "batch_no": material_with_batch['batch_no'],
             }],
-            "reason": "Test batch update",
+            "reason_category": "purchase",
             "is_batch_mode": True,
+            "warehouse_id": material_with_batch['warehouse_id'],
         })
         data = resp.json()
         assert data['success'] is True

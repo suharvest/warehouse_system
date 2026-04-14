@@ -75,14 +75,15 @@ class TestDashboardWithData:
         admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 10,
-            "reason": "Dashboard test"
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id']
         })
 
         # Stats should update
         updated = admin_client.get("/api/dashboard/stats").json()
         assert updated['today_in'] >= initial['today_in']
 
-    def test_low_stock_triggered(self, admin_client):
+    def test_low_stock_triggered(self, admin_client, default_warehouse_id):
         """Creating a low-stock material should appear in alerts."""
         from database import get_db_connection
         import uuid
@@ -93,9 +94,9 @@ class TestDashboardWithData:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (name, sku, 'Test', 5, 'pcs', 100, 'Z-01'))
+            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (name, sku, 'Test', 5, 'pcs', 100, 'Z-01', default_warehouse_id))
         conn.commit()
         conn.close()
 

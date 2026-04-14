@@ -5,7 +5,7 @@ import pytest
 
 
 @pytest.fixture()
-def stocked_material(admin_client):
+def stocked_material(admin_client, default_warehouse_id):
     """Create a material with known batch structure for FIFO testing."""
     from database import get_db_connection
     import uuid
@@ -16,9 +16,9 @@ def stocked_material(admin_client):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (name, sku, 'Test', 0, 'pcs', 10, 'B-01'))
+        INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, sku, 'Test', 0, 'pcs', 10, 'B-01', default_warehouse_id))
     conn.commit()
     conn.close()
 
@@ -26,7 +26,8 @@ def stocked_material(admin_client):
     resp1 = admin_client.post("/api/materials/stock-in", json={
         "product_name": name,
         "quantity": 30,
-        "reason": "First batch"
+        "reason_category": "purchase",
+        "warehouse_id": default_warehouse_id
     })
     assert resp1.json()['success'] is True
     batch1_no = resp1.json()['batch']['batch_no']
@@ -34,7 +35,8 @@ def stocked_material(admin_client):
     resp2 = admin_client.post("/api/materials/stock-in", json={
         "product_name": name,
         "quantity": 20,
-        "reason": "Second batch"
+        "reason_category": "purchase",
+        "warehouse_id": default_warehouse_id
     })
     assert resp2.json()['success'] is True
     batch2_no = resp2.json()['batch']['batch_no']
@@ -47,6 +49,7 @@ def stocked_material(admin_client):
         'batch1_qty': 30,
         'batch2_no': batch2_no,
         'batch2_qty': 20,
+        'warehouse_id': default_warehouse_id,
     }
 
 
@@ -58,7 +61,8 @@ class TestStockOut:
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": stocked_material['name'],
             "quantity": 10,
-            "reason": "Sales"
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -71,7 +75,8 @@ class TestStockOut:
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": stocked_material['name'],
             "quantity": 9999,
-            "reason": "Excessive"
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -83,18 +88,20 @@ class TestStockOut:
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": stocked_material['name'],
             "quantity": 0,
-            "reason": "Invalid"
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data['success'] is False
 
-    def test_stock_out_nonexistent_product(self, admin_client):
+    def test_stock_out_nonexistent_product(self, admin_client, default_warehouse_id):
         """Stock-out for non-existent product should fail."""
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": "NonexistentProduct_ABC",
             "quantity": 5,
-            "reason": "Test"
+            "reason_category": "sell",
+            "warehouse_id": default_warehouse_id
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -109,7 +116,8 @@ class TestFIFOConsumption:
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": stocked_material['name'],
             "quantity": 25,
-            "reason": "FIFO test"
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -129,7 +137,8 @@ class TestFIFOConsumption:
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": stocked_material['name'],
             "quantity": 40,
-            "reason": "Multi-batch FIFO"
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id']
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -147,7 +156,7 @@ class TestFIFOConsumption:
             assert consumptions[1]['batch_no'] == stocked_material['batch2_no']
             assert consumptions[1]['quantity'] == 10
 
-    def test_stock_out_low_stock_warning(self, admin_client):
+    def test_stock_out_low_stock_warning(self, admin_client, default_warehouse_id):
         """Stock-out that drops below safe_stock should include warning."""
         from database import get_db_connection
         import uuid
@@ -158,9 +167,9 @@ class TestFIFOConsumption:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (name, sku, 'Test', 0, 'pcs', 50, 'C-01'))
+            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (name, sku, 'Test', 0, 'pcs', 50, 'C-01', default_warehouse_id))
         conn.commit()
         conn.close()
 
@@ -168,14 +177,16 @@ class TestFIFOConsumption:
         admin_client.post("/api/materials/stock-in", json={
             "product_name": name,
             "quantity": 60,
-            "reason": "Setup"
+            "reason_category": "purchase",
+            "warehouse_id": default_warehouse_id
         })
 
         # Stock out 50 (leaves 10, below safe_stock of 50)
         resp = admin_client.post("/api/materials/stock-out", json={
             "product_name": name,
             "quantity": 50,
-            "reason": "Trigger warning"
+            "reason_category": "sell",
+            "warehouse_id": default_warehouse_id
         })
         assert resp.status_code == 200
         data = resp.json()

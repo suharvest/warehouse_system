@@ -96,15 +96,16 @@ class TestImportConfirm:
             # Confirm import with the changes from preview
             confirm_resp = admin_client.post("/api/materials/import-excel/confirm", json={
                 "changes": preview_data['preview'],
-                "reason": "Test import",
+                "reason_category": "purchase",
                 "confirm_new_skus": False,
-                "confirm_disable_missing_skus": False
+                "confirm_disable_missing_skus": False,
+                "warehouse_id": sample_material['warehouse_id']
             })
             assert confirm_resp.status_code == 200
             data = confirm_resp.json()
             assert data['success'] is True
 
-    def test_confirm_import_new_sku(self, admin_client):
+    def test_confirm_import_new_sku(self, admin_client, default_warehouse_id):
         """Import with new SKU should create new material."""
         from openpyxl import Workbook
         import uuid
@@ -135,8 +136,9 @@ class TestImportConfirm:
             changes = preview_data.get('preview', [])
             confirm_resp = admin_client.post("/api/materials/import-excel/confirm", json={
                 "changes": changes,
-                "reason": "Import new SKU test",
+                "reason_category": "purchase",
                 "confirm_new_skus": True,
-                "confirm_disable_missing_skus": False
+                "confirm_disable_missing_skus": False,
+                "warehouse_id": default_warehouse_id
             })
             assert confirm_resp.status_code == 200

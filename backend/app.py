@@ -22,7 +22,8 @@ from database import (
     init_database, generate_mock_data, get_db_connection,
     has_admin_user, hash_password, verify_password,
     generate_session_token, generate_api_key, hash_api_key,
-    generate_batch_no, needs_password_rehash
+    generate_batch_no, needs_password_rehash,
+    REASON_CATEGORIES, REASON_CATEGORY_LABELS,
 )
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
@@ -50,6 +51,9 @@ from models import (
     MCPConnectionItem, MCPConnectionResponse,
     # Fuzzy match models
     FuzzyMatchCandidate, FuzzyMatchResponse,
+    # Warehouse models
+    WarehouseItem, CreateWarehouseRequest, UpdateWarehouseRequest,
+    UserWarehouseAssignment,
 )
 from fuzzy_match import FuzzyMatcher
 import math
@@ -253,13 +257,15 @@ class CurrentUser:
     """当前用户信息"""
     def __init__(self, user_id: int = None, username: str = None,
                  display_name: str = None, role: str = 'view',
-                 is_guest: bool = True, source: str = 'guest'):
+                 is_guest: bool = True, source: str = 'guest',
+                 warehouse_id: int = None):
         self.id = user_id
         self.username = username
         self.display_name = display_name
         self.role = role
         self.is_guest = is_guest
         self.source = source  # 'session' | 'api_key' | 'guest'
+        self.warehouse_id = warehouse_id  # 从API key自动绑定的仓库
 
     def has_permission(self, min_role: str) -> bool:
         """检查是否有最低权限"""
@@ -272,6 +278,29 @@ class CurrentUser:
         if self.username:
             return self.username
         return "访客"
+
+    def get_authorized_warehouses(self, conn) -> List[int]:
+        """获取用户授权的仓库ID列表。管理员可访问所有仓库。"""
+        cursor = conn.cursor()
+        if self.role == 'admin':
+            cursor.execute('SELECT id FROM warehouses WHERE is_disabled = 0')
+            return [r['id'] for r in cursor.fetchall()]
+        cursor.execute(
+            'SELECT warehouse_id FROM user_warehouses WHERE user_id = ?',
+            (self.id,)
+        )
+        return [r['warehouse_id'] for r in cursor.fetchall()]
+
+    def can_access_warehouse(self, conn, warehouse_id: int) -> bool:
+        """检查用户是否有权访问指定仓库"""
+        if self.role == 'admin':
+            return True
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT 1 FROM user_warehouses WHERE user_id = ? AND warehouse_id = ?',
+            (self.id, warehouse_id)
+        )
+        return cursor.fetchone() is not None
 
 
 async def get_current_user(request: Request) -> CurrentUser:
@@ -287,7 +316,8 @@ async def get_current_user(request: Request) -> CurrentUser:
         if api_key:
             key_hash = hash_api_key(api_key)
             cursor.execute('''
-                SELECT ak.id, ak.name, ak.role, ak.user_id, u.username, u.display_name
+                SELECT ak.id, ak.name, ak.role, ak.user_id, ak.warehouse_id,
+                       u.username, u.display_name
                 FROM api_keys ak
                 LEFT JOIN users u ON ak.user_id = u.id
                 WHERE ak.key_hash = ? AND ak.is_disabled = 0
@@ -310,7 +340,8 @@ async def get_current_user(request: Request) -> CurrentUser:
                     display_name=display_name,
                     role=key_row['role'],
                     is_guest=False,
-                    source='api_key'
+                    source='api_key',
+                    warehouse_id=key_row['warehouse_id']
                 )
 
         # 2. 检查 session_token Cookie
@@ -356,6 +387,212 @@ def require_auth(min_role: str = 'view'):
                 raise HTTPException(status_code=403, detail="权限不足")
         return current_user
     return dependency
+
+
+# ============ 仓库上下文辅助 ============
+
+def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> Optional[int]:
+    """
+    解析仓库ID：
+    - 如果请求指定了 warehouse_id，使用它
+    - 如果用户通过 API key 绑定了仓库，使用 API key 的仓库
+    - 否则返回 None（全局视图）
+    """
+    if warehouse_id is not None:
+        return warehouse_id
+    if current_user.warehouse_id is not None:
+        return current_user.warehouse_id
+    return None
+
+
+def check_warehouse_access(conn, current_user: CurrentUser, warehouse_id: int):
+    """检查用户是否有权访问指定仓库，无权限则抛出403"""
+    if current_user.role == 'admin':
+        return
+    if not current_user.can_access_warehouse(conn, warehouse_id):
+        raise HTTPException(status_code=403, detail="无权访问该仓库")
+
+
+def require_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
+    """写操作：必须指定仓库ID（从请求或API key获取）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    if wh_id is None:
+        raise HTTPException(status_code=400, detail="写操作必须指定仓库 (warehouse_id)")
+    return wh_id
+
+
+def build_warehouse_filter(warehouse_id: Optional[int], table_alias: str = '') -> tuple:
+    """构建仓库过滤SQL片段。返回 (sql_fragment, params_tuple)。"""
+    prefix = f'{table_alias}.' if table_alias else ''
+    if warehouse_id is not None:
+        return f' AND {prefix}warehouse_id = ?', (warehouse_id,)
+    return '', ()
+
+
+# ============ 仓库管理 API ============
+
+@app.get("/api/warehouses", response_model=List[WarehouseItem])
+async def list_warehouses(
+    include_disabled: bool = False,
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
+    """获取仓库列表"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if include_disabled and current_user.role == 'admin':
+            cursor.execute('SELECT * FROM warehouses ORDER BY is_default DESC, id ASC')
+        else:
+            cursor.execute('SELECT * FROM warehouses WHERE is_disabled = 0 ORDER BY is_default DESC, id ASC')
+        rows = cursor.fetchall()
+        return [WarehouseItem(
+            id=r['id'], slug=r['slug'], name=r['name'],
+            address=r['address'], is_default=bool(r['is_default']),
+            is_disabled=bool(r['is_disabled']),
+            created_at=r['created_at']
+        ) for r in rows]
+
+
+@app.post("/api/warehouses", response_model=WarehouseItem)
+async def create_warehouse(
+    request: CreateWarehouseRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """创建仓库（仅管理员）"""
+    import re
+    if not re.match(r'^[a-z0-9][a-z0-9\-]*$', request.slug):
+        raise HTTPException(status_code=400, detail="仓库标识只能包含小写字母、数字和连字符，且不能以连字符开头")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM warehouses WHERE slug = ?', (request.slug,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="仓库标识已存在")
+
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute('''
+            INSERT INTO warehouses (slug, name, address, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (request.slug, request.name, request.address, created_at))
+        wh_id = cursor.lastrowid
+        conn.commit()
+
+        return WarehouseItem(
+            id=wh_id, slug=request.slug, name=request.name,
+            address=request.address, is_default=False, is_disabled=False,
+            created_at=created_at
+        )
+
+
+@app.put("/api/warehouses/{warehouse_id}", response_model=WarehouseItem)
+async def update_warehouse(
+    warehouse_id: int,
+    request: UpdateWarehouseRequest,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """更新仓库（仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM warehouses WHERE id = ?', (warehouse_id,))
+        wh = cursor.fetchone()
+        if not wh:
+            raise HTTPException(status_code=404, detail="仓库不存在")
+
+        updates = []
+        params = []
+        if request.name is not None:
+            updates.append('name = ?')
+            params.append(request.name)
+        if request.address is not None:
+            updates.append('address = ?')
+            params.append(request.address)
+        if request.is_disabled is not None:
+            if wh['is_default'] and request.is_disabled:
+                raise HTTPException(status_code=400, detail="不能禁用默认仓库")
+            updates.append('is_disabled = ?')
+            params.append(1 if request.is_disabled else 0)
+
+        if updates:
+            params.append(warehouse_id)
+            cursor.execute(f'UPDATE warehouses SET {", ".join(updates)} WHERE id = ?', params)
+            conn.commit()
+
+        cursor.execute('SELECT * FROM warehouses WHERE id = ?', (warehouse_id,))
+        wh = cursor.fetchone()
+        return WarehouseItem(
+            id=wh['id'], slug=wh['slug'], name=wh['name'],
+            address=wh['address'], is_default=bool(wh['is_default']),
+            is_disabled=bool(wh['is_disabled']),
+            created_at=wh['created_at']
+        )
+
+
+@app.delete("/api/warehouses/{warehouse_id}")
+async def delete_warehouse(
+    warehouse_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """禁用仓库（软删除，仅管理员）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM warehouses WHERE id = ?', (warehouse_id,))
+        wh = cursor.fetchone()
+        if not wh:
+            raise HTTPException(status_code=404, detail="仓库不存在")
+        if wh['is_default']:
+            raise HTTPException(status_code=400, detail="不能删除默认仓库")
+
+        cursor.execute('UPDATE warehouses SET is_disabled = 1 WHERE id = ?', (warehouse_id,))
+        conn.commit()
+        return {"success": True, "message": "仓库已禁用"}
+
+
+@app.get("/api/users/{user_id}/warehouses")
+async def get_user_warehouses(
+    user_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """获取用户授权的仓库列表"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT w.id, w.slug, w.name FROM user_warehouses uw
+            JOIN warehouses w ON uw.warehouse_id = w.id
+            WHERE uw.user_id = ?
+        ''', (user_id,))
+        rows = cursor.fetchall()
+        return {"warehouse_ids": [r['id'] for r in rows],
+                "warehouses": [{"id": r['id'], "slug": r['slug'], "name": r['name']} for r in rows]}
+
+
+@app.put("/api/users/{user_id}/warehouses")
+async def set_user_warehouses(
+    user_id: int,
+    request: UserWarehouseAssignment,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """设置用户授权的仓库列表"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # 验证用户存在
+        cursor.execute('SELECT id FROM users WHERE id = ?', (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        # 验证所有仓库ID存在
+        for wh_id in request.warehouse_ids:
+            cursor.execute('SELECT id FROM warehouses WHERE id = ?', (wh_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=400, detail=f"仓库ID {wh_id} 不存在")
+
+        # 替换授权
+        cursor.execute('DELETE FROM user_warehouses WHERE user_id = ?', (user_id,))
+        for wh_id in request.warehouse_ids:
+            cursor.execute(
+                'INSERT INTO user_warehouses (user_id, warehouse_id) VALUES (?, ?)',
+                (user_id, wh_id)
+            )
+        conn.commit()
+        return {"success": True, "message": "仓库授权已更新", "warehouse_ids": request.warehouse_ids}
 
 
 # ============ Auth APIs ============
@@ -532,6 +769,21 @@ async def get_current_user_info(current_user: CurrentUser = Depends(require_auth
     )
 
 
+@app.get("/api/auth/warehouses")
+async def get_my_warehouses(current_user: CurrentUser = Depends(require_auth('view'))):
+    """获取当前用户可访问的仓库列表"""
+    with get_db() as conn:
+        warehouses = current_user.get_authorized_warehouses(conn)
+        cursor = conn.cursor()
+        result = []
+        for wh_id in warehouses:
+            cursor.execute('SELECT id, slug, name, is_default FROM warehouses WHERE id = ?', (wh_id,))
+            wh = cursor.fetchone()
+            if wh:
+                result.append({"id": wh['id'], "slug": wh['slug'], "name": wh['name'], "is_default": bool(wh['is_default'])})
+        return {"warehouses": result}
+
+
 # ============ User Management APIs ============
 
 @app.get("/api/users", response_model=List[UserListItem])
@@ -543,18 +795,28 @@ async def list_users(current_user: CurrentUser = Depends(require_auth('admin')))
             SELECT id, username, display_name, role, is_disabled, created_at
             FROM users ORDER BY created_at DESC
         ''')
+        users = cursor.fetchall()
 
-        return [
-            UserListItem(
+        result = []
+        for row in users:
+            # 获取用户授权的仓库
+            cursor.execute('''
+                SELECT w.id, w.name FROM user_warehouses uw
+                JOIN warehouses w ON uw.warehouse_id = w.id
+                WHERE uw.user_id = ?
+            ''', (row['id'],))
+            wh_rows = cursor.fetchall()
+            result.append(UserListItem(
                 id=row['id'],
                 username=row['username'],
                 display_name=row['display_name'],
                 role=row['role'],
                 is_disabled=bool(row['is_disabled']),
-                created_at=row['created_at']
-            )
-            for row in cursor.fetchall()
-        ]
+                created_at=row['created_at'],
+                warehouse_ids=[r['id'] for r in wh_rows],
+                warehouse_names=[r['name'] for r in wh_rows]
+            ))
+        return result
 
 
 @app.post("/api/users", response_model=UserListItem)
@@ -1348,62 +1610,75 @@ async def delete_contact(
 # ============ Dashboard APIs ============
 
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
-def get_dashboard_stats():
+def get_dashboard_stats(
+    warehouse_id: Optional[int] = Query(None),
+    current_user: CurrentUser = Depends(get_current_user)
+):
     """获取仪表盘统计数据（排除禁用物料）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter_m, wh_params_m = build_warehouse_filter(wh_id, 'm')
+    wh_filter_r, wh_params_r = build_warehouse_filter(wh_id, 'r')
+
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 库存总量（排除禁用）
-        cursor.execute('SELECT SUM(quantity) as total FROM materials WHERE is_disabled = 0')
+        cursor.execute(
+            f'SELECT SUM(m.quantity) as total FROM materials m WHERE m.is_disabled = 0{wh_filter_m}',
+            wh_params_m
+        )
         total_stock = cursor.fetchone()['total'] or 0
 
         # 今日入库量（排除禁用物料的记录）
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT SUM(r.quantity) as total
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
-            WHERE r.type = 'in' AND r.created_at >= ? AND m.is_disabled = 0
-        ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),))
+            WHERE r.type = 'in' AND r.created_at >= ? AND m.is_disabled = 0{wh_filter_r}
+        ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),) + wh_params_r)
         today_in = cursor.fetchone()['total'] or 0
 
         # 今日出库量（排除禁用物料的记录）
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT SUM(r.quantity) as total
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
-            WHERE r.type = 'out' AND r.created_at >= ? AND m.is_disabled = 0
-        ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),))
+            WHERE r.type = 'out' AND r.created_at >= ? AND m.is_disabled = 0{wh_filter_r}
+        ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),) + wh_params_r)
         today_out = cursor.fetchone()['total'] or 0
 
         # 库存预警（低于安全库存，排除禁用）
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT COUNT(*) as count
-            FROM materials
-            WHERE safe_stock IS NOT NULL AND quantity < safe_stock AND is_disabled = 0
-        ''')
+            FROM materials m
+            WHERE m.safe_stock IS NOT NULL AND m.quantity < m.safe_stock AND m.is_disabled = 0{wh_filter_m}
+        ''', wh_params_m)
         low_stock_count = cursor.fetchone()['count']
 
         # 物料种类数（排除禁用）
-        cursor.execute('SELECT COUNT(*) as count FROM materials WHERE is_disabled = 0')
+        cursor.execute(
+            f'SELECT COUNT(*) as count FROM materials m WHERE m.is_disabled = 0{wh_filter_m}',
+            wh_params_m
+        )
         material_types = cursor.fetchone()['count']
 
         # 计算昨日数据用于百分比变化
         yesterday_start = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_end = today_start
 
-        cursor.execute('''
-            SELECT SUM(quantity) as total
-            FROM inventory_records
-            WHERE type = 'in' AND created_at >= ? AND created_at < ?
-        ''', (yesterday_start.strftime('%Y-%m-%d %H:%M:%S'), yesterday_end.strftime('%Y-%m-%d %H:%M:%S')))
+        cursor.execute(f'''
+            SELECT SUM(r.quantity) as total
+            FROM inventory_records r
+            WHERE r.type = 'in' AND r.created_at >= ? AND r.created_at < ?{wh_filter_r}
+        ''', (yesterday_start.strftime('%Y-%m-%d %H:%M:%S'), yesterday_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params_r)
         yesterday_in = cursor.fetchone()['total'] or 1
 
-        cursor.execute('''
-            SELECT SUM(quantity) as total
-            FROM inventory_records
-            WHERE type = 'out' AND created_at >= ? AND created_at < ?
-        ''', (yesterday_start.strftime('%Y-%m-%d %H:%M:%S'), yesterday_end.strftime('%Y-%m-%d %H:%M:%S')))
+        cursor.execute(f'''
+            SELECT SUM(r.quantity) as total
+            FROM inventory_records r
+            WHERE r.type = 'out' AND r.created_at >= ? AND r.created_at < ?{wh_filter_r}
+        ''', (yesterday_start.strftime('%Y-%m-%d %H:%M:%S'), yesterday_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params_r)
         yesterday_out = cursor.fetchone()['total'] or 1
 
         # 计算百分比变化
@@ -1422,17 +1697,24 @@ def get_dashboard_stats():
 
 
 @app.get("/api/dashboard/category-distribution", response_model=List[CategoryItem])
-def get_category_distribution():
+def get_category_distribution(
+    warehouse_id: Optional[int] = Query(None),
+    current_user: CurrentUser = Depends(get_current_user)
+):
     """获取库存类型分布"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'm')
+
     with get_db() as conn:
         cursor = conn.cursor()
 
-        cursor.execute('''
-            SELECT category, SUM(quantity) as total
-            FROM materials
-            GROUP BY category
+        cursor.execute(f'''
+            SELECT m.category, SUM(m.quantity) as total
+            FROM materials m
+            WHERE 1=1{wh_filter}
+            GROUP BY m.category
             ORDER BY total DESC
-        ''')
+        ''', wh_params)
 
         return [
             CategoryItem(name=row['category'], value=row['total'])
@@ -1441,8 +1723,14 @@ def get_category_distribution():
 
 
 @app.get("/api/dashboard/weekly-trend", response_model=WeeklyTrend)
-def get_weekly_trend():
+def get_weekly_trend(
+    warehouse_id: Optional[int] = Query(None),
+    current_user: CurrentUser = Depends(get_current_user)
+):
     """获取近7天出入库趋势"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'r')
+
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -1458,20 +1746,20 @@ def get_weekly_trend():
             dates.append(date.strftime('%m-%d'))
 
             # 入库数据
-            cursor.execute('''
-                SELECT SUM(quantity) as total
-                FROM inventory_records
-                WHERE type = 'in' AND created_at >= ? AND created_at < ?
-            ''', (date_start.strftime('%Y-%m-%d %H:%M:%S'), date_end.strftime('%Y-%m-%d %H:%M:%S')))
+            cursor.execute(f'''
+                SELECT SUM(r.quantity) as total
+                FROM inventory_records r
+                WHERE r.type = 'in' AND r.created_at >= ? AND r.created_at < ?{wh_filter}
+            ''', (date_start.strftime('%Y-%m-%d %H:%M:%S'), date_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params)
             in_total = cursor.fetchone()['total'] or 0
             in_data.append(in_total)
 
             # 出库数据
-            cursor.execute('''
-                SELECT SUM(quantity) as total
-                FROM inventory_records
-                WHERE type = 'out' AND created_at >= ? AND created_at < ?
-            ''', (date_start.strftime('%Y-%m-%d %H:%M:%S'), date_end.strftime('%Y-%m-%d %H:%M:%S')))
+            cursor.execute(f'''
+                SELECT SUM(r.quantity) as total
+                FROM inventory_records r
+                WHERE r.type = 'out' AND r.created_at >= ? AND r.created_at < ?{wh_filter}
+            ''', (date_start.strftime('%Y-%m-%d %H:%M:%S'), date_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params)
             out_total = cursor.fetchone()['total'] or 0
             out_data.append(out_total)
 
@@ -1479,17 +1767,24 @@ def get_weekly_trend():
 
 
 @app.get("/api/dashboard/top-stock", response_model=TopStock)
-def get_top_stock():
+def get_top_stock(
+    warehouse_id: Optional[int] = Query(None),
+    current_user: CurrentUser = Depends(get_current_user)
+):
     """获取库存TOP10"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'm')
+
     with get_db() as conn:
         cursor = conn.cursor()
 
-        cursor.execute('''
-            SELECT name, quantity, category
-            FROM materials
-            ORDER BY quantity DESC
+        cursor.execute(f'''
+            SELECT m.name, m.quantity, m.category
+            FROM materials m
+            WHERE 1=1{wh_filter}
+            ORDER BY m.quantity DESC
             LIMIT 10
-        ''')
+        ''', wh_params)
 
         names = []
         quantities = []
@@ -1504,18 +1799,24 @@ def get_top_stock():
 
 
 @app.get("/api/dashboard/low-stock-alert", response_model=List[LowStockItem])
-def get_low_stock_alert():
+def get_low_stock_alert(
+    warehouse_id: Optional[int] = Query(None),
+    current_user: CurrentUser = Depends(get_current_user)
+):
     """获取库存预警列表"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'm')
+
     with get_db() as conn:
         cursor = conn.cursor()
 
-        cursor.execute('''
-            SELECT name, sku, category, quantity, safe_stock, location
-            FROM materials
-            WHERE safe_stock IS NOT NULL AND quantity < safe_stock AND is_disabled = 0
-            ORDER BY (quantity - safe_stock) ASC
+        cursor.execute(f'''
+            SELECT m.name, m.sku, m.category, m.quantity, m.safe_stock, m.location
+            FROM materials m
+            WHERE m.safe_stock IS NOT NULL AND m.quantity < m.safe_stock AND m.is_disabled = 0{wh_filter}
+            ORDER BY (m.quantity - m.safe_stock) ASC
             LIMIT 20
-        ''')
+        ''', wh_params)
 
         return [
             LowStockItem(
@@ -1538,7 +1839,8 @@ def fuzzy_match_endpoint(
     q: str = Query(..., description="搜索文本"),
     entity_type: str = Query("all", description="实体类型: material/contact/operator/all"),
     top_k: int = Query(5, ge=1, le=50, description="返回前k个结果"),
-    threshold: float = Query(50.0, ge=0, le=100, description="最低分数阈值")
+    threshold: float = Query(50.0, ge=0, le=100, description="最低分数阈值"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID（预留，暂未生效）"),
 ):
     """模糊匹配搜索"""
     matcher = get_fuzzy_matcher()
@@ -1576,13 +1878,17 @@ def unified_search(
     include_batches: bool = Query(False, description="是否附带批次列表（仅material）"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页条数"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """统一搜索端点"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id)
     with get_db() as conn:
         cursor = conn.cursor()
 
         if entity_type == "material":
-            return _search_materials(cursor, q, category, status, fuzzy, format, include_batches, page, page_size)
+            return _search_materials(cursor, q, category, status, fuzzy, format, include_batches, page, page_size, wh_filter, wh_params)
         elif entity_type == "contact":
             return _search_contacts(cursor, q, contact_type, fuzzy, format, page, page_size)
         elif entity_type == "operator":
@@ -1591,7 +1897,7 @@ def unified_search(
             raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
 
 
-def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size):
+def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=()):
     """搜索物料"""
     # 获取匹配的 material IDs (fuzzy mode)
     matched_ids = None
@@ -1602,9 +1908,9 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, 
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
-    base_query = 'SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled FROM materials WHERE is_disabled = 0'
-    count_query = 'SELECT COUNT(*) as total FROM materials WHERE is_disabled = 0'
-    params = []
+    base_query = f'SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled FROM materials WHERE is_disabled = 0{wh_filter}'
+    count_query = f'SELECT COUNT(*) as total FROM materials WHERE is_disabled = 0{wh_filter}'
+    params = list(wh_params)
 
     if matched_ids is not None:
         placeholders = ','.join('?' * len(matched_ids))
@@ -1831,17 +2137,22 @@ def _search_operators(cursor, q, fuzzy, fmt, page, page_size):
 # ============ Materials APIs ============
 
 @app.get("/api/materials/all", response_model=List[MaterialItem])
-def get_all_materials():
+def get_all_materials(
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
     """获取所有库存（兼容旧API）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id)
     with get_db() as conn:
         cursor = conn.cursor()
 
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT name, sku, category, quantity, unit, safe_stock, location, is_disabled
             FROM materials
-            WHERE is_disabled = 0
+            WHERE is_disabled = 0{wh_filter}
             ORDER BY name ASC
-        ''')
+        ''', wh_params)
 
         result = []
         for row in cursor.fetchall():
@@ -1890,8 +2201,11 @@ def get_materials_list(
     location: Optional[str] = Query(None, description="位置模糊匹配"),
     fuzzy: bool = Query(True, description="名称模糊匹配开关"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取物料列表（分页+筛选）— 一行一批次"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -1909,6 +2223,10 @@ def get_materials_list(
         # 构建物料筛选条件
         where_clauses = []
         params = []
+
+        if wh_id is not None:
+            where_clauses.append('m.warehouse_id = ?')
+            params.append(wh_id)
 
         if not status_filter or 'disabled' not in status_filter:
             where_clauses.append('m.is_disabled = 0')
@@ -1938,10 +2256,12 @@ def get_materials_list(
             SELECT m.id as material_id, m.name, m.sku, m.category, m.quantity as total_quantity,
                    m.unit, m.safe_stock, m.location as material_location, m.is_disabled,
                    b.batch_no, b.quantity as batch_quantity, b.location as batch_location,
-                   b.variant, c.name as contact_name
+                   b.variant, c.name as contact_name,
+                   m.warehouse_id, w.name as warehouse_name
             FROM materials m
             LEFT JOIN batches b ON b.material_id = m.id AND b.is_exhausted = 0
             LEFT JOIN contacts c ON b.contact_id = c.id
+            LEFT JOIN warehouses w ON m.warehouse_id = w.id
             WHERE {where_sql}
             ORDER BY m.name ASC, b.created_at ASC
         '''
@@ -2008,6 +2328,8 @@ def get_materials_list(
                     contact_name=row['contact_name'] or '',
                     total_quantity=row['total_quantity'],
                     variant=row['variant'] or '',
+                    warehouse_id=row['warehouse_id'],
+                    warehouse_name=row['warehouse_name'],
                 ))
 
         return {
@@ -2020,29 +2342,40 @@ def get_materials_list(
 
 
 @app.get("/api/materials/categories", response_model=List[str])
-def get_categories():
+def get_categories(
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
     """获取所有物料分类"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id)
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT DISTINCT category FROM materials ORDER BY category')
+        cursor.execute(f'SELECT DISTINCT category FROM materials WHERE 1=1{wh_filter} ORDER BY category', wh_params)
         return [row['category'] for row in cursor.fetchall()]
 
 
 @app.get("/api/materials/product-stats", response_model=ProductStats)
-def get_product_stats(name: str = Query(..., description="产品名称")):
+def get_product_stats(
+    name: str = Query(..., description="产品名称"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
     """获取单个产品的统计数据"""
     if not name:
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id)
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 查询产品基本信息（支持 name 或 SKU）
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT id, name, sku, quantity, unit, safe_stock, location
             FROM materials
-            WHERE name = ? OR sku = ?
-        ''', (name, name))
+            WHERE (name = ? OR sku = ?){wh_filter}
+        ''', (name, name) + wh_params)
 
         product = cursor.fetchone()
         if not product:
@@ -2125,8 +2458,14 @@ def get_product_stats(name: str = Query(..., description="产品名称")):
 
 
 @app.get("/api/materials/batches")
-def get_material_batches(name: str = Query(..., description="产品名称")):
+def get_material_batches(
+    name: str = Query(..., description="产品名称"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
     """获取物料的活跃批次列表"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'b')
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT id FROM materials WHERE name = ?', (name,))
@@ -2134,13 +2473,13 @@ def get_material_batches(name: str = Query(..., description="产品名称")):
         if not material:
             raise HTTPException(status_code=404, detail="产品不存在")
 
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT b.batch_no, b.quantity, b.location, b.created_at, b.variant, c.name as contact_name
             FROM batches b
             LEFT JOIN contacts c ON b.contact_id = c.id
-            WHERE b.material_id = ? AND b.is_exhausted = 0
+            WHERE b.material_id = ? AND b.is_exhausted = 0{wh_filter}
             ORDER BY b.created_at ASC
-        ''', (material['id'],))
+        ''', (material['id'],) + wh_params)
         batches = cursor.fetchall()
 
         total_quantity = sum(b['quantity'] for b in batches)
@@ -2213,12 +2552,16 @@ def get_product_trend(name: str = Query(..., description="产品名称")):
 def get_product_records(
     name: str = Query(..., description="产品名称"),
     page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=10, le=100, description="每页条数")
+    page_size: int = Query(20, ge=10, le=100, description="每页条数"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取单个产品的出入库记录（分页）"""
     if not name:
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'r')
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -2231,27 +2574,28 @@ def get_product_records(
         material_id = product['id']
 
         # 获取总数
-        cursor.execute('SELECT COUNT(*) as total FROM inventory_records WHERE material_id = ?', (material_id,))
+        cursor.execute(f'SELECT COUNT(*) as total FROM inventory_records r WHERE r.material_id = ?{wh_filter}', (material_id,) + wh_params)
         total = cursor.fetchone()['total']
 
         # 分页查询
         offset = (page - 1) * page_size
-        cursor.execute('''
-            SELECT r.type, r.quantity, r.operator, r.reason, r.created_at,
+        cursor.execute(f'''
+            SELECT r.type, r.quantity, r.operator, r.reason_category, r.reason_note, r.created_at,
                    b.variant, b.batch_no
             FROM inventory_records r
             LEFT JOIN batches b ON r.batch_id = b.id
-            WHERE r.material_id = ?
+            WHERE r.material_id = ?{wh_filter}
             ORDER BY r.created_at DESC
             LIMIT ? OFFSET ?
-        ''', (material_id, page_size, offset))
+        ''', (material_id,) + wh_params + (page_size, offset))
 
         items = [
             ProductRecord(
                 type=row['type'],
                 quantity=row['quantity'],
                 operator=row['operator'],
-                reason=row['reason'],
+                reason_category=row['reason_category'],
+                reason_note=row['reason_note'],
                 created_at=row['created_at'],
                 variant=row['variant'] or '',
                 batch_no=row['batch_no'] or '',
@@ -2270,6 +2614,15 @@ def get_product_records(
         )
 
 
+@app.get("/api/reason-categories")
+def get_reason_categories():
+    """获取出入库原因分类列表"""
+    return {
+        "in": [{"key": k, "label": REASON_CATEGORY_LABELS[k]} for k in REASON_CATEGORIES["in"]],
+        "out": [{"key": k, "label": REASON_CATEGORY_LABELS[k]} for k in REASON_CATEGORIES["out"]],
+    }
+
+
 @app.get("/api/inventory/records")
 def get_inventory_records_paginated(
     page: int = Query(1, ge=1, description="页码"),
@@ -2282,40 +2635,48 @@ def get_inventory_records_paginated(
     status: Optional[str] = Query(None, description="状态(逗号分隔: normal,warning,danger,disabled)"),
     contact_id: Optional[int] = Query(None, description="联系方ID筛选"),
     operator_user_id: Optional[int] = Query(None, description="操作员用户ID筛选"),
-    reason: Optional[str] = Query(None, description="原因关键词搜索"),
+    reason_category: Optional[str] = Query(None, description="原因分类筛选"),
+    reason: Optional[str] = Query(None, description="原因/备注关键词搜索"),
     sort_by: str = Query("created_at", description="排序字段: created_at/quantity/material_name"),
     sort_order: str = Query("desc", description="排序方向: asc/desc"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取所有进出库记录（分页+筛选）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id, 'r')
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 解析状态筛选
         status_filter = status.split(',') if status else None
 
-        # 构建查询（含联系方、批次和操作员信息）
-        base_query = '''
+        # 构建查询（含联系方、批次、操作员和仓库信息）
+        base_query = f'''
             SELECT r.id, m.name as material_name, m.sku as material_sku, m.category,
-                   r.type, r.quantity, r.operator, r.operator_user_id, r.reason, r.created_at,
+                   r.type, r.quantity, r.operator, r.operator_user_id,
+                   r.reason_category, r.reason_note, r.created_at,
                    m.quantity as current_quantity, m.safe_stock, m.is_disabled,
                    r.contact_id, c.name as contact_name,
                    r.batch_id, b.batch_no, b.variant,
-                   u.display_name as operator_display_name, u.username as operator_username
+                   u.display_name as operator_display_name, u.username as operator_username,
+                   r.warehouse_id, w.name as warehouse_name
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
             LEFT JOIN contacts c ON r.contact_id = c.id
             LEFT JOIN batches b ON r.batch_id = b.id
             LEFT JOIN users u ON r.operator_user_id = u.id
-            WHERE 1=1
+            LEFT JOIN warehouses w ON r.warehouse_id = w.id
+            WHERE 1=1{wh_filter}
         '''
-        count_query = '''
+        count_query = f'''
             SELECT COUNT(*) as total
             FROM inventory_records r
             JOIN materials m ON r.material_id = m.id
-            WHERE 1=1
+            WHERE 1=1{wh_filter}
         '''
-        params = []
+        params = list(wh_params)
 
         # 时间范围筛选
         if start_date:
@@ -2357,11 +2718,17 @@ def get_inventory_records_paginated(
             count_query += ' AND r.operator_user_id = ?'
             params.append(operator_user_id)
 
-        # 原因关键词搜索
+        # 原因分类筛选
+        if reason_category:
+            base_query += ' AND r.reason_category = ?'
+            count_query += ' AND r.reason_category = ?'
+            params.append(reason_category)
+
+        # 原因/备注关键词搜索
         if reason:
-            base_query += ' AND r.reason LIKE ?'
-            count_query += ' AND r.reason LIKE ?'
-            params.append(f'%{reason}%')
+            base_query += ' AND (r.reason_note LIKE ? OR r.reason_category LIKE ?)'
+            count_query += ' AND (r.reason_note LIKE ? OR r.reason_category LIKE ?)'
+            params.extend([f'%{reason}%', f'%{reason}%'])
 
         # 获取总数
         cursor.execute(count_query, params)
@@ -2447,7 +2814,8 @@ def get_inventory_records_paginated(
                     operator=row['operator'],
                     operator_user_id=row['operator_user_id'],
                     operator_name=operator_name,
-                    reason=row['reason'],
+                    reason_category=row['reason_category'],
+                    reason_note=row['reason_note'],
                     created_at=row['created_at'],
                     material_status=material_status,
                     is_disabled=is_disabled,
@@ -2457,19 +2825,21 @@ def get_inventory_records_paginated(
                     batch_no=row['batch_no'],
                     batch_details=batch_details,
                     variant=row['variant'] or '',
+                    warehouse_id=row['warehouse_id'],
+                    warehouse_name=row['warehouse_name'],
                 ))
             filtered_count += 1
 
         # 如果有状态筛选，需要重新计算总数
         if status_filter:
             # 需要遍历所有数据来计算真实的筛选后总数
-            count_base_query = '''
+            count_base_query = f'''
                 SELECT m.quantity, m.safe_stock, m.is_disabled
                 FROM inventory_records r
                 JOIN materials m ON r.material_id = m.id
-                WHERE 1=1
+                WHERE 1=1{wh_filter}
             '''
-            count_params = []
+            count_params = list(wh_params)
             if start_date:
                 count_base_query += ' AND DATE(r.created_at) >= ?'
                 count_params.append(start_date)
@@ -2527,10 +2897,12 @@ async def stock_in(
     """入库操作（需要operate权限）- 自动创建批次，支持模糊匹配"""
     product_name = request.product_name
     quantity = request.quantity
-    reason = request.reason or "采购入库"
+    reason_category = request.reason_category
+    reason_note = request.reason_note
     operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
     operator_user_id = current_user.id
     resolved_from = None
+    wh_id = require_warehouse_id(current_user, request.warehouse_id)
 
     if quantity <= 0:
         return StockInResponse(
@@ -2540,10 +2912,12 @@ async def stock_in(
         )
 
     with get_db() as conn:
+        check_warehouse_access(conn, current_user, wh_id)
         cursor = conn.cursor()
+        wh_filter, wh_params = build_warehouse_filter(wh_id)
 
-        # 查询产品（先精确匹配）
-        cursor.execute('SELECT id, unit FROM materials WHERE name = ?', (product_name,))
+        # 查询产品（先精确匹配，按仓库过滤）
+        cursor.execute(f'SELECT id, unit FROM materials WHERE name = ?{wh_filter}', (product_name,) + wh_params)
         row = cursor.fetchone()
 
         # 模糊匹配
@@ -2554,7 +2928,7 @@ async def stock_in(
             if result['confident'] and result['best_match']:
                 resolved_from = product_name
                 product_name = result['best_match']['name']
-                cursor.execute('SELECT id, unit FROM materials WHERE name = ?', (product_name,))
+                cursor.execute(f'SELECT id, unit FROM materials WHERE name = ?{wh_filter}', (product_name,) + wh_params)
                 row = cursor.fetchone()
             elif result['candidates']:
                 names = [c['name'] for c in result['candidates'][:5]]
@@ -2586,15 +2960,15 @@ async def stock_in(
 
         batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id)
         cursor.execute('''
-            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (batch_no, material_id, quantity, quantity, request.contact_id, request.location, request.variant, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, warehouse_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (batch_no, material_id, quantity, quantity, request.contact_id, request.location, request.variant, wh_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         batch_id = cursor.lastrowid
 
         cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, batch_id, created_at)
-            VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, operator_user_id, reason, request.contact_id, batch_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, batch_id, warehouse_id, created_at)
+            VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, quantity, operator, operator_user_id, reason_category, reason_note, request.contact_id, batch_id, wh_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
         conn.commit()
 
@@ -2636,10 +3010,12 @@ async def stock_out(
     """出库操作（需要operate权限）- FIFO批次消耗，支持模糊匹配"""
     product_name = stock_data.product_name
     quantity = stock_data.quantity
-    reason = stock_data.reason or "销售出库"
+    reason_category = stock_data.reason_category
+    reason_note = stock_data.reason_note
     operator = stock_data.operator if stock_data.operator and stock_data.operator != "MCP系统" else current_user.get_operator_name()
     operator_user_id = current_user.id
     resolved_from = None
+    wh_id = require_warehouse_id(current_user, stock_data.warehouse_id)
 
     if quantity <= 0:
         return StockOutResponse(
@@ -2649,10 +3025,12 @@ async def stock_out(
         )
 
     with get_db() as conn:
+        check_warehouse_access(conn, current_user, wh_id)
         cursor = conn.cursor()
+        wh_filter, wh_params = build_warehouse_filter(wh_id)
 
-        # 先精确匹配
-        cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
+        # 先精确匹配（按仓库过滤）
+        cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ?{wh_filter}', (product_name,) + wh_params)
         row = cursor.fetchone()
 
         # 模糊匹配
@@ -2663,7 +3041,7 @@ async def stock_out(
             if result['confident'] and result['best_match']:
                 resolved_from = product_name
                 product_name = result['best_match']['name']
-                cursor.execute('SELECT id, unit, safe_stock FROM materials WHERE name = ?', (product_name,))
+                cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ?{wh_filter}', (product_name,) + wh_params)
                 row = cursor.fetchone()
             elif result['candidates']:
                 names = [c['name'] for c in result['candidates'][:5]]
@@ -2705,9 +3083,9 @@ async def stock_out(
         old_quantity = new_quantity + quantity
 
         cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason, contact_id, created_at)
-            VALUES (?, 'out', ?, ?, ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, operator_user_id, reason, stock_data.contact_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, warehouse_id, created_at)
+            VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, quantity, operator, operator_user_id, reason_category, reason_note, stock_data.contact_id, wh_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         record_id = cursor.lastrowid
 
         # FIFO批次消耗（可选按 variant 过滤）
@@ -2802,19 +3180,23 @@ async def stock_out(
 def export_materials_excel(
     name: Optional[str] = Query(None, description="名称/SKU模糊搜索"),
     category: Optional[str] = Query(None, description="分类"),
-    status: Optional[str] = Query(None, description="状态(逗号分隔)")
+    status: Optional[str] = Query(None, description="状态(逗号分隔)"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """导出库存数据为Excel — 一行一批次，含批次号、位置、联系方"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id)
     with get_db() as conn:
         cursor = conn.cursor()
 
         # 基础查询
-        query = '''
+        query = f'''
             SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled
             FROM materials
-            WHERE 1=1
+            WHERE 1=1{wh_filter}
         '''
-        params = []
+        params = list(wh_params)
 
         # 解析状态筛选
         status_filter = status.split(',') if status else None
@@ -2908,25 +3290,25 @@ def export_materials_excel(
     ws.title = "库存数据"
 
     # 表头
-    headers = ['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '变体', '库存', '存放位置', '联系方']
+    headers = ['物料名称', '规格', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '库存', '存放位置', '联系方']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
     # 数据
     for row_idx, item in enumerate(export_rows, 2):
         ws.cell(row=row_idx, column=1, value=item['name'])
-        ws.cell(row=row_idx, column=2, value=item['sku'])
-        ws.cell(row=row_idx, column=3, value=item['category'])
-        ws.cell(row=row_idx, column=4, value=item['unit'])
-        ws.cell(row=row_idx, column=5, value=item['safe_stock'])
-        ws.cell(row=row_idx, column=6, value=item['batch_no'])
-        ws.cell(row=row_idx, column=7, value=item['variant'])
+        ws.cell(row=row_idx, column=2, value=item['variant'])
+        ws.cell(row=row_idx, column=3, value=item['sku'])
+        ws.cell(row=row_idx, column=4, value=item['category'])
+        ws.cell(row=row_idx, column=5, value=item['unit'])
+        ws.cell(row=row_idx, column=6, value=item['safe_stock'])
+        ws.cell(row=row_idx, column=7, value=item['batch_no'])
         ws.cell(row=row_idx, column=8, value=item['quantity'])
         ws.cell(row=row_idx, column=9, value=item['location'])
         ws.cell(row=row_idx, column=10, value=item['contact_name'])
 
     # 设置列宽
-    column_widths = [22, 18, 14, 8, 12, 18, 10, 10, 16, 16]
+    column_widths = [22, 10, 18, 14, 8, 12, 18, 10, 16, 16]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -2969,9 +3351,12 @@ def extract_variants(names: list) -> tuple:
 async def preview_import_excel(
     request: Request,
     file: UploadFile = File(...),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(get_current_user)  # 需要登录
 ):
     """预览Excel导入内容，自动检测简化模式/批次模式"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    wh_filter, wh_params = build_warehouse_filter(wh_id)
     def _error_resp(msg):
         return ExcelImportPreviewResponse(
             success=False, preview=[], new_skus=[], total_in=0, total_out=0, total_new=0, message=msg
@@ -3019,7 +3404,7 @@ async def preview_import_excel(
             col_mapping['batch_no'] = idx
         elif '联系方' in header or 'contact' in header_lower or '供应商' in header:
             col_mapping['contact_name'] = idx
-        elif '变体' in header or 'variant' in header_lower:
+        elif '变体' in header or '规格' in header or 'variant' in header_lower:
             col_mapping['variant'] = idx
 
     if col_mapping['sku'] is None:
@@ -3095,8 +3480,8 @@ async def preview_import_excel(
             variant_val = _read_cell(row, 'variant') or ""
             contact_id, contact_name = resolve_contact(contact_name_val) if contact_name_val else (None, None)
 
-            # 查询物料
-            cursor.execute('SELECT id, name, quantity FROM materials WHERE sku = ?', (sku,))
+            # 查询物料（按仓库过滤）
+            cursor.execute(f'SELECT id, name, quantity FROM materials WHERE sku = ?{wh_filter}', (sku,) + wh_params)
             material = cursor.fetchone()
 
             if is_batch_mode:
@@ -3127,9 +3512,19 @@ async def preview_import_excel(
                                 variant=variant_val or None,
                             ))
                         else:
-                            return _error_resp(f"第 {idx} 行：批次号 '{batch_no_val}' 在物料 '{sku}' 中不存在")
+                            # 批次号不存在，视为新批次导入
+                            total_in += import_qty
+                            preview_items.append(ImportPreviewItem(
+                                sku=sku, name=material['name'], category=category, unit=unit,
+                                safe_stock=safe_stock, location=location,
+                                current_quantity=0, import_quantity=import_qty,
+                                difference=import_qty, operation='in',
+                                batch_no=batch_no_val, is_batch_new=True,
+                                contact_name=contact_name, contact_id=contact_id,
+                                variant=variant_val or None,
+                            ))
                     else:
-                        # 新批次
+                        # 新批次（无批次号）
                         total_in += import_qty
                         preview_items.append(ImportPreviewItem(
                             sku=sku, name=material['name'], category=category, unit=unit,
@@ -3224,7 +3619,7 @@ async def preview_import_excel(
 
         # 查找缺失的SKU（系统中有但导入文件中没有的，且未被禁用的）
         import_skus = {item.sku for item in preview_items}
-        cursor.execute('SELECT sku, name, category, quantity FROM materials WHERE is_disabled = 0')
+        cursor.execute(f'SELECT sku, name, category, quantity FROM materials WHERE is_disabled = 0{wh_filter}', wh_params)
         all_system_skus = cursor.fetchall()
 
         missing_skus = []
@@ -3261,6 +3656,7 @@ async def confirm_import_excel(
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
     """确认导入，执行变更单（需要operate权限）— 统一创建批次"""
+    wh_id = require_warehouse_id(current_user, request.warehouse_id)
     in_count = 0
     out_count = 0
     new_count = 0
@@ -3271,19 +3667,21 @@ async def confirm_import_excel(
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as conn:
+        check_warehouse_access(conn, current_user, wh_id)
         cursor = conn.cursor()
 
         # 收集导入文件中的所有SKU
         import_skus = set(item.sku for item in request.changes)
 
-        # 将不在导入文件中的SKU标记为禁用（需显式确认）
+        # 将不在导入文件中的SKU标记为禁用（需显式确认，仅限当前仓库）
+        wh_filter, wh_params = build_warehouse_filter(wh_id)
         if import_skus:
             placeholders = ','.join(['?' for _ in import_skus])
             if request.confirm_disable_missing_skus:
-                cursor.execute(f'UPDATE materials SET is_disabled = 1 WHERE sku NOT IN ({placeholders})', list(import_skus))
+                cursor.execute(f'UPDATE materials SET is_disabled = 1 WHERE sku NOT IN ({placeholders}){wh_filter}', list(import_skus) + list(wh_params))
             else:
                 warnings.append("已跳过禁用导入文件之外的SKU，如需禁用请勾选确认选项后重试。")
-            cursor.execute(f'UPDATE materials SET is_disabled = 0 WHERE sku IN ({placeholders})', list(import_skus))
+            cursor.execute(f'UPDATE materials SET is_disabled = 0 WHERE sku IN ({placeholders}){wh_filter}', list(import_skus) + list(wh_params))
 
         # 前置：创建新联系方
         contact_name_to_id = {}
@@ -3309,23 +3707,31 @@ async def confirm_import_excel(
                 return contact_name_to_id[item.contact_name]
             return None
 
-        def _create_batch(material_id, quantity, location, contact_id, variant=None):
+        def _create_batch(material_id, quantity, location, contact_id, variant=None, batch_no=None):
             """创建新批次并返回 batch_id"""
-            batch_no = generate_batch_no(material_id, cursor=cursor)
+            batch_no = batch_no or generate_batch_no(material_id, cursor=cursor)
             cursor.execute('''
-                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (batch_no, material_id, quantity, quantity, contact_id, location, variant, now))
+                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, warehouse_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (batch_no, material_id, quantity, quantity, contact_id, location, variant, wh_id, now))
             return cursor.lastrowid
 
-        def _create_record(material_id, rec_type, quantity, reason_suffix, batch_id=None, contact_id=None):
+        def _create_record(material_id, rec_type, quantity, item_reason_category, reason_suffix, batch_id=None, contact_id=None):
             """创建出入库记录"""
+            # reason_category 从每行 item 读取，reason_note 从全局备注 + 后缀拼接
+            category = item_reason_category or ('purchase' if rec_type == 'in' else 'sell')
+            note_parts = []
+            if request.reason_note:
+                note_parts.append(request.reason_note)
+            if reason_suffix:
+                note_parts.append(reason_suffix.strip(' ()（）'))
+            note = '; '.join(note_parts) if note_parts else None
             cursor.execute('''
                 INSERT INTO inventory_records
-                (material_id, type, quantity, operator, operator_user_id, reason, contact_id, batch_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, batch_id, warehouse_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (material_id, rec_type, quantity, operator, operator_user_id,
-                  f"Excel导入: {request.reason}{reason_suffix}", contact_id, batch_id, now))
+                  category, note, contact_id, batch_id, wh_id, now))
 
         if request.is_batch_mode:
             # === 批次模式 ===
@@ -3333,7 +3739,7 @@ async def confirm_import_excel(
                 if item.operation == 'none':
                     # 无变动，仅更新 batch location
                     if item.batch_no and item.location:
-                        cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                        cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
                         mat = cursor.fetchone()
                         if mat:
                             cursor.execute('UPDATE batches SET location = ? WHERE batch_no = ? AND material_id = ?',
@@ -3347,12 +3753,12 @@ async def confirm_import_excel(
                     if not request.confirm_new_skus:
                         continue
                     cursor.execute('''
-                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
-                        VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id, created_at)
+                        VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
                     ''', (item.name, item.sku, item.category or '未分类', item.unit or '个',
-                          item.safe_stock, item.location or '', now))
+                          item.safe_stock, item.location or '', wh_id, now))
                     if cursor.rowcount == 0:
-                        cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                        cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
                         material_id = cursor.fetchone()['id']
                     else:
                         material_id = cursor.lastrowid
@@ -3362,25 +3768,25 @@ async def confirm_import_excel(
                         batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant)
                         cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
                                        (item.import_quantity, material_id))
-                        _create_record(material_id, 'in', item.import_quantity, ' (新建物料)', batch_id, contact_id)
+                        _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
                 elif item.is_batch_new:
                     # 已有SKU，新批次
-                    cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                    cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
                     mat = cursor.fetchone()
                     if not mat:
                         continue
                     material_id = mat['id']
-                    batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant)
+                    batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant, item.batch_no)
                     cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
                                    (item.import_quantity, material_id))
-                    _create_record(material_id, 'in', item.import_quantity, ' (新批次)', batch_id, contact_id)
+                    _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新批次)', batch_id, contact_id)
                     in_count += 1
                     records_created += 1
                 else:
                     # 已有批次有变动
-                    cursor.execute('SELECT id FROM materials WHERE sku = ?', (item.sku,))
+                    cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
                     mat = cursor.fetchone()
                     if not mat:
                         continue
@@ -3398,7 +3804,7 @@ async def confirm_import_excel(
                                    (diff, material_id))
 
                     rec_type = 'in' if diff > 0 else 'out'
-                    _create_record(material_id, rec_type, abs(diff), '', batch['id'], contact_id)
+                    _create_record(material_id, rec_type, abs(diff), item.reason_category, '', batch['id'], contact_id)
                     if diff > 0:
                         in_count += 1
                     else:
@@ -3407,7 +3813,7 @@ async def confirm_import_excel(
 
                 # 更新 materials.location 为最新
                 if item.location:
-                    cursor.execute('UPDATE materials SET location = ? WHERE sku = ?', (item.location, item.sku))
+                    cursor.execute(f'UPDATE materials SET location = ? WHERE sku = ?{wh_filter}', (item.location, item.sku) + wh_params)
         else:
             # === 简化模式（统一创建批次）===
             for item in request.changes:
@@ -3418,14 +3824,14 @@ async def confirm_import_excel(
                         continue
 
                     cursor.execute('''
-                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (item.name, item.sku, item.category or '未分类', item.import_quantity,
-                          item.unit or '个', item.safe_stock, item.location or '', now))
+                          item.unit or '个', item.safe_stock, item.location or '', wh_id, now))
 
                     if cursor.rowcount == 0:
                         # SKU已存在，按已有物料处理
-                        cursor.execute('SELECT id, quantity FROM materials WHERE sku = ?', (item.sku,))
+                        cursor.execute(f'SELECT id, quantity FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
                         existing = cursor.fetchone()
                         if existing and item.import_quantity != existing['quantity']:
                             material_id = existing['id']
@@ -3436,7 +3842,7 @@ async def confirm_import_excel(
                                 batch_id = _create_batch(material_id, abs(diff), item.location, contact_id, item.variant)
                             else:
                                 batch_id = None
-                            _create_record(material_id, rec_type, abs(diff), ' (SKU已存在，调整库存)', batch_id, contact_id)
+                            _create_record(material_id, rec_type, abs(diff), item.reason_category, ' (SKU已存在，调整库存)', batch_id, contact_id)
                             records_created += 1
                         new_count += 1
                         continue
@@ -3444,11 +3850,11 @@ async def confirm_import_excel(
                     material_id = cursor.lastrowid
                     if item.import_quantity > 0:
                         batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
-                        _create_record(material_id, 'in', item.import_quantity, ' (新建物料)', batch_id, contact_id)
+                        _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         records_created += 1
                     new_count += 1
                 else:
-                    cursor.execute('SELECT id, quantity FROM materials WHERE sku = ?', (item.sku,))
+                    cursor.execute(f'SELECT id, quantity FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
                     material = cursor.fetchone()
                     if not material:
                         continue
@@ -3471,7 +3877,7 @@ async def confirm_import_excel(
                         batch_id = _create_batch(material_id, abs_diff, item.location, contact_id, item.variant)
                         cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
                                        (current_qty + abs_diff, material_id))
-                        _create_record(material_id, 'in', abs_diff, '', batch_id, contact_id)
+                        _create_record(material_id, 'in', abs_diff, item.reason_category, '', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
                     elif item.operation == 'out':
@@ -3492,12 +3898,13 @@ async def confirm_import_excel(
 
                         cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
                                        (current_qty - abs_diff, material_id))
+                        out_reason = item.reason_category or 'sell'
                         cursor.execute('''
                             INSERT INTO inventory_records
-                            (material_id, type, quantity, operator, operator_user_id, reason, contact_id, created_at)
-                            VALUES (?, 'out', ?, ?, ?, ?, ?, ?)
+                            (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, warehouse_id, created_at)
+                            VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (material_id, abs_diff, operator, operator_user_id,
-                              f"Excel导入: {request.reason}", contact_id, now))
+                              out_reason, request.reason_note, contact_id, wh_id, now))
                         record_id = cursor.lastrowid
 
                         for batch in available_batches:
@@ -3542,7 +3949,8 @@ def export_inventory_records(
         cursor = conn.cursor()
 
         query = '''
-            SELECT r.id, m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.operator_user_id, r.reason, r.created_at,
+            SELECT r.id, m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.operator_user_id,
+                   r.reason_category, r.reason_note, r.created_at,
                    c.name as contact_name, r.batch_id, b.batch_no, b.variant,
                    u.display_name as operator_display_name, u.username as operator_username
             FROM inventory_records r
@@ -3592,7 +4000,7 @@ def export_inventory_records(
     ws = wb.active
     ws.title = "出入库记录"
 
-    headers = ['物料名称', '物料编码', '商品类型', '记录类型', '数量', '批次', '变体', '联系方', '操作人', '原因', '时间']
+    headers = ['物料名称', '规格', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '操作人', '原因类别', '备注', '时间']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
@@ -3605,21 +4013,22 @@ def export_inventory_records(
             batch_info = batch_details_map.get(record['id'], '')
 
         ws.cell(row=row_idx, column=1, value=record['name'])
-        ws.cell(row=row_idx, column=2, value=record['sku'])
-        ws.cell(row=row_idx, column=3, value=record['category'])
-        ws.cell(row=row_idx, column=4, value='入库' if record['type'] == 'in' else '出库')
-        ws.cell(row=row_idx, column=5, value=record['quantity'])
-        ws.cell(row=row_idx, column=6, value=batch_info)
-        ws.cell(row=row_idx, column=7, value=record['variant'] or '')
+        ws.cell(row=row_idx, column=2, value=record['variant'] or '')
+        ws.cell(row=row_idx, column=3, value=record['sku'])
+        ws.cell(row=row_idx, column=4, value=record['category'])
+        ws.cell(row=row_idx, column=5, value='入库' if record['type'] == 'in' else '出库')
+        ws.cell(row=row_idx, column=6, value=record['quantity'])
+        ws.cell(row=row_idx, column=7, value=batch_info)
         ws.cell(row=row_idx, column=8, value=record['contact_name'] or '')
         # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段
         operator_name = record['operator_display_name'] or record['operator_username'] or record['operator']
         ws.cell(row=row_idx, column=9, value=operator_name)
-        ws.cell(row=row_idx, column=10, value=record['reason'])
-        ws.cell(row=row_idx, column=11, value=record['created_at'])
+        ws.cell(row=row_idx, column=10, value=REASON_CATEGORY_LABELS.get(record['reason_category'], record['reason_category'] or ''))
+        ws.cell(row=row_idx, column=11, value=record['reason_note'] or '')
+        ws.cell(row=row_idx, column=12, value=record['created_at'])
 
     # 设置列宽
-    column_widths = [22, 18, 14, 12, 10, 28, 10, 16, 14, 24, 22]
+    column_widths = [22, 10, 18, 14, 12, 10, 28, 16, 14, 14, 24, 22]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -3650,11 +4059,14 @@ async def add_inventory_record(
             StockOperationRequest(
                 product_name=request.product_name,
                 quantity=request.quantity,
-                reason=request.reason,
+                reason_category=request.reason_category,
+                reason_note=request.reason_note,
                 operator=operator,
                 contact_id=request.contact_id,
                 location=request.location,
                 batch_no=request.batch_no,
+                variant=request.variant,
+                warehouse_id=request.warehouse_id,
             ),
             current_user
         )
@@ -3673,9 +4085,12 @@ async def add_inventory_record(
             StockOperationRequest(
                 product_name=request.product_name,
                 quantity=request.quantity,
-                reason=request.reason,
+                reason_category=request.reason_category,
+                reason_note=request.reason_note,
                 operator=operator,
-                contact_id=request.contact_id
+                contact_id=request.contact_id,
+                variant=request.variant,
+                warehouse_id=request.warehouse_id,
             ),
             current_user
         )
@@ -3726,7 +4141,7 @@ async def shutdown_mcp_manager():
     await mcp_manager.stop_all()
 
 
-def _build_connection_item(row, status_info: dict) -> MCPConnectionItem:
+def _build_connection_item(row, status_info: dict, warehouse_name: str = None) -> MCPConnectionItem:
     """从数据库行和实时状态构建响应对象"""
     return MCPConnectionItem(
         id=row['id'],
@@ -3740,24 +4155,35 @@ def _build_connection_item(row, status_info: dict) -> MCPConnectionItem:
         pid=status_info.get('pid'),
         uptime_seconds=status_info.get('uptime_seconds'),
         created_at=row['created_at'],
-        updated_at=row['updated_at']
+        updated_at=row['updated_at'],
+        warehouse_id=row['warehouse_id'] if 'warehouse_id' in row.keys() else None,
+        warehouse_name=warehouse_name
     )
 
 
 @app.get("/api/mcp/connections")
 async def list_mcp_connections(
+    warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """列出所有MCP连接（含实时状态）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections ORDER BY created_at DESC')
+        wh_filter, wh_params = build_warehouse_filter(wh_id, 'mc')
+        cursor.execute(f'''
+            SELECT mc.*, w.name as warehouse_name
+            FROM mcp_connections mc
+            LEFT JOIN warehouses w ON mc.warehouse_id = w.id
+            WHERE 1=1{wh_filter}
+            ORDER BY mc.created_at DESC
+        ''', wh_params)
         rows = cursor.fetchall()
 
     items = []
     for row in rows:
         status_info = mcp_manager.get_connection_status(row['id'])
-        items.append(_build_connection_item(row, status_info))
+        items.append(_build_connection_item(row, status_info, warehouse_name=row['warehouse_name']))
 
     return items
 
@@ -3783,16 +4209,17 @@ async def create_mcp_connection(
 
         # 创建关联的 API Key（is_system=1，不在用户管理中显示）
         cursor.execute('''
-            INSERT INTO api_keys (key_hash, name, role, user_id, is_system, created_at)
-            VALUES (?, ?, ?, ?, 1, ?)
-        ''', (key_hash, f'Agent: {request.name}', role, current_user.id, now))
+            INSERT INTO api_keys (key_hash, name, role, user_id, is_system, warehouse_id, created_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+        ''', (key_hash, f'Agent: {request.name}', role, current_user.id,
+              request.warehouse_id, now))
 
         # 创建 MCP 连接记录
         cursor.execute('''
-            INSERT INTO mcp_connections (id, name, mcp_endpoint, api_key, role, auto_start, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'stopped', ?, ?)
+            INSERT INTO mcp_connections (id, name, mcp_endpoint, api_key, role, auto_start, warehouse_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)
         ''', (conn_id, request.name, request.mcp_endpoint, api_key_plain, role,
-              1 if request.auto_start else 0, now, now))
+              1 if request.auto_start else 0, request.warehouse_id, now, now))
         conn.commit()
 
     # 如果 auto_start，立即启动
@@ -3861,6 +4288,14 @@ async def update_mcp_connection(
         if request.auto_start is not None:
             updates.append('auto_start = ?')
             params.append(1 if request.auto_start else 0)
+        if request.warehouse_id is not None:
+            updates.append('warehouse_id = ?')
+            params.append(request.warehouse_id)
+            # 同步更新关联的 API Key 仓库
+            cursor.execute(
+                'UPDATE api_keys SET warehouse_id = ? WHERE key_hash = ?',
+                (request.warehouse_id, key_hash)
+            )
 
         if updates:
             updates.append('updated_at = ?')
@@ -4033,6 +4468,408 @@ async def get_mcp_connection_logs(
 
     logs = mcp_manager.get_logs(conn_id, lines)
     return {"logs": logs}
+
+
+# ============ ERP Provider 管理 APIs ============
+
+# 将 mcp/providers 目录加入 sys.path，供动态加载 Provider 使用
+import sys as _sys
+import json as _json
+_mcp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'mcp')
+if _mcp_dir not in _sys.path:
+    _sys.path.insert(0, _mcp_dir)
+
+
+def _get_providers_custom_dir() -> str:
+    """返回自定义 Provider 存储目录（确保存在）。"""
+    custom_dir = os.path.join(_mcp_dir, 'providers', 'custom')
+    os.makedirs(custom_dir, exist_ok=True)
+    return custom_dir
+
+
+@app.get("/api/system/mode")
+async def get_system_mode(current_user: CurrentUser = Depends(require_auth('admin'))):
+    """查询系统当前运行模式（self_owned / external_erp）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM system_settings WHERE key = 'system_mode'")
+        row = cursor.fetchone()
+        mode = row['value'] if row else 'self_owned'
+    return {"mode": mode}
+
+
+@app.put("/api/system/mode")
+async def set_system_mode(
+    request: Request,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """切换系统运行模式"""
+    body = await request.json()
+    mode = body.get('mode', '')
+    if mode not in ('self_owned', 'external_erp'):
+        raise HTTPException(status_code=400, detail="mode 必须是 self_owned 或 external_erp")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 切换到外部ERP模式时，必须先有激活的Provider
+        if mode == 'external_erp':
+            cursor.execute("SELECT id FROM erp_providers WHERE is_active = 1")
+            if not cursor.fetchone():
+                raise HTTPException(status_code=400, detail="切换到外部ERP模式前，请先激活一个 Provider")
+
+        cursor.execute(
+            "UPDATE system_settings SET value = ?, updated_at = ? WHERE key = 'system_mode'",
+            (mode, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        if cursor.rowcount == 0:
+            cursor.execute(
+                "INSERT INTO system_settings (key, value) VALUES ('system_mode', ?)", (mode,)
+            )
+        conn.commit()
+
+    logger.info(f"系统模式切换为: {mode}，操作人: {current_user.display_name}")
+    return {"mode": mode}
+
+
+@app.get("/api/erp/providers")
+async def list_erp_providers(current_user: CurrentUser = Depends(require_auth('admin'))):
+    """列出所有 ERP Provider"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, provider_name, class_name, filename,
+                   config, test_results, test_passed_at, is_active,
+                   created_at, updated_at
+            FROM erp_providers ORDER BY created_at DESC
+        """)
+        rows = cursor.fetchall()
+
+    providers = []
+    for row in rows:
+        p = dict(row)
+        p['config'] = _json.loads(p['config']) if p['config'] else {}
+        p['test_results'] = _json.loads(p['test_results']) if p['test_results'] else None
+        providers.append(p)
+    return {"providers": providers}
+
+
+@app.post("/api/erp/providers")
+async def upload_erp_provider(
+    file: UploadFile = File(...),
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """上传自定义 Provider .py 文件"""
+    import tempfile
+    import shutil
+
+    # 校验扩展名
+    if not file.filename or not file.filename.endswith('.py'):
+        raise HTTPException(status_code=400, detail="只接受 .py 文件")
+
+    # 读取内容并检查大小
+    content = await file.read()
+    if len(content) > 100 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小超过 100KB 上限")
+
+    # 写入临时文件后校验
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.py')
+    try:
+        with os.fdopen(tmp_fd, 'wb') as f:
+            f.write(content)
+
+        from providers.validator import validate_provider_file
+        result = validate_provider_file(tmp_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not result['valid']:
+        raise HTTPException(status_code=400, detail={
+            "message": "Provider 文件校验失败",
+            "errors": result['errors'],
+        })
+
+    provider_name = result['provider_name']
+    class_name = result['class_name']
+    filename = f"{provider_name}.py"
+
+    # 保存到 custom 目录
+    custom_dir = _get_providers_custom_dir()
+    dest_path = os.path.join(custom_dir, filename)
+    with open(dest_path, 'wb') as f:
+        f.write(content)
+
+    # 写入数据库
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # 使用文件名（去掉.py）作为默认显示名
+        display_name = file.filename.replace('.py', '')
+        try:
+            cursor.execute("""
+                INSERT INTO erp_providers
+                    (name, provider_name, class_name, filename, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (display_name, provider_name, class_name, filename, now, now))
+            conn.commit()
+            provider_id = cursor.lastrowid
+        except Exception as e:
+            # provider_name 唯一约束冲突
+            os.unlink(dest_path)
+            raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 已存在")
+
+    logger.info(f"上传 ERP Provider: {provider_name} ({class_name})，操作人: {current_user.display_name}")
+    return {
+        "id": provider_id,
+        "provider_name": provider_name,
+        "class_name": class_name,
+        "filename": filename,
+        "methods": result['methods'],
+    }
+
+
+@app.get("/api/erp/providers/{provider_id}")
+async def get_erp_provider(
+    provider_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """获取单个 Provider 详情"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    p = dict(row)
+    p['config'] = _json.loads(p['config']) if p['config'] else {}
+    p['test_results'] = _json.loads(p['test_results']) if p['test_results'] else None
+    return p
+
+
+@app.put("/api/erp/providers/{provider_id}")
+async def update_erp_provider(
+    provider_id: int,
+    request: Request,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """更新 Provider 的名称和配置"""
+    body = await request.json()
+    name = body.get('name')
+    config = body.get('config', {})
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM erp_providers WHERE id = ?", (provider_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Provider 不存在")
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        updates = []
+        params = []
+        if name is not None:
+            updates.append("name = ?")
+            params.append(name)
+        if config is not None:
+            updates.append("config = ?")
+            params.append(_json.dumps(config))
+        updates.append("updated_at = ?")
+        params.append(now)
+        params.append(provider_id)
+
+        cursor.execute(
+            f"UPDATE erp_providers SET {', '.join(updates)} WHERE id = ?",
+            params
+        )
+        conn.commit()
+
+    return {"success": True}
+
+
+@app.delete("/api/erp/providers/{provider_id}")
+async def delete_erp_provider(
+    provider_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """删除 Provider（激活状态下禁止删除）"""
+    import shutil
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    if row['is_active']:
+        raise HTTPException(status_code=400, detail="请先停用 Provider 再删除")
+
+    # 删除文件
+    custom_dir = _get_providers_custom_dir()
+    filepath = os.path.join(custom_dir, row['filename'])
+    if os.path.exists(filepath):
+        os.unlink(filepath)
+
+    # 删除数据库记录
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM erp_providers WHERE id = ?", (provider_id,))
+        conn.commit()
+
+    logger.info(f"删除 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
+    return {"success": True}
+
+
+@app.post("/api/erp/providers/{provider_id}/test")
+async def test_erp_provider(
+    provider_id: int,
+    level: int = Query(1, ge=1, le=2),
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """运行 Provider 连通性测试（level=1 只读，level=2 写操作）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    config = _json.loads(row['config']) if row['config'] else {}
+    custom_dir = _get_providers_custom_dir()
+    filepath = os.path.join(custom_dir, row['filename'])
+
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=400, detail=f"Provider 文件不存在: {row['filename']}")
+
+    from providers.test_runner import run_level1_tests, run_level2_tests
+    if level == 1:
+        test_result = run_level1_tests(filepath, config)
+    else:
+        test_result = run_level2_tests(filepath, config)
+
+    # 存储测试结果（分级保存，L1 和 L2 独立存储）
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # 读取现有测试结果
+        cursor.execute("SELECT test_results FROM erp_providers WHERE id = ?", (provider_id,))
+        existing = cursor.fetchone()
+        all_results = _json.loads(existing['test_results']) if existing and existing['test_results'] else {}
+        all_results[f'level{level}'] = test_result
+
+        # L1 通过才更新 test_passed_at
+        l1 = all_results.get('level1', {})
+        test_passed_at = now if l1.get('all_passed') else None
+
+        cursor.execute(
+            "UPDATE erp_providers SET test_results = ?, test_passed_at = ?, updated_at = ? WHERE id = ?",
+            (_json.dumps(all_results), test_passed_at, now, provider_id)
+        )
+        conn.commit()
+
+    logger.info(f"测试 ERP Provider: {row['provider_name']} L{level}，all_passed={test_result['all_passed']}")
+    return test_result
+
+
+@app.post("/api/erp/providers/{provider_id}/activate")
+async def activate_erp_provider(
+    provider_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """激活指定 Provider（需先通过 Level 1 测试）"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    # 校验 Level 1 测试通过
+    test_results = _json.loads(row['test_results']) if row['test_results'] else None
+    l1 = test_results.get('level1', {}) if test_results else {}
+    if not l1.get('all_passed'):
+        raise HTTPException(status_code=400, detail="请先通过 Level 1 测试再激活")
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # 先停用所有其他 Provider
+        cursor.execute("UPDATE erp_providers SET is_active = 0, updated_at = ?", (now,))
+        # 激活指定 Provider
+        cursor.execute(
+            "UPDATE erp_providers SET is_active = 1, updated_at = ? WHERE id = ?",
+            (now, provider_id)
+        )
+        conn.commit()
+
+    logger.info(f"激活 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
+    return {"success": True, "provider_name": row['provider_name']}
+
+
+@app.post("/api/erp/providers/{provider_id}/deactivate")
+async def deactivate_erp_provider(
+    provider_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """停用指定 Provider"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, provider_name FROM erp_providers WHERE id = ?", (provider_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE erp_providers SET is_active = 0, updated_at = ? WHERE id = ?",
+            (now, provider_id)
+        )
+        conn.commit()
+
+    logger.info(f"停用 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
+    return {"success": True}
+
+
+@app.get("/api/erp/providers/{provider_id}/status")
+async def get_erp_provider_status(
+    provider_id: int,
+    current_user: CurrentUser = Depends(require_auth('admin'))
+):
+    """实时检测 Provider 连通性（调用 get_today_statistics 作为健康探针）"""
+    import time as _time
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    config = _json.loads(row['config']) if row['config'] else {}
+    custom_dir = _get_providers_custom_dir()
+    filepath = os.path.join(custom_dir, row['filename'])
+
+    if not os.path.exists(filepath):
+        return {"online": False, "latency_ms": None, "error": f"Provider 文件不存在: {row['filename']}"}
+
+    try:
+        from providers.test_runner import load_provider_from_file
+        t0 = _time.perf_counter()
+        provider = load_provider_from_file(filepath, config)
+        provider.get_today_statistics()
+        latency_ms = round((_time.perf_counter() - t0) * 1000, 2)
+        return {"online": True, "latency_ms": latency_ms, "error": None}
+    except Exception as e:
+        return {"online": False, "latency_ms": None, "error": f"{type(e).__name__}: {e}"}
 
 
 # ============ 前端静态文件（all-in-one 部署）============
