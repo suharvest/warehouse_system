@@ -1,7 +1,7 @@
 // ============ 导入导出模块 ============
 import { t } from '../../../i18n.js';
-import { API_BASE_URL } from '../api.js';
-import { currentProductName, currentTab } from '../state.js';
+import { API_BASE_URL, getCurrentWarehouseId } from '../api.js';
+import { currentProductName, currentTab, currentWarehouse } from '../state.js';
 
 // 回调函数引用
 let loadAllProductsFn = null;
@@ -20,6 +20,38 @@ export function setImportExportCallbacks(callbacks) {
 // 导入状态
 let importPreviewData = null;
 let pendingNewSkus = [];
+let _importReasonCategories = null;
+
+// 根据操作类型获取默认原因分类
+function _defaultReasonForOp(operation) {
+    if (operation === 'in' || operation === 'new') return 'purchase';
+    if (operation === 'out') return 'sell';
+    return '';
+}
+
+// 从预览表行内下拉收集 reason_category 写回 preview data
+function _collectRowReasonCategories() {
+    if (!importPreviewData || !importPreviewData.preview) return;
+    document.querySelectorAll('.import-row-reason').forEach(select => {
+        const idx = parseInt(select.dataset.row);
+        if (importPreviewData.preview[idx]) {
+            importPreviewData.preview[idx].reason_category = select.value || null;
+        }
+    });
+}
+
+// 生成行内原因下拉 HTML
+function _reasonSelectHtml(index, operation) {
+    if (operation === 'none') return '<td>-</td>';
+    const cats = _importReasonCategories || { in: [], out: [] };
+    const type = (operation === 'out') ? 'out' : 'in';
+    const options = cats[type] || [];
+    const defaultVal = _defaultReasonForOp(operation);
+    const optionsHtml = options.map(c =>
+        `<option value="${c.key}"${c.key === defaultVal ? ' selected' : ''}>${c.label}</option>`
+    ).join('');
+    return `<td><select class="import-row-reason" data-row="${index}" style="width:100%;min-width:80px;padding:2px 4px;font-size:12px;">${optionsHtml}</select></td>`;
+}
 
 // ============ 导出功能 ============
 export function exportInventory() {
@@ -64,7 +96,11 @@ export function exportProductRecords() {
 }
 
 // ============ 导入功能 ============
-export function showImportModal() {
+export async function showImportModal() {
+    if (!currentWarehouse) {
+        alert(t('writeRequiresWarehouse') || '写操作需要选择具体仓库');
+        return;
+    }
     document.getElementById('import-modal').classList.add('show');
     document.getElementById('preview-area').style.display = 'none';
     document.getElementById('excel-file').value = '';
@@ -76,6 +112,15 @@ export function showImportModal() {
     // 隐藏缺失SKU区域
     const missingArea = document.getElementById('missing-skus-area');
     if (missingArea) missingArea.style.display = 'none';
+    // 预加载原因分类（供预览表行内下拉使用）
+    if (!_importReasonCategories) {
+        try {
+            const resp = await fetch(`${API_BASE_URL}/reason-categories`);
+            _importReasonCategories = await resp.json();
+        } catch (e) {
+            console.error('加载原因分类失败:', e);
+        }
+    }
 }
 
 export function closeImportModal() {
@@ -213,10 +258,10 @@ function renderImportPreview(data) {
     data._hasChanges = hasChanges;
     data._hasMissing = hasMissing;
 
-    const reasonRow = document.getElementById('import-reason').closest('.form-row');
+    const reasonRow = document.getElementById('import-reason-note').closest('.form-row');
     const disableRow = document.getElementById('confirm-disable-missing').closest('.form-row');
 
-    // 显示原因输入框（有变更时）
+    // 显示备注输入框（有变更时）
     if (hasChanges) {
         reasonRow.style.display = '';
     } else {
@@ -261,6 +306,7 @@ function renderImportPreview(data) {
                     <th>${t('location')}</th>
                     <th>${t('contact')}</th>
                     <th>${t('operation')}</th>
+                    <th>${t('reasonCategory')}</th>
                 </tr>
             `;
         } else {
@@ -272,12 +318,13 @@ function renderImportPreview(data) {
                     <th>${t('importQty')}</th>
                     <th>${t('difference')}</th>
                     <th>${t('operation')}</th>
+                    <th>${t('reasonCategory')}</th>
                 </tr>
             `;
         }
     }
 
-    data.preview.forEach(item => {
+    data.preview.forEach((item, rowIndex) => {
         const tr = document.createElement('tr');
 
         let opText = '', opClass = '';
@@ -310,6 +357,7 @@ function renderImportPreview(data) {
                 <td>${item.location || '-'}</td>
                 <td>${item.contact_name || '-'}</td>
                 <td><span class="type-badge ${opClass}">${opText}</span></td>
+                ${_reasonSelectHtml(rowIndex, item.operation)}
             `;
         } else {
             const nameDisplay = item.variant ? `${item.name} <span style="color:#888">[${item.variant}]</span>` : item.name;
@@ -320,6 +368,7 @@ function renderImportPreview(data) {
                 <td>${item.import_quantity}</td>
                 <td class="${item.difference > 0 ? 'diff-positive' : item.difference < 0 ? 'diff-negative' : ''}">${diffDisplay}</td>
                 <td><span class="type-badge ${opClass}">${opText}</span></td>
+                ${_reasonSelectHtml(rowIndex, item.operation)}
             `;
         }
         tbody.appendChild(tr);
@@ -342,13 +391,9 @@ export async function confirmImport() {
         return;
     }
 
-    // 如果有变更，需要填写原因
+    // 读取每行的原因分类到 preview data
     if (hasChanges) {
-        const reason = document.getElementById('import-reason').value.trim();
-        if (!reason) {
-            alert(t('fillAllFields'));
-            return;
-        }
+        _collectRowReasonCategories();
     }
 
     if (pendingNewSkus.length > 0) {
@@ -392,8 +437,11 @@ export async function confirmNewSkus() {
 }
 
 async function executeImport(confirmNewSkusFlag) {
-    const reason = document.getElementById('import-reason').value.trim();
+    const reasonNote = document.getElementById('import-reason-note').value.trim() || null;
     const confirmDisableMissing = document.getElementById('confirm-disable-missing')?.checked || false;
+
+    // 确保每行都有 reason_category
+    _collectRowReasonCategories();
 
     try {
         const response = await fetch(`${API_BASE_URL}/materials/import-excel/confirm`, {
@@ -402,10 +450,11 @@ async function executeImport(confirmNewSkusFlag) {
             credentials: 'include',
             body: JSON.stringify({
                 changes: importPreviewData.preview,
-                reason: reason,
+                reason_note: reasonNote,
                 confirm_new_skus: confirmNewSkusFlag,
                 confirm_disable_missing_skus: confirmDisableMissing,
-                is_batch_mode: importPreviewData.is_batch_mode || false
+                is_batch_mode: importPreviewData.is_batch_mode || false,
+                warehouse_id: getCurrentWarehouseId()
             })
         });
 

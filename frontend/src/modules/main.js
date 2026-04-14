@@ -1,14 +1,15 @@
 // ============ 主入口模块 ============
 import { t } from '../../i18n.js';
-import { inventoryApi } from './api.js';
+import { inventoryApi, warehousesApi } from './api.js';
 import {
     allCategories, setAllCategories, allProducts, setAllProducts,
-    currentTab, recordsCurrentPage, inventoryCurrentPage, detailCurrentPage, contactsCurrentPage
+    currentTab, recordsCurrentPage, inventoryCurrentPage, detailCurrentPage, contactsCurrentPage,
+    setAllWarehouses, allWarehouses
 } from './state.js';
 
 // UI 模块
 import { initDropdownListeners, initSearchableSelect, setProductSelectorValue, clearProductSelector, clearRecordProductSelector, toggleDropdown, toggleDropdownItem } from './ui/dropdown.js';
-import { switchTab, initFromHash, startAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules } from './ui/tabs.js';
+import { switchTab, initFromHash, startAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules, renderWarehouseSwitcher, toggleWarehouseSwitcher, selectWarehouse } from './ui/tabs.js';
 
 // 功能模块
 import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks, initSessionExpiredHandler } from './features/auth.js';
@@ -22,6 +23,7 @@ import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, 
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh } from './features/mcp.js';
+import { loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
 
 // 语言切换
 import { toggleLangDropdown, selectLanguage } from '../../i18n.js';
@@ -43,7 +45,13 @@ function setupModuleCallbacks() {
         setProductSelectorValue,
         loadMCPConnections,
         startMCPRefresh,
-        stopMCPRefresh
+        stopMCPRefresh,
+        loadERPStatus,
+        startERPRefresh,
+        stopERPRefresh,
+        t,
+        loadCategories,
+        loadAllProducts
     });
 
     // 设置认证回调
@@ -180,6 +188,19 @@ function populateProductSelector() {
         },
         placeholder: t('searchPlaceholder') || '搜索产品名称或编码...'
     });
+}
+
+// ============ 仓库初始化 ============
+async function loadWarehouses() {
+    try {
+        const data = await warehousesApi.getMyWarehouses();
+        if (data && data.warehouses) {
+            setAllWarehouses(data.warehouses);
+            renderWarehouseSwitcher();
+        }
+    } catch (error) {
+        console.error('加载仓库列表失败:', error);
+    }
 }
 
 // ============ 语言变更回调 ============
@@ -335,6 +356,33 @@ const actionHandlers = {
     'exportThenClearDatabase': exportThenClearDatabase,
     'directClearDatabase': directClearDatabase,
 
+    // ERP 系统模式管理
+    'showUploadWizard': showUploadWizard,
+    'closeUploadWizard': closeUploadWizard,
+    'handleProviderUpload': handleProviderUpload,
+    'saveProviderConfig': saveProviderConfig,
+    'wizardNextStep': wizardNextStep,
+    'wizardPrevStep': wizardPrevStep,
+    'switchToSelfOwned': () => switchSystemMode('self_owned'),
+    'switchToERP': () => switchSystemMode('external_erp'),
+    'erpActivate': (el) => activateProvider(el.dataset.providerId),
+    'erpDeactivate': (el) => deactivateProvider(el.dataset.providerId),
+    'erpDelete': (el) => deleteProvider(el.dataset.providerId),
+    'erpEdit': (el) => editProviderConfig(el.dataset.providerId),
+    'erpRunTest1': (el) => runProviderTest(el.dataset.providerId, 1),
+    'erpRunTest2': (el) => runProviderTest(el.dataset.providerId, 2),
+    'erpWizardRunLevel2': () => wizardRunLevel2(),
+    'erpWizardGoToResults': () => wizardGoToResults(),
+    'erpFileChanged': (el) => {
+        const label = document.getElementById('erp-file-name-label');
+        if (label && el.files && el.files[0]) label.textContent = el.files[0].name;
+    },
+    'erpWizardActivate': () => wizardActivate(),
+
+    // 仓库切换
+    'toggleWarehouseSwitcher': toggleWarehouseSwitcher,
+    'selectWarehouse': (el) => selectWarehouse(el.dataset.slug),
+
     // MCP 连接管理
     'showAddMCPModal': showAddMCPModal,
     'closeMCPModal': closeMCPModal,
@@ -397,6 +445,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // 检查认证状态
     await checkAuthStatus();
+
+    // 加载仓库列表（需在 initFromHash 之前，因为 initFromHash 会用到仓库信息）
+    await loadWarehouses();
 
     // 初始化图表
     initCharts();

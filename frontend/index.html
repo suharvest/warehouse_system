@@ -88,7 +88,7 @@
                         <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
                         <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
                     </svg>
-                    <span data-i18n="tabUsers">用户管理</span>
+                    <span data-i18n="tabUsers">系统设置</span>
                 </button>
                 <button class="nav-item" data-tab="mcp" data-min-role="admin" data-action="switchTab" id="nav-mcp" style="display:none;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -120,6 +120,21 @@
                         </div>
                         <button class="login-btn" id="login-btn" data-action="showLoginModal" data-i18n="login">登录</button>
                         <button class="logout-btn" id="logout-btn" data-action="handleLogout" style="display:none;" data-i18n="logout">登出</button>
+                    </div>
+
+                    <!-- 仓库切换 -->
+                    <div class="warehouse-switcher" id="warehouseSwitcher" style="display:none">
+                        <button class="warehouse-btn" data-action="toggleWarehouseSwitcher">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                                <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                            </svg>
+                            <span id="currentWarehouseName" data-i18n="allWarehouses">全部仓库</span>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                        </button>
+                        <div class="warehouse-dropdown" id="warehouseDropdown"></div>
                     </div>
 
                     <!-- 语言切换 -->
@@ -345,9 +360,15 @@
                                 </select>
                             </div>
                             <div class="filter-group">
-                                <label data-i18n="reason">原因</label>
+                                <label data-i18n="reasonCategory">原因类别</label>
+                                <select id="filter-reason-category">
+                                    <option value="" data-i18n="allReasonCategories">全部类别</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label data-i18n="reasonNote">备注</label>
                                 <input type="text" id="filter-record-reason" data-i18n="reasonSearchPlaceholder"
-                                    placeholder="搜索原因...">
+                                    placeholder="搜索备注...">
                             </div>
                             <div class="filter-actions">
                                 <button class="filter-btn primary" data-action="applyRecordsFilter"
@@ -387,15 +408,16 @@
                                     <tr>
                                         <th data-i18n="time">时间</th>
                                         <th data-i18n="materialName">物料名称</th>
+                                        <th data-i18n="variant">规格</th>
                                         <th data-i18n="materialCode">物料编码</th>
                                         <th data-i18n="productCategory">商品类型</th>
                                         <th data-i18n="recordType">记录类型</th>
                                         <th data-i18n="quantity">数量</th>
                                         <th data-i18n="batch">批次</th>
-                                        <th data-i18n="variant">变体</th>
                                         <th data-i18n="contact">联系方</th>
                                         <th data-i18n="operator">操作人</th>
-                                        <th data-i18n="reason">原因</th>
+                                        <th data-i18n="reasonCategory">原因类别</th>
+                                        <th data-i18n="reasonNote">备注</th>
                                         <th data-i18n="status">状态</th>
                                     </tr>
                                 </thead>
@@ -515,10 +537,10 @@
                                 <thead>
                                     <tr>
                                         <th data-i18n="materialName">物料名称</th>
+                                        <th data-i18n="variant">规格</th>
                                         <th data-i18n="materialCode">物料编码</th>
                                         <th data-i18n="type">类型</th>
                                         <th data-i18n="batchNo">批次号</th>
-                                        <th data-i18n="variant">变体</th>
                                         <th data-i18n="currentStockCol">库存</th>
                                         <th data-i18n="unitCol">单位</th>
                                         <th data-i18n="safeStockCol">安全库存</th>
@@ -642,7 +664,7 @@
                                         <thead>
                                             <tr>
                                                 <th data-i18n="batchNo">批次号</th>
-                                                <th data-i18n="variant">变体</th>
+                                                <th data-i18n="variant">规格</th>
                                                 <th data-i18n="quantity">库存</th>
                                                 <th data-i18n="location">存放位置</th>
                                                 <th data-i18n="contact">联系方</th>
@@ -684,10 +706,11 @@
                                         <tr>
                                             <th data-i18n="time">时间</th>
                                             <th data-i18n="type">类型</th>
+                                            <th data-i18n="variant">规格</th>
                                             <th data-i18n="quantity">数量</th>
-                                            <th data-i18n="variant">变体</th>
                                             <th data-i18n="operator">操作人</th>
-                                            <th data-i18n="reason">原因</th>
+                                            <th data-i18n="reasonCategory">原因类别</th>
+                                            <th data-i18n="reasonNote">备注</th>
                                         </tr>
                                     </thead>
                                     <tbody id="detail-records-tbody">
@@ -801,10 +824,10 @@
                         </div>
                     </div>
 
-                    <!-- 用户管理 Tab -->
+                    <!-- 系统设置 Tab -->
                     <div id="tab-users" class="tab-pane">
                         <div class="page-header">
-                            <h2 class="page-title" data-i18n="tabUsers">用户管理</h2>
+                            <h2 class="page-title" data-i18n="tabUsers">系统设置</h2>
                         </div>
 
                         <!-- 用户列表 -->
@@ -861,6 +884,47 @@
                             </table>
                         </div>
 
+                        <!-- 系统模式 / ERP Provider 管理 -->
+                        <div id="erp-mode-cards" class="table-container mt-6">
+                            <!-- Rendered by JS -->
+                        </div>
+
+                        <div id="erp-provider-section" class="table-container mt-6">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="erpProviderList">已配置的外部系统</div>
+                                <button class="action-btn add-btn" data-action="showUploadWizard">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    <span data-i18n="erpUploadProvider">上传 Provider</span>
+                                </button>
+                            </div>
+                            <table id="erp-providers-table">
+                                <thead>
+                                    <tr>
+                                        <th data-i18n="name">名称</th>
+                                        <th>Provider ID</th>
+                                        <th data-i18n="erpTargetUrl">目标地址</th>
+                                        <th data-i18n="erpTestStatus">测试状态</th>
+                                        <th data-i18n="status">状态</th>
+                                        <th data-i18n="actions">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="erp-providers-tbody"></tbody>
+                            </table>
+                        </div>
+
+                        <div id="erp-status-dashboard" class="table-container mt-6" style="display: none;">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="erpStatusDashboard">接口状态看板</div>
+                            </div>
+                            <div id="erp-status-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 16px;">
+                                <!-- Rendered by JS -->
+                            </div>
+                            <div id="erp-status-footer" style="padding: 8px 16px; font-size: 12px; color: var(--text-muted);"></div>
+                        </div>
+
                         <!-- 数据库管理 -->
                         <div class="table-container mt-6">
                             <div class="section-header">
@@ -869,7 +933,6 @@
                             <div class="p-4">
                                 <p class="text-sm text-gray-500 mb-4" data-i18n="databaseManagementDesc">管理仓库数据的导出、导入和清空操作。用户账户和API密钥不受影响。</p>
                                 <div class="flex flex-wrap gap-4">
-                                    <!-- 导出数据库 -->
                                     <div class="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 flex-1 min-w-[280px]">
                                         <div class="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-lg bg-blue-50 text-blue-600">
                                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -891,7 +954,6 @@
                                             <span data-i18n="export">导出</span>
                                         </button>
                                     </div>
-                                    <!-- 导入数据库 -->
                                     <div class="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 flex-1 min-w-[280px]">
                                         <div class="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-lg bg-green-50 text-green-600">
                                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -913,7 +975,6 @@
                                             <span data-i18n="import">导入</span>
                                         </button>
                                     </div>
-                                    <!-- 清空数据库 -->
                                     <div class="flex items-center gap-4 p-4 bg-red-50 rounded-lg border border-red-200 flex-1 min-w-[280px]">
                                         <div class="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-lg bg-red-100 text-red-600">
                                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -974,6 +1035,125 @@
         </main>
     </div>
 
+    <!-- ERP Provider 上传向导模态框 -->
+    <div id="erp-upload-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 data-i18n="erpUploadTitle">上传 Provider</h3>
+                <button class="close-btn" data-action="closeUploadWizard">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- 步骤指示器 -->
+                <div style="display: flex; align-items: center; justify-content: center; gap: 0; margin-bottom: 24px;">
+                    <div id="erp-step-dot-1" style="width: 28px; height: 28px; border-radius: 50%; background: var(--primary-color, #3b82f6); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">1</div>
+                    <div style="height: 2px; width: 40px; background: var(--border-color, #e5e7eb);"></div>
+                    <div id="erp-step-dot-2" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">2</div>
+                    <div style="height: 2px; width: 40px; background: var(--border-color, #e5e7eb);"></div>
+                    <div id="erp-step-dot-3" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">3</div>
+                    <div style="height: 2px; width: 40px; background: var(--border-color, #e5e7eb);"></div>
+                    <div id="erp-step-dot-4" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">4</div>
+                    <div style="height: 2px; width: 40px; background: var(--border-color, #e5e7eb);"></div>
+                    <div id="erp-step-dot-5" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">5</div>
+                </div>
+
+                <!-- Step 1: 上传文件 -->
+                <div id="erp-wizard-step-1">
+                    <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep1">上传文件</h4>
+                    <label class="upload-area" for="erp-provider-file" style="cursor: pointer; display: block; border: 2px dashed var(--border-color, #d1d5db); border-radius: 8px; padding: 40px 20px; text-align: center;">
+                        <input type="file" id="erp-provider-file" accept=".py" style="display: none;" data-action-change="erpFileChanged">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2" style="margin: 0 auto 12px;">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+                        </svg>
+                        <p style="margin: 0 0 8px; color: var(--text-primary, #1f2937);" data-i18n="erpUploadDragHint">拖拽 .py 文件到此处，或点击选择</p>
+                        <p style="margin: 0; font-size: 12px; color: var(--text-muted, #9ca3af);" data-i18n="erpUploadSizeHint">要求：实现 BaseProvider 的 Python 文件，最大 100KB</p>
+                        <p id="erp-file-name-label" style="margin-top: 8px; font-size: 13px; color: var(--primary-color, #3b82f6);"></p>
+                    </label>
+                    <div class="form-error" id="erp-upload-error" style="display:none; margin-top: 8px;"></div>
+                    <div style="text-align: right; margin-top: 16px;">
+                        <button class="btn confirm-btn" data-action="handleProviderUpload" data-i18n="erpUploadStep1">上传文件</button>
+                    </div>
+                </div>
+
+                <!-- Step 2: 校验 & 配置 -->
+                <div id="erp-wizard-step-2" style="display: none;">
+                    <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep2">校验 & 配置</h4>
+                    <div id="erp-validation-result" style="margin-bottom: 16px;"></div>
+                    <h5 style="margin-bottom: 12px;" data-i18n="erpConfigTitle">连接配置</h5>
+                    <div class="form-group">
+                        <label data-i18n="name">名称 <span class="required">*</span></label>
+                        <input type="text" id="erp-config-name" placeholder="ERP Provider 名称" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="erpApiBaseUrl">API 地址 <span class="required">*</span></label>
+                        <input type="text" id="erp-config-url" placeholder="https://erp.example.com/api" required>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="erpAuthType">认证方式</label>
+                        <select id="erp-config-auth-type">
+                            <option value="api_key" data-i18n="erpAuthApiKey">API Key</option>
+                            <option value="bearer" data-i18n="erpAuthBearer">Bearer Token</option>
+                            <option value="basic" data-i18n="erpAuthBasic">Basic Auth</option>
+                            <option value="custom" data-i18n="erpAuthCustom">自定义</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Token / Key</label>
+                        <input type="password" id="erp-config-auth-value" placeholder="认证凭据">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="erpTimeout">超时 (秒)</label>
+                        <input type="number" id="erp-config-timeout" value="30" min="5" max="120">
+                    </div>
+                    <div class="form-error" id="erp-config-error" style="display:none;"></div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 16px;">
+                        <button class="btn cancel-btn" data-action="wizardPrevStep" data-i18n="back">返回</button>
+                        <button class="btn confirm-btn" data-action="saveProviderConfig" data-i18n="erpUploadStep3">保存并测试</button>
+                    </div>
+                </div>
+
+                <!-- Step 3: Level 1 测试 -->
+                <div id="erp-wizard-step-3" style="display: none;">
+                    <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep3">Level 1 只读测试</h4>
+                    <div id="erp-test1-results" style="border: 1px solid var(--border-color, #e5e7eb); border-radius: 8px; padding: 16px; min-height: 80px;">
+                        <div style="color: var(--text-muted, #6b7280);" data-i18n="erpTestRunning">测试中...</div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 16px;">
+                        <button class="btn cancel-btn" data-action="wizardPrevStep" data-i18n="back">返回</button>
+                        <button class="btn confirm-btn" data-action="wizardNextStep" data-i18n="erpTestLevel2">下一步（Level 2 测试）</button>
+                    </div>
+                </div>
+
+                <!-- Step 4: Level 2 测试（可选） -->
+                <div id="erp-wizard-step-4" style="display: none;">
+                    <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep4">Level 2 写操作测试（可选）</h4>
+                    <div style="background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
+                        <div style="font-weight: 600; color: #92400e; margin-bottom: 4px;" data-i18n="erpLevel2Warning">写操作测试会在目标 ERP 中产生真实数据</div>
+                        <div style="font-size: 13px; color: #78350f;" data-i18n="erpLevel2Detail">系统将执行一次入库 + 一次出库操作（测试数量: 1），测试后不会自动回滚。</div>
+                    </div>
+                    <div id="erp-test2-results" style="border: 1px solid var(--border-color, #e5e7eb); border-radius: 8px; padding: 16px; min-height: 40px;"></div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 16px;">
+                        <button class="btn cancel-btn" data-action="wizardPrevStep" data-i18n="back">返回</button>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn cancel-btn" data-action="erpWizardGoToResults" data-i18n="erpSkipLevel2">跳过，直接到结果</button>
+                            <button class="btn confirm-btn" data-action="erpWizardRunLevel2" id="erp-level2-run-btn" data-i18n="erpRunLevel2">执行 Level 2 测试</button>
+                            <button class="btn confirm-btn" data-action="erpWizardGoToResults" data-i18n="erpUploadStep5" style="display:none;" id="erp-level2-next-btn">查看结果</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 5: 结果 & 激活 -->
+                <div id="erp-wizard-step-5" style="display: none;">
+                    <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep5">结果 & 激活</h4>
+                    <div id="erp-wizard-summary"></div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 16px; align-items: center;">
+                        <button class="btn cancel-btn" data-action="closeUploadWizard" data-i18n="erpActivateLater">稍后激活</button>
+                        <button class="btn confirm-btn add-btn" id="erp-wizard-activate-btn" data-action="erpWizardActivate" data-i18n="erpActivateNow">立即激活此 Provider</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- MCP连接模态框 -->
     <div id="mcp-modal" class="modal">
         <div class="modal-content modal-small">
@@ -991,14 +1171,6 @@
                     <div class="form-group">
                         <label><span>Endpoint</span> <span class="required">*</span></label>
                         <input type="text" id="mcp-conn-endpoint" placeholder="wss://sensecraft..." required>
-                    </div>
-                    <div class="form-group">
-                        <label><span data-i18n="mcpRole">权限角色</span> <span class="required">*</span></label>
-                        <select id="mcp-conn-role">
-                            <option value="operate" data-i18n="roleOperate">操作员</option>
-                            <option value="admin" data-i18n="roleAdmin">管理员</option>
-                            <option value="view" data-i18n="roleView">仅查看</option>
-                        </select>
                     </div>
                     <div class="form-group">
                         <label class="checkbox-label">
@@ -1065,9 +1237,9 @@
                     <div class="import-form">
                         <div class="form-row">
                             <div class="form-group" style="flex: 1;">
-                                <label><span data-i18n="reason">导入原因</span> <span class="required">*</span></label>
-                                <input type="text" id="import-reason" data-i18n-placeholder="reasonPlaceholder"
-                                    placeholder="请输入导入原因" required>
+                                <label data-i18n="reasonNote">备注（整批说明）</label>
+                                <input type="text" id="import-reason-note" data-i18n-placeholder="reasonNotePlaceholder"
+                                    placeholder="选填，如季度盘点">
                             </div>
                         </div>
                         <div class="form-row">
@@ -1152,8 +1324,13 @@
                         <input type="number" id="record-quantity" min="1" required>
                     </div>
                     <div class="form-group">
-                        <label><span data-i18n="reason">原因</span> <span class="required">*</span></label>
-                        <input type="text" id="record-reason" required>
+                        <label><span data-i18n="reasonCategory">原因类别</span> <span class="required">*</span></label>
+                        <select id="record-reason-category" required>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="reasonNote">备注</label>
+                        <input type="text" id="record-reason-note" data-i18n-placeholder="reasonNotePlaceholder" placeholder="选填，如借给谁">
                     </div>
                     <div class="form-group">
                         <label data-i18n="contact">联系方</label>

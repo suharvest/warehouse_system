@@ -72,6 +72,12 @@ export let recordProductHighlightIndex = -1;
 export function setProductSelectorHighlightIndex(idx) { productSelectorHighlightIndex = idx; }
 export function setRecordProductHighlightIndex(idx) { recordProductHighlightIndex = idx; }
 
+// 仓库状态
+export let currentWarehouse = null;  // { id, slug, name, is_default } or null (全局视图)
+export let allWarehouses = [];
+export function setCurrentWarehouse(wh) { currentWarehouse = wh; }
+export function setAllWarehouses(list) { allWarehouses = list; }
+
 // 联系方分页状态
 export let contactsCurrentPage = 1;
 export let contactsPageSize = 20;

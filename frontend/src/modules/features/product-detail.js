@@ -2,6 +2,18 @@
 import * as echarts from 'echarts';
 import { t } from '../../../i18n.js';
 import { productApi } from '../api.js';
+
+const _REASON_I18N = {
+    purchase: 'reasonPurchase', return: 'reasonReturn', refund: 'reasonRefund',
+    produce: 'reasonProduce', transfer_in: 'reasonTransferIn', other_in: 'reasonOtherIn',
+    sell: 'reasonSell', lend: 'reasonLend', consume: 'reasonConsume',
+    loss: 'reasonLoss', transfer_out: 'reasonTransferOut', other_out: 'reasonOtherOut',
+};
+function _getReasonLabel(key) {
+    if (!key) return '-';
+    const i18nKey = _REASON_I18N[key];
+    return i18nKey ? t(i18nKey) : key;
+}
 import {
     currentProductName, setCurrentProductName,
     detailCurrentPage, detailPageSize, detailTotalPages,
@@ -225,7 +237,7 @@ function renderDetailRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -234,14 +246,16 @@ function renderDetailRecordsTable(items) {
 
         const typeText = item.type === 'in' ? t('inbound') : t('outbound');
         const typeClass = item.type === 'in' ? 'type-in' : 'type-out';
+        const categoryLabel = _getReasonLabel(item.reason_category);
 
         tr.innerHTML = `
             <td>${item.created_at}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
-            <td><strong>${item.quantity}</strong></td>
             <td>${item.variant || '-'}</td>
+            <td><strong>${item.quantity}</strong></td>
             <td>${item.operator}</td>
-            <td>${item.reason || '-'}</td>
+            <td>${categoryLabel}</td>
+            <td>${item.reason_note || '-'}</td>
         `;
 
         tbody.appendChild(tr);

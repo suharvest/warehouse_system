@@ -1,6 +1,7 @@
 // ============ MCP 连接管理模块 ============
 import { t } from '../../../i18n.js';
-import { API_BASE_URL } from '../state.js';
+import { API_BASE_URL, currentWarehouse } from '../state.js';
+import { getCurrentWarehouseId } from '../api.js';
 
 // API 封装
 async function mcpFetch(url, options = {}) {
@@ -111,11 +112,9 @@ function getConnectionActions(conn) {
         actions.push(`<button class="action-btn" data-action="mcpRestart" data-conn-id="${conn.id}" title="${t('mcpRestart')}">${t('mcpRestart')}</button>`);
     } else {
         actions.push(`<button class="action-btn add-btn" data-action="mcpStart" data-conn-id="${conn.id}" title="${t('mcpStart')}">${t('mcpStart')}</button>`);
-    }
-    actions.push(`<button class="action-btn" data-action="mcpEdit" data-conn-id="${conn.id}" title="${t('edit')}">${t('edit')}</button>`);
-    if (conn.status !== 'running') {
         actions.push(`<button class="action-btn delete-btn" data-action="mcpDelete" data-conn-id="${conn.id}" title="${t('delete')}">${t('delete')}</button>`);
     }
+    actions.push(`<button class="action-btn" data-action="mcpEdit" data-conn-id="${conn.id}" title="${t('edit')}">${t('edit')}</button>`);
     return `<div class="flex gap-2 flex-wrap">${actions.join('')}</div>`;
 }
 
@@ -135,7 +134,6 @@ export function showAddMCPModal() {
     document.getElementById('mcp-conn-id').value = '';
     document.getElementById('mcp-conn-name').value = '';
     document.getElementById('mcp-conn-endpoint').value = '';
-    document.getElementById('mcp-conn-role').value = 'operate';
     document.getElementById('mcp-conn-autostart').checked = true;
     document.getElementById('mcp-modal-error').style.display = 'none';
 
@@ -151,7 +149,7 @@ export async function handleSaveMCP() {
     const connId = document.getElementById('mcp-conn-id').value;
     const name = document.getElementById('mcp-conn-name').value.trim();
     const endpoint = document.getElementById('mcp-conn-endpoint').value.trim();
-    const role = document.getElementById('mcp-conn-role').value;
+    const role = 'operate';  // MCP 智能体固定使用操作员权限
     const autoStart = document.getElementById('mcp-conn-autostart').checked;
     const errorDiv = document.getElementById('mcp-modal-error');
 
@@ -172,7 +170,7 @@ export async function handleSaveMCP() {
             // 新建模式
             await mcpFetch('/mcp/connections', {
                 method: 'POST',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: getCurrentWarehouseId() })
             });
         }
         closeMCPModal();
@@ -196,7 +194,6 @@ export function editMCPConnection(connId) {
     document.getElementById('mcp-conn-id').value = conn.id;
     document.getElementById('mcp-conn-name').value = conn.name;
     document.getElementById('mcp-conn-endpoint').value = conn.mcp_endpoint;
-    document.getElementById('mcp-conn-role').value = conn.role || 'operate';
     document.getElementById('mcp-conn-autostart').checked = conn.auto_start;
     document.getElementById('mcp-modal-error').style.display = 'none';
 

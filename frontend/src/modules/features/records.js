@@ -1,10 +1,10 @@
 // ============ 进出库记录模块 ============
 import { t } from '../../../i18n.js';
-import { recordsApi, contactsApi, operatorsApi } from '../api.js';
+import { recordsApi, contactsApi, operatorsApi, getCurrentWarehouseId } from '../api.js';
 import {
     recordsCurrentPage, recordsPageSize, recordsTotalPages,
     setRecordsCurrentPage, setRecordsPageSize, setRecordsTotalPages,
-    currentProductName, currentTab, allProducts
+    currentProductName, currentTab, allProducts, currentWarehouse
 } from '../state.js';
 import { getDropdownSelectedValues, resetDropdownSelection, clearRecordProductSelector } from '../ui/dropdown.js';
 
@@ -25,6 +25,52 @@ export function setRecordsCallbacks(callbacks) {
 // 新增记录状态
 let addRecordForProduct = false;
 
+// 原因分类缓存
+let reasonCategoriesCache = null;
+
+// i18n 标签映射（key → i18n key）
+const REASON_CATEGORY_I18N = {
+    purchase: 'reasonPurchase', return: 'reasonReturn', refund: 'reasonRefund',
+    produce: 'reasonProduce', transfer_in: 'reasonTransferIn', other_in: 'reasonOtherIn',
+    sell: 'reasonSell', lend: 'reasonLend', consume: 'reasonConsume',
+    loss: 'reasonLoss', transfer_out: 'reasonTransferOut', other_out: 'reasonOtherOut',
+};
+
+function getReasonCategoryLabel(key) {
+    if (!key) return '-';
+    const i18nKey = REASON_CATEGORY_I18N[key];
+    return i18nKey ? t(i18nKey) : key;
+}
+
+async function loadReasonCategories() {
+    if (reasonCategoriesCache) return reasonCategoriesCache;
+    try {
+        const resp = await fetch(`${window.API_BASE_URL || ''}/api/reason-categories`);
+        reasonCategoriesCache = await resp.json();
+        return reasonCategoriesCache;
+    } catch (e) {
+        console.error('加载原因分类失败:', e);
+        return { in: [], out: [] };
+    }
+}
+
+function populateReasonCategorySelect(selectId, type) {
+    const select = document.getElementById(selectId);
+    if (!select || !reasonCategoriesCache) return;
+    const items = reasonCategoriesCache[type] || [];
+    select.innerHTML = items.map(c =>
+        `<option value="${c.key}">${getReasonCategoryLabel(c.key)}</option>`
+    ).join('');
+}
+
+function populateReasonCategoryFilterSelect() {
+    const select = document.getElementById('filter-reason-category');
+    if (!select || !reasonCategoriesCache) return;
+    const allItems = [...(reasonCategoriesCache.in || []), ...(reasonCategoriesCache.out || [])];
+    select.innerHTML = `<option value="">${t('allReasonCategories')}</option>` +
+        allItems.map(c => `<option value="${c.key}">${getReasonCategoryLabel(c.key)}</option>`).join('');
+}
+
 // ============ 记录列表加载 ============
 export async function loadRecords() {
     const startDate = document.getElementById('filter-start-date').value;
@@ -35,6 +81,7 @@ export async function loadRecords() {
     const selectedStatuses = getDropdownSelectedValues('filter-record-status-dropdown');
     const contactId = document.getElementById('filter-record-contact').value;
     const operatorUserId = document.getElementById('filter-record-operator').value;
+    const reasonCategory = document.getElementById('filter-reason-category')?.value || '';
     const reason = document.getElementById('filter-record-reason').value.trim();
 
     const params = {
@@ -47,6 +94,7 @@ export async function loadRecords() {
         recordType: recordType || undefined,
         contactId: contactId || undefined,
         operatorUserId: operatorUserId || undefined,
+        reasonCategory: reasonCategory || undefined,
         reason: reason || undefined,
         status: selectedStatuses.length > 0 ? selectedStatuses : undefined
     };
@@ -66,7 +114,7 @@ function renderRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="12" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="13" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -102,15 +150,16 @@ function renderRecordsTable(items) {
         tr.innerHTML = `
             <td>${item.created_at}</td>
             <td>${item.material_name}</td>
+            <td>${item.variant || '-'}</td>
             <td>${item.material_sku}</td>
             <td>${item.category || '-'}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
             <td><strong>${item.quantity}</strong></td>
             <td>${batchDisplay}</td>
-            <td>${item.variant || '-'}</td>
             <td>${item.contact_name || '-'}</td>
             <td>${item.operator_name || item.operator}</td>
-            <td>${item.reason || '-'}</td>
+            <td>${getReasonCategoryLabel(item.reason_category)}</td>
+            <td>${item.reason_note || '-'}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
         `;
 
@@ -154,6 +203,7 @@ export function resetRecordsFilter() {
     document.getElementById('filter-record-type').value = '';
     document.getElementById('filter-record-contact').value = '';
     document.getElementById('filter-record-operator').value = '';
+    document.getElementById('filter-reason-category').value = '';
     document.getElementById('filter-record-reason').value = '';
     resetDropdownSelection('filter-record-status-dropdown');
     setRecordsCurrentPage(1);
@@ -173,8 +223,12 @@ export async function loadRecordsFilterOptions() {
     try {
         const [contactsData, operators] = await Promise.all([
             contactsApi.getAll(null, false),
-            operatorsApi.getList()
+            operatorsApi.getList(),
+            loadReasonCategories(),
         ]);
+
+        // 原因分类筛选
+        populateReasonCategoryFilterSelect();
 
         // 联系方选项
         const contactSelect = document.getElementById('filter-record-contact');
@@ -203,17 +257,24 @@ export async function loadRecordsFilterOptions() {
 }
 
 // ============ 新增记录 ============
-export function showAddRecordModal() {
+export async function showAddRecordModal() {
+    if (!currentWarehouse) {
+        alert(t('writeRequiresWarehouse') || '写操作需要选择具体仓库');
+        return;
+    }
     addRecordForProduct = false;
     document.getElementById('record-product-group').style.display = 'block';
     document.getElementById('record-product-display-group').style.display = 'none';
     document.getElementById('add-record-modal').classList.add('show');
     document.getElementById('add-record-form').reset();
     clearRecordProductSelector();
+    await loadReasonCategories();
+    populateReasonCategorySelect('record-reason-category', 'in');
     loadContactsForRecord('in');
     updateLocationFieldVisibility('in');
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
         radio.onchange = () => {
+            populateReasonCategorySelect('record-reason-category', radio.value);
             loadContactsForRecord(radio.value);
             updateLocationFieldVisibility(radio.value);
         };
@@ -222,7 +283,11 @@ export function showAddRecordModal() {
     setTimeout(() => document.getElementById('record-product-input')?.focus(), 100);
 }
 
-export function showAddRecordModalForProduct() {
+export async function showAddRecordModalForProduct() {
+    if (!currentWarehouse) {
+        alert(t('writeRequiresWarehouse') || '写操作需要选择具体仓库');
+        return;
+    }
     if (!currentProductName) return;
     addRecordForProduct = true;
     document.getElementById('record-product-group').style.display = 'none';
@@ -231,10 +296,13 @@ export function showAddRecordModalForProduct() {
     document.getElementById('add-record-modal').classList.add('show');
     document.getElementById('add-record-form').reset();
     document.getElementById('record-product-display').value = currentProductName;
+    await loadReasonCategories();
+    populateReasonCategorySelect('record-reason-category', 'in');
     loadContactsForRecord('in');
     updateLocationFieldVisibility('in');
     document.querySelectorAll('input[name="record-type"]').forEach(radio => {
         radio.onchange = () => {
+            populateReasonCategorySelect('record-reason-category', radio.value);
             loadContactsForRecord(radio.value);
             updateLocationFieldVisibility(radio.value);
         };
@@ -295,8 +363,10 @@ function setupFormEnterNavigation() {
         e.preventDefault();
 
         if (active.id === 'record-quantity') {
-            document.getElementById('record-reason')?.focus();
-        } else if (active.id === 'record-reason') {
+            document.getElementById('record-reason-category')?.focus();
+        } else if (active.id === 'record-reason-category') {
+            document.getElementById('record-reason-note')?.focus();
+        } else if (active.id === 'record-reason-note') {
             document.getElementById('record-contact')?.focus();
         } else if (active.id === 'record-contact') {
             const locationGroup = document.getElementById('record-location-group');
@@ -326,14 +396,15 @@ export async function submitAddRecord() {
         : document.getElementById('record-product').value;
     const type = document.querySelector('input[name="record-type"]:checked')?.value;
     const quantity = parseInt(document.getElementById('record-quantity').value);
-    const reason = document.getElementById('record-reason').value.trim();
+    const reasonCategory = document.getElementById('record-reason-category').value;
+    const reasonNote = document.getElementById('record-reason-note').value.trim() || null;
     const contactId = document.getElementById('record-contact')?.value || null;
     const locationInput = document.getElementById('record-location');
     const location = (type === 'in' && locationInput) ? locationInput.value.trim() : null;
     const batchNoInput = document.getElementById('record-batch-no');
     const batchNo = (type === 'in' && batchNoInput) ? batchNoInput.value.trim() || null : null;
 
-    if (!productName || !type || !document.getElementById('record-quantity').value || !reason) {
+    if (!productName || !type || !document.getElementById('record-quantity').value || !reasonCategory) {
         alert(t('fillAllFields'));
         return;
     }
@@ -359,8 +430,10 @@ export async function submitAddRecord() {
             product_name: productName,
             type: type,
             quantity: quantity,
-            reason: reason,
-            contact_id: contactId ? parseInt(contactId) : null
+            reason_category: reasonCategory,
+            reason_note: reasonNote,
+            contact_id: contactId ? parseInt(contactId) : null,
+            warehouse_id: getCurrentWarehouseId()
         };
         if (location) {
             requestData.location = location;
