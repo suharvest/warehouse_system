@@ -148,12 +148,13 @@ class DefaultProvider(BaseProvider):
 
         return result
 
-    def stock_in(self, product_name, quantity, reason, operator, fuzzy,
-                 location=None, contact_id=None, variant=None):
+    def stock_in(self, product_name, quantity, reason_category, reason_note,
+                 operator, fuzzy, location=None, contact_id=None, variant=None):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
-            "reason": reason,
+            "reason_category": reason_category,
+            "reason_note": reason_note or None,
             "operator": operator,
             "fuzzy": fuzzy,
         }
@@ -166,12 +167,13 @@ class DefaultProvider(BaseProvider):
 
         return self.http_post("/materials/stock-in", payload)
 
-    def stock_out(self, product_name, quantity, reason, operator, fuzzy,
-                  variant=None):
+    def stock_out(self, product_name, quantity, reason_category, reason_note,
+                  operator, fuzzy, variant=None):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
-            "reason": reason,
+            "reason_category": reason_category,
+            "reason_note": reason_note or None,
             "operator": operator,
             "fuzzy": fuzzy,
         }

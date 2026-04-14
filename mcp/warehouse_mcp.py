@@ -34,8 +34,9 @@ if sys.platform == 'win32':
 def load_config():
     """从 config.yml 加载配置，支持环境变量覆盖"""
     config_path = os.path.join(os.path.dirname(__file__), 'config.yml')
+    port = os.environ.get('PORT', '2124')
     config = {
-        'api_base_url': 'http://localhost:2124/api',
+        'api_base_url': f'http://localhost:{port}/api',
         'api_key': '',
         'max_results': 30,  # MCP 搜索结果上限
     }
@@ -66,7 +67,70 @@ _config = load_config()
 sys.path.insert(0, os.path.dirname(__file__))
 from providers import load_provider  # noqa: E402
 
-_provider = load_provider(_config)
+
+def _load_provider_from_db_or_default(default_config: dict):
+    """从数据库读取系统模式，若为 external_erp 则加载激活的自定义 Provider。
+
+    任何异常（数据库不存在、文件缺失等）均回退到默认 Provider。
+    """
+    import sqlite3 as _sqlite3
+    import json as _json
+
+    db_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        'backend',
+        os.environ.get('DATABASE_PATH', 'warehouse.db')
+    )
+
+    try:
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"数据库文件不存在: {db_path}")
+
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+        cursor = conn.cursor()
+
+        # 读取系统模式
+        cursor.execute("SELECT value FROM system_settings WHERE key = 'system_mode'")
+        row = cursor.fetchone()
+        mode = row['value'] if row else 'self_owned'
+
+        if mode != 'external_erp':
+            conn.close()
+            return load_provider(default_config)
+
+        # 查询激活的 Provider
+        cursor.execute("SELECT * FROM erp_providers WHERE is_active = 1 LIMIT 1")
+        provider_row = cursor.fetchone()
+        conn.close()
+
+        if not provider_row:
+            logger.warning("系统模式为 external_erp 但没有激活的 Provider，回退到默认 Provider")
+            return load_provider(default_config)
+
+        # 构造 Provider 配置
+        stored_config = _json.loads(provider_row['config']) if provider_row['config'] else {}
+        merged_config = {**default_config, **stored_config}
+        merged_config['provider'] = provider_row['provider_name']
+
+        # 从文件动态加载
+        custom_dir = os.path.join(os.path.dirname(__file__), 'providers', 'custom')
+        filepath = os.path.join(custom_dir, provider_row['filename'])
+
+        if not os.path.exists(filepath):
+            logger.warning(f"激活的 Provider 文件不存在: {filepath}，回退到默认 Provider")
+            return load_provider(default_config)
+
+        from providers.test_runner import load_provider_from_file
+        logger.info(f"使用外部 ERP Provider: {provider_row['provider_name']} ({provider_row['filename']})")
+        return load_provider_from_file(filepath, merged_config)
+
+    except Exception as e:
+        logger.warning(f"从数据库加载 Provider 失败: {e}，回退到默认 Provider")
+        return load_provider(default_config)
+
+
+_provider = _load_provider_from_db_or_default(_config)
 
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
@@ -125,7 +189,8 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
 
 
 @mcp.tool()
-def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
+def stock_in(product_name: str, quantity: int,
+             reason_category: str = "purchase", reason_note: str = "",
              operator: str = "MCP系统", fuzzy: bool = True,
              location: str = None, contact_id: int = None,
              variant: str = None) -> dict:
@@ -135,7 +200,14 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
     参数:
         product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
         quantity: 入库数量（正整数）
-        reason: 入库原因（默认"采购入库"）
+        reason_category: 入库原因分类，必须是以下之一：
+            - "purchase": 采购入库（默认）
+            - "return": 借还（物料归还）
+            - "refund": 退货入库
+            - "produce": 生产入库
+            - "transfer_in": 调拨入库
+            - "other_in": 其他入库
+        reason_note: 备注详情（可选），如"张三归还"、"供应商A"
         operator: 操作人（默认"MCP系统"）
         fuzzy: 是否启用模糊匹配（默认 true）
         location: 存放位置（可选，如"A区-01架"）
@@ -147,12 +219,13 @@ def stock_in(product_name: str, quantity: int, reason: str = "采购入库",
         success=true 时：入库成功，含批次信息（含 variant）和产品详情
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
-    return _provider.stock_in(product_name, quantity, reason, operator, fuzzy,
-                              location, contact_id, variant)
+    return _provider.stock_in(product_name, quantity, reason_category, reason_note,
+                              operator, fuzzy, location, contact_id, variant)
 
 
 @mcp.tool()
-def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
+def stock_out(product_name: str, quantity: int,
+              reason_category: str = "sell", reason_note: str = "",
               operator: str = "MCP系统", fuzzy: bool = True,
               variant: str = None) -> dict:
     """
@@ -162,7 +235,14 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
     参数:
         product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
         quantity: 出库数量（正整数）
-        reason: 出库原因（默认"销售出库"）
+        reason_category: 出库原因分类，必须是以下之一：
+            - "sell": 出售（默认）
+            - "lend": 借出
+            - "consume": 领用/消耗
+            - "loss": 损耗/损失
+            - "transfer_out": 调拨出库
+            - "other_out": 其他出库
+        reason_note: 备注详情（可选），如"借给张三"、"研发测试用"
         operator: 操作人（默认"MCP系统"）
         fuzzy: 是否启用模糊匹配（默认 true）
         variant: 变体过滤（可选，如"红"）。指定后仅消耗该变体的批次。
@@ -172,7 +252,8 @@ def stock_out(product_name: str, quantity: int, reason: str = "销售出库",
         success=true 时：出库成功，含批次消耗详情（每个消耗批次含 variant 字段）
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
-    return _provider.stock_out(product_name, quantity, reason, operator, fuzzy, variant)
+    return _provider.stock_out(product_name, quantity, reason_category, reason_note,
+                               operator, fuzzy, variant)
 
 
 @mcp.tool()
