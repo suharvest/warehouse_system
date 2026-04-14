@@ -13,6 +13,33 @@ except ImportError:
     BCRYPT_AVAILABLE = False
 
 # ============================================
+# 出入库原因分类常量
+# ============================================
+REASON_CATEGORIES = {
+    'in': ['purchase', 'return', 'refund', 'produce', 'transfer_in', 'other_in'],
+    'out': ['sell', 'lend', 'consume', 'loss', 'transfer_out', 'other_out'],
+}
+
+REASON_CATEGORY_LABELS = {
+    'purchase': '采购入库', 'return': '借还', 'refund': '退货入库',
+    'produce': '生产入库', 'transfer_in': '调拨入库', 'other_in': '其他',
+    'sell': '出售', 'lend': '借出', 'consume': '领用/消耗',
+    'loss': '损耗/损失', 'transfer_out': '调拨出库', 'other_out': '其他',
+}
+
+# 历史数据迁移映射：旧 reason 文本 → 新 reason_category
+REASON_MIGRATION_MAP = {
+    '采购入库': 'purchase', '退货入库': 'refund',
+    '生产完工入库': 'produce', '生产入库': 'produce',
+    '调拨入库': 'transfer_in', '借还': 'return',
+    '销售出库': 'sell', '借出': 'lend',
+    '领用': 'consume', '消耗': 'consume',
+    '研发领用': 'consume', '生产领料': 'consume',
+    '损耗': 'loss', '调拨出库': 'transfer_out',
+    '返修出库': 'other_out',
+}
+
+# ============================================
 # 环境变量配置
 # ============================================
 # 数据库路径
@@ -43,6 +70,34 @@ def init_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 创建仓库表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS warehouses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            address TEXT,
+            is_default INTEGER DEFAULT 0,
+            is_disabled INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 创建用户-仓库授权表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_warehouses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+            UNIQUE(user_id, warehouse_id)
+        )
+    ''')
+
+    # 确保默认仓库存在
+    cursor.execute('''
+        INSERT OR IGNORE INTO warehouses (slug, name, is_default) VALUES ('default', '默认仓库', 1)
+    ''')
+
     # 创建物料表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS materials (
@@ -55,6 +110,7 @@ def init_database():
             safe_stock INTEGER DEFAULT NULL,
             location TEXT,
             is_disabled INTEGER DEFAULT 0,
+            warehouse_id INTEGER REFERENCES warehouses(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -65,6 +121,12 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE materials ADD COLUMN is_disabled INTEGER DEFAULT 0')
 
+    # 检查并添加 warehouse_id 字段到 materials
+    try:
+        cursor.execute('SELECT warehouse_id FROM materials LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE materials ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)')
+
     # 创建出入库记录表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventory_records (
@@ -74,6 +136,8 @@ def init_database():
             quantity INTEGER NOT NULL,
             operator TEXT DEFAULT '系统',
             reason TEXT,
+            reason_category TEXT,
+            reason_note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (material_id) REFERENCES materials (id)
         )
@@ -152,6 +216,7 @@ def init_database():
             initial_quantity INTEGER NOT NULL,
             contact_id INTEGER REFERENCES contacts(id),
             is_exhausted INTEGER DEFAULT 0,
+            warehouse_id INTEGER REFERENCES warehouses(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (material_id) REFERENCES materials (id)
         )
@@ -231,6 +296,38 @@ def init_database():
         ) WHERE location IS NULL
     ''')
 
+    # 创建系统设置KV表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 创建ERP Provider表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS erp_providers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            provider_name TEXT UNIQUE NOT NULL,
+            class_name TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            config TEXT,
+            test_results TEXT,
+            test_passed_at TIMESTAMP,
+            is_active INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 插入默认系统模式设置
+    cursor.execute('''
+        INSERT OR IGNORE INTO system_settings (key, value)
+        VALUES ('system_mode', 'self_owned')
+    ''')
+
     # 创建MCP连接表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mcp_connections (
@@ -259,8 +356,79 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN role TEXT DEFAULT \'operate\'')
 
+    # 检查并添加 warehouse_id 字段到各表（多仓库支持）
+    for table in ('batches', 'inventory_records', 'api_keys', 'mcp_connections'):
+        try:
+            cursor.execute(f'SELECT warehouse_id FROM {table} LIMIT 1')
+        except sqlite3.OperationalError:
+            cursor.execute(f'ALTER TABLE {table} ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)')
+
+    # 检查并添加 reason_category / reason_note 字段到 inventory_records
+    need_reason_backfill = False
+    try:
+        cursor.execute('SELECT reason_category FROM inventory_records LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE inventory_records ADD COLUMN reason_category TEXT')
+        cursor.execute('ALTER TABLE inventory_records ADD COLUMN reason_note TEXT')
+        need_reason_backfill = True
+
+    # 首次升级时回填历史数据
+    if need_reason_backfill:
+        _migrate_reason_to_category(cursor)
+
+    # ============================================
+    # 多仓库迁移：回填 warehouse_id 到默认仓库
+    # ============================================
+    cursor.execute('SELECT id FROM warehouses WHERE is_default = 1 LIMIT 1')
+    default_wh = cursor.fetchone()
+    if default_wh:
+        default_wh_id = default_wh['id']
+        cursor.execute('UPDATE materials SET warehouse_id = ? WHERE warehouse_id IS NULL', (default_wh_id,))
+        cursor.execute('UPDATE batches SET warehouse_id = ? WHERE warehouse_id IS NULL', (default_wh_id,))
+        cursor.execute('UPDATE inventory_records SET warehouse_id = ? WHERE warehouse_id IS NULL', (default_wh_id,))
+        # api_keys 和 mcp_connections 的 warehouse_id 保持 NULL 表示全局
+
+    # 多仓库索引
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_materials_warehouse ON materials(warehouse_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_batches_warehouse ON batches(warehouse_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_records_warehouse ON inventory_records(warehouse_id)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_sku_wh ON materials(sku, warehouse_id)')
+
     conn.commit()
     conn.close()
+
+
+def _migrate_reason_to_category(cursor):
+    """将旧 reason 文本回填到 reason_category + reason_note（一次性迁移）"""
+    cursor.execute(
+        'SELECT id, type, reason FROM inventory_records WHERE reason_category IS NULL'
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return
+
+    for row in rows:
+        rec_id, rec_type, reason = row['id'], row['type'], row['reason'] or ''
+        category = None
+        note = None
+
+        # 1. 精确匹配
+        if reason in REASON_MIGRATION_MAP:
+            category = REASON_MIGRATION_MAP[reason]
+        # 2. Excel导入前缀
+        elif reason.startswith('Excel导入:') or reason.startswith('Excel导入: '):
+            prefix = 'Excel导入: ' if reason.startswith('Excel导入: ') else 'Excel导入:'
+            note = reason[len(prefix):].strip() or None
+            category = 'other_in' if rec_type == 'in' else 'other_out'
+        # 3. 无法匹配：归入"其他"，原文保留到 note
+        else:
+            category = 'other_in' if rec_type == 'in' else 'other_out'
+            note = reason if reason else None
+
+        cursor.execute(
+            'UPDATE inventory_records SET reason_category = ?, reason_note = ? WHERE id = ?',
+            (category, note, rec_id)
+        )
 
 
 def generate_batch_no(material_id: int, cursor=None) -> str:
@@ -436,19 +604,45 @@ def generate_mock_data():
         ('watcher-xiaozhi(专业版)', 'FG-WZ-PRO', '成品', 34, '台', 10, 'H区-03'),
     ]
 
+    # 获取默认仓库ID
+    cursor.execute('SELECT id FROM warehouses WHERE is_default = 1 LIMIT 1')
+    default_wh = cursor.fetchone()
+    default_wh_id = default_wh['id'] if default_wh else 1
+
     # 插入物料数据
     for material in materials_data:
         cursor.execute('''
-            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', material)
+            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (*material, default_wh_id))
 
     # 生成出入库记录（近7天）
     material_ids = [row[0] for row in cursor.execute('SELECT id FROM materials').fetchall()]
 
-    reasons_in = ['采购入库', '生产完工入库', '退货入库', '调拨入库']
-    reasons_out = ['生产领料', '销售出库', '研发领用', '调拨出库', '返修出库']
+    # 带备注的分类演示数据：(category, [possible notes])
+    reasons_in = [
+        ('purchase', ['深圳供应商', '月度补货', '紧急采购', None]),
+        ('return', ['张三归还', '李四归还', '研发部归还', None]),
+        ('refund', ['质量问题退货', '客户退回', None]),
+        ('produce', ['本周生产批次', None]),
+        ('transfer_in', ['从B仓调入', None]),
+        ('other_in', ['盘盈', None]),
+    ]
+    reasons_out = [
+        ('sell', ['客户A订单', '线上订单#2024', '批发出货', None]),
+        ('lend', ['借给张三，预计下周归还', '借给研发部测试', '借给李四', None]),
+        ('consume', ['研发测试用', '产线领料', '日常消耗', None]),
+        ('loss', ['运输破损', '仓库盘亏', None]),
+        ('transfer_out', ['调拨至B仓', None]),
+        ('other_out', ['报废处理', None]),
+    ]
     operators = ['张三', '李四', '王五', '赵六', '系统']
+
+    def _pick_reason(record_type):
+        pool = reasons_in if record_type == 'in' else reasons_out
+        category, notes = random.choice(pool)
+        note = random.choice(notes)
+        return category, note
 
     # 生成过去7天的记录
     for day_offset in range(7, 0, -1):
@@ -461,11 +655,7 @@ def generate_mock_data():
             record_type = random.choice(['in', 'out'])
             quantity = random.randint(5, 30)
             operator = random.choice(operators)
-
-            if record_type == 'in':
-                reason = random.choice(reasons_in)
-            else:
-                reason = random.choice(reasons_out)
+            reason_category, reason_note = _pick_reason(record_type)
 
             # 随机时间（当天的某个时间）
             hour = random.randint(8, 18)
@@ -473,9 +663,9 @@ def generate_mock_data():
             record_time = record_date.replace(hour=hour, minute=minute)
 
             cursor.execute('''
-                INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (material_id, record_type, quantity, operator, reason, record_time.strftime('%Y-%m-%d %H:%M:%S')))
+                INSERT INTO inventory_records (material_id, type, quantity, operator, reason_category, reason_note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (material_id, record_type, quantity, operator, reason_category, reason_note, record_time.strftime('%Y-%m-%d %H:%M:%S')))
 
     # 生成今天的记录（更多一些）
     today = datetime.now()
@@ -486,11 +676,7 @@ def generate_mock_data():
         record_type = random.choice(['in', 'out'])
         quantity = random.randint(5, 30)
         operator = random.choice(operators)
-
-        if record_type == 'in':
-            reason = random.choice(reasons_in)
-        else:
-            reason = random.choice(reasons_out)
+        reason_category, reason_note = _pick_reason(record_type)
 
         # 今天的随机时间
         hour = random.randint(8, datetime.now().hour if datetime.now().hour > 8 else 9)
@@ -498,9 +684,9 @@ def generate_mock_data():
         record_time = today.replace(hour=hour, minute=minute)
 
         cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (material_id, record_type, quantity, operator, reason, record_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO inventory_records (material_id, type, quantity, operator, reason_category, reason_note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, record_type, quantity, operator, reason_category, reason_note, record_time.strftime('%Y-%m-%d %H:%M:%S')))
 
     conn.commit()
     conn.close()

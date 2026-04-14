@@ -93,8 +93,20 @@ def admin_client(app_instance, _admin_setup):
     return c
 
 
+@pytest.fixture(scope="session")
+def default_warehouse_id(test_db):
+    """Get the default warehouse ID (created during init_database)."""
+    from database import get_db_connection
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM warehouses WHERE is_default = 1 LIMIT 1')
+    row = cursor.fetchone()
+    conn.close()
+    return row['id']
+
+
 @pytest.fixture()
-def sample_material(admin_client):
+def sample_material(admin_client, default_warehouse_id):
     """Create a sample material for testing and return its info."""
     from database import get_db_connection
     conn = get_db_connection()
@@ -106,9 +118,9 @@ def sample_material(admin_client):
     name = f"Test Material {sku}"
 
     cursor.execute('''
-        INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (name, sku, 'Test Category', 100, 'pcs', 20, 'A-01'))
+        INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, sku, 'Test Category', 100, 'pcs', 20, 'A-01', default_warehouse_id))
 
     material_id = cursor.lastrowid
     conn.commit()
@@ -121,5 +133,6 @@ def sample_material(admin_client):
         'category': 'Test Category',
         'quantity': 100,
         'unit': 'pcs',
-        'safe_stock': 20
+        'safe_stock': 20,
+        'warehouse_id': default_warehouse_id
     }

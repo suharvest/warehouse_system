@@ -39,6 +39,34 @@ def init_database():
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
 
+    # 创建仓库表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS warehouses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            address TEXT,
+            is_default INTEGER DEFAULT 0,
+            is_disabled INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 创建用户-仓库授权表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_warehouses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+            UNIQUE(user_id, warehouse_id)
+        )
+    ''')
+
+    # 确保默认仓库存在
+    cursor.execute('''
+        INSERT OR IGNORE INTO warehouses (slug, name, is_default) VALUES ('default', '默认仓库', 1)
+    ''')
+
     # 创建物料表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS materials (
@@ -51,6 +79,7 @@ def init_database():
             safe_stock INTEGER DEFAULT NULL,
             location TEXT,
             is_disabled INTEGER DEFAULT 0,
+            warehouse_id INTEGER REFERENCES warehouses(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -65,8 +94,11 @@ def init_database():
             operator TEXT DEFAULT '系统',
             operator_user_id INTEGER REFERENCES users(id),
             reason TEXT,
+            reason_category TEXT,
+            reason_note TEXT,
             contact_id INTEGER REFERENCES contacts(id),
             batch_id INTEGER REFERENCES batches(id),
+            warehouse_id INTEGER REFERENCES warehouses(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (material_id) REFERENCES materials (id)
         )
@@ -108,6 +140,7 @@ def init_database():
             user_id INTEGER REFERENCES users(id),
             is_disabled INTEGER DEFAULT 0,
             is_system INTEGER DEFAULT 0,
+            warehouse_id INTEGER REFERENCES warehouses(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_used_at TIMESTAMP
         )
@@ -139,6 +172,7 @@ def init_database():
             initial_quantity INTEGER NOT NULL,
             contact_id INTEGER REFERENCES contacts(id),
             is_exhausted INTEGER DEFAULT 0,
+            warehouse_id INTEGER REFERENCES warehouses(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (material_id) REFERENCES materials (id)
         )
@@ -165,6 +199,7 @@ def init_database():
             mcp_endpoint TEXT NOT NULL,
             api_key TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'operate',
+            warehouse_id INTEGER REFERENCES warehouses(id),
             auto_start INTEGER DEFAULT 1,
             status TEXT DEFAULT 'stopped',
             error_message TEXT,
@@ -270,22 +305,47 @@ def generate_mock_data():
         ('watcher-xiaozhi(专业版)', 'FG-WZ-PRO', '成品', 34, '台', 10, 'H区-03'),
     ]
 
+    # 获取默认仓库ID
+    cursor.execute('SELECT id FROM warehouses WHERE is_default = 1 LIMIT 1')
+    default_wh_row = cursor.fetchone()
+    default_wh_id = default_wh_row[0] if default_wh_row else 1
+
     # 插入物料数据
     for material in materials_data:
         cursor.execute('''
-            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', material)
+            INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (*material, default_wh_id))
 
     print(f"Created {len(materials_data)} materials")
 
     # 获取物料ID
     material_ids = [row[0] for row in cursor.execute('SELECT id FROM materials').fetchall()]
 
-    # 生成出入库记录
-    reasons_in = ['采购入库', '生产完工入库', '退货入库', '调拨入库']
-    reasons_out = ['生产领料', '销售出库', '研发领用', '调拨出库', '返修出库']
+    # 生成出入库记录（带分类+备注）
+    reasons_in = [
+        ('purchase', ['深圳供应商', '月度补货', '紧急采购', None]),
+        ('return', ['张三归还', '李四归还', '研发部归还', None]),
+        ('refund', ['质量问题退货', '客户退回', None]),
+        ('produce', ['本周生产批次', None]),
+        ('transfer_in', ['从B仓调入', None]),
+        ('other_in', ['盘盈', None]),
+    ]
+    reasons_out = [
+        ('sell', ['客户A订单', '线上订单#2024', '批发出货', None]),
+        ('lend', ['借给张三，预计下周归还', '借给研发部测试', '借给李四', None]),
+        ('consume', ['研发测试用', '产线领料', '日常消耗', None]),
+        ('loss', ['运输破损', '仓库盘亏', None]),
+        ('transfer_out', ['调拨至B仓', None]),
+        ('other_out', ['报废处理', None]),
+    ]
     operators = ['张三', '李四', '王五', '赵六', 'seeed']
+
+    def _pick_reason(record_type):
+        pool = reasons_in if record_type == 'in' else reasons_out
+        category, notes = random.choice(pool)
+        note = random.choice(notes)
+        return category, note
 
     total_records = 0
 
@@ -299,20 +359,16 @@ def generate_mock_data():
             record_type = random.choice(['in', 'out'])
             quantity = random.randint(5, 30)
             operator = random.choice(operators)
-
-            if record_type == 'in':
-                reason = random.choice(reasons_in)
-            else:
-                reason = random.choice(reasons_out)
+            reason_category, reason_note = _pick_reason(record_type)
 
             hour = random.randint(8, 18)
             minute = random.randint(0, 59)
             record_time = record_date.replace(hour=hour, minute=minute)
 
             cursor.execute('''
-                INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (material_id, record_type, quantity, operator, reason, record_time.strftime('%Y-%m-%d %H:%M:%S')))
+                INSERT INTO inventory_records (material_id, type, quantity, operator, reason_category, reason_note, warehouse_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (material_id, record_type, quantity, operator, reason_category, reason_note, default_wh_id, record_time.strftime('%Y-%m-%d %H:%M:%S')))
             total_records += 1
 
     # 生成今天的记录
@@ -324,20 +380,16 @@ def generate_mock_data():
         record_type = random.choice(['in', 'out'])
         quantity = random.randint(5, 30)
         operator = random.choice(operators)
-
-        if record_type == 'in':
-            reason = random.choice(reasons_in)
-        else:
-            reason = random.choice(reasons_out)
+        reason_category, reason_note = _pick_reason(record_type)
 
         hour = random.randint(8, min(datetime.now().hour, 18) if datetime.now().hour > 8 else 9)
         minute = random.randint(0, 59)
         record_time = today.replace(hour=hour, minute=minute)
 
         cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (material_id, record_type, quantity, operator, reason, record_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO inventory_records (material_id, type, quantity, operator, reason_category, reason_note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, record_type, quantity, operator, reason_category, reason_note, record_time.strftime('%Y-%m-%d %H:%M:%S')))
         total_records += 1
 
     conn.commit()

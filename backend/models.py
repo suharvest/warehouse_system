@@ -7,6 +7,38 @@ from typing import List, Optional, Generic, TypeVar
 T = TypeVar('T')
 
 
+# ============ Warehouse Models ============
+
+class WarehouseItem(BaseModel):
+    """仓库信息"""
+    id: int
+    slug: str
+    name: str
+    address: Optional[str] = None
+    is_default: bool = False
+    is_disabled: bool = False
+    created_at: str
+
+
+class CreateWarehouseRequest(BaseModel):
+    """创建仓库请求"""
+    slug: str
+    name: str
+    address: Optional[str] = None
+
+
+class UpdateWarehouseRequest(BaseModel):
+    """更新仓库请求"""
+    name: Optional[str] = None
+    address: Optional[str] = None
+    is_disabled: Optional[bool] = None
+
+
+class UserWarehouseAssignment(BaseModel):
+    """用户仓库授权"""
+    warehouse_ids: List[int]
+
+
 # ============ Dashboard Models ============
 
 class DashboardStats(BaseModel):
@@ -88,7 +120,8 @@ class ProductRecord(BaseModel):
     type: str
     quantity: int
     operator: str
-    reason: Optional[str]
+    reason_category: Optional[str] = None
+    reason_note: Optional[str] = None
     created_at: str
     variant: Optional[str] = None
     batch_no: Optional[str] = None
@@ -100,13 +133,15 @@ class StockOperationRequest(BaseModel):
     """入库/出库请求"""
     product_name: str
     quantity: int
-    reason: Optional[str] = None
+    reason_category: str  # 原因分类，如 purchase/sell/lend 等
+    reason_note: Optional[str] = None  # 备注详情，如借给谁
     operator: Optional[str] = "MCP系统"
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 批次存放位置
     batch_no: Optional[str] = None  # 自定义批次号（留空自动生成）
     variant: Optional[str] = None   # 变体标识（如颜色"红"），写入批次
     fuzzy: bool = True  # 是否启用模糊匹配
+    warehouse_id: Optional[int] = None  # 仓库ID（写操作必填）
 
 
 class StockOperationProduct(BaseModel):
@@ -150,6 +185,7 @@ class ImportPreviewItem(BaseModel):
     contact_name: Optional[str] = None     # 联系方名称
     contact_id: Optional[int] = None       # 解析后的联系方ID
     is_batch_new: bool = False             # 是否为新批次
+    reason_category: Optional[str] = None  # 原因分类（导入确认时由前端逐行设置）
     variant: Optional[str] = None          # 变体标识（如颜色"红"、规格"大号"）
 
 
@@ -180,10 +216,11 @@ class ExcelImportConfirm(BaseModel):
     """Excel导入确认请求"""
     changes: List[ImportPreviewItem]
     operator: Optional[str] = None  # 可选，如不提供则使用当前登录用户
-    reason: str
+    reason_note: Optional[str] = None  # 全局备注（整批说明）
     confirm_new_skus: bool = False  # 是否确认创建新SKU
     confirm_disable_missing_skus: bool = False  # 是否确认禁用导入文件以外的SKU
     is_batch_mode: bool = False  # 是否为批次模式导入
+    warehouse_id: Optional[int] = None  # 仓库ID（导入操作必填）
 
 
 class ExcelImportResponse(BaseModel):
@@ -202,11 +239,13 @@ class ManualRecordRequest(BaseModel):
     type: str  # 'in' | 'out'
     quantity: int
     operator: Optional[str] = None  # 可选，如不提供则使用当前登录用户
-    reason: str
+    reason_category: str  # 原因分类
+    reason_note: Optional[str] = None  # 备注详情
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 入库时可选更新库位
     batch_no: Optional[str] = None  # 入库时可选指定批次号（留空自动生成）
     variant: Optional[str] = None   # 变体标识（如颜色"红"），入库时写入批次
+    warehouse_id: Optional[int] = None  # 仓库ID（写操作必填）
 
 
 # ============ Pagination Models ============
@@ -245,6 +284,8 @@ class MaterialItemWithDisabled(BaseModel):
     contact_name: Optional[str] = None
     total_quantity: Optional[int] = None  # 物料总库存（所有批次之和）
     variant: Optional[str] = None
+    warehouse_id: Optional[int] = None
+    warehouse_name: Optional[str] = None
 
 
 class InventoryRecordItem(BaseModel):
@@ -258,7 +299,8 @@ class InventoryRecordItem(BaseModel):
     operator: str  # 保留用于向后兼容（旧记录）
     operator_user_id: Optional[int] = None  # 关联用户ID
     operator_name: Optional[str] = None  # 从用户表获取的当前显示名称
-    reason: Optional[str]
+    reason_category: Optional[str] = None
+    reason_note: Optional[str] = None
     created_at: str
     material_status: str  # 物料当前状态
     is_disabled: bool = False
@@ -268,6 +310,8 @@ class InventoryRecordItem(BaseModel):
     batch_no: Optional[str] = None
     batch_details: Optional[str] = None  # 出库时的批次消耗详情
     variant: Optional[str] = None
+    warehouse_id: Optional[int] = None
+    warehouse_name: Optional[str] = None
 
 
 class PaginatedProductRecordsResponse(BaseModel):
@@ -341,6 +385,8 @@ class UserListItem(BaseModel):
     role: str
     is_disabled: bool
     created_at: str
+    warehouse_ids: Optional[List[int]] = None  # 授权仓库ID列表
+    warehouse_names: Optional[List[str]] = None  # 授权仓库名称列表
 
 
 # ============ API Key Models ============
@@ -349,6 +395,7 @@ class CreateApiKeyRequest(BaseModel):
     """创建API密钥请求"""
     name: str
     role: str = 'operate'  # 'admin' | 'operate' | 'view'
+    warehouse_id: Optional[int] = None  # 仓库ID（NULL=全局）
 
 
 class ApiKeyStatusRequest(BaseModel):
@@ -374,6 +421,8 @@ class ApiKeyListItem(BaseModel):
     is_disabled: bool
     created_at: str
     last_used_at: Optional[str] = None
+    warehouse_id: Optional[int] = None
+    warehouse_name: Optional[str] = None
 
 
 # ============ Contact Models ============
@@ -526,6 +575,7 @@ class CreateMCPConnectionRequest(BaseModel):
     mcp_endpoint: str
     role: str = 'operate'  # 'admin' | 'operate' | 'view'
     auto_start: bool = True
+    warehouse_id: Optional[int] = None  # 仓库ID（关联的MCP代理归属仓库）
 
 
 class UpdateMCPConnectionRequest(BaseModel):
@@ -534,6 +584,7 @@ class UpdateMCPConnectionRequest(BaseModel):
     mcp_endpoint: Optional[str] = None
     role: Optional[str] = None  # 'admin' | 'operate' | 'view'
     auto_start: Optional[bool] = None
+    warehouse_id: Optional[int] = None
 
 
 class MCPConnectionItem(BaseModel):
@@ -550,6 +601,8 @@ class MCPConnectionItem(BaseModel):
     uptime_seconds: Optional[int] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    warehouse_id: Optional[int] = None
+    warehouse_name: Optional[str] = None
 
 
 class MCPConnectionResponse(BaseModel):
