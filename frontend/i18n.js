@@ -83,6 +83,12 @@ const translations = {
         batchNo: '批次号',
         variant: '规格',
         batchDetails: '批次消耗',
+        outboundBatch: '指定批次',
+        autoFIFO: '-- FIFO 自动分配 --',
+        variantPlaceholder: '如：红、大号（选填）',
+        batchLoadFailed: '加载批次列表失败',
+        batchLocationChipPrefix: '库位：',
+        batchVariantChipPrefix: '变体：',
 
         // 状态文本
         statusNormal: '正常',
@@ -352,6 +358,11 @@ const translations = {
         erpNormal: '正常',
         erpAbnormal: '异常',
 
+        // 系统设置子 Tab
+        settingsUsersKeys: '用户与密钥',
+        settingsWarehouses: '仓库',
+        settingsDataMgmt: '数据管理',
+
         // 仓库
         allWarehouses: '全部仓库',
         switchWarehouse: '切换仓库',
@@ -363,9 +374,15 @@ const translations = {
         noWarehouseAccess: '无仓库访问权限',
         selectWarehouse: '请选择仓库',
         defaultWarehouse: '默认仓库',
-        addWarehouse: '新增仓库',
+        addWarehouse: '添加仓库',
         editWarehouse: '编辑仓库',
         deleteWarehouse: '删除仓库',
+        confirmDeleteWarehouse: '确定删除仓库',
+        deleteWarehouseWarning: '该仓库下的所有物料和记录也会被删除！',
+        warehouseNameRequired: '请输入仓库名称',
+        warehouseSlugRequired: '请输入仓库标识',
+        slugHint: '用于 URL 路径，只能包含小写字母、数字和连字符',
+        isDefault: '默认',
         warehouseColumn: '仓库',
         writeRequiresWarehouse: '写操作需要选择具体仓库',
         cannotDeleteDefault: '不能删除默认仓库',
@@ -445,6 +462,12 @@ const translations = {
         batchNo: 'Batch No.',
         variant: 'Variant',
         batchDetails: 'Batch Consumption',
+        outboundBatch: 'Specific Batch',
+        autoFIFO: '-- Auto (FIFO) --',
+        variantPlaceholder: 'e.g. Red, Large (optional)',
+        batchLoadFailed: 'Failed to load batches',
+        batchLocationChipPrefix: 'Location: ',
+        batchVariantChipPrefix: 'Variant: ',
 
         statusNormal: 'Normal',
         statusWarning: 'Low',
@@ -711,6 +734,11 @@ const translations = {
         erpNormal: 'Normal',
         erpAbnormal: 'Abnormal',
 
+        // Settings Sub-Tabs
+        settingsUsersKeys: 'Users & Keys',
+        settingsWarehouses: 'Warehouses',
+        settingsDataMgmt: 'Data Management',
+
         // Warehouse
         allWarehouses: 'All Warehouses',
         switchWarehouse: 'Switch Warehouse',
@@ -725,6 +753,12 @@ const translations = {
         addWarehouse: 'Add Warehouse',
         editWarehouse: 'Edit Warehouse',
         deleteWarehouse: 'Delete Warehouse',
+        confirmDeleteWarehouse: 'Confirm delete warehouse',
+        deleteWarehouseWarning: 'All materials and records in this warehouse will be deleted!',
+        warehouseNameRequired: 'Please enter warehouse name',
+        warehouseSlugRequired: 'Please enter warehouse slug',
+        slugHint: 'Used in URL path, only lowercase letters, numbers and hyphens allowed',
+        isDefault: 'Default',
         warehouseColumn: 'Warehouse',
         writeRequiresWarehouse: 'Write operations require selecting a specific warehouse',
         cannotDeleteDefault: 'Cannot delete default warehouse',
