@@ -23,6 +23,7 @@ import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, 
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh } from './features/mcp.js';
+import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks } from './features/warehouses.js';
 import { loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
 
 // 语言切换
@@ -51,7 +52,8 @@ function setupModuleCallbacks() {
         stopERPRefresh,
         t,
         loadCategories,
-        loadAllProducts
+        loadAllProducts,
+        loadWarehousesList
     });
 
     // 设置认证回调
@@ -82,6 +84,11 @@ function setupModuleCallbacks() {
     // 设置用户管理回调
     setUsersCallbacks({
         checkAuthStatus
+    });
+
+    // 设置仓库管理回调
+    setWarehousesCallbacks({
+        refreshSwitcher: loadWarehouses
     });
 
     // 设置导入导出回调
@@ -185,6 +192,10 @@ function populateProductSelector() {
         onSelect: () => {
             const qty = document.getElementById('record-quantity');
             if (qty) qty.focus();
+            const recordType = document.querySelector('input[name="record-type"]:checked')?.value;
+            if (recordType === 'out') {
+                import('./features/records.js').then(m => m.populateBatchSelectForCurrentProduct?.());
+            }
         },
         placeholder: t('searchPlaceholder') || '搜索产品名称或编码...'
     });
@@ -226,6 +237,7 @@ function onLanguageChange() {
         case 'users':
             loadUsers();
             loadApiKeys();
+            loadWarehousesList();
             break;
         case 'mcp':
             loadMCPConnections();
@@ -274,6 +286,32 @@ const actionHandlers = {
     'toggleApiKeyStatus': (el) => toggleApiKeyStatus(el.dataset.keyId, el.dataset.isDisabled === 'true'),
     'disableApiKey': (el) => disableApiKey(el.dataset.keyId),
     'deleteApiKey': (el) => deleteApiKey(el.dataset.keyId, el.dataset.keyName),
+
+    // 系统设置子 Tab 切换
+    'switchSettingsSubTab': (el) => {
+        const subTab = el.dataset.subTab;
+        // 切换按钮样式
+        document.querySelectorAll('.sub-tab').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.subTab === subTab);
+        });
+        // 切换面板
+        document.querySelectorAll('.settings-panel').forEach(panel => {
+            panel.style.display = 'none';
+        });
+        const panel = document.getElementById(`settings-panel-${subTab}`);
+        if (panel) panel.style.display = '';
+    },
+
+    // 仓库管理
+    'showAddWarehouseModal': showAddWarehouseModal,
+    'showEditWarehouseModal': (el) => showEditWarehouseModal(
+        el.dataset.whId, el.dataset.whName, el.dataset.whSlug,
+        el.dataset.whAddress, el.dataset.whIsDefault === 'true'
+    ),
+    'closeWarehouseModal': closeWarehouseModal,
+    'handleSaveWarehouse': handleSaveWarehouse,
+    'toggleWarehouseStatus': (el) => toggleWarehouseStatus(el.dataset.whId, el.dataset.isDisabled === 'true'),
+    'deleteWarehouse': (el) => deleteWarehouse(el.dataset.whId, el.dataset.whName),
 
     // 筛选器
     'applyRecordsFilter': applyRecordsFilter,
