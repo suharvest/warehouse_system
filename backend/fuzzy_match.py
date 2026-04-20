@@ -138,6 +138,31 @@ class FuzzyMatcher:
         """写操作后调用以使缓存失效"""
         self._dirty = True
 
+    def _judge_confident(self, candidates: list[dict]) -> bool:
+        """根据已排序（降序）候选列表判定置信度。
+
+        规则:
+        - 空 → False
+        - 并列第一 → False
+        - 单候选 → score ≥ 75
+        - score ≥ 95 → True
+        - score ≥ 90 且 gap > 5 → True
+        - 否则 → score ≥ _confident_score 且 gap > _confident_gap
+        """
+        if not candidates:
+            return False
+        best = candidates[0]
+        if len(candidates) >= 2 and best["score"] == candidates[1]["score"]:
+            return False
+        if len(candidates) == 1:
+            return best["score"] >= 75.0
+        if best["score"] >= 95.0:
+            return True
+        gap = best["score"] - candidates[1]["score"]
+        if best["score"] >= 90.0:
+            return gap > 5.0
+        return best["score"] >= self._confident_score and gap > self._confident_gap
+
     def _calc_score(self, norm_query: str, query_pinyin: str,
                     norm_name: str, name_pinyin: str) -> float:
         """计算综合匹配分数。
@@ -237,23 +262,7 @@ class FuzzyMatcher:
             }
 
         best = candidates[0]
-        if len(candidates) >= 2 and best["score"] == candidates[1]["score"]:
-            # 并列第一，无法区分，交给 LLM 判断
-            confident = False
-        elif len(candidates) == 1:
-            # 唯一候选，无歧义，但仍需足够相似
-            confident = best["score"] >= 75.0
-        elif best["score"] >= 95.0:
-            # 强匹配（近似完全包含），直接确认，不被短子串干扰
-            confident = True
-        else:
-            second_score = candidates[1]["score"]
-            gap = best["score"] - second_score
-            # 梯度 gap：score 越高要求的差距越小
-            if best["score"] >= 90.0:
-                confident = gap > 5.0
-            else:
-                confident = best["score"] >= self._confident_score and gap > self._confident_gap
+        confident = self._judge_confident(candidates)
 
         return {
             "best_match": best,
@@ -316,18 +325,6 @@ class FuzzyMatcher:
             return {"best_match": None, "confident": False, "candidates": []}
 
         best = scored[0]
-        if len(scored) >= 2 and best["score"] == scored[1]["score"]:
-            confident = False
-        elif len(scored) == 1:
-            confident = best["score"] >= 75.0
-        elif best["score"] >= 95.0:
-            confident = True
-        else:
-            gap = best["score"] - scored[1]["score"]
-            if best["score"] >= 90.0:
-                confident = gap > 5.0
-            else:
-                confident = (best["score"] >= self._confident_score
-                             and gap > self._confident_gap)
+        confident = self._judge_confident(scored)
 
         return {"best_match": best, "confident": confident, "candidates": scored[:5]}
