@@ -2480,9 +2480,12 @@ def get_material_batches(
     """获取物料的活跃批次列表"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     wh_filter, wh_params = build_warehouse_filter(wh_id, 'b')
+    mat_wh_filter, mat_wh_params = build_warehouse_filter(wh_id, '')
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM materials WHERE name = ?', (name,))
+        if wh_id is not None:
+            check_warehouse_access(conn, current_user, wh_id)
+        cursor.execute(f'SELECT id FROM materials WHERE name = ?{mat_wh_filter}', (name,) + mat_wh_params)
         material = cursor.fetchone()
         if not material:
             raise HTTPException(status_code=404, detail="产品不存在")

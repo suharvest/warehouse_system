@@ -627,3 +627,98 @@ class TestExportImportRoundtrip:
         for item in our_items:
             assert item['operation'] == 'none', \
                 f"Expected 'none' for {item['sku']} batch={item.get('batch_no')}, got '{item['operation']}' (diff={item['difference']})"
+
+
+class TestBatchesWarehouseAccess:
+    """Test warehouse-scoped access control on batches endpoint."""
+
+    def test_cross_warehouse_batches_access_denied(self, admin_client, default_warehouse_id):
+        """User with access to warehouse A cannot access batches from warehouse B."""
+        from database import get_db_connection
+        import uuid
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Create a second warehouse
+        wh_slug = f"wh-{uuid.uuid4().hex[:6]}"
+        cursor.execute(
+            'INSERT INTO warehouses (slug, name, is_default) VALUES (?, ?, 0)',
+            (wh_slug, f"Second Warehouse {wh_slug}")
+        )
+        wh_b_id = cursor.lastrowid
+        conn.commit()
+
+        # Create a non-admin user with access only to default warehouse
+        username = f"operator-{uuid.uuid4().hex[:6]}"
+        password = "OpPass123!"
+        cursor.execute(
+            '''INSERT INTO users (username, password_hash, role, display_name, created_at)
+               VALUES (?, ?, 'operate', ?, datetime('now'))''',
+            (username, 'dummy_hash_for_test', username)
+        )
+        user_id = cursor.lastrowid
+        cursor.execute(
+            'INSERT INTO user_warehouses (user_id, warehouse_id) VALUES (?, ?)',
+            (user_id, default_warehouse_id)
+        )
+        conn.commit()
+
+        # Create material in warehouse B
+        sku = f"XWH-{uuid.uuid4().hex[:8].upper()}"
+        name = f"CrossWH Material {sku}"
+        cursor.execute(
+            '''INSERT INTO materials (name, sku, category, quantity, unit, warehouse_id)
+               VALUES (?, ?, 'Test', 100, 'pcs', ?)''',
+            (name, sku, wh_b_id)
+        )
+        mat_id = cursor.lastrowid
+
+        # Create a batch in warehouse B
+        batch_no = f"BATCH-XWH-{uuid.uuid4().hex[:6]}"
+        cursor.execute(
+            '''INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, warehouse_id, created_at)
+               VALUES (?, ?, 50, 50, ?, datetime('now'))''',
+            (batch_no, mat_id, wh_b_id)
+        )
+        conn.commit()
+        conn.close()
+
+        # Login as restricted user (directly set real password hash)
+        from app import hash_password
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET password_hash = ? WHERE id = ?',
+            (hash_password(password), user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        # Login as restricted user
+        from fastapi.testclient import TestClient
+        import app as app_module
+        c = TestClient(app_module.app)
+        resp = c.post("/api/auth/login", json={"username": username, "password": password})
+        assert resp.status_code == 200
+        assert resp.json()['success'] is True
+
+        # Try to access batches from warehouse B - should get 403
+        resp = c.get("/api/materials/batches", params={
+            "name": name,
+            "warehouse_id": wh_b_id
+        })
+        assert resp.status_code == 403
+        detail = resp.json().get('detail') or resp.json().get('error')
+        assert "无权访问" in detail
+
+        # Cleanup: delete test user and warehouse
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM user_warehouses WHERE user_id = ?', (user_id,))
+        cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        cursor.execute('DELETE FROM batches WHERE material_id = ?', (mat_id,))
+        cursor.execute('DELETE FROM materials WHERE id = ?', (mat_id,))
+        cursor.execute('DELETE FROM warehouses WHERE id = ?', (wh_b_id,))
+        conn.commit()
+        conn.close()
