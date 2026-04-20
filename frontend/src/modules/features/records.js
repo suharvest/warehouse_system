@@ -329,15 +329,66 @@ async function loadContactsForRecord(recordType) {
     }
 }
 
-// 根据操作类型显示/隐藏库位字段（仅入库显示）
+// 根据操作类型切换字段可见性
 function updateLocationFieldVisibility(type) {
     const locationGroup = document.getElementById('record-location-group');
-    const batchGroup = document.getElementById('record-batch-group');
-    if (locationGroup) {
-        locationGroup.style.display = type === 'in' ? 'block' : 'none';
+    const batchNoGroup = document.getElementById('record-batch-group'); // 入库自定义批次号
+    const variantGroup = document.getElementById('record-variant-group');
+    const batchSelectGroup = document.getElementById('record-batch-select-group');
+
+    // location 和 variant 两种操作都显示
+    if (locationGroup) locationGroup.style.display = 'block';
+    if (variantGroup) variantGroup.style.display = 'block';
+
+    // 入库时显示"自定义批次号"输入，出库时显示"指定批次"下拉
+    if (batchNoGroup) batchNoGroup.style.display = type === 'in' ? 'block' : 'none';
+    if (batchSelectGroup) batchSelectGroup.style.display = type === 'out' ? 'block' : 'none';
+
+    if (type === 'out') {
+        populateBatchSelectForCurrentProduct();
+    } else {
+        const sel = document.getElementById('record-batch-select');
+        if (sel) sel.value = '';
     }
-    if (batchGroup) {
-        batchGroup.style.display = type === 'in' ? 'block' : 'none';
+}
+
+export async function populateBatchSelectForCurrentProduct() {
+    const sel = document.getElementById('record-batch-select');
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${t('autoFIFO')}</option>`;
+
+    const productName = addRecordForProduct
+        ? currentProductName
+        : document.getElementById('record-product').value;
+    if (!productName) return;
+
+    const whId = getCurrentWarehouseId();
+    if (!whId) return;
+
+    try {
+        const params = new URLSearchParams({ name: productName, warehouse_id: String(whId) });
+        const resp = await fetch(`/api/materials/batches?${params.toString()}`, {
+            credentials: 'include',
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const batches = data.batches || [];
+        for (const b of batches) {
+            if (!b.quantity || b.quantity <= 0) continue;
+            const parts = [b.batch_no];
+            if (b.location) parts.push(b.location);
+            if (b.variant) parts.push(b.variant);
+            parts.push(`余 ${b.quantity}`);
+            const label = parts.join(' · ');
+            const opt = document.createElement('option');
+            opt.value = b.batch_no;
+            opt.textContent = label;
+            opt.dataset.location = b.location || '';
+            opt.dataset.variant = b.variant || '';
+            sel.appendChild(opt);
+        }
+    } catch (err) {
+        console.error('[records] load batches failed:', err);
     }
 }
 
@@ -399,29 +450,40 @@ export async function submitAddRecord() {
     const reasonCategory = document.getElementById('record-reason-category').value;
     const reasonNote = document.getElementById('record-reason-note').value.trim() || null;
     const contactId = document.getElementById('record-contact')?.value || null;
-    const locationInput = document.getElementById('record-location');
-    const location = (type === 'in' && locationInput) ? locationInput.value.trim() : null;
-    const batchNoInput = document.getElementById('record-batch-no');
-    const batchNo = (type === 'in' && batchNoInput) ? batchNoInput.value.trim() || null : null;
+
+    const location = document.getElementById('record-location')?.value.trim() || null;
+    const variant = document.getElementById('record-variant')?.value.trim() || null;
+
+    let batchNo = null;
+    let selectedBatchLocation = null;
+    let selectedBatchVariant = null;
+    if (type === 'in') {
+        const batchNoInput = document.getElementById('record-batch-no');
+        batchNo = batchNoInput ? (batchNoInput.value.trim() || null) : null;
+    } else {
+        const sel = document.getElementById('record-batch-select');
+        if (sel && sel.value) {
+            batchNo = sel.value;
+            const opt = sel.selectedOptions[0];
+            selectedBatchLocation = opt?.dataset.location || null;
+            selectedBatchVariant = opt?.dataset.variant || null;
+        }
+    }
 
     if (!productName || !type || !document.getElementById('record-quantity').value || !reasonCategory) {
         alert(t('fillAllFields'));
         return;
     }
-
     if (isNaN(quantity) || quantity <= 0) {
         alert(t('quantityMustBePositive'));
         return;
     }
 
-    // 如果填了库位，检查是否与现有库位不同
-    if (location) {
+    // 入库时检查 location 与现有产品库位是否冲突（原逻辑保留）
+    if (type === 'in' && location) {
         const product = allProducts.find(p => p.name === productName);
         if (product && product.location && product.location !== location) {
-            const confirmed = confirm(
-                `该产品当前库位为「${product.location}」，是否覆盖为「${location}」？`
-            );
-            if (!confirmed) return;
+            if (!confirm(`该产品当前库位为「${product.location}」，是否覆盖为「${location}」？`)) return;
         }
     }
 
@@ -433,14 +495,13 @@ export async function submitAddRecord() {
             reason_category: reasonCategory,
             reason_note: reasonNote,
             contact_id: contactId ? parseInt(contactId) : null,
-            warehouse_id: getCurrentWarehouseId()
+            warehouse_id: getCurrentWarehouseId(),
         };
-        if (location) {
-            requestData.location = location;
-        }
-        if (batchNo) {
-            requestData.batch_no = batchNo;
-        }
+        const effectiveLocation = location || selectedBatchLocation;
+        if (effectiveLocation) requestData.location = effectiveLocation;
+        const effectiveVariant = variant || selectedBatchVariant;
+        if (effectiveVariant) requestData.variant = effectiveVariant;
+        if (batchNo) requestData.batch_no = batchNo;
 
         const data = await recordsApi.create(requestData);
 
@@ -456,9 +517,6 @@ export async function submitAddRecord() {
             alert(data.error || data.message || t('operationFailed'));
         }
     } catch (error) {
-        // 401 错误已由全局 session 过期处理器处理，不再重复提示
-        if (error.status === 401) return;
-        console.error('操作失败:', error);
-        alert(t('operationFailed'));
+        // 401 由全局 session 过期处理
     }
 }
