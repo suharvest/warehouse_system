@@ -260,3 +260,74 @@ class FuzzyMatcher:
             "confident": confident,
             "candidates": candidates,
         }
+
+    def resolve_location_in_scope(self, material_id: int, warehouse_id: int,
+                                   query: str) -> dict:
+        """按产品+仓库作用域对 location 做模糊匹配。
+
+        候选集现场查 SQL（该物料该仓库所有未耗尽批次的 DISTINCT location），
+        通常 < 20 条。不走全局索引，避免跨产品污染。
+
+        返回: {best_match, confident, candidates} 同 resolve。
+        """
+        if not query:
+            return {"best_match": None, "confident": False, "candidates": []}
+
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT DISTINCT location FROM batches
+                   WHERE material_id = ? AND warehouse_id = ?
+                     AND is_exhausted = 0 AND quantity > 0
+                     AND location IS NOT NULL AND location != ''""",
+                (material_id, warehouse_id),
+            )
+            locations = [r['location'] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+        if not locations:
+            return {"best_match": None, "confident": False, "candidates": []}
+
+        norm_query = self._normalize(query)
+        query_pinyin = self._get_pinyin(norm_query)
+
+        scored = []
+        for loc in locations:
+            norm_loc = self._normalize(loc)
+            loc_pinyin = self._get_pinyin(norm_loc)
+            score = self._calc_score(norm_query, query_pinyin, norm_loc, loc_pinyin)
+            if score >= 50.0:
+                scored.append({
+                    "name": loc,
+                    "score": round(score, 1),
+                    "entity_type": "location",
+                    "entity_id": None,
+                    "extra": {},
+                })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        if scored:
+            top_score = scored[0]["score"]
+            scored = [r for r in scored if top_score - r["score"] <= 20]
+
+        if not scored:
+            return {"best_match": None, "confident": False, "candidates": []}
+
+        best = scored[0]
+        if len(scored) >= 2 and best["score"] == scored[1]["score"]:
+            confident = False
+        elif len(scored) == 1:
+            confident = best["score"] >= 75.0
+        elif best["score"] >= 95.0:
+            confident = True
+        else:
+            gap = best["score"] - scored[1]["score"]
+            if best["score"] >= 90.0:
+                confident = gap > 5.0
+            else:
+                confident = (best["score"] >= self._confident_score
+                             and gap > self._confident_gap)
+
+        return {"best_match": best, "confident": confident, "candidates": scored[:5]}
