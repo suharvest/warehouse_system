@@ -177,9 +177,14 @@ class BaseProvider(ABC):
         operator: str,
         fuzzy: bool,
         variant: str | None = None,
+        location: str | None = None,
+        batch_no: str | None = None,
+        location_fuzzy: bool = False,
     ) -> dict:
         """产品出库。
 
+        batch_no 非空时只从该批次扣减（不足报错，不 fallback）。
+        location_fuzzy=True 时对 location 做作用域模糊（仅 MCP 使用）。
         返回: {success, ...}
         """
         ...
