@@ -192,3 +192,58 @@ class TestFIFOConsumption:
         data = resp.json()
         assert data['success'] is True
         assert data.get('warning') is not None
+
+    def test_stock_out_specified_batch_success(self, admin_client, stocked_material):
+        """指定 batch_no 出库应仅从该批次扣减，不触发 FIFO。"""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 5,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "batch_no": stocked_material['batch2_no'],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert len(data['batch_consumptions']) == 1
+        assert data['batch_consumptions'][0]['batch_no'] == stocked_material['batch2_no']
+        assert data['batch_consumptions'][0]['quantity'] == 5
+
+    def test_stock_out_specified_batch_insufficient(self, admin_client, stocked_material):
+        """指定批次余量不足应报错，不 fallback 到 FIFO。"""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 999,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "batch_no": stocked_material['batch1_no'],
+        })
+        data = resp.json()
+        assert data['success'] is False
+        assert data['error'] == 'batch_insufficient_stock'
+
+    def test_stock_out_batch_not_found(self, admin_client, stocked_material):
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 1,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "batch_no": "NONEXISTENT-9999",
+        })
+        data = resp.json()
+        assert data['success'] is False
+        assert data['error'] == 'batch_not_found'
+
+    def test_stock_out_batch_location_mismatch(self, admin_client, stocked_material):
+        """指定 batch_no + 不匹配的 location 应报 batch_field_mismatch。"""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 1,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "batch_no": stocked_material['batch1_no'],
+            "location": "WRONG-LOC-ZZ",
+        })
+        data = resp.json()
+        assert data['success'] is False
+        assert data['error'] == 'batch_field_mismatch'
