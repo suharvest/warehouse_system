@@ -517,6 +517,10 @@ export async function submitAddRecord() {
             alert(data.error || data.message || t('operationFailed'));
         }
     } catch (error) {
-        // 401 由全局 session 过期处理
+        // 401 由全局 session 过期处理；其它错误兜底提示
+        if (error && error.status !== 401) {
+            console.error('[records] submitAddRecord error:', error);
+            alert(t('operationFailed') || '操作失败');
+        }
     }
 }
