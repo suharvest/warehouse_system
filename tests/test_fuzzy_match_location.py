@@ -110,3 +110,27 @@ class TestResolveLocationInScope:
         assert result['confident'] is False
         assert result['best_match'] is None
         assert result['candidates'] == []
+
+    def test_empty_normalized_query_returns_empty(self, scoped_material):
+        """Query that normalizes to empty string should return empty candidates."""
+        from fuzzy_match import FuzzyMatcher
+        from database import get_db_connection
+        matcher = FuzzyMatcher(get_db_connection)
+        result = matcher.resolve_location_in_scope(
+            scoped_material['material_id'],
+            scoped_material['warehouse_id'],
+            '-',
+        )
+        assert result['confident'] is False
+        assert result['best_match'] is None
+        assert result['candidates'] == []
+
+        # Also test space-only query
+        result = matcher.resolve_location_in_scope(
+            scoped_material['material_id'],
+            scoped_material['warehouse_id'],
+            '   ',
+        )
+        assert result['confident'] is False
+        assert result['best_match'] is None
+        assert result['candidates'] == []

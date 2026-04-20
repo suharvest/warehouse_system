@@ -300,6 +300,8 @@ class FuzzyMatcher:
             return {"best_match": None, "confident": False, "candidates": []}
 
         norm_query = self._normalize(query)
+        if not norm_query:
+            return {"best_match": None, "confident": False, "candidates": []}
         query_pinyin = self._get_pinyin(norm_query)
 
         scored = []
