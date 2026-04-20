@@ -349,3 +349,19 @@ class TestAddRecordBatchNoForwarding:
         assert len(data['batch_consumptions']) == 1
         assert data['batch_consumptions'][0]['batch_no'] == stocked_material['batch2_no']
         assert data['batch_consumptions'][0]['quantity'] == 5
+
+    def test_add_record_out_without_batch_no_uses_fifo(self, admin_client, stocked_material):
+        """add-record with type=out but no batch_no should use FIFO (pick batch1)."""
+        resp = admin_client.post("/api/inventory/add-record", json={
+            "product_name": stocked_material['name'],
+            "type": "out",
+            "quantity": 5,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert len(data['batch_consumptions']) == 1
+        assert data['batch_consumptions'][0]['batch_no'] == stocked_material['batch1_no']
+        assert data['batch_consumptions'][0]['quantity'] == 5
