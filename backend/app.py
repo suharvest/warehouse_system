@@ -4263,6 +4263,7 @@ async def add_inventory_record(
                 operator=operator,
                 contact_id=request.contact_id,
                 location=request.location,
+                batch_no=request.batch_no,
                 variant=request.variant,
                 warehouse_id=request.warehouse_id,
             ),
