@@ -60,7 +60,8 @@ function setupModuleCallbacks() {
     setAuthCallbacks({
         onAuthChange: () => {},
         switchTab,
-        refreshCurrentTab
+        refreshCurrentTab,
+        onLoginSuccess: loadWarehouses
     });
 
     // 设置看板回调

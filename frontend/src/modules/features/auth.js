@@ -14,12 +14,14 @@ let sessionExpiredNotified = false;
 let onAuthChange = null;
 let switchTabFn = null;
 let refreshCurrentTabFn = null;
+let onLoginSuccessFn = null;
 
 // 设置回调
 export function setAuthCallbacks(callbacks) {
     onAuthChange = callbacks.onAuthChange;
     switchTabFn = callbacks.switchTab;
     refreshCurrentTabFn = callbacks.refreshCurrentTab;
+    onLoginSuccessFn = callbacks.onLoginSuccess;
 }
 
 // 初始化 session 过期处理
@@ -163,6 +165,7 @@ export async function handleLogin(event) {
 
         if (data.success) {
             setCurrentUser(data.user);
+            if (onLoginSuccessFn) await onLoginSuccessFn();
             closeLoginModal();
             updateUserDisplay();
             updatePermissionUI();
