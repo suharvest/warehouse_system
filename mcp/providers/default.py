@@ -168,7 +168,8 @@ class DefaultProvider(BaseProvider):
         return self.http_post("/materials/stock-in", payload)
 
     def stock_out(self, product_name, quantity, reason_category, reason_note,
-                  operator, fuzzy, variant=None):
+                  operator, fuzzy, variant=None, location=None,
+                  batch_no=None, location_fuzzy=False):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
@@ -179,6 +180,12 @@ class DefaultProvider(BaseProvider):
         }
         if variant is not None:
             payload["variant"] = variant
+        if location is not None:
+            payload["location"] = location
+        if batch_no is not None:
+            payload["batch_no"] = batch_no
+        if location_fuzzy:
+            payload["location_fuzzy"] = True
         return self.http_post("/materials/stock-out", payload)
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,
