@@ -138,10 +138,11 @@ class StockOperationRequest(BaseModel):
     operator: Optional[str] = "MCP系统"
     contact_id: Optional[int] = None  # 联系方ID（供应商/客户）
     location: Optional[str] = None  # 批次存放位置
-    batch_no: Optional[str] = None  # 自定义批次号（留空自动生成）
+    batch_no: Optional[str] = None  # 入库: 自定义批次号; 出库: 指定批次消耗
     variant: Optional[str] = None   # 变体标识（如颜色"红"），写入批次
     fuzzy: bool = True  # 是否启用模糊匹配
     warehouse_id: Optional[int] = None  # 仓库ID（写操作必填）
+    location_fuzzy: bool = False  # 出库时对 location 做作用域模糊（仅 MCP 使用）
 
 
 class StockOperationProduct(BaseModel):
