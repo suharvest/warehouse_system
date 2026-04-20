@@ -387,9 +387,49 @@ export async function populateBatchSelectForCurrentProduct() {
             opt.dataset.variant = b.variant || '';
             sel.appendChild(opt);
         }
+        setupBatchSelectChangeListener();
     } catch (err) {
         console.error('[records] load batches failed:', err);
     }
+}
+
+function setupBatchSelectChangeListener() {
+    const sel = document.getElementById('record-batch-select');
+    const locationInput = document.getElementById('record-location');
+    const variantInput = document.getElementById('record-variant');
+    if (!sel) return;
+
+    sel.removeEventListener('change', sel._batchChangeHandler || (() => {}));
+    const handler = function () {
+        if (sel.value && sel.selectedOptions[0]) {
+            const opt = sel.selectedOptions[0];
+            const batchLoc = opt.dataset.location || '';
+            const batchVar = opt.dataset.variant || '';
+            if (locationInput) {
+                locationInput.value = batchLoc;
+                locationInput.readOnly = true;
+                locationInput.style.opacity = '0.6';
+            }
+            if (variantInput) {
+                variantInput.value = batchVar;
+                variantInput.readOnly = true;
+                variantInput.style.opacity = '0.6';
+            }
+        } else {
+            if (locationInput) {
+                locationInput.value = '';
+                locationInput.readOnly = false;
+                locationInput.style.opacity = '1';
+            }
+            if (variantInput) {
+                variantInput.value = '';
+                variantInput.readOnly = false;
+                variantInput.style.opacity = '1';
+            }
+        }
+    };
+    sel._batchChangeHandler = handler;
+    sel.addEventListener('change', handler);
 }
 
 // Enter 键跳转到下一个输入框（兼容扫码机自动换行）
@@ -497,9 +537,9 @@ export async function submitAddRecord() {
             contact_id: contactId ? parseInt(contactId) : null,
             warehouse_id: getCurrentWarehouseId(),
         };
-        const effectiveLocation = location || selectedBatchLocation;
+        const effectiveLocation = selectedBatchLocation || location;
         if (effectiveLocation) requestData.location = effectiveLocation;
-        const effectiveVariant = variant || selectedBatchVariant;
+        const effectiveVariant = selectedBatchVariant || variant;
         if (effectiveVariant) requestData.variant = effectiveVariant;
         if (batchNo) requestData.batch_no = batchNo;
 
