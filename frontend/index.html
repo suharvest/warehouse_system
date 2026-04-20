@@ -830,6 +830,35 @@
                             <h2 class="page-title" data-i18n="tabUsers">系统设置</h2>
                         </div>
 
+                        <!-- 子 Tab 导航 -->
+                        <div class="sub-tabs">
+                            <button class="sub-tab active" data-action="switchSettingsSubTab" data-sub-tab="users-keys">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                                    <circle cx="12" cy="7" r="4"></circle>
+                                </svg>
+                                <span data-i18n="settingsUsersKeys">用户与密钥</span>
+                            </button>
+                            <button class="sub-tab" data-action="switchSettingsSubTab" data-sub-tab="warehouses">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                                    <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                                </svg>
+                                <span data-i18n="settingsWarehouses">仓库</span>
+                            </button>
+                            <button class="sub-tab" data-action="switchSettingsSubTab" data-sub-tab="data-mgmt">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                                </svg>
+                                <span data-i18n="settingsDataMgmt">数据管理</span>
+                            </button>
+                        </div>
+
+                        <!-- 子面板：用户与密钥 -->
+                        <div id="settings-panel-users-keys" class="settings-panel">
+
                         <!-- 用户列表 -->
                         <div class="table-container">
                             <div class="section-header">
@@ -883,6 +912,43 @@
                                 <tbody id="api-keys-tbody"></tbody>
                             </table>
                         </div>
+
+                        </div><!-- end settings-panel-users-keys -->
+
+                        <!-- 子面板：仓库 -->
+                        <div id="settings-panel-warehouses" class="settings-panel" style="display:none">
+
+                        <!-- 仓库管理 -->
+                        <div class="table-container">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="warehouseManagement">仓库管理</div>
+                                <button class="action-btn add-btn" data-action="showAddWarehouseModal">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    <span data-i18n="addWarehouse">添加仓库</span>
+                                </button>
+                            </div>
+                            <table id="warehouses-table">
+                                <thead>
+                                    <tr>
+                                        <th data-i18n="warehouseName">名称</th>
+                                        <th data-i18n="warehouseSlug">标识</th>
+                                        <th data-i18n="warehouseAddress">地址</th>
+                                        <th data-i18n="isDefault">默认</th>
+                                        <th data-i18n="status">状态</th>
+                                        <th data-i18n="actions">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="warehouses-tbody"></tbody>
+                            </table>
+                        </div>
+
+                        </div><!-- end settings-panel-warehouses -->
+
+                        <!-- 子面板：数据管理 -->
+                        <div id="settings-panel-data-mgmt" class="settings-panel" style="display:none">
 
                         <!-- 系统模式 / ERP Provider 管理 -->
                         <div id="erp-mode-cards" class="table-container mt-6">
@@ -999,6 +1065,8 @@
                                 </div>
                             </div>
                         </div>
+
+                        </div><!-- end settings-panel-data-mgmt -->
                     </div>
 
                     <!-- 智能体配置 Tab -->
@@ -1346,6 +1414,16 @@
                         <label data-i18n="location">存放位置</label>
                         <input type="text" id="record-location" placeholder="选填">
                     </div>
+                    <div class="form-group" id="record-variant-group" style="display: none;">
+                        <label data-i18n="variant">变体</label>
+                        <input type="text" id="record-variant" data-i18n-placeholder="variantPlaceholder" placeholder="如：红、大号（选填）">
+                    </div>
+                    <div class="form-group" id="record-batch-select-group" style="display: none;">
+                        <label data-i18n="outboundBatch">指定批次</label>
+                        <select id="record-batch-select">
+                            <option value="" data-i18n="autoFIFO">-- FIFO 自动分配 --</option>
+                        </select>
+                    </div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -1378,6 +1456,39 @@
             <div class="modal-footer">
                 <button class="btn cancel-btn" data-action="closeLoginModal" data-i18n="cancel">取消</button>
                 <button class="btn confirm-btn" data-action="handleLogin" data-i18n="login">登录</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加/编辑仓库模态框 -->
+    <div id="warehouse-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 id="warehouse-modal-title" data-i18n="addWarehouse">添加仓库</h3>
+                <button class="close-btn" data-action="closeWarehouseModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="warehouse-form">
+                    <input type="hidden" id="warehouse-edit-id">
+                    <div class="form-group">
+                        <label><span data-i18n="warehouseName">名称</span> <span class="required">*</span></label>
+                        <input type="text" id="warehouse-name" required placeholder="如：深圳仓、北京仓">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="warehouseSlug">标识</span> <span class="required">*</span></label>
+                        <input type="text" id="warehouse-slug" required placeholder="如：shenzhen、beijing（小写字母+数字+连字符）" pattern="^[a-z0-9][a-z0-9\-]*$">
+                        <div class="form-hint" data-i18n="slugHint">用于 URL 路径，只能包含小写字母、数字和连字符</div>
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="warehouseAddress">地址</span></label>
+                        <input type="text" id="warehouse-address" placeholder="可选">
+                    </div>
+                    <div class="form-error" id="warehouse-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" data-action="closeWarehouseModal" data-i18n="cancel">取消</button>
+                <button class="btn confirm-btn" data-action="handleSaveWarehouse" data-i18n="submit">提交</button>
             </div>
         </div>
     </div>
