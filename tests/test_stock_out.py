@@ -328,3 +328,24 @@ class TestFIFOConsumption:
         count = cursor.fetchone()['cnt']
         conn.close()
         assert count == 1  # Only this consumption, no duplicates
+
+
+class TestAddRecordBatchNoForwarding:
+    """Test that /api/inventory/add-record forwards batch_no for 'out' operations."""
+
+    def test_add_record_out_forwards_batch_no(self, admin_client, stocked_material):
+        """add-record with type=out + batch_no should bypass FIFO."""
+        resp = admin_client.post("/api/inventory/add-record", json={
+            "product_name": stocked_material['name'],
+            "type": "out",
+            "quantity": 5,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "batch_no": stocked_material['batch2_no'],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert len(data['batch_consumptions']) == 1
+        assert data['batch_consumptions'][0]['batch_no'] == stocked_material['batch2_no']
+        assert data['batch_consumptions'][0]['quantity'] == 5
