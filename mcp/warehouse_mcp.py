@@ -225,35 +225,46 @@ def stock_in(product_name: str, quantity: int,
 
 @mcp.tool()
 def stock_out(product_name: str, quantity: int,
-              reason_category: str = "sell", reason_note: str = "",
+              reason_category: str, reason_note: str = "",
               operator: str = "MCP系统", fuzzy: bool = True,
-              variant: str = None) -> dict:
+              variant: str = None, location: str = None,
+              batch_no: str = None) -> dict:
     """
     产品出库。可直接传入模糊名称，自动解析为精确产品。
-    默认按 FIFO 消耗批次；若指定 variant，则仅从匹配变体的批次中 FIFO 消耗。
+    默认按 FIFO 消耗批次；若指定 variant / location，则仅从匹配批次中 FIFO 消耗。
+    若指定 batch_no，则仅从该批次扣减，不 fallback 到 FIFO。
 
-    参数:
-        product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
+    参数：
+        product_name: 产品名称（支持模糊输入，如"指示灯"会匹配到"LED指示灯"）
         quantity: 出库数量（正整数）
         reason_category: 出库原因分类，必须是以下之一：
-            - "sell": 出售（默认）
+            - "sell": 销售出库
+            - "use": 领用/消耗
             - "lend": 借出
-            - "consume": 领用/消耗
-            - "loss": 损耗/损失
+            - "scrap": 报废
+            - "return_out": 退货出库
             - "transfer_out": 调拨出库
             - "other_out": 其他出库
-        reason_note: 备注详情（可选），如"借给张三"、"研发测试用"
-        operator: 操作人（默认"MCP系统"）
-        fuzzy: 是否启用模糊匹配（默认 true）
-        variant: 变体过滤（可选，如"红"）。指定后仅消耗该变体的批次。
-                 例如"出库2个红色指示灯"时设为"红"。
+        reason_note: 详情备注（如"销售给XX公司"、"借给小王"），选填
+        operator: 操作员姓名（默认"MCP系统"）
+        fuzzy: 是否启用产品名模糊匹配（默认 True）
+        variant: 变体过滤（可选，如"红"）。指定后仅消耗该变体的批次。精确匹配。
+        location: 库位过滤（可选，如"A-01"）。
+                  MCP 场景自动开启作用域模糊匹配：用户口述"A 区"可匹配到 A-01。
+                  若模糊结果歧义会返回候选让 LLM 判断。
+        batch_no: 指定批次号（可选，如"B-2026-003"）。
+                  用户明确说"出 B-2026-003 这批"时才传。
+                  指定后只从该批次扣，不足直接报错（不 fallback 到 FIFO 补齐）。
+                  若同时传 location/variant 与批次实际不符，会报 batch_field_mismatch。
 
-    返回:
+    返回：
         success=true 时：出库成功，含批次消耗详情（每个消耗批次含 variant 字段）
-        success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
+        success=false 时：含具体错误类型，如 ambiguous_name / location_ambiguous /
+                         batch_not_found / batch_insufficient_stock / batch_field_mismatch 等
     """
     return _provider.stock_out(product_name, quantity, reason_category, reason_note,
-                               operator, fuzzy, variant)
+                               operator, fuzzy, variant, location,
+                               batch_no=batch_no, location_fuzzy=True)
 
 
 @mcp.tool()
