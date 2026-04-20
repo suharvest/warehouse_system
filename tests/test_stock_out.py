@@ -247,3 +247,41 @@ class TestFIFOConsumption:
         data = resp.json()
         assert data['success'] is False
         assert data['error'] == 'batch_field_mismatch'
+
+    def test_stock_out_location_fuzzy_confident(self, admin_client, default_warehouse_id):
+        """location_fuzzy=True 且匹配明确时应成功出库。"""
+        import uuid
+        name = f"LocFuzzy-{uuid.uuid4().hex[:8]}"
+
+        from database import get_db_connection
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''INSERT INTO materials
+            (name, sku, category, quantity, unit, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?)''',
+            (name, f"S-{uuid.uuid4().hex[:8]}", 'Test', 0, 'pcs', default_warehouse_id))
+        conn.commit()
+        conn.close()
+
+        admin_client.post("/api/materials/stock-in", json={
+            "product_name": name, "quantity": 20, "reason_category": "purchase",
+            "warehouse_id": default_warehouse_id, "location": "A-01",
+        })
+
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": name, "quantity": 5, "reason_category": "sell",
+            "warehouse_id": default_warehouse_id, "location": "A01",
+            "location_fuzzy": True,
+        })
+        assert resp.json()['success'] is True
+
+    def test_stock_out_location_fuzzy_not_found(self, admin_client, stocked_material):
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'], "quantity": 1,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "location": "ZZZ-999", "location_fuzzy": True,
+        })
+        data = resp.json()
+        assert data['success'] is False
+        assert data['error'] == 'location_not_found'
