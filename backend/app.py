@@ -3162,19 +3162,30 @@ async def stock_out(
                  datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             record_id = cursor.lastrowid
 
-            new_batch_qty = batch['quantity'] - quantity
-            is_exhausted = 1 if new_batch_qty == 0 else 0
-            cursor.execute("UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?",
-                           (new_batch_qty, is_exhausted, batch['id']))
+            consume_qty = quantity
+            cursor.execute(
+                """UPDATE batches
+                   SET quantity = quantity - ?,
+                       is_exhausted = CASE WHEN quantity - ? <= 0 THEN 1 ELSE 0 END
+                   WHERE id = ? AND quantity >= ? AND is_exhausted = 0""",
+                (consume_qty, consume_qty, batch['id'], consume_qty),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return StockOutResponse(
+                    success=False, error="batch_race_conflict",
+                    message="批次并发冲突，请重试",
+                )
             cursor.execute(
                 """INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
                    VALUES (?, ?, ?, ?)""",
-                (record_id, batch['id'], quantity,
+                (record_id, batch['id'], consume_qty,
                  datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
+            remaining_qty = max(batch['quantity'] - consume_qty, 0)
             batch_consumptions = [BatchConsumption(
                 batch_no=batch['batch_no'], batch_id=batch['id'],
-                quantity=quantity, remaining=new_batch_qty, variant=batch['variant'],
+                quantity=consume_qty, remaining=remaining_qty, variant=batch['variant'],
             )]
             conn.commit()
             get_fuzzy_matcher().invalidate_cache()
@@ -3274,19 +3285,29 @@ async def stock_out(
             if remaining_to_consume <= 0:
                 break
             consume_qty = min(b['quantity'], remaining_to_consume)
-            new_batch_qty = b['quantity'] - consume_qty
             remaining_to_consume -= consume_qty
-            is_exhausted = 1 if new_batch_qty == 0 else 0
-            cursor.execute("UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?",
-                           (new_batch_qty, is_exhausted, b['id']))
+            cursor.execute(
+                """UPDATE batches
+                   SET quantity = quantity - ?,
+                       is_exhausted = CASE WHEN quantity - ? <= 0 THEN 1 ELSE 0 END
+                   WHERE id = ? AND quantity >= ? AND is_exhausted = 0""",
+                (consume_qty, consume_qty, b['id'], consume_qty),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return StockOutResponse(
+                    success=False, error="batch_race_conflict",
+                    message="批次并发冲突，请重试",
+                )
             cursor.execute(
                 """INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
                    VALUES (?, ?, ?, ?)""",
                 (record_id, b['id'], consume_qty,
                  datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            remaining_qty = max(b['quantity'] - consume_qty, 0)
             batch_consumptions.append(BatchConsumption(
                 batch_no=b['batch_no'], batch_id=b['id'],
-                quantity=consume_qty, remaining=new_batch_qty, variant=b['variant'],
+                quantity=consume_qty, remaining=remaining_qty, variant=b['variant'],
             ))
 
         conn.commit()

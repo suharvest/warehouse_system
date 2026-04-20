@@ -285,3 +285,46 @@ class TestFIFOConsumption:
         data = resp.json()
         assert data['success'] is False
         assert data['error'] == 'location_not_found'
+
+    def test_atomic_batch_update_remaining_correct(self, admin_client, stocked_material):
+        """Verify atomic batch update produces correct remaining value."""
+        from database import get_db_connection
+
+        # Initial batch2 quantity
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT quantity FROM batches WHERE batch_no = ?',
+            (stocked_material['batch2_no'],)
+        )
+        initial_qty = cursor.fetchone()['quantity']
+        conn.close()
+
+        # Stock out 5 from batch2
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 5,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "batch_no": stocked_material['batch2_no'],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert len(data['batch_consumptions']) == 1
+        assert data['batch_consumptions'][0]['batch_no'] == stocked_material['batch2_no']
+        assert data['batch_consumptions'][0]['quantity'] == 5
+        expected_remaining = max(initial_qty - 5, 0)
+        assert data['batch_consumptions'][0]['remaining'] == expected_remaining
+
+        # Verify batch_consumptions table has exactly 1 entry for this record
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT COUNT(*) as cnt FROM batch_consumptions WHERE batch_id IN '
+            '(SELECT id FROM batches WHERE batch_no = ?)',
+            (stocked_material['batch2_no'],)
+        )
+        count = cursor.fetchone()['cnt']
+        conn.close()
+        assert count == 1  # Only this consumption, no duplicates
