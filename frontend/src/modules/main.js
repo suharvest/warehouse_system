@@ -2,9 +2,9 @@
 import { t } from '../../i18n.js';
 import { inventoryApi, warehousesApi } from './api.js';
 import {
-    allCategories, setAllCategories, allProducts, setAllProducts,
-    currentTab, recordsCurrentPage, inventoryCurrentPage, detailCurrentPage, contactsCurrentPage,
-    setAllWarehouses, allWarehouses
+    getAllCategories, setAllCategories, getAllProducts, setAllProducts,
+    getCurrentTab, getRecordsCurrentPage, getInventoryCurrentPage, getDetailCurrentPage, getContactsCurrentPage,
+    setAllWarehouses, getAllWarehouses
 } from './state.js';
 
 // UI 模块
@@ -18,13 +18,22 @@ import { loadInventory, inventoryGoToPage, changeInventoryPageSize, applyInvento
 import { loadRecords, recordsGoToPage, changeRecordsPageSize, applyRecordsFilter, resetRecordsFilter, applyRecordsFilters, loadRecordsFilterOptions, showAddRecordModal, showAddRecordModalForProduct, closeAddRecordModal, submitAddRecord, setRecordsCallbacks } from './features/records.js';
 import { onProductSelect, initDetailCharts, loadProductDetail, loadProductTrend, loadDetailPieChart, loadProductRecords, detailGoToPage, changeDetailPageSize, refreshProductDetailForLanguage } from './features/product-detail.js';
 import { exportInventory, exportRecords, exportProductRecords, showImportModal, closeImportModal, handleFileSelect, confirmImport, closeNewSkuModal, skipNewSkus, confirmNewSkus, setImportExportCallbacks } from './features/import-export.js';
-import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEditUserModal, closeEditUserModal, handleEditUser, toggleUserStatus, setUsersCallbacks } from './features/users.js';
+import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEditUserModal, closeEditUserModal, handleEditUser, toggleUserStatus, setUsersCallbacks, loadTenantInfo } from './features/users.js';
 import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh } from './features/mcp.js';
 import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks } from './features/warehouses.js';
 import { loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
+import { fetchDeployMode, renderTenantsPanel, showAddTenantModal, closeAddTenantModal, handleAddTenant, showEditTenantModal, closeEditTenantModal, handleEditTenant, handleDeleteTenant, tenantsPrevPage, tenantsNextPage, getTenantModalsHTML, setTenantsPage } from './features/tenants.js';
+import {
+    renderFaceRecognitionPanel, switchFaceSubTab, refreshFacePanel,
+    saveFaceConfig, testFaceConnection,
+    showAddFaceRuleModal, editFaceRule, closeFaceRuleModal, saveFaceRule, deleteFaceRule,
+    selectFaceEnrollUser, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
+    applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
+    getFaceModalsHTML
+} from './features/face-recognition.js';
 
 // 语言切换
 import { toggleLangDropdown, selectLanguage } from '../../i18n.js';
@@ -41,6 +50,7 @@ function setupModuleCallbacks() {
         applyInventoryFilters,
         loadContacts,
         loadUsers,
+        loadTenantInfo,
         loadApiKeys,
         loadProductDetail,
         setProductSelectorValue,
@@ -50,6 +60,7 @@ function setupModuleCallbacks() {
         loadERPStatus,
         startERPRefresh,
         stopERPRefresh,
+        renderTenantsPanel,
         t,
         loadCategories,
         loadAllProducts,
@@ -164,7 +175,7 @@ async function loadAllProducts() {
 }
 
 function populateProductSelector() {
-    if (!allProducts || !Array.isArray(allProducts)) {
+    if (!getAllProducts() || !Array.isArray(getAllProducts())) {
         setAllProducts([]);
     }
 
@@ -174,7 +185,7 @@ function populateProductSelector() {
         inputId: 'product-selector-input',
         dropdownId: 'product-selector-dropdown',
         hiddenId: 'product-selector',
-        products: allProducts,
+        products: getAllProducts(),
         includeDisabled: true,
         showStock: false,
         onSelect: onProductSelect,
@@ -187,7 +198,7 @@ function populateProductSelector() {
         inputId: 'record-product-input',
         dropdownId: 'record-product-dropdown',
         hiddenId: 'record-product',
-        products: allProducts.filter(p => !p.is_disabled),
+        products: getAllProducts().filter(p => !p.is_disabled),
         includeDisabled: false,
         showStock: true,
         onSelect: () => {
@@ -222,7 +233,7 @@ function onLanguageChange() {
     populateCategorySelect();
 
     // 重新渲染当前Tab
-    switch (currentTab) {
+    switch (getCurrentTab()) {
         case 'dashboard':
             loadDashboardData();
             break;
@@ -239,6 +250,7 @@ function onLanguageChange() {
             loadUsers();
             loadApiKeys();
             loadWarehousesList();
+            loadTenantInfo();
             break;
         case 'mcp':
             loadMCPConnections();
@@ -277,7 +289,6 @@ const actionHandlers = {
     'closeEditUserModal': closeEditUserModal,
     'handleEditUser': handleEditUser,
     'toggleUserStatus': (el) => toggleUserStatus(el.dataset.userId, el.dataset.isDisabled === 'true'),
-
     // API 密钥
     'showAddApiKeyModal': showAddApiKeyModal,
     'closeAddApiKeyModal': closeAddApiKeyModal,
@@ -291,20 +302,43 @@ const actionHandlers = {
     // 系统设置子 Tab 切换
     'switchSettingsSubTab': (el) => {
         const subTab = el.dataset.subTab;
-        // 切换按钮样式
-        document.querySelectorAll('.sub-tab').forEach(btn => {
+        // 切换按钮样式（仅对顶层设置 sub-tabs，不影响人脸识别面板内的子标签）
+        document.querySelectorAll('#tab-users > .sub-tabs > .sub-tab').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.subTab === subTab);
         });
         // 切换面板
-        document.querySelectorAll('.settings-panel').forEach(panel => {
+        document.querySelectorAll('#tab-users > .settings-panel').forEach(panel => {
             panel.style.display = 'none';
         });
         const panel = document.getElementById(`settings-panel-${subTab}`);
         if (panel) panel.style.display = '';
+        if (subTab === 'face-recognition') {
+            renderFaceRecognitionPanel();
+        }
     },
 
+    // 人脸识别
+    'switchFaceSubTab': (el) => switchFaceSubTab(el.dataset.subTab),
+    'refreshFacePanel': refreshFacePanel,
+    'saveFaceConfig': saveFaceConfig,
+    'testFaceConnection': testFaceConnection,
+    'showAddFaceRuleModal': showAddFaceRuleModal,
+    'editFaceRule': editFaceRule,
+    'closeFaceRuleModal': closeFaceRuleModal,
+    'saveFaceRule': saveFaceRule,
+    'deleteFaceRule': deleteFaceRule,
+    'selectFaceEnrollUser': selectFaceEnrollUser,
+    'showFaceEnrollModal': showFaceEnrollModal,
+    'closeFaceEnrollModal': closeFaceEnrollModal,
+    'submitFaceEnroll': submitFaceEnroll,
+    'deleteFaceEnrollment': deleteFaceEnrollment,
+    'applyFaceLogsFilter': applyFaceLogsFilter,
+    'resetFaceLogsFilter': resetFaceLogsFilter,
+    'faceLogsPrevPage': faceLogsPrevPage,
+    'faceLogsNextPage': faceLogsNextPage,
+
     // 仓库管理
-    'showAddWarehouseModal': showAddWarehouseModal,
+    'showAddWarehouseModal': (el) => showAddWarehouseModal(el?.dataset?.tenantId),
     'showEditWarehouseModal': (el) => showEditWarehouseModal(
         el.dataset.whId, el.dataset.whName, el.dataset.whSlug,
         el.dataset.whAddress, el.dataset.whIsDefault === 'true'
@@ -358,17 +392,17 @@ const actionHandlers = {
     'confirmNewSkus': confirmNewSkus,
 
     // 分页
-    'recordsPrevPage': () => recordsGoToPage(recordsCurrentPage - 1),
-    'recordsNextPage': () => recordsGoToPage(recordsCurrentPage + 1),
+    'recordsPrevPage': () => recordsGoToPage(getRecordsCurrentPage() - 1),
+    'recordsNextPage': () => recordsGoToPage(getRecordsCurrentPage() + 1),
     'changeRecordsPageSize': (el) => changeRecordsPageSize(el.value),
-    'inventoryPrevPage': () => inventoryGoToPage(inventoryCurrentPage - 1),
-    'inventoryNextPage': () => inventoryGoToPage(inventoryCurrentPage + 1),
+    'inventoryPrevPage': () => inventoryGoToPage(getInventoryCurrentPage() - 1),
+    'inventoryNextPage': () => inventoryGoToPage(getInventoryCurrentPage() + 1),
     'changeInventoryPageSize': (el) => changeInventoryPageSize(el.value),
-    'detailPrevPage': () => detailGoToPage(detailCurrentPage - 1),
-    'detailNextPage': () => detailGoToPage(detailCurrentPage + 1),
+    'detailPrevPage': () => detailGoToPage(getDetailCurrentPage() - 1),
+    'detailNextPage': () => detailGoToPage(getDetailCurrentPage() + 1),
     'changeDetailPageSize': (el) => changeDetailPageSize(el.value),
-    'contactsPrevPage': () => contactsGoToPage(contactsCurrentPage - 1),
-    'contactsNextPage': () => contactsGoToPage(contactsCurrentPage + 1),
+    'contactsPrevPage': () => contactsGoToPage(getContactsCurrentPage() - 1),
+    'contactsNextPage': () => contactsGoToPage(getContactsCurrentPage() + 1),
     'changeContactsPageSize': (el) => changeContactsPageSize(el.value),
 
     // 联系方管理
@@ -394,6 +428,28 @@ const actionHandlers = {
     'closeClearDatabaseModal': closeClearDatabaseModal,
     'exportThenClearDatabase': exportThenClearDatabase,
     'directClearDatabase': directClearDatabase,
+
+    // 租户管理
+    'showAddTenantModal': showAddTenantModal,
+    'closeAddTenantModal': closeAddTenantModal,
+    'handleAddTenant': handleAddTenant,
+    'editTenant': (el) => showEditTenantModal(
+        el.dataset.tenantId,
+        el.dataset.tenantName,
+        el.dataset.tenantActive
+    ),
+    'closeEditTenantModal': closeEditTenantModal,
+    'handleEditTenant': handleEditTenant,
+    'deleteTenant': (el) => handleDeleteTenant(
+        parseInt(el.dataset.tenantId),
+        el.dataset.tenantName
+    ),
+    'tenantsPrevPage': tenantsPrevPage,
+    'tenantsNextPage': tenantsNextPage,
+    'toggleTenantExpand': (el) => import('./features/tenants.js').then(m => m.toggleTenantExpand(el)),
+    'goToAddWarehouse': () => import('./features/tenants.js').then(m => m.goToAddWarehouse()),
+    'goToUsers': () => import('./features/tenants.js').then(m => m.goToUsers()),
+    'refreshTenantsPanel': () => import('./features/tenants.js').then(m => m.refreshTenantsPanel()),
 
     // ERP 系统模式管理
     'showUploadWizard': showUploadWizard,
@@ -481,6 +537,19 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // 初始化下拉组件监听
     initDropdownListeners();
+
+    // 注入租户管理弹窗 HTML
+    const tenantModalsContainer = document.createElement('div');
+    tenantModalsContainer.innerHTML = getTenantModalsHTML();
+    document.body.appendChild(tenantModalsContainer);
+
+    // 注入人脸识别弹窗 HTML
+    const faceModalsContainer = document.createElement('div');
+    faceModalsContainer.innerHTML = getFaceModalsHTML();
+    document.body.appendChild(faceModalsContainer);
+
+    // 获取部署模式（鉴权渲染会依赖它决定多租户入口显隐）
+    await fetchDeployMode();
 
     // 检查认证状态
     await checkAuthStatus();
