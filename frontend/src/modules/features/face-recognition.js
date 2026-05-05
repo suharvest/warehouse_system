@@ -2,6 +2,7 @@
 import { t } from '../../../i18n.js';
 import { faceApi, usersApi, warehousesApi } from '../api.js';
 import { showToast } from '../ui-components.js';
+import { getCurrentUser } from '../state.js';
 
 const DEFAULT_CONFIG = {
     enabled: false,
@@ -21,6 +22,19 @@ let allUsers = [];
 let allWarehouses = [];
 let selectedEnrollUserId = null;
 let enrollmentItems = [];
+let allTenants = [];
+let selectedTenantId = null;
+
+function isGlobalAdmin() {
+    const u = getCurrentUser();
+    return !!(u && u.role === 'admin' && (u.tenant_id == null));
+}
+
+function effectiveTenantId() {
+    if (isGlobalAdmin()) return selectedTenantId;
+    const u = getCurrentUser();
+    return u ? u.tenant_id : null;
+}
 let logsState = {
     page: 1,
     pageSize: 20,
@@ -66,8 +80,43 @@ function readFileAsBase64(file) {
 export async function renderFaceRecognitionPanel() {
     const panel = document.getElementById('settings-panel-face-recognition');
     if (!panel) return;
+    if (isGlobalAdmin() && allTenants.length === 0) {
+        try {
+            const r = await fetch('/api/tenants', { credentials: 'include' });
+            if (r.ok) allTenants = (await r.json()).filter(x => x.is_active !== false);
+        } catch { allTenants = []; }
+        if (allTenants.length > 0 && !selectedTenantId) {
+            selectedTenantId = allTenants[0].id;
+        }
+    }
     panel.innerHTML = renderShell();
+    if (isGlobalAdmin() && !selectedTenantId) return;  // wait for selection
     await switchFaceSubTab(currentSubTab);
+}
+
+export async function onFaceTenantChange(el) {
+    const v = parseInt(el.value, 10);
+    selectedTenantId = Number.isFinite(v) ? v : null;
+    allUsers = []; allWarehouses = []; enrollmentItems = []; selectedEnrollUserId = null;
+    await renderFaceRecognitionPanel();
+}
+
+function renderTenantBar() {
+    if (!isGlobalAdmin()) return '';
+    if (allTenants.length === 0) {
+        return `<div class="panel-empty-state"><div class="empty-message">${tt('tenantNoneAvailable', '暂无可管理的租户')}</div></div>`;
+    }
+    const opts = allTenants.map(tn => `
+        <option value="${tn.id}" ${String(selectedTenantId) === String(tn.id) ? 'selected' : ''}>${escapeHtml(tn.name)} (${escapeHtml(tn.slug)})</option>
+    `).join('');
+    return `
+        <div class="form-group" style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:#fafafa;border-bottom:1px solid #f0f0f0;">
+            <label style="margin:0;font-size:13px;color:#666;">${tt('tenant', '租户')}:</label>
+            <select id="face-tenant-select" data-action-change="onFaceTenantChange" style="min-width:240px;">
+                ${opts}
+            </select>
+        </div>
+    `;
 }
 
 function renderShell() {
@@ -80,6 +129,7 @@ function renderShell() {
         <div class="page-header">
             <h2 class="page-title">${tt('faceRecognition', '人脸识别')}</h2>
         </div>
+        ${renderTenantBar()}
         <div class="sub-tabs" id="face-sub-tabs">
             ${tabs.map(tab => `
                 <button class="sub-tab ${tab.key === currentSubTab ? 'active' : ''}" data-action="switchFaceSubTab" data-sub-tab="${tab.key}">
@@ -149,9 +199,10 @@ export function refreshFacePanel() {
 
 // ============ 数据加载 ============
 async function loadConfigAndRules() {
+    const tid = effectiveTenantId();
     const [config, rules] = await Promise.all([
-        faceApi.getConfig().catch(() => ({})),
-        faceApi.getRules().catch(() => [])
+        faceApi.getConfig(tid).catch(() => ({})),
+        faceApi.getRules(tid).catch(() => [])
     ]);
     currentConfig = { ...DEFAULT_CONFIG, ...(config || {}) };
     currentRules = Array.isArray(rules) ? rules : [];
@@ -279,7 +330,7 @@ export async function saveFaceConfig() {
         min_confidence: parseFloat(document.getElementById('face-config-min-confidence').value) || 0
     };
     try {
-        await faceApi.updateConfig(data);
+        await faceApi.updateConfig(data, effectiveTenantId());
         currentConfig = { ...currentConfig, ...data };
         showToast(tt('faceConfigSaved', '配置已保存'));
     } catch (error) {
@@ -405,10 +456,11 @@ export async function saveFaceRule() {
         min_confidence_override: confidenceVal === '' ? null : parseFloat(confidenceVal)
     };
     try {
+        const tid = effectiveTenantId();
         if (idVal) {
-            await faceApi.updateRule(parseInt(idVal, 10), data);
+            await faceApi.updateRule(parseInt(idVal, 10), data, tid);
         } else {
-            await faceApi.createRule(data);
+            await faceApi.createRule(data, tid);
         }
         closeFaceRuleModal();
         showToast(tt('faceRuleSaved', '规则已保存'));
@@ -427,7 +479,7 @@ export async function deleteFaceRule(el) {
     const ruleId = parseInt(el.dataset.ruleId, 10);
     if (!confirm(tt('faceRuleDeleteConfirm', '确定要删除该规则吗？'))) return;
     try {
-        await faceApi.deleteRule(ruleId);
+        await faceApi.deleteRule(ruleId, effectiveTenantId());
         showToast(tt('faceRuleDeleted', '规则已删除'));
         await loadConfigAndRules();
         const tbody = document.getElementById('face-rules-tbody');
@@ -519,7 +571,7 @@ async function loadEnrollmentsForSelected() {
         return;
     }
     try {
-        const result = await faceApi.getEnrollments({ userId: selectedEnrollUserId });
+        const result = await faceApi.getEnrollments({ userId: selectedEnrollUserId, tenantId: effectiveTenantId() });
         enrollmentItems = Array.isArray(result) ? result : (result.items || []);
     } catch {
         enrollmentItems = [];
@@ -602,7 +654,7 @@ export async function submitFaceEnroll() {
             images_b64,
             applies_to_warehouse_ids: warehouseIds
         };
-        await faceApi.createEnrollment(payload);
+        await faceApi.createEnrollment(payload, effectiveTenantId());
         showToast(tt('faceEnrollSuccess', '录入成功'));
         closeFaceEnrollModal();
         await loadEnrollmentsForSelected();
@@ -615,7 +667,7 @@ export async function deleteFaceEnrollment(el) {
     const id = parseInt(el.dataset.enrollmentId, 10);
     if (!confirm(tt('faceEnrollDeleteConfirm', '确定要删除该录入条目吗？'))) return;
     try {
-        await faceApi.deleteEnrollment(id);
+        await faceApi.deleteEnrollment(id, effectiveTenantId());
         showToast(tt('faceEnrollDeleted', '录入条目已删除'));
         await loadEnrollmentsForSelected();
     } catch (error) {
@@ -633,37 +685,37 @@ function renderLogsTab() {
             </div>
             <div style="padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
                 <div class="form-group">
-                    <label>${tt('userList', '用户')}</label>
+                    <label>${tt('faceLogOperator', '操作人')}</label>
                     <select id="face-logs-user">
-                        <option value="">${tt('all', t('all') || '全部')}</option>
+                        <option value="">${tt('all', '全部')}</option>
                         ${allUsers.map(u => `<option value="${u.id}" ${String(f.userId) === String(u.id) ? 'selected' : ''}>${escapeHtml(u.display_name || u.username)}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group">
                     <label>${tt('operation', '操作')}</label>
                     <select id="face-logs-operation">
-                        <option value="">${tt('all', t('all') || '全部')}</option>
+                        <option value="">${tt('all', '全部')}</option>
                         ${FACE_OPERATIONS.map(op => `<option value="${op}" ${f.operation === op ? 'selected' : ''}>${escapeHtml(op)}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>${tt('startDate', t('startDate') || '开始日期')}</label>
+                    <label>${tt('startDate', '开始日期')}</label>
                     <input type="date" id="face-logs-start" value="${escapeHtml(f.start || '')}">
                 </div>
                 <div class="form-group">
-                    <label>${tt('endDate', t('endDate') || '结束日期')}</label>
+                    <label>${tt('endDate', '结束日期')}</label>
                     <input type="date" id="face-logs-end" value="${escapeHtml(f.end || '')}">
                 </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;gap:8px;">
-                    <button class="btn confirm-btn" data-action="applyFaceLogsFilter">${t('apply') || '应用'}</button>
-                    <button class="btn cancel-btn" data-action="resetFaceLogsFilter">${t('reset') || '重置'}</button>
+                    <button class="btn confirm-btn" data-action="applyFaceLogsFilter">${tt('apply', '应用')}</button>
+                    <button class="btn cancel-btn" data-action="resetFaceLogsFilter">${tt('reset', '重置')}</button>
                 </div>
             </div>
             <table id="face-logs-table">
                 <thead>
                     <tr>
                         <th>${tt('faceLogTime', '时间')}</th>
-                        <th>${tt('userList', '用户')}</th>
+                        <th>${tt('faceLogOperator', '操作人')}</th>
                         <th>${tt('operation', '操作')}</th>
                         <th>${tt('faceLogMatchedUser', '匹配用户')}</th>
                         <th>${tt('faceLogConfidence', '置信度')}</th>
@@ -722,7 +774,8 @@ async function reloadLogs() {
             start: f.start || undefined,
             end: f.end || undefined,
             page: logsState.page,
-            pageSize: logsState.pageSize
+            pageSize: logsState.pageSize,
+            tenantId: effectiveTenantId() || undefined
         });
         logsState.items = Array.isArray(result) ? result : (result.items || []);
         logsState.total = (result && typeof result.total === 'number') ? result.total : logsState.items.length;

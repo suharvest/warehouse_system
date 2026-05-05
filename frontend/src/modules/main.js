@@ -32,7 +32,7 @@ import {
     showAddFaceRuleModal, editFaceRule, closeFaceRuleModal, saveFaceRule, deleteFaceRule,
     selectFaceEnrollUser, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
     applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
-    getFaceModalsHTML
+    getFaceModalsHTML, onFaceTenantChange
 } from './features/face-recognition.js';
 
 // 语言切换
@@ -336,6 +336,7 @@ const actionHandlers = {
     'resetFaceLogsFilter': resetFaceLogsFilter,
     'faceLogsPrevPage': faceLogsPrevPage,
     'faceLogsNextPage': faceLogsNextPage,
+    'onFaceTenantChange': onFaceTenantChange,
 
     // 仓库管理
     'showAddWarehouseModal': (el) => showAddWarehouseModal(el?.dataset?.tenantId),
