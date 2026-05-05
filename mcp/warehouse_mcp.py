@@ -144,9 +144,11 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
     - status='pass'    -> caller proceeds
     - status='skipped' -> caller proceeds (feature disabled or rule not required)
     - status='deny'    -> caller MUST surface an error to the LLM and abort
-    - any transport failure -> treated as 'skipped' (fail-open) so a broken
-      backend or older deployment doesn't break MCP writes. Hardening to
-      fail-closed will happen in Phase 2.
+
+    Failure handling (fail-closed):
+    - api_base unset -> skipped (face module not deployed in this MCP host)
+    - HTTP 4xx/5xx   -> deny (server reachable but rejected; never silently bypass)
+    - transport error (network, timeout) -> deny (treat as if face check failed)
     """
     import requests as _r
     api_base = _config.get('api_base_url', '').rstrip('/')
@@ -163,11 +165,11 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
         resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=15)
         if resp.status_code >= 400:
             logger.warning("face verify returned %s: %s", resp.status_code, resp.text[:200])
-            return {"status": "skipped", "failure_reason": f"http_{resp.status_code}"}
+            return {"status": "deny", "failure_reason": f"http_{resp.status_code}"}
         return resp.json()
     except Exception as e:
         logger.warning("face verify transport error: %s", e)
-        return {"status": "skipped", "failure_reason": "transport_error"}
+        return {"status": "deny", "failure_reason": "transport_error"}
 
 
 def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
