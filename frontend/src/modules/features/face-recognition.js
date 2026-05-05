@@ -298,7 +298,13 @@ export async function testFaceConnection() {
     if (resultEl) resultEl.textContent = tt('processing', t('processing') || '测试中...');
     try {
         const result = await faceApi.testConnection({ endpoint, auth_token });
-        if (resultEl) resultEl.textContent = (result && result.ok) ? tt('faceConnectionOk', '连接成功') : tt('faceConnectionFailed', '连接失败');
+        if (result && result.success) {
+            const tag = result.info && result.info.model_tag ? ` (${result.info.model_tag})` : '';
+            if (resultEl) resultEl.textContent = `${tt('faceConnectionOk', '连接成功')}${tag}`;
+        } else {
+            const err = result && result.error ? `: ${result.error}` : '';
+            if (resultEl) resultEl.textContent = `${tt('faceConnectionFailed', '连接失败')}${err}`;
+        }
     } catch (error) {
         if (resultEl) resultEl.textContent = `${tt('faceConnectionFailed', '连接失败')}: ${getErrorMessage(error, 'faceConnectionFailed', '连接失败')}`;
     }
