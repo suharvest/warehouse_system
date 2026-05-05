@@ -20,6 +20,8 @@ dependencies = [
     # 生产安全依赖
     "bcrypt>=4.1.0",
     "slowapi>=0.1.9",
+    "httpx>=0.28.1",
+    "numpy>=2.4.4",
 ]
 
 [project.optional-dependencies]
