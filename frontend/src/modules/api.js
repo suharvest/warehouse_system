@@ -1,13 +1,13 @@
 // ============ API 请求封装 ============
 
-import { currentWarehouse } from './state.js';
+import { getCurrentWarehouse } from './state.js';
 
 export const API_BASE_URL = '/api';
 
 // 不需要注入 warehouse_id 的路径前缀
 const WAREHOUSE_EXEMPT_PREFIXES = [
   '/auth/', '/users', '/api-keys', '/contacts', '/operators',
-  '/warehouses', '/database/', '/system/'
+  '/warehouses', '/database/', '/system/', '/tenants', '/face/'
 ];
 
 // 全局 session 过期回调
@@ -20,16 +20,16 @@ export function setSessionExpiredHandler(handler) {
 /**
  * 自动为 URL 注入 warehouse_id 查询参数
  * - 仓库无关的接口（auth/users/contacts等）不注入
- * - currentWarehouse 为 null 时不注入（全局视图）
+ * - getCurrentWarehouse() 为 null 时不注入（全局视图）
  */
 function injectWarehouseParam(url) {
-  if (!currentWarehouse) return url;
+  if (!getCurrentWarehouse()) return url;
   // 检查是否是仓库无关的接口
   for (const prefix of WAREHOUSE_EXEMPT_PREFIXES) {
     if (url.startsWith(prefix)) return url;
   }
   const separator = url.includes('?') ? '&' : '?';
-  return `${url}${separator}warehouse_id=${currentWarehouse.id}`;
+  return `${url}${separator}warehouse_id=${getCurrentWarehouse().id}`;
 }
 
 // 通用请求封装
@@ -209,6 +209,7 @@ export const recordsApi = {
     if (params.recordType) query.set('record_type', params.recordType);
     if (params.startDate) query.set('start_date', params.startDate);
     if (params.endDate) query.set('end_date', params.endDate);
+    if (params.warehouseId) query.set('warehouse_id', params.warehouseId);
     const response = await request(`/inventory/export-excel?${query.toString()}`);
     return response.blob();
   }
@@ -421,9 +422,108 @@ export const warehousesApi = {
   }
 };
 
+// ============ 人脸识别 API ============
+export const faceApi = {
+  // 获取当前租户人脸识别配置
+  async getConfig(tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/config${query}`);
+  },
+
+  // 更新人脸识别配置
+  async updateConfig(data, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/config${query}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 获取规则列表
+  async getRules(tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/rules${query}`);
+  },
+
+  // 创建规则
+  async createRule(data, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/rules${query}`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 更新规则
+  async updateRule(ruleId, data, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/rules/${ruleId}${query}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 删除规则
+  async deleteRule(ruleId, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/rules/${ruleId}${query}`, {
+      method: 'DELETE'
+    });
+  },
+
+  // 获取人脸录入条目
+  async getEnrollments(params = {}) {
+    const query = new URLSearchParams();
+    if (params.userId) query.set('user_id', params.userId);
+    if (params.includeImage) query.set('include_image', '1');
+    if (params.tenantId) query.set('tenant_id', params.tenantId);
+    const qs = query.toString();
+    return fetchJson(`/face/enrollments${qs ? '?' + qs : ''}`);
+  },
+
+  // 创建人脸录入
+  async createEnrollment(data, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/enrollments${query}`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 删除人脸录入
+  async deleteEnrollment(enrollmentId, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/enrollments/${enrollmentId}${query}`, {
+      method: 'DELETE'
+    });
+  },
+
+  // 测试与远端服务的连接
+  async testConnection(data) {
+    return fetchJson('/face/test-connection', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  // 获取审计日志
+  async getLogs(params = {}) {
+    const query = new URLSearchParams();
+    if (params.userId) query.set('user_id', params.userId);
+    if (params.operation) query.set('operation', params.operation);
+    if (params.start) query.set('start', params.start);
+    if (params.end) query.set('end', params.end);
+    if (params.page) query.set('page', params.page);
+    if (params.pageSize) query.set('page_size', params.pageSize);
+    if (params.tenantId) query.set('tenant_id', params.tenantId);
+    const qs = query.toString();
+    return fetchJson(`/face/logs${qs ? '?' + qs : ''}`);
+  }
+};
+
 /**
  * 获取当前仓库ID（供写操作使用，注入到请求体中）
  */
 export function getCurrentWarehouseId() {
-  return currentWarehouse ? currentWarehouse.id : null;
+  return getCurrentWarehouse() ? getCurrentWarehouse().id : null;
 }
