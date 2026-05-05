@@ -70,6 +70,17 @@ def init_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 创建租户表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tenants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # 创建仓库表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS warehouses (
@@ -96,6 +107,11 @@ def init_database():
     # 确保默认仓库存在
     cursor.execute('''
         INSERT OR IGNORE INTO warehouses (slug, name, is_default) VALUES ('default', '默认仓库', 1)
+    ''')
+
+    # 确保默认租户存在
+    cursor.execute('''
+        INSERT OR IGNORE INTO tenants (slug, name) VALUES ('default', '默认租户')
     ''')
 
     # 创建物料表
@@ -164,10 +180,17 @@ def init_database():
             user_id INTEGER NOT NULL,
             token TEXT UNIQUE NOT NULL,
             expires_at TIMESTAMP NOT NULL,
+            revoked_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
+
+    # 检查并添加 revoked_at 字段（用于已存在的数据库）
+    try:
+        cursor.execute('SELECT revoked_at FROM sessions LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE sessions ADD COLUMN revoked_at TIMESTAMP')
 
     # 创建API密钥表（用于MCP终端身份识别）
     cursor.execute('''
@@ -345,6 +368,75 @@ def init_database():
         )
     ''')
 
+    # ============================================
+    # 人脸识别 + 权限校验（Phase 1，仅对 MCP tool 生效）
+    # ============================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tenant_face_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id INTEGER UNIQUE NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            mode TEXT CHECK(mode IN('local','hello','jetson','custom')),
+            endpoint TEXT,
+            auth_token TEXT,
+            embedding_model_tag TEXT,
+            min_confidence REAL NOT NULL DEFAULT 0.65,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tenant_face_operation_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id INTEGER NOT NULL,
+            warehouse_id INTEGER,
+            operation TEXT NOT NULL,
+            require_face INTEGER NOT NULL DEFAULT 0,
+            allowed_user_ids TEXT,
+            min_confidence_override REAL,
+            FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+            FOREIGN KEY(warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_face_rules_lookup ON tenant_face_operation_rules(tenant_id, warehouse_id, operation)')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_enrollments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            tenant_id INTEGER NOT NULL,
+            model_tag TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            source_image_b64 TEXT,
+            applies_to_warehouse_ids TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            enrolled_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            enrolled_by INTEGER,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_face_enroll ON face_enrollments(tenant_id, model_tag, is_active)')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_auth_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT,
+            user_id INTEGER NOT NULL,
+            matched_user_id INTEGER,
+            tenant_id INTEGER NOT NULL,
+            warehouse_id INTEGER,
+            operation TEXT NOT NULL,
+            confidence REAL,
+            decision TEXT NOT NULL CHECK(decision IN('pass','deny','skipped')),
+            failure_reason TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_face_logs_query ON face_auth_logs(tenant_id, created_at DESC)')
+
     # 为已有数据库添加新列
     try:
         cursor.execute('SELECT is_system FROM api_keys LIMIT 1')
@@ -362,6 +454,76 @@ def init_database():
             cursor.execute(f'SELECT warehouse_id FROM {table} LIMIT 1')
         except sqlite3.OperationalError:
             cursor.execute(f'ALTER TABLE {table} ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)')
+
+
+    # 检查并添加 tenant_id 字段到各表（多租户支持）
+    for table in ('warehouses', 'users', 'api_keys', 'mcp_connections', 'contacts', 'erp_providers', 'materials', 'batches', 'inventory_records'):
+        try:
+            cursor.execute(f'SELECT tenant_id FROM {table} LIMIT 1')
+        except sqlite3.OperationalError:
+            cursor.execute(f'ALTER TABLE {table} ADD COLUMN tenant_id INTEGER REFERENCES tenants(id) DEFAULT 1')
+
+    # 检查并添加 warehouse_id 字段到 contacts
+    try:
+        cursor.execute('SELECT warehouse_id FROM contacts LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE contacts ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)')
+
+
+    # ============================================
+    # 多租户迁移：回填 tenant_id 到默认租户
+    # ============================================
+    cursor.execute('UPDATE warehouses SET tenant_id = 1 WHERE tenant_id IS NULL')
+    if get_deploy_mode() == 'multi_tenant':
+        cursor.execute('SELECT COUNT(*) as cnt FROM users WHERE role = "admin" AND tenant_id IS NULL')
+        has_global_admin = cursor.fetchone()['cnt'] > 0
+        if not has_global_admin:
+            cursor.execute('''
+                UPDATE users SET tenant_id = NULL
+                WHERE id = (
+                    SELECT id FROM users
+                    WHERE role = 'admin'
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT 1
+                )
+            ''')
+        cursor.execute('UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL AND role != "admin"')
+    else:
+        cursor.execute('UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE api_keys SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE mcp_connections SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE contacts SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE erp_providers SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE materials SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE batches SET tenant_id = 1 WHERE tenant_id IS NULL')
+    cursor.execute('UPDATE inventory_records SET tenant_id = 1 WHERE tenant_id IS NULL')
+
+    # 修复历史数据中 tenant_id 与 warehouse_id 所属租户不一致的问题。
+    # 这类数据会导致“写入成功但当前租户列表/看板查不到”。
+    for table in ('contacts', 'materials', 'batches', 'inventory_records', 'api_keys', 'mcp_connections'):
+        cursor.execute(f'''
+            UPDATE {table}
+            SET tenant_id = (
+                SELECT w.tenant_id FROM warehouses w
+                WHERE w.id = {table}.warehouse_id
+            )
+            WHERE warehouse_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM warehouses w
+                WHERE w.id = {table}.warehouse_id
+                  AND w.tenant_id IS NOT NULL
+                  AND ({table}.tenant_id IS NULL OR {table}.tenant_id != w.tenant_id)
+              )
+        ''')
+
+    # contacts 的 warehouse_id 回填：按 contact 的 tenant 找该租户的默认仓库
+    cursor.execute('''
+        UPDATE contacts SET warehouse_id = (
+            SELECT w.id FROM warehouses w
+            WHERE w.tenant_id = contacts.tenant_id AND w.is_default = 1
+            LIMIT 1
+        ) WHERE contacts.warehouse_id IS NULL
+    ''')
 
     # 检查并添加 reason_category / reason_note 字段到 inventory_records
     need_reason_backfill = False
@@ -393,6 +555,28 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_batches_warehouse ON batches(warehouse_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_records_warehouse ON inventory_records(warehouse_id)')
     cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_sku_wh ON materials(sku, warehouse_id)')
+
+    # 多租户索引
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_warehouses_tenant ON warehouses(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_contacts_warehouse ON contacts(warehouse_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_connections_tenant ON mcp_connections(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_materials_tenant ON materials(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_batches_tenant ON batches(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_records_tenant ON inventory_records(tenant_id)')
+
+    # ============================================
+    # DEPLOY_MODE 校验
+    # ============================================
+    if get_deploy_mode() == 'single_tenant':
+        cursor.execute('SELECT COUNT(*) as cnt FROM tenants WHERE is_active = 1 AND id != 1')
+        if cursor.fetchone()['cnt'] > 0:
+            raise RuntimeError(
+                'Cannot start in single_tenant mode: multiple active tenants exist. '
+                'Switch to multi_tenant or consolidate tenants.'
+            )
 
     conn.commit()
     conn.close()
@@ -690,6 +874,11 @@ def generate_mock_data():
 
     conn.commit()
     conn.close()
+
+
+
+def get_deploy_mode() -> str:
+    return os.environ.get('DEPLOY_MODE', 'single_tenant')
 
 if __name__ == '__main__':
     init_database()
