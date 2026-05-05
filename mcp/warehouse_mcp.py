@@ -132,6 +132,57 @@ def _load_provider_from_db_or_default(default_config: dict):
 
 _provider = _load_provider_from_db_or_default(_config)
 
+
+# ============ Face Guard (Phase 1) ============
+# 仅对 MCP tool 调用生效。通过后端 /api/face/verify-mcp 桥接到
+# backend.face.orchestrator.verify_mcp_face；后端用 X-API-Key 识别
+# 当前用户、租户与仓库上下文。
+def _face_guard(operation: str, warehouse_id: int = None) -> dict:
+    """Verify face for an MCP write operation. Returns the decision dict.
+
+    Behavior:
+    - status='pass'    -> caller proceeds
+    - status='skipped' -> caller proceeds (feature disabled or rule not required)
+    - status='deny'    -> caller MUST surface an error to the LLM and abort
+    - any transport failure -> treated as 'skipped' (fail-open) so a broken
+      backend or older deployment doesn't break MCP writes. Hardening to
+      fail-closed will happen in Phase 2.
+    """
+    import requests as _r
+    api_base = _config.get('api_base_url', '').rstrip('/')
+    if not api_base:
+        return {"status": "skipped", "failure_reason": "no_api_base"}
+    headers = {}
+    auth = _config.get('auth') or {}
+    if auth.get('type') == 'api_key':
+        headers[auth.get('header', 'X-API-Key')] = auth.get('key', '')
+    elif auth.get('type') == 'bearer':
+        headers['Authorization'] = f"Bearer {auth.get('token', '')}"
+    body = {"operation": operation, "warehouse_id": warehouse_id}
+    try:
+        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=15)
+        if resp.status_code >= 400:
+            logger.warning("face verify returned %s: %s", resp.status_code, resp.text[:200])
+            return {"status": "skipped", "failure_reason": f"http_{resp.status_code}"}
+        return resp.json()
+    except Exception as e:
+        logger.warning("face verify transport error: %s", e)
+        return {"status": "skipped", "failure_reason": "transport_error"}
+
+
+def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
+    """Run face guard; return a tool-error dict to surface, or None to proceed."""
+    decision = _face_guard(operation, warehouse_id)
+    if decision.get("status") == "deny":
+        reason = decision.get("failure_reason") or "denied"
+        return {
+            "success": False,
+            "error": f"face_auth_denied:{reason}",
+            "message": f"人脸校验未通过：{reason}。请由本人操作或联系管理员检查权限规则。",
+        }
+    return None
+
+
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
 
@@ -219,6 +270,9 @@ def stock_in(product_name: str, quantity: int,
         success=true 时：入库成功，含批次信息（含 variant）和产品详情
         success=false 且有 candidates 时：名称不够明确，需用候选中的精确名称重试
     """
+    blocked = _enforce_face("stock_in")
+    if blocked is not None:
+        return blocked
     return _provider.stock_in(product_name, quantity, reason_category, reason_note,
                               operator, fuzzy, location, contact_id, variant)
 
@@ -262,6 +316,9 @@ def stock_out(product_name: str, quantity: int,
         success=false 时：含具体错误类型，如 ambiguous_name / location_ambiguous /
                          batch_not_found / batch_insufficient_stock / batch_field_mismatch 等
     """
+    blocked = _enforce_face("stock_out")
+    if blocked is not None:
+        return blocked
     return _provider.stock_out(product_name, quantity, reason_category, reason_note,
                                operator, fuzzy, variant, location,
                                batch_no=batch_no, location_fuzzy=True)
