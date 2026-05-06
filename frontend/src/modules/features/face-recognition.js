@@ -492,26 +492,50 @@ export async function deleteFaceRule(el) {
 function renderEnrollTab() {
     const eligibleUsers = allUsers.filter(u => ['operate', 'admin'].includes((u.role || '').toLowerCase()));
     return `
-        <div class="table-container">
+        <div class="table-container face-enroll-card">
             <div class="section-header">
                 <div class="section-title">${tt('faceEnrollments', '人脸录入')}</div>
             </div>
-            <div style="display:grid;grid-template-columns:280px 1fr;gap:16px;padding:16px;">
-                <div>
-                    <div class="section-title" style="margin-bottom:8px;">${tt('userList', '用户列表')}</div>
-                    <div id="face-enroll-user-list" style="border:1px solid var(--border-color, #e5e7eb);border-radius:4px;max-height:480px;overflow:auto;">
-                        ${eligibleUsers.length === 0 ? `<div style="padding:12px;color:#999;">${t('noData')}</div>` : eligibleUsers.map(u => `
-                            <button class="action-btn-small" data-action="selectFaceEnrollUser" data-user-id="${u.id}" style="display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--border-color, #f0f0f0);background:${selectedEnrollUserId === u.id ? 'var(--bg-hover, #f5f5f5)' : 'transparent'};border-radius:0;padding:10px 12px;">
-                                <div>${escapeHtml(u.display_name || u.username)}</div>
-                                <div class="form-hint" style="margin-top:2px;">${escapeHtml(u.username)}</div>
-                            </button>
-                        `).join('')}
+            <div class="face-enroll-grid">
+                <aside class="face-enroll-users">
+                    <div class="face-enroll-users-header">${tt('userList', '用户列表')} <span class="face-enroll-users-count">${eligibleUsers.length}</span></div>
+                    <div id="face-enroll-user-list" class="face-enroll-users-list">
+                        ${eligibleUsers.length === 0 ? `<div class="face-enroll-users-empty">${t('noData')}</div>` : eligibleUsers.map(renderEnrollUserItem).join('')}
                     </div>
-                </div>
-                <div id="face-enroll-detail">
-                    ${selectedEnrollUserId ? renderEnrollDetail() : `<div class="panel-empty-state"><div class="empty-message">${tt('faceSelectUserHint', '请选择左侧的用户进行人脸录入')}</div></div>`}
-                </div>
+                </aside>
+                <section id="face-enroll-detail" class="face-enroll-detail">
+                    ${selectedEnrollUserId ? renderEnrollDetail() : renderEnrollPlaceholder()}
+                </section>
             </div>
+        </div>
+    `;
+}
+
+function renderEnrollUserItem(u) {
+    const display = u.display_name && u.display_name !== u.username ? u.display_name : u.username;
+    const sub = u.display_name && u.display_name !== u.username ? u.username : '';
+    const roleLabel = (u.role || '').toLowerCase() === 'admin'
+        ? tt('roleAdmin', '管理员')
+        : tt('roleOperator', '操作员');
+    const active = selectedEnrollUserId === u.id ? 'is-active' : '';
+    return `
+        <button class="face-enroll-user-item ${active}" data-action="selectFaceEnrollUser" data-user-id="${u.id}">
+            <div class="face-enroll-user-name">${escapeHtml(display)}</div>
+            ${sub ? `<div class="face-enroll-user-sub">@${escapeHtml(sub)}</div>` : ''}
+            <span class="face-enroll-user-role">${escapeHtml(roleLabel)}</span>
+        </button>
+    `;
+}
+
+function renderEnrollPlaceholder() {
+    return `
+        <div class="panel-empty-state">
+            <svg class="empty-icon" width="44" height="44" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"></path>
+                <circle cx="9" cy="7" r="4" stroke-width="1.5"></circle>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 8v6M22 11h-6"></path>
+            </svg>
+            <div class="empty-message">${tt('faceSelectUserHint', '从左侧选择一个用户开始录入人脸')}</div>
         </div>
     `;
 }
@@ -519,20 +543,23 @@ function renderEnrollTab() {
 function renderEnrollDetail() {
     const user = allUsers.find(u => u.id === selectedEnrollUserId);
     if (!user) return '';
+    const count = enrollmentItems.length;
+    const name = user.display_name || user.username;
     return `
-        <div class="section-header">
-            <div class="section-title">${escapeHtml(user.display_name || user.username)}</div>
-            <button class="action-btn add-btn" data-action="showFaceEnrollModal">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                <span>${tt('faceEnrollAdd', '录入新条目')}</span>
+        <div class="face-enroll-detail-header">
+            <div>
+                <div class="face-enroll-detail-name">${escapeHtml(name)}</div>
+                <div class="face-enroll-detail-meta">${tt('faceEnrolledCount', '已录入')} <strong>${count}</strong> ${tt('faceEnrolledItems', '条')}</div>
+            </div>
+            <button class="btn confirm-btn" data-action="showFaceEnrollModal">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                ${tt('faceEnrollAdd', '录入新条目')}
             </button>
         </div>
-        <div style="padding:12px 0;">
-            <div class="form-hint">${tt('faceEnrolledCount', '已录入条数')}: <strong>${enrollmentItems.length}</strong></div>
-        </div>
-        <div id="face-enroll-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;">
-            ${enrollmentItems.length === 0 ? `<div style="grid-column:1/-1;color:#999;">${t('noData')}</div>` : enrollmentItems.map(renderEnrollmentCard).join('')}
-        </div>
+        ${count === 0
+            ? `<div class="panel-empty-state" style="padding:32px 16px;"><div class="empty-message">${tt('faceEnrollNoItems', '该用户尚未录入人脸')}</div></div>`
+            : `<div class="face-enroll-list">${enrollmentItems.map(renderEnrollmentCard).join('')}</div>`
+        }
     `;
 }
 
