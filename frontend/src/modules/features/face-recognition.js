@@ -110,9 +110,9 @@ function renderTenantBar() {
         <option value="${tn.id}" ${String(selectedTenantId) === String(tn.id) ? 'selected' : ''}>${escapeHtml(tn.name)} (${escapeHtml(tn.slug)})</option>
     `).join('');
     return `
-        <div class="form-group" style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:#fafafa;border-bottom:1px solid #f0f0f0;">
-            <label style="margin:0;font-size:13px;color:#666;">${tt('tenant', '租户')}:</label>
-            <select id="face-tenant-select" data-action-change="onFaceTenantChange" style="min-width:240px;">
+        <div class="face-tenant-bar">
+            <span class="face-tenant-label">${tt('tenant', '所属租户')}</span>
+            <select id="face-tenant-select" data-action-change="onFaceTenantChange">
                 ${opts}
             </select>
         </div>
@@ -227,41 +227,40 @@ function renderConfigTab() {
         { v: 'custom', label: tt('mode_custom', '自定义') }
     ];
     return `
-        <div class="table-container">
+        <div class="table-container face-config-card">
             <div class="section-header">
                 <div class="section-title">${tt('faceConfig', '人脸识别配置')}</div>
+                <label class="face-enable-toggle">
+                    <input type="checkbox" id="face-config-enabled" ${c.enabled ? 'checked' : ''}>
+                    <span>${tt('faceEnabled', '启用人脸识别')}</span>
+                </label>
             </div>
-            <div style="padding:16px;">
-                <div class="form-group">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="face-config-enabled" ${c.enabled ? 'checked' : ''}>
-                        <span>${tt('faceEnabled', '启用人脸识别')}</span>
-                    </label>
+            <div class="face-config-body">
+                <div class="face-config-grid">
+                    <div class="form-group">
+                        <label>${tt('faceMode', '识别模式')}</label>
+                        <select id="face-config-mode">
+                            ${modes.map(m => `<option value="${m.v}" ${c.mode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span></label>
+                        <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
+                    </div>
+                    <div class="form-group span-2">
+                        <label>${tt('faceEndpoint', '远端服务地址')}</label>
+                        <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
+                    </div>
+                    <div class="form-group">
+                        <label>${tt('faceAuthToken', '认证 Token')}</label>
+                        <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label>${tt('faceModelTag', '嵌入模型标签')}</label>
+                        <input type="text" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}" placeholder="arcface-r100">
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>${tt('faceMode', '识别模式')}</label>
-                    <select id="face-config-mode">
-                        ${modes.map(m => `<option value="${m.v}" ${c.mode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>${tt('faceEndpoint', '远端服务地址')}</label>
-                    <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
-                </div>
-                <div class="form-group">
-                    <label>${tt('faceAuthToken', '认证 Token')}</label>
-                    <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
-                </div>
-                <div class="form-group">
-                    <label>${tt('faceModelTag', '嵌入模型标签')}</label>
-                    <input type="text" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}" placeholder="arcface-r100">
-                </div>
-                <div class="form-group">
-                    <label>${tt('faceMinConfidence', '最低识别置信度')}</label>
-                    <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
-                    <div class="form-hint">0.0 - 1.0</div>
-                </div>
-                <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;">
+                <div class="face-config-actions">
                     <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', t('submit') || '保存')}</button>
                     <button class="btn cancel-btn" data-action="testFaceConnection">${tt('faceTestConnection', '测试连接')}</button>
                     <span id="face-config-test-result" class="form-hint"></span>
@@ -281,11 +280,11 @@ function renderConfigTab() {
                 <thead>
                     <tr>
                         <th>${tt('warehouse', t('warehouseName') || '仓库')}</th>
-                        <th>${tt('operation', t('recordType') || '操作')}</th>
+                        <th>${tt('faceRuleOperation', '操作类型')}</th>
                         <th>${tt('faceRequireFace', '启用人脸')}</th>
                         <th>${tt('faceAllowedUsers', '允许用户')}</th>
                         <th>${tt('faceMinConfidenceOverride', '自定义阈值')}</th>
-                        <th>${t('actions') || '操作'}</th>
+                        <th style="width:140px;">${t('actions') || '管理'}</th>
                     </tr>
                 </thead>
                 <tbody id="face-rules-tbody">${renderRulesRows()}</tbody>
