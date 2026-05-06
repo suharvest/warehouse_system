@@ -221,11 +221,11 @@ async function loadUsersAndWarehouses() {
 function renderConfigTab() {
     const c = currentConfig;
     const modes = [
-        { v: 'local', label: tt('mode_local', '本地推理') },
-        { v: 'hello', label: tt('mode_hello', 'Hello 服务') },
-        { v: 'jetson', label: tt('mode_jetson', 'Jetson 服务') },
-        { v: 'custom', label: tt('mode_custom', '自定义') }
+        { v: 'local', label: tt('mode_local', '本机') },
+        { v: 'lan', label: tt('mode_lan', '局域网设备') }
     ];
+    // 老数据可能是 hello/jetson/custom，统一归为 lan
+    const currentMode = (c.mode === 'local') ? 'local' : 'lan';
     return `
         <div class="table-container face-config-card">
             <div class="section-header">
@@ -240,7 +240,7 @@ function renderConfigTab() {
                     <div class="form-group">
                         <label>${tt('faceMode', '识别模式')}</label>
                         <select id="face-config-mode">
-                            ${modes.map(m => `<option value="${m.v}" ${c.mode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                            ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
