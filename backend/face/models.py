@@ -7,7 +7,7 @@ from typing import Optional, List
 class FaceConfig:
     tenant_id: int
     enabled: bool = False
-    mode: Optional[str] = None  # 'local' | 'hello' | 'jetson' | 'custom'
+    mode: Optional[str] = None  # 'local' | 'lan'
     endpoint: Optional[str] = None
     auth_token: Optional[str] = None
     embedding_model_tag: Optional[str] = None
@@ -21,14 +21,14 @@ class FaceRule:
     warehouse_id: Optional[int]
     operation: str
     require_face: bool = False
-    allowed_user_ids: List[int] = field(default_factory=list)
+    allowed_subject_ids: List[int] = field(default_factory=list)
     min_confidence_override: Optional[float] = None
 
 
 @dataclass
 class Match:
     enrollment_id: int
-    user_id: int
+    subject_id: int
     confidence: float
 
 
@@ -44,4 +44,4 @@ class Decision:
     status: str
     failure_reason: Optional[str] = None
     confidence: Optional[float] = None
-    matched_user_id: Optional[int] = None
+    matched_subject_id: Optional[int] = None

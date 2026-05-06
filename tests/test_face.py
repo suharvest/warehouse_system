@@ -4,6 +4,11 @@ Covers the orchestrator decision ladder with the endpoint client
 mocked out so we never actually hit a network. We use a plain
 sqlite3 connection (no FastAPI client) and call the async public
 API directly.
+
+Identity model (post-refactor): enrollments are bound to
+`face_subjects` (people), not to system `users`. A subject is the
+unit of authorization; the calling system user is just identified
+for audit. There is no "user_mismatch" check anymore.
 """
 from __future__ import annotations
 
@@ -46,7 +51,7 @@ def conn(monkeypatch):
 
     c = database.get_db_connection()
     cur = c.cursor()
-    # Make sure we have a tenant=1 and a couple of users
+    # Make sure we have a tenant=1 and a couple of users (caller identities).
     cur.execute("INSERT OR IGNORE INTO tenants (id, slug, name) VALUES (1, 'default', 'Default')")
     cur.execute(
         "INSERT OR IGNORE INTO users (id, username, password_hash, role, tenant_id) "
@@ -72,41 +77,54 @@ def _set_config(conn, *, enabled: bool, min_confidence: float = 0.65):
         """
         INSERT INTO tenant_face_config
             (tenant_id, enabled, mode, endpoint, embedding_model_tag, min_confidence)
-        VALUES (1, ?, 'custom', 'http://fake.local', 'fake-v1', ?)
+        VALUES (1, ?, 'lan', 'http://fake.local', 'fake-v1', ?)
         """,
         (1 if enabled else 0, min_confidence),
     )
     conn.commit()
 
 
-def _set_rule(conn, *, require_face: bool, allowed_user_ids=None, operation="stock_out", warehouse_id=None):
+def _set_rule(conn, *, require_face: bool, allowed_subject_ids=None, operation="stock_out", warehouse_id=None):
     cur = conn.cursor()
     cur.execute("DELETE FROM tenant_face_operation_rules WHERE tenant_id = 1")
     cur.execute(
         """
         INSERT INTO tenant_face_operation_rules
-            (tenant_id, warehouse_id, operation, require_face, allowed_user_ids)
+            (tenant_id, warehouse_id, operation, require_face, allowed_subject_ids)
         VALUES (1, ?, ?, ?, ?)
         """,
         (
             warehouse_id,
             operation,
             1 if require_face else 0,
-            json.dumps(allowed_user_ids) if allowed_user_ids else None,
+            json.dumps(allowed_subject_ids) if allowed_subject_ids else None,
         ),
     )
     conn.commit()
 
 
-def _enroll(conn, user_id: int, vec, model_tag: str = "fake-v1"):
+def _create_subject(conn, name: str, employee_id: str | None = None) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO face_subjects (tenant_id, name, employee_id, is_active)
+        VALUES (1, ?, ?, 1)
+        """,
+        (name, employee_id),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _enroll(conn, subject_id: int, vec, model_tag: str = "fake-v1"):
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO face_enrollments
-            (user_id, tenant_id, model_tag, embedding, is_active)
+            (subject_id, tenant_id, model_tag, embedding, is_active)
         VALUES (?, 1, ?, ?, 1)
         """,
-        (user_id, model_tag, _emb_bytes(vec)),
+        (subject_id, model_tag, _emb_bytes(vec)),
     )
     conn.commit()
 
@@ -120,18 +138,18 @@ def test_enroll_face_persists_n(conn, monkeypatch):
         return {"embedding": _emb_bytes([1.0, 0.0, 0.0]), "model_tag": "fake-v1"}
 
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
-    # need a config row so enroll can find an endpoint
     _set_config(conn, enabled=True)
+    sid = _create_subject(conn, "Alice Person")
 
     out = asyncio.run(orchestrator.enroll_face(
         conn,
-        user_id=101,
+        subject_id=sid,
         tenant_id=1,
         images_b64=["img1", "img2", "img3"],
     ))
     assert out["count"] == 3
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) AS n FROM face_enrollments WHERE user_id = 101")
+    cur.execute("SELECT COUNT(*) AS n FROM face_enrollments WHERE subject_id = ?", (sid,))
     assert cur.fetchone()["n"] == 3
 
 
@@ -156,7 +174,7 @@ def test_verify_skipped_when_rule_not_required(conn):
     assert decision.status == "skipped"
 
 
-def test_verify_pass_when_match_correct_user(conn, monkeypatch):
+def test_verify_pass_when_subject_matches_and_allowed(conn, monkeypatch):
     from backend.face import endpoint_client, orchestrator
 
     target = [1.0, 0.0, 0.0]
@@ -171,14 +189,15 @@ def test_verify_pass_when_match_correct_user(conn, monkeypatch):
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True, min_confidence=0.5)
-    _set_rule(conn, require_face=True)
-    _enroll(conn, 101, target)
+    sid = _create_subject(conn, "Person A")
+    _enroll(conn, sid, target)
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
     ))
     assert decision.status == "pass", decision
-    assert decision.matched_user_id == 101
+    assert decision.matched_subject_id == sid
     assert decision.confidence is not None and decision.confidence > 0.99
 
 
@@ -196,8 +215,9 @@ def test_verify_deny_low_confidence(conn, monkeypatch):
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True, min_confidence=0.65)
+    sid = _create_subject(conn, "Person A")
+    _enroll(conn, sid, [1.0, 0.0, 0.0])
     _set_rule(conn, require_face=True)
-    _enroll(conn, 101, [1.0, 0.0, 0.0])
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
@@ -206,7 +226,7 @@ def test_verify_deny_low_confidence(conn, monkeypatch):
     assert decision.failure_reason == "low_confidence"
 
 
-def test_verify_deny_user_mismatch(conn, monkeypatch):
+def test_verify_deny_subject_not_in_allow_list(conn, monkeypatch):
     from backend.face import endpoint_client, orchestrator
 
     async def fake_capture(cfg):
@@ -219,16 +239,18 @@ def test_verify_deny_user_mismatch(conn, monkeypatch):
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True, min_confidence=0.5)
-    _set_rule(conn, require_face=True)
-    # The enrolled vector matches user 102, but the request claims to be 101
-    _enroll(conn, 102, [0.0, 1.0, 0.0])
+    sid_b = _create_subject(conn, "Person B")
+    sid_allowed = _create_subject(conn, "Person Allowed")
+    # The enrolled vector matches subject B, but rule only allows the other one.
+    _enroll(conn, sid_b, [0.0, 1.0, 0.0])
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid_allowed])
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
     ))
     assert decision.status == "deny"
-    assert decision.failure_reason == "user_mismatch"
-    assert decision.matched_user_id == 102
+    assert decision.failure_reason == "not_in_allow_list"
+    assert decision.matched_subject_id == sid_b
 
 
 def test_verify_deny_endpoint_unreachable(conn, monkeypatch):

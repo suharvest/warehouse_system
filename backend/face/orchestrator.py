@@ -80,7 +80,7 @@ def _row_to_rule(row) -> FaceRule:
         warehouse_id=row["warehouse_id"],
         operation=row["operation"],
         require_face=bool(row["require_face"]),
-        allowed_user_ids=_parse_id_list(row["allowed_user_ids"]),
+        allowed_subject_ids=_parse_id_list(row["allowed_subject_ids"]),
         min_confidence_override=row["min_confidence_override"],
     )
 
@@ -90,7 +90,7 @@ def _log_decision(
     *,
     request_id: Optional[str],
     user_id: int,
-    matched_user_id: Optional[int],
+    matched_subject_id: Optional[int],
     tenant_id: int,
     warehouse_id: Optional[int],
     operation: str,
@@ -103,14 +103,14 @@ def _log_decision(
         cur.execute(
             """
             INSERT INTO face_auth_logs
-                (request_id, user_id, matched_user_id, tenant_id, warehouse_id,
+                (request_id, user_id, matched_subject_id, tenant_id, warehouse_id,
                  operation, confidence, decision, failure_reason, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
                 user_id,
-                matched_user_id,
+                matched_subject_id,
                 tenant_id,
                 warehouse_id,
                 operation,
@@ -130,13 +130,13 @@ def _log_decision(
 async def enroll_face(
     conn,
     *,
-    user_id: int,
+    subject_id: int,
     tenant_id: int,
     images_b64: List[str],
     applies_to_warehouse_ids: Optional[List[int]] = None,
     enrolled_by: Optional[int] = None,
 ) -> dict:
-    """Run each image through endpoint /infer, persist embeddings.
+    """Run each image through endpoint /infer, persist embeddings for a subject.
 
     Returns: {count, ids}
     Raises FaceEndpointError if config missing / endpoint unreachable.
@@ -147,20 +147,29 @@ async def enroll_face(
     if not images_b64:
         return {"count": 0, "ids": []}
 
+    # Verify the subject belongs to this tenant
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT tenant_id FROM face_subjects WHERE id = ?",
+        (subject_id,),
+    )
+    row = cur.fetchone()
+    if not row or int(row["tenant_id"]) != int(tenant_id):
+        raise FaceEndpointError("subject_not_in_tenant")
+
     applies_raw = json.dumps(applies_to_warehouse_ids) if applies_to_warehouse_ids else None
     inserted_ids: List[int] = []
-    cur = conn.cursor()
     for img in images_b64:
         result = await endpoint_client.infer(cfg, img)
         cur.execute(
             """
             INSERT INTO face_enrollments
-                (user_id, tenant_id, model_tag, embedding, source_image_b64,
+                (subject_id, tenant_id, model_tag, embedding, source_image_b64,
                  applies_to_warehouse_ids, is_active, enrolled_at, enrolled_by)
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
-                user_id,
+                subject_id,
                 tenant_id,
                 result["model_tag"],
                 result["embedding"],
@@ -187,13 +196,14 @@ async def verify_mcp_face(
     """Short-circuit verification ladder for an MCP tool call.
 
     Order: config -> rule -> capture -> infer -> match -> threshold ->
-    allow-list -> identity (matched.user_id == user_id). Always logs.
+    allow-list. The matched **subject** is the authorization unit; the
+    calling system user is just identified for audit purposes.
     """
     cfg = _load_config(conn, tenant_id)
     if cfg is None or not cfg.enabled:
         decision = Decision(status="skipped", failure_reason="feature_disabled")
         _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=None,
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
             confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
         )
@@ -203,7 +213,7 @@ async def verify_mcp_face(
     if rule is None or not rule.require_face:
         decision = Decision(status="skipped", failure_reason="rule_not_required")
         _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=None,
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
             confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
         )
@@ -217,7 +227,7 @@ async def verify_mcp_face(
         reason = str(e) if str(e) else "endpoint_unreachable"
         decision = Decision(status="deny", failure_reason=reason)
         _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=None,
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
             confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
         )
@@ -234,7 +244,7 @@ async def verify_mcp_face(
     if not matches:
         decision = Decision(status="deny", failure_reason="no_match")
         _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=None,
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
             confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
         )
@@ -246,34 +256,22 @@ async def verify_mcp_face(
     if best.confidence < threshold:
         decision = Decision(
             status="deny", failure_reason="low_confidence",
-            confidence=best.confidence, matched_user_id=best.user_id,
+            confidence=best.confidence, matched_subject_id=best.subject_id,
         )
         _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=best.user_id,
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=best.subject_id,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
             confidence=best.confidence, decision=decision.status, failure_reason=decision.failure_reason,
         )
         return decision
 
-    if rule.allowed_user_ids and best.user_id not in rule.allowed_user_ids:
+    if rule.allowed_subject_ids and best.subject_id not in rule.allowed_subject_ids:
         decision = Decision(
             status="deny", failure_reason="not_in_allow_list",
-            confidence=best.confidence, matched_user_id=best.user_id,
+            confidence=best.confidence, matched_subject_id=best.subject_id,
         )
         _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=best.user_id,
-            tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-            confidence=best.confidence, decision=decision.status, failure_reason=decision.failure_reason,
-        )
-        return decision
-
-    if best.user_id != user_id:
-        decision = Decision(
-            status="deny", failure_reason="user_mismatch",
-            confidence=best.confidence, matched_user_id=best.user_id,
-        )
-        _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_user_id=best.user_id,
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=best.subject_id,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
             confidence=best.confidence, decision=decision.status, failure_reason=decision.failure_reason,
         )
@@ -281,10 +279,10 @@ async def verify_mcp_face(
 
     decision = Decision(
         status="pass", failure_reason=None,
-        confidence=best.confidence, matched_user_id=best.user_id,
+        confidence=best.confidence, matched_subject_id=best.subject_id,
     )
     _log_decision(
-        conn, request_id=request_id, user_id=user_id, matched_user_id=best.user_id,
+        conn, request_id=request_id, user_id=user_id, matched_subject_id=best.subject_id,
         tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
         confidence=best.confidence, decision=decision.status, failure_reason=None,
     )

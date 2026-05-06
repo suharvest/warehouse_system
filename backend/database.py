@@ -388,13 +388,29 @@ def init_database():
     ''')
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS face_subjects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            employee_id TEXT,
+            note TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_by INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_face_subjects_tenant ON face_subjects(tenant_id, is_active)')
+
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS tenant_face_operation_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,
             warehouse_id INTEGER,
             operation TEXT NOT NULL,
             require_face INTEGER NOT NULL DEFAULT 0,
-            allowed_user_ids TEXT,
+            allowed_subject_ids TEXT,
             min_confidence_override REAL,
             FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
             FOREIGN KEY(warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE
@@ -405,7 +421,7 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS face_enrollments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
             tenant_id INTEGER NOT NULL,
             model_tag TEXT NOT NULL,
             embedding BLOB NOT NULL,
@@ -414,18 +430,19 @@ def init_database():
             is_active INTEGER NOT NULL DEFAULT 1,
             enrolled_at TEXT DEFAULT CURRENT_TIMESTAMP,
             enrolled_by INTEGER,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(subject_id) REFERENCES face_subjects(id) ON DELETE CASCADE,
             FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_face_enroll ON face_enrollments(tenant_id, model_tag, is_active)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_face_enroll_subject ON face_enrollments(subject_id)')
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS face_auth_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             request_id TEXT,
             user_id INTEGER NOT NULL,
-            matched_user_id INTEGER,
+            matched_subject_id INTEGER,
             tenant_id INTEGER NOT NULL,
             warehouse_id INTEGER,
             operation TEXT NOT NULL,

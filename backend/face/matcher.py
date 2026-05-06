@@ -86,9 +86,11 @@ def topk_match(
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, user_id, embedding, applies_to_warehouse_ids
-        FROM face_enrollments
-        WHERE tenant_id = ? AND model_tag = ? AND is_active = 1
+        SELECT fe.id, fe.subject_id, fe.embedding, fe.applies_to_warehouse_ids
+        FROM face_enrollments fe
+        JOIN face_subjects fs ON fs.id = fe.subject_id
+        WHERE fe.tenant_id = ? AND fe.model_tag = ? AND fe.is_active = 1
+          AND fs.is_active = 1
         """,
         (tenant_id, model_tag),
     )
@@ -100,7 +102,7 @@ def topk_match(
         if v is None:
             continue
         score = _cosine(q, v)
-        scored.append(Match(enrollment_id=row["id"], user_id=row["user_id"], confidence=score))
+        scored.append(Match(enrollment_id=row["id"], subject_id=row["subject_id"], confidence=score))
 
     scored.sort(key=lambda m: m.confidence, reverse=True)
     return scored[:k]
