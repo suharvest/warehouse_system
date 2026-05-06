@@ -474,11 +474,43 @@ export const faceApi = {
   // 获取人脸录入条目
   async getEnrollments(params = {}) {
     const query = new URLSearchParams();
-    if (params.userId) query.set('user_id', params.userId);
+    if (params.subjectId) query.set('subject_id', params.subjectId);
     if (params.includeImage) query.set('include_image', '1');
     if (params.tenantId) query.set('tenant_id', params.tenantId);
     const qs = query.toString();
     return fetchJson(`/face/enrollments${qs ? '?' + qs : ''}`);
+  },
+
+  // ===== 人员档案 (face_subjects) =====
+  async getSubjects(tenantId = null, includeInactive = false) {
+    const query = new URLSearchParams();
+    if (tenantId) query.set('tenant_id', tenantId);
+    if (includeInactive) query.set('include_inactive', '1');
+    const qs = query.toString();
+    return fetchJson(`/face/subjects${qs ? '?' + qs : ''}`);
+  },
+
+  async createSubject(data, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/subjects${query}`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  async updateSubject(subjectId, data, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/subjects/${subjectId}${query}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    });
+  },
+
+  async deleteSubject(subjectId, tenantId = null) {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return fetchJson(`/face/subjects/${subjectId}${query}`, {
+      method: 'DELETE'
+    });
   },
 
   // 创建人脸录入
