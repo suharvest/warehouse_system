@@ -1,6 +1,6 @@
 // ============ 人脸识别管理模块 ============
 import { t } from '../../../i18n.js';
-import { faceApi, usersApi, warehousesApi } from '../api.js';
+import { faceApi, warehousesApi } from '../api.js';
 import { showToast } from '../ui-components.js';
 import { getCurrentUser } from '../state.js';
 
@@ -18,9 +18,9 @@ const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust'];
 let currentSubTab = 'config';
 let currentConfig = { ...DEFAULT_CONFIG };
 let currentRules = [];
-let allUsers = [];
 let allWarehouses = [];
-let selectedEnrollUserId = null;
+let allSubjects = [];
+let selectedSubjectId = null;
 let enrollmentItems = [];
 let allTenants = [];
 let selectedTenantId = null;
@@ -40,7 +40,7 @@ let logsState = {
     pageSize: 20,
     total: 0,
     items: [],
-    filters: { userId: '', operation: '', start: '', end: '' }
+    filters: { operation: '', start: '', end: '' }
 };
 
 // ============ 工具函数 ============
@@ -97,7 +97,7 @@ export async function renderFaceRecognitionPanel() {
 export async function onFaceTenantChange(el) {
     const v = parseInt(el.value, 10);
     selectedTenantId = Number.isFinite(v) ? v : null;
-    allUsers = []; allWarehouses = []; enrollmentItems = []; selectedEnrollUserId = null;
+    allWarehouses = []; allSubjects = []; enrollmentItems = []; selectedSubjectId = null;
     await renderFaceRecognitionPanel();
 }
 
@@ -153,15 +153,16 @@ export async function switchFaceSubTab(subTab) {
     try {
         if (subTab === 'config') {
             await loadConfigAndRules();
+            await loadSubjectsAndWarehouses();
             content.innerHTML = renderConfigTab();
         } else if (subTab === 'enroll') {
-            await loadUsersAndWarehouses();
+            await loadSubjectsAndWarehouses();
             content.innerHTML = renderEnrollTab();
-            if (selectedEnrollUserId) {
+            if (selectedSubjectId) {
                 await loadEnrollmentsForSelected();
             }
         } else if (subTab === 'logs') {
-            await loadUsersAndWarehouses();
+            await loadSubjectsAndWarehouses();
             content.innerHTML = renderLogsTab();
             await reloadLogs();
         }
@@ -208,9 +209,10 @@ async function loadConfigAndRules() {
     currentRules = Array.isArray(rules) ? rules : [];
 }
 
-async function loadUsersAndWarehouses() {
-    if (allUsers.length === 0) {
-        try { allUsers = await usersApi.getList(); } catch { allUsers = []; }
+async function loadSubjectsAndWarehouses(force = false) {
+    const tid = effectiveTenantId();
+    if (force || allSubjects.length === 0) {
+        try { allSubjects = await faceApi.getSubjects(tid, true); } catch { allSubjects = []; }
     }
     if (allWarehouses.length === 0) {
         try { allWarehouses = await warehousesApi.getList(true); } catch { allWarehouses = []; }
@@ -296,10 +298,13 @@ function renderRulesRows() {
     }
     return currentRules.map(rule => {
         const wh = rule.warehouse_id ? (allWarehouses.find(w => w.id === rule.warehouse_id) || {}).name : null;
-        const allowedNames = (rule.allowed_user_ids || []).map(id => {
-            const u = allUsers.find(u => u.id === id);
-            return u ? (u.display_name || u.username) : `#${id}`;
-        }).join(', ');
+        const allowedIds = rule.allowed_subject_ids || [];
+        const allowedNames = allowedIds.length === 0
+            ? tt('faceAllowedAll', '全部人员')
+            : allowedIds.map(id => {
+                const s = allSubjects.find(x => x.id === id);
+                return s ? s.name : `#${id}`;
+            }).join(', ');
         return `
             <tr>
                 <td>${escapeHtml(wh || tt('faceAppliesAll', '全部仓库'))}</td>
@@ -372,7 +377,7 @@ function openRuleModal(rule) {
     const modal = document.getElementById('face-rule-modal');
     if (!modal) return;
     const isEdit = !!rule;
-    const r = rule || { warehouse_id: null, operation: 'stock_out', require_face: true, allowed_user_ids: [], min_confidence_override: null };
+    const r = rule || { warehouse_id: null, operation: 'stock_out', require_face: true, allowed_subject_ids: [], min_confidence_override: null };
     const operations = FACE_OPERATIONS;
     modal.innerHTML = `
         <div class="modal-content modal-small">
@@ -403,16 +408,16 @@ function openRuleModal(rule) {
                         </label>
                     </div>
                     <div class="form-group">
-                        <label>${tt('faceAllowedUsers', '允许用户')}</label>
-                        <div id="face-rule-users" style="max-height:160px;overflow:auto;border:1px solid var(--border-color, #e5e7eb);border-radius:4px;padding:8px;">
-                            ${allUsers.length === 0 ? `<div style="color:#999;">${t('noData')}</div>` : allUsers.map(u => `
+                        <label>${tt('faceAllowedSubjects', '允许人员')}</label>
+                        <div id="face-rule-subjects" style="max-height:160px;overflow:auto;border:1px solid var(--border-color, #e5e7eb);border-radius:4px;padding:8px;">
+                            ${allSubjects.length === 0 ? `<div style="color:#999;">${tt('faceSubjectsEmpty', '暂无人员，请先到「人员与录入」新增')}</div>` : allSubjects.map(s => `
                                 <label class="checkbox-label" style="display:block;">
-                                    <input type="checkbox" value="${u.id}" ${(r.allowed_user_ids || []).includes(u.id) ? 'checked' : ''}>
-                                    <span>${escapeHtml(u.display_name || u.username)}</span>
+                                    <input type="checkbox" value="${s.id}" ${(r.allowed_subject_ids || []).includes(s.id) ? 'checked' : ''} ${!s.is_active ? 'disabled' : ''}>
+                                    <span>${escapeHtml(s.name)}${s.employee_id ? ` <span style="color:#999;">(${escapeHtml(s.employee_id)})</span>` : ''}${!s.is_active ? ` <span style="color:#c00;font-size:11px;">[${tt('disabled', '已停用')}]</span>` : ''}</span>
                                 </label>
                             `).join('')}
                         </div>
-                        <div class="form-hint">${tt('faceAllowedUsersHint', '为空表示所有用户均需通过人脸识别')}</div>
+                        <div class="form-hint">${tt('faceAllowedSubjectsHint', '不勾选任何人员表示所有已录入人员都可以通过')}</div>
                     </div>
                     <div class="form-group">
                         <label>${tt('faceMinConfidenceOverride', '自定义阈值')}</label>
@@ -441,14 +446,14 @@ export async function saveFaceRule() {
     const op = document.getElementById('face-rule-operation').value;
     const requireFace = document.getElementById('face-rule-require').checked;
     const confidenceVal = document.getElementById('face-rule-confidence').value;
-    const allowedIds = Array.from(document.querySelectorAll('#face-rule-users input[type="checkbox"]:checked')).map(cb => parseInt(cb.value, 10));
+    const allowedIds = Array.from(document.querySelectorAll('#face-rule-subjects input[type="checkbox"]:checked')).map(cb => parseInt(cb.value, 10));
     const errEl = document.getElementById('face-rule-error');
 
     const data = {
         warehouse_id: whVal ? parseInt(whVal, 10) : null,
         operation: op,
         require_face: requireFace,
-        allowed_user_ids: allowedIds,
+        allowed_subject_ids: allowedIds,
         min_confidence_override: confidenceVal === '' ? null : parseFloat(confidenceVal)
     };
     try {
@@ -485,41 +490,44 @@ export async function deleteFaceRule(el) {
     }
 }
 
-// ============ 子页签 B: 录入 ============
+// ============ 子页签 B: 人员 + 录入 ============
 function renderEnrollTab() {
-    const eligibleUsers = allUsers.filter(u => ['operate', 'admin'].includes((u.role || '').toLowerCase()));
     return `
         <div class="table-container face-enroll-card">
             <div class="section-header">
-                <div class="section-title">${tt('faceEnrollments', '人脸录入')}</div>
+                <div class="section-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
+                <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    ${tt('faceSubjectAdd', '新增人员')}
+                </button>
             </div>
             <div class="face-enroll-grid">
                 <aside class="face-enroll-users">
-                    <div class="face-enroll-users-header">${tt('userList', '用户列表')} <span class="face-enroll-users-count">${eligibleUsers.length}</span></div>
-                    <div id="face-enroll-user-list" class="face-enroll-users-list">
-                        ${eligibleUsers.length === 0 ? `<div class="face-enroll-users-empty">${t('noData')}</div>` : eligibleUsers.map(renderEnrollUserItem).join('')}
+                    <div class="face-enroll-users-header">${tt('faceSubjectList', '人员列表')} <span class="face-enroll-users-count">${allSubjects.length}</span></div>
+                    <div id="face-enroll-subject-list" class="face-enroll-users-list">
+                        ${allSubjects.length === 0
+                            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
+                            : allSubjects.map(renderSubjectItem).join('')}
                     </div>
                 </aside>
                 <section id="face-enroll-detail" class="face-enroll-detail">
-                    ${selectedEnrollUserId ? renderEnrollDetail() : renderEnrollPlaceholder()}
+                    ${selectedSubjectId ? renderEnrollDetail() : renderEnrollPlaceholder()}
                 </section>
             </div>
         </div>
     `;
 }
 
-function renderEnrollUserItem(u) {
-    const display = u.display_name && u.display_name !== u.username ? u.display_name : u.username;
-    const sub = u.display_name && u.display_name !== u.username ? u.username : '';
-    const roleLabel = (u.role || '').toLowerCase() === 'admin'
-        ? tt('roleAdmin', '管理员')
-        : tt('roleOperator', '操作员');
-    const active = selectedEnrollUserId === u.id ? 'is-active' : '';
+function renderSubjectItem(s) {
+    const name = s.name || `#${s.id}`;
+    const sub = s.employee_id ? `${tt('faceSubjectEmployeeId', '工号')}: ${s.employee_id}` : '';
+    const inactive = !s.is_active;
+    const active = selectedSubjectId === s.id ? 'is-active' : '';
     return `
-        <button class="face-enroll-user-item ${active}" data-action="selectFaceEnrollUser" data-user-id="${u.id}">
-            <div class="face-enroll-user-name">${escapeHtml(display)}</div>
-            ${sub ? `<div class="face-enroll-user-sub">@${escapeHtml(sub)}</div>` : ''}
-            <span class="face-enroll-user-role">${escapeHtml(roleLabel)}</span>
+        <button class="face-enroll-user-item ${active}" data-action="selectFaceSubject" data-subject-id="${s.id}">
+            <div class="face-enroll-user-name">${escapeHtml(name)}${inactive ? ` <span class="face-enroll-user-role" style="position:static;background:#fee;color:#c00;">${tt('disabled', '已停用')}</span>` : ''}</div>
+            ${sub ? `<div class="face-enroll-user-sub">${escapeHtml(sub)}</div>` : ''}
+            ${typeof s.enrollment_count === 'number' ? `<span class="face-enroll-user-role">${s.enrollment_count} ${tt('faceEnrolledItems', '条')}</span>` : ''}
         </button>
     `;
 }
@@ -532,29 +540,35 @@ function renderEnrollPlaceholder() {
                 <circle cx="9" cy="7" r="4" stroke-width="1.5"></circle>
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 8v6M22 11h-6"></path>
             </svg>
-            <div class="empty-message">${tt('faceSelectUserHint', '从左侧选择一个用户开始录入人脸')}</div>
+            <div class="empty-message">${tt('faceSelectSubjectHint', '从左侧选择一个人员开始录入人脸')}</div>
         </div>
     `;
 }
 
 function renderEnrollDetail() {
-    const user = allUsers.find(u => u.id === selectedEnrollUserId);
-    if (!user) return '';
+    const subject = allSubjects.find(s => s.id === selectedSubjectId);
+    if (!subject) return '';
     const count = enrollmentItems.length;
-    const name = user.display_name || user.username;
     return `
         <div class="face-enroll-detail-header">
             <div>
-                <div class="face-enroll-detail-name">${escapeHtml(name)}</div>
-                <div class="face-enroll-detail-meta">${tt('faceEnrolledCount', '已录入')} <strong>${count}</strong> ${tt('faceEnrolledItems', '条')}</div>
+                <div class="face-enroll-detail-name">${escapeHtml(subject.name)}</div>
+                <div class="face-enroll-detail-meta">
+                    ${subject.employee_id ? `${tt('faceSubjectEmployeeId', '工号')}: ${escapeHtml(subject.employee_id)} · ` : ''}
+                    ${tt('faceEnrolledCount', '已录入')} <strong>${count}</strong> ${tt('faceEnrolledItems', '条')}
+                </div>
             </div>
-            <button class="btn confirm-btn" data-action="showFaceEnrollModal">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                ${tt('faceEnrollAdd', '录入新条目')}
-            </button>
+            <div style="display:flex;gap:8px;">
+                <button class="action-btn-small" data-action="showEditFaceSubjectModal" data-subject-id="${subject.id}">${tt('edit', '编辑')}</button>
+                <button class="action-btn-small danger" data-action="deleteFaceSubject" data-subject-id="${subject.id}">${tt('delete', '删除')}</button>
+                <button class="btn confirm-btn" data-action="showFaceEnrollModal">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    ${tt('faceEnrollAdd', '录入新条目')}
+                </button>
+            </div>
         </div>
         ${count === 0
-            ? `<div class="panel-empty-state" style="padding:32px 16px;"><div class="empty-message">${tt('faceEnrollNoItems', '该用户尚未录入人脸')}</div></div>`
+            ? `<div class="panel-empty-state" style="padding:32px 16px;"><div class="empty-message">${tt('faceEnrollNoItems', '该人员尚未录入人脸')}</div></div>`
             : `<div class="face-enroll-list">${enrollmentItems.map(renderEnrollmentCard).join('')}</div>`
         }
     `;
@@ -578,23 +592,24 @@ function renderEnrollmentCard(item) {
     `;
 }
 
-export async function selectFaceEnrollUser(el) {
-    selectedEnrollUserId = parseInt(el.dataset.userId, 10);
+export async function selectFaceSubject(el) {
+    selectedSubjectId = parseInt(el.dataset.subjectId, 10);
     const detail = document.getElementById('face-enroll-detail');
     if (detail) detail.innerHTML = renderLoading();
-    document.querySelectorAll('#face-enroll-user-list [data-action="selectFaceEnrollUser"]').forEach(btn => {
-        btn.style.background = parseInt(btn.dataset.userId, 10) === selectedEnrollUserId ? 'var(--bg-hover, #f5f5f5)' : 'transparent';
+    document.querySelectorAll('#face-enroll-subject-list [data-action="selectFaceSubject"]').forEach(btn => {
+        const id = parseInt(btn.dataset.subjectId, 10);
+        btn.classList.toggle('is-active', id === selectedSubjectId);
     });
     await loadEnrollmentsForSelected();
 }
 
 async function loadEnrollmentsForSelected() {
-    if (!selectedEnrollUserId) {
+    if (!selectedSubjectId) {
         enrollmentItems = [];
         return;
     }
     try {
-        const result = await faceApi.getEnrollments({ userId: selectedEnrollUserId, tenantId: effectiveTenantId() });
+        const result = await faceApi.getEnrollments({ subjectId: selectedSubjectId, tenantId: effectiveTenantId() });
         enrollmentItems = Array.isArray(result) ? result : (result.items || []);
     } catch {
         enrollmentItems = [];
@@ -605,7 +620,7 @@ async function loadEnrollmentsForSelected() {
 
 export function showFaceEnrollModal() {
     const modal = document.getElementById('face-enroll-modal');
-    if (!modal || !selectedEnrollUserId) return;
+    if (!modal || !selectedSubjectId) return;
     modal.innerHTML = `
         <div class="modal-content modal-small">
             <div class="modal-header">
@@ -673,7 +688,7 @@ export async function submitFaceEnroll() {
     const errEl = document.getElementById('face-enroll-error');
     const allBox = document.getElementById('face-enroll-all-wh');
     const files = fileInput && fileInput.files ? Array.from(fileInput.files) : [];
-    if (!selectedEnrollUserId) return;
+    if (!selectedSubjectId) return;
     if (files.length === 0) {
         if (errEl) { errEl.hidden = false; errEl.textContent = tt('faceEnrollImagesRequired', '请至少选择一张图片'); }
         return;
@@ -685,14 +700,18 @@ export async function submitFaceEnroll() {
     try {
         const images_b64 = await Promise.all(files.map(readFileAsBase64));
         const payload = {
-            user_id: selectedEnrollUserId,
+            subject_id: selectedSubjectId,
             images_b64,
             applies_to_warehouse_ids: warehouseIds
         };
         await faceApi.createEnrollment(payload, effectiveTenantId());
         showToast(tt('faceEnrollSuccess', '录入成功'));
         closeFaceEnrollModal();
+        await loadSubjectsAndWarehouses(true);  // refresh enrollment counts
         await loadEnrollmentsForSelected();
+        // re-render left list to update count badge
+        const list = document.getElementById('face-enroll-subject-list');
+        if (list) list.innerHTML = allSubjects.map(renderSubjectItem).join('');
     } catch (error) {
         if (errEl) { errEl.hidden = false; errEl.textContent = getErrorMessage(error, 'faceEnrollFailed', '录入失败'); }
     }
@@ -720,13 +739,6 @@ function renderLogsTab() {
             </div>
             <div style="padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
                 <div class="form-group">
-                    <label>${tt('faceLogOperator', '操作人')}</label>
-                    <select id="face-logs-user">
-                        <option value="">${tt('all', '全部')}</option>
-                        ${allUsers.map(u => `<option value="${u.id}" ${String(f.userId) === String(u.id) ? 'selected' : ''}>${escapeHtml(u.display_name || u.username)}</option>`).join('')}
-                    </select>
-                </div>
-                <div class="form-group">
                     <label>${tt('operation', '操作')}</label>
                     <select id="face-logs-operation">
                         <option value="">${tt('all', '全部')}</option>
@@ -750,9 +762,9 @@ function renderLogsTab() {
                 <thead>
                     <tr>
                         <th>${tt('faceLogTime', '时间')}</th>
-                        <th>${tt('faceLogOperator', '操作人')}</th>
+                        <th>${tt('faceLogCaller', '调用方')}</th>
                         <th>${tt('operation', '操作')}</th>
-                        <th>${tt('faceLogMatchedUser', '匹配用户')}</th>
+                        <th>${tt('faceLogMatchedSubject', '匹配人员')}</th>
                         <th>${tt('faceLogConfidence', '置信度')}</th>
                         <th>${tt('faceLogDecision', '判定')}</th>
                         <th>${tt('faceLogReason', '原因')}</th>
@@ -781,17 +793,20 @@ function renderLogsRows() {
         return `<tr><td colspan="7" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
     }
     return logsState.items.map(item => {
-        const matched = item.matched_user_id ? (allUsers.find(u => u.id === item.matched_user_id) || {}) : null;
-        const acting = item.user_id ? (allUsers.find(u => u.id === item.user_id) || {}) : null;
+        const matched = item.matched_subject_id ? (allSubjects.find(s => s.id === item.matched_subject_id) || {}) : null;
+        const matchedName = matched && matched.name
+            ? matched.name
+            : (item.matched_subject_id ? `#${item.matched_subject_id}` : '-');
+        const callerText = item.user_id ? `#${item.user_id}` : '-';
         const decisionKey = `decision_${item.decision || 'skipped'}`;
         const decisionText = tt(decisionKey, item.decision || '-');
         const decisionClass = item.decision === 'pass' ? 'status-normal' : (item.decision === 'deny' ? 'status-disabled' : '');
         return `
             <tr>
                 <td>${escapeHtml((item.created_at || '').replace('T', ' ').slice(0, 19))}</td>
-                <td>${escapeHtml(acting ? (acting.display_name || acting.username) : (item.user_id ? `#${item.user_id}` : '-'))}</td>
+                <td>${escapeHtml(callerText)}</td>
                 <td>${escapeHtml(item.operation || '-')}</td>
-                <td>${escapeHtml(matched ? (matched.display_name || matched.username) : (item.matched_user_id ? `#${item.matched_user_id}` : '-'))}</td>
+                <td>${escapeHtml(matchedName)}</td>
                 <td>${item.confidence == null ? '-' : escapeHtml(Number(item.confidence).toFixed(3))}</td>
                 <td><span class="status-badge ${decisionClass}">${escapeHtml(decisionText)}</span></td>
                 <td>${escapeHtml(item.failure_reason || '-')}</td>
@@ -804,7 +819,6 @@ async function reloadLogs() {
     try {
         const f = logsState.filters;
         const result = await faceApi.getLogs({
-            userId: f.userId || undefined,
             operation: f.operation || undefined,
             start: f.start || undefined,
             end: f.end || undefined,
@@ -826,7 +840,6 @@ async function reloadLogs() {
 
 export async function applyFaceLogsFilter() {
     logsState.filters = {
-        userId: document.getElementById('face-logs-user').value,
         operation: document.getElementById('face-logs-operation').value,
         start: document.getElementById('face-logs-start').value,
         end: document.getElementById('face-logs-end').value
@@ -836,7 +849,7 @@ export async function applyFaceLogsFilter() {
 }
 
 export async function resetFaceLogsFilter() {
-    logsState.filters = { userId: '', operation: '', start: '', end: '' };
+    logsState.filters = { operation: '', start: '', end: '' };
     logsState.page = 1;
     const content = document.getElementById('face-content');
     if (content) content.innerHTML = renderLogsTab();
@@ -862,10 +875,139 @@ export async function faceLogsNextPage() {
     }
 }
 
+// ============ 人员档案 CRUD ============
+export function showAddFaceSubjectModal() {
+    openSubjectModal(null);
+}
+
+export function showEditFaceSubjectModal(el) {
+    const sid = parseInt(el.dataset.subjectId, 10);
+    const subject = allSubjects.find(s => s.id === sid);
+    if (!subject) return;
+    openSubjectModal(subject);
+}
+
+function openSubjectModal(subject) {
+    const modal = document.getElementById('face-subject-modal');
+    if (!modal) return;
+    const isEdit = !!subject;
+    const s = subject || { name: '', employee_id: '', note: '', is_active: true };
+    modal.innerHTML = `
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3>${isEdit ? tt('faceSubjectEdit', '编辑人员') : tt('faceSubjectAdd', '新增人员')}</h3>
+                <button class="close-btn" data-action="closeFaceSubjectModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="face-subject-form">
+                    <input type="hidden" id="face-subject-id" value="${isEdit ? s.id : ''}">
+                    <div class="form-group">
+                        <label>${tt('faceSubjectName', '姓名')} <span class="required">*</span></label>
+                        <input type="text" id="face-subject-name" value="${escapeHtml(s.name || '')}" maxlength="100" placeholder="${tt('faceSubjectNamePlaceholder', '如：张三')}">
+                    </div>
+                    <div class="form-group">
+                        <label>${tt('faceSubjectEmployeeId', '工号')} <span class="form-hint" style="display:inline;font-weight:normal;">(${tt('optional', '可选')})</span></label>
+                        <input type="text" id="face-subject-employee-id" value="${escapeHtml(s.employee_id || '')}" maxlength="50">
+                    </div>
+                    <div class="form-group">
+                        <label>${tt('faceSubjectNote', '备注')} <span class="form-hint" style="display:inline;font-weight:normal;">(${tt('optional', '可选')})</span></label>
+                        <input type="text" id="face-subject-note" value="${escapeHtml(s.note || '')}" maxlength="200">
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="face-subject-active" ${s.is_active !== false ? 'checked' : ''}>
+                            <span>${tt('faceSubjectActive', '启用')}</span>
+                        </label>
+                        <div class="form-hint">${tt('faceSubjectActiveHint', '停用后该人员的录入将不参与识别')}</div>
+                    </div>
+                    <div class="form-error" id="face-subject-error" hidden></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" data-action="closeFaceSubjectModal">${t('cancel') || '取消'}</button>
+                <button class="btn confirm-btn" data-action="saveFaceSubject">${t('submit') || '提交'}</button>
+            </div>
+        </div>
+    `;
+    modal.classList.add('show');
+}
+
+export function closeFaceSubjectModal() {
+    const modal = document.getElementById('face-subject-modal');
+    if (modal) modal.classList.remove('show');
+}
+
+export async function saveFaceSubject() {
+    const idVal = document.getElementById('face-subject-id').value;
+    const name = document.getElementById('face-subject-name').value.trim();
+    const employeeId = document.getElementById('face-subject-employee-id').value.trim();
+    const note = document.getElementById('face-subject-note').value.trim();
+    const isActive = document.getElementById('face-subject-active').checked;
+    const errEl = document.getElementById('face-subject-error');
+    if (!name) {
+        if (errEl) { errEl.hidden = false; errEl.textContent = tt('faceSubjectNameRequired', '姓名不能为空'); }
+        return;
+    }
+    const data = {
+        name,
+        employee_id: employeeId || null,
+        note: note || null,
+        is_active: isActive,
+    };
+    try {
+        const tid = effectiveTenantId();
+        if (idVal) {
+            await faceApi.updateSubject(parseInt(idVal, 10), data, tid);
+        } else {
+            await faceApi.createSubject(data, tid);
+        }
+        closeFaceSubjectModal();
+        showToast(tt('faceSubjectSaved', '人员档案已保存'));
+        await loadSubjectsAndWarehouses(true);
+        const list = document.getElementById('face-enroll-subject-list');
+        if (list) list.innerHTML = allSubjects.length === 0
+            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
+            : allSubjects.map(renderSubjectItem).join('');
+        // refresh detail if currently viewing the edited subject
+        if (idVal && parseInt(idVal, 10) === selectedSubjectId) {
+            const detail = document.getElementById('face-enroll-detail');
+            if (detail) detail.innerHTML = renderEnrollDetail();
+        }
+    } catch (error) {
+        if (errEl) { errEl.hidden = false; errEl.textContent = getErrorMessage(error, 'faceSubjectSaveFailed', '保存失败'); }
+    }
+}
+
+export async function deleteFaceSubject(el) {
+    const sid = parseInt(el.dataset.subjectId, 10);
+    const subject = allSubjects.find(s => s.id === sid);
+    const name = subject ? subject.name : `#${sid}`;
+    if (!confirm(`${tt('faceSubjectDeleteConfirm', '删除该人员将一并删除其所有录入记录，确定继续？')}\n\n${name}`)) return;
+    try {
+        await faceApi.deleteSubject(sid, effectiveTenantId());
+        showToast(tt('faceSubjectDeleted', '已删除'));
+        if (selectedSubjectId === sid) {
+            selectedSubjectId = null;
+            enrollmentItems = [];
+        }
+        await loadSubjectsAndWarehouses(true);
+        const list = document.getElementById('face-enroll-subject-list');
+        if (list) list.innerHTML = allSubjects.length === 0
+            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
+            : allSubjects.map(renderSubjectItem).join('');
+        const detail = document.getElementById('face-enroll-detail');
+        if (detail) detail.innerHTML = renderEnrollPlaceholder();
+    } catch (error) {
+        showToast(getErrorMessage(error, 'faceSubjectDeleteFailed', '删除失败'), 'error');
+    }
+}
+
+
 // ============ 模态容器 ============
 export function getFaceModalsHTML() {
     return `
         <div id="face-rule-modal" class="modal"></div>
         <div id="face-enroll-modal" class="modal"></div>
+        <div id="face-subject-modal" class="modal"></div>
     `;
 }

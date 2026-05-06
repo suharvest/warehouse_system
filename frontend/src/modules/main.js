@@ -30,7 +30,8 @@ import {
     renderFaceRecognitionPanel, switchFaceSubTab, refreshFacePanel,
     saveFaceConfig, testFaceConnection,
     showAddFaceRuleModal, editFaceRule, closeFaceRuleModal, saveFaceRule, deleteFaceRule,
-    selectFaceEnrollUser, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
+    selectFaceSubject, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
+    showAddFaceSubjectModal, showEditFaceSubjectModal, closeFaceSubjectModal, saveFaceSubject, deleteFaceSubject,
     applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
     getFaceModalsHTML, onFaceTenantChange
 } from './features/face-recognition.js';
@@ -327,7 +328,12 @@ const actionHandlers = {
     'closeFaceRuleModal': closeFaceRuleModal,
     'saveFaceRule': saveFaceRule,
     'deleteFaceRule': deleteFaceRule,
-    'selectFaceEnrollUser': selectFaceEnrollUser,
+    'selectFaceSubject': selectFaceSubject,
+    'showAddFaceSubjectModal': showAddFaceSubjectModal,
+    'showEditFaceSubjectModal': showEditFaceSubjectModal,
+    'closeFaceSubjectModal': closeFaceSubjectModal,
+    'saveFaceSubject': saveFaceSubject,
+    'deleteFaceSubject': deleteFaceSubject,
     'showFaceEnrollModal': showFaceEnrollModal,
     'closeFaceEnrollModal': closeFaceEnrollModal,
     'submitFaceEnroll': submitFaceEnroll,
