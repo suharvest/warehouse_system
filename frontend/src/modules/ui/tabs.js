@@ -80,8 +80,13 @@ export function switchTab(tabId, filters = {}) {
         case 'users':
             if (modules.loadUsers) modules.loadUsers();
             if (modules.loadApiKeys) modules.loadApiKeys();
+            if (modules.loadWarehousesList) modules.loadWarehousesList();
             if (modules.loadERPStatus) modules.loadERPStatus();
             if (modules.startERPRefresh) modules.startERPRefresh();
+            if (modules.loadTenantInfo) modules.loadTenantInfo();
+            break;
+        case 'tenants':
+            if (modules.renderTenantsPanel) modules.renderTenantsPanel();
             break;
         case 'mcp':
             if (modules.loadMCPConnections) modules.loadMCPConnections();
@@ -111,7 +116,7 @@ export function initFromHash() {
     if (hash) {
         const params = new URLSearchParams(hash.substring(1));
         const tab = params.get('tab');
-        if (tab && ['dashboard', 'records', 'inventory', 'detail', 'contacts', 'users', 'mcp'].includes(tab)) {
+        if (tab && ['dashboard', 'records', 'inventory', 'detail', 'contacts', 'users', 'mcp', 'tenants'].includes(tab)) {
             const filters = {};
             for (const [key, value] of params.entries()) {
                 if (key !== 'tab') {
@@ -139,7 +144,8 @@ function initWarehouseFromPath() {
             return;
         }
     }
-    // 全局视图或未匹配
+    // 单仓库时保持已自动选中的默认仓库，不重置为全局视图
+    if (currentWarehouse) return;
     setCurrentWarehouse(null);
     updateWarehouseSwitcherDisplay();
 }
@@ -180,16 +186,12 @@ export function renderWarehouseSwitcher() {
     const switcher = document.getElementById('warehouseSwitcher');
     if (!switcher) return;
 
-    // 只有多个仓库时才显示切换器
-    if (allWarehouses.length <= 1) {
-        switcher.style.display = 'none';
-        // 单仓库时自动选中默认仓库
-        if (allWarehouses.length === 1 && !currentWarehouse) {
-            setCurrentWarehouse(allWarehouses[0]);
-        }
-        return;
+    // 单仓库时自动选中默认仓库
+    if (allWarehouses.length === 1 && !currentWarehouse) {
+        setCurrentWarehouse(allWarehouses[0]);
     }
 
+    // 始终显示切换器（即使只有一个仓库，也需要看到当前仓库）
     switcher.style.display = '';
     updateWarehouseSwitcherDisplay();
 

@@ -7,14 +7,20 @@ echo ""
 
 # 解析参数
 USE_VITE=false
+DEPLOY_MODE="${DEPLOY_MODE:-single_tenant}"
 for arg in "$@"; do
     case $arg in
         --vite)
             USE_VITE=true
             shift
             ;;
+        --multi-tenant)
+            DEPLOY_MODE=multi_tenant
+            shift
+            ;;
     esac
 done
+export DEPLOY_MODE
 
 # 检查是否安装了 uv
 if ! command -v uv &> /dev/null; then
@@ -76,6 +82,7 @@ trap cleanup INT TERM EXIT
 
 echo ""
 echo "启动服务..."
+echo "部署模式: $DEPLOY_MODE"
 echo ""
 
 # 清理残留进程

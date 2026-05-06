@@ -4,11 +4,13 @@ export const API_BASE_URL = '/api';
 
 // 当前 Tab
 export let currentTab = 'dashboard';
+export const getCurrentTab = () => currentTab;
 export function setCurrentTab(tab) { currentTab = tab; }
 
 // 自动刷新
 export let countdownInterval = null;
 export let countdownSeconds = 20;
+export const getCountdownSeconds = () => countdownSeconds;
 export function setCountdownInterval(val) { countdownInterval = val; }
 export function setCountdownSeconds(val) { countdownSeconds = val; }
 
@@ -26,11 +28,14 @@ export function setDetailPieChart(chart) { detailPieChart = chart; }
 
 // 分类数据
 export let allCategories = [];
+export const getAllCategories = () => allCategories;
 export function setAllCategories(categories) { allCategories = categories; }
 
 // 用户认证状态
 export let currentUser = null;
 export let isSystemInitialized = false;
+export const getCurrentUser = () => currentUser;
+export const getIsSystemInitialized = () => isSystemInitialized;
 export function setCurrentUser(user) { currentUser = user; }
 export function setIsSystemInitialized(val) { isSystemInitialized = val; }
 
@@ -38,6 +43,7 @@ export function setIsSystemInitialized(val) { isSystemInitialized = val; }
 export let inventoryCurrentPage = 1;
 export let inventoryPageSize = 20;
 export let inventoryTotalPages = 1;
+export const getInventoryCurrentPage = () => inventoryCurrentPage;
 export function setInventoryCurrentPage(page) { inventoryCurrentPage = page; }
 export function setInventoryPageSize(size) { inventoryPageSize = size; }
 export function setInventoryTotalPages(total) { inventoryTotalPages = total; }
@@ -46,6 +52,7 @@ export function setInventoryTotalPages(total) { inventoryTotalPages = total; }
 export let recordsCurrentPage = 1;
 export let recordsPageSize = 20;
 export let recordsTotalPages = 1;
+export const getRecordsCurrentPage = () => recordsCurrentPage;
 export function setRecordsCurrentPage(page) { recordsCurrentPage = page; }
 export function setRecordsPageSize(size) { recordsPageSize = size; }
 export function setRecordsTotalPages(total) { recordsTotalPages = total; }
@@ -56,6 +63,8 @@ export let detailCurrentPage = 1;
 export let detailPageSize = 20;
 export let detailTotalPages = 1;
 export let lastProductStats = null;
+export const getCurrentProductName = () => currentProductName;
+export const getDetailCurrentPage = () => detailCurrentPage;
 export function setCurrentProductName(name) { currentProductName = name; }
 export function setDetailCurrentPage(page) { detailCurrentPage = page; }
 export function setDetailPageSize(size) { detailPageSize = size; }
@@ -64,6 +73,7 @@ export function setLastProductStats(stats) { lastProductStats = stats; }
 
 // 所有产品列表（用于产品选择器和新增记录）
 export let allProducts = [];
+export const getAllProducts = () => allProducts;
 export function setAllProducts(products) { allProducts = products; }
 
 // 可搜索下拉组件状态
@@ -75,6 +85,8 @@ export function setRecordProductHighlightIndex(idx) { recordProductHighlightInde
 // 仓库状态
 export let currentWarehouse = null;  // { id, slug, name, is_default } or null (全局视图)
 export let allWarehouses = [];
+export const getCurrentWarehouse = () => currentWarehouse;
+export const getAllWarehouses = () => allWarehouses;
 export function setCurrentWarehouse(wh) { currentWarehouse = wh; }
 export function setAllWarehouses(list) { allWarehouses = list; }
 
@@ -82,6 +94,15 @@ export function setAllWarehouses(list) { allWarehouses = list; }
 export let contactsCurrentPage = 1;
 export let contactsPageSize = 20;
 export let contactsTotalPages = 1;
+export const getContactsCurrentPage = () => contactsCurrentPage;
 export function setContactsCurrentPage(page) { contactsCurrentPage = page; }
 export function setContactsPageSize(size) { contactsPageSize = size; }
 export function setContactsTotalPages(total) { contactsTotalPages = total; }
+
+// 租户状态
+export let currentTenant = null;
+export let deployMode = 'single_tenant';
+export const getDeployMode = () => deployMode;
+export function setCurrentTenant(tenant) { currentTenant = tenant; }
+export function setDeployMode(mode) { deployMode = mode; localStorage.setItem('deploy_mode', mode); }
+

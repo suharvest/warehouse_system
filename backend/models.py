@@ -7,6 +7,24 @@ from typing import List, Optional, Generic, TypeVar
 T = TypeVar('T')
 
 
+# ============ Tenant Models ============
+
+class TenantItem(BaseModel):
+    id: int
+    slug: str
+    name: str
+    is_active: bool = True
+    created_at: str
+
+class CreateTenantRequest(BaseModel):
+    slug: str
+    name: str
+
+class UpdateTenantRequest(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 # ============ Warehouse Models ============
 
 class WarehouseItem(BaseModel):
@@ -18,6 +36,8 @@ class WarehouseItem(BaseModel):
     is_default: bool = False
     is_disabled: bool = False
     created_at: str
+    tenant_id: Optional[int] = None
+    tenant_name: Optional[str] = None
 
 
 class CreateWarehouseRequest(BaseModel):
@@ -25,6 +45,7 @@ class CreateWarehouseRequest(BaseModel):
     slug: str
     name: str
     address: Optional[str] = None
+    tenant_id: Optional[int] = None
 
 
 class UpdateWarehouseRequest(BaseModel):
@@ -339,6 +360,7 @@ class UserInfo(BaseModel):
     username: str
     display_name: Optional[str]
     role: str  # 'admin' | 'operate' | 'view'
+    tenant_id: Optional[int] = None
 
 
 class SetupRequest(BaseModel):
@@ -367,6 +389,7 @@ class CreateUserRequest(BaseModel):
     password: str
     display_name: Optional[str] = None
     role: str = 'view'  # 'admin' | 'operate' | 'view'
+    tenant_id: Optional[int] = None
 
 
 class UpdateUserRequest(BaseModel):
@@ -386,6 +409,7 @@ class UserListItem(BaseModel):
     role: str
     is_disabled: bool
     created_at: str
+    tenant_id: Optional[int] = None
     warehouse_ids: Optional[List[int]] = None  # 授权仓库ID列表
     warehouse_names: Optional[List[str]] = None  # 授权仓库名称列表
 
@@ -604,6 +628,7 @@ class MCPConnectionItem(BaseModel):
     updated_at: Optional[str] = None
     warehouse_id: Optional[int] = None
     warehouse_name: Optional[str] = None
+    tenant_id: Optional[int] = None
 
 
 class MCPConnectionResponse(BaseModel):
