@@ -27,6 +27,7 @@ services:
       - data_a:/data
     environment:
       PORT: 1025
+      DEPLOY_MODE: ${DEPLOY_MODE:-single_tenant}
 
   warehouse-b:
     <<: *warehouse-base
@@ -37,6 +38,7 @@ services:
       - data_b:/data
     environment:
       PORT: 1026
+      DEPLOY_MODE: ${DEPLOY_MODE:-single_tenant}
 
   warehouse-c:
     <<: *warehouse-base
@@ -47,6 +49,7 @@ services:
       - data_c:/data
     environment:
       PORT: 1027
+      DEPLOY_MODE: ${DEPLOY_MODE:-single_tenant}
 
 volumes:
   data_a:

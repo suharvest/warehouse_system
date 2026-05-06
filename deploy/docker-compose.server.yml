@@ -13,6 +13,7 @@ services:
     environment:
       - PORT=1025
       - DATABASE_PATH=/data/warehouse.db
+      - DEPLOY_MODE=${DEPLOY_MODE:-single_tenant}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-10}
       - MAX_IMPORT_ROWS=${MAX_IMPORT_ROWS:-10000}

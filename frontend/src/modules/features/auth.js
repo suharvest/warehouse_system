@@ -2,9 +2,9 @@
 import { t } from '../../../i18n.js';
 import { authApi, setSessionExpiredHandler } from '../api.js';
 import {
-    currentUser, setCurrentUser,
-    isSystemInitialized, setIsSystemInitialized,
-    currentTab
+    getCurrentUser, setCurrentUser,
+    getIsSystemInitialized, setIsSystemInitialized,
+    getCurrentTab
 } from '../state.js';
 
 // 标记是否已显示过期提示（避免重复弹窗）
@@ -30,19 +30,19 @@ export function initSessionExpiredHandler() {
 }
 
 // 处理 session 过期
-function handleSessionExpired() {
+async function handleSessionExpired() {
     // 如果当前没有用户或已经通知过，跳过
-    if (!currentUser || sessionExpiredNotified) return;
+    if (!getCurrentUser() || sessionExpiredNotified) return;
 
     sessionExpiredNotified = true;
 
     // 清除用户状态
     setCurrentUser(null);
-    updateUserDisplay();
+    await updateUserDisplay();
     updatePermissionUI();
 
     // 如果在需要权限的页面，切换到看板
-    if ((currentTab === 'users' || currentTab === 'contacts' || currentTab === 'mcp') && switchTabFn) {
+    if ((getCurrentTab() === 'users' || getCurrentTab() === 'contacts' || getCurrentTab() === 'mcp') && switchTabFn) {
         switchTabFn('dashboard');
     }
 
@@ -75,26 +75,55 @@ export async function checkAuthStatus() {
             setCurrentUser(null);
         }
 
-        updateUserDisplay();
+        await updateUserDisplay();
         updatePermissionUI();
     } catch (error) {
         console.error('检查认证状态失败:', error);
         setCurrentUser(null);
-        updateUserDisplay();
+        await updateUserDisplay();
     }
 }
 
 // 更新用户显示
-export function updateUserDisplay() {
+export async function updateUserDisplay() {
     const nameDisplay = document.getElementById('user-name-display');
     const roleBadge = document.getElementById('user-role-badge');
     const loginBtn = document.getElementById('login-btn');
     const logoutBtn = document.getElementById('logout-btn');
 
-    if (currentUser) {
-        nameDisplay.textContent = currentUser.display_name || currentUser.username;
-        roleBadge.textContent = t('role' + currentUser.role.charAt(0).toUpperCase() + currentUser.role.slice(1));
-        roleBadge.className = 'user-role-badge ' + currentUser.role;
+    const user = getCurrentUser();
+    if (user) {
+        let tenantPrefix = '';
+        const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
+        
+        if (dm === 'multi_tenant') {
+            if (!user.tenant_id) {
+                tenantPrefix = `[${t('globalAdmin') || '全局管理'}] `;
+            } else {
+                // 如果 user 对象中没有 tenant_name，尝试获取
+                if (!user.tenant_name) {
+                    try {
+                        // 优先检查 login response 中是否已经包含 (假设后端已更新)
+                        // 如果没有，再尝试从 tenants 列表获取
+                        const resp = await fetch('/api/tenants', { credentials: 'include' });
+                        if (resp.ok) {
+                            const tenants = await resp.json();
+                            const tenant = tenants.find(t => t.id === user.tenant_id);
+                            if (tenant) {
+                                user.tenant_name = tenant.name;
+                            }
+                        }
+                    } catch (e) {
+                        console.error('获取租户信息失败:', e);
+                    }
+                }
+                tenantPrefix = `[${user.tenant_name || t('tenant') || '租户'}] `;
+            }
+        }
+
+        nameDisplay.textContent = tenantPrefix + (user.display_name || user.username);
+        roleBadge.textContent = t('role' + user.role.charAt(0).toUpperCase() + user.role.slice(1));
+        roleBadge.className = 'user-role-badge ' + user.role;
         roleBadge.style.display = 'inline';
         loginBtn.style.display = 'none';
         logoutBtn.style.display = 'inline';
@@ -108,6 +137,7 @@ export function updateUserDisplay() {
 
 // 更新权限控制UI
 export function updatePermissionUI() {
+    const currentUser = getCurrentUser();
     const role = currentUser ? currentUser.role : 'view';
     const roleLevel = { view: 1, operate: 2, admin: 3 };
     const currentLevel = roleLevel[role] || 1;
@@ -128,6 +158,14 @@ export function updatePermissionUI() {
     const mcpNav = document.getElementById('nav-mcp');
     if (mcpNav) {
         mcpNav.style.display = role === 'admin' ? 'flex' : 'none';
+    }
+
+    // 显示/隐藏租户管理TAB（admin + multi_tenant）
+    const tenantsNav = document.getElementById('nav-tenants');
+    const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
+    if (tenantsNav) {
+        // 租户管理仅在 multi_tenant 模式下对全局 admin 可见
+        tenantsNav.style.display = (role === 'admin' && dm === 'multi_tenant' && !currentUser?.tenant_id) ? 'flex' : 'none';
     }
 
 }
@@ -167,7 +205,7 @@ export async function handleLogin(event) {
             setCurrentUser(data.user);
             if (onLoginSuccessFn) await onLoginSuccessFn();
             closeLoginModal();
-            updateUserDisplay();
+            await updateUserDisplay();
             updatePermissionUI();
             if (refreshCurrentTabFn) refreshCurrentTabFn();
         } else {
@@ -190,11 +228,11 @@ export async function handleLogout() {
     }
 
     setCurrentUser(null);
-    updateUserDisplay();
+    await updateUserDisplay();
     updatePermissionUI();
 
     // 如果在需要权限的页面，切换到看板
-    if ((currentTab === 'users' || currentTab === 'mcp') && switchTabFn) {
+    if ((getCurrentTab() === 'users' || getCurrentTab() === 'mcp') && switchTabFn) {
         switchTabFn('dashboard');
     }
 }
@@ -241,7 +279,7 @@ export async function handleSetup(event) {
             setCurrentUser(data.user);
             setIsSystemInitialized(true);
             document.getElementById('setup-modal').classList.remove('show');
-            updateUserDisplay();
+            await updateUserDisplay();
             updatePermissionUI();
         } else {
             errorDiv.textContent = data.message || t('operationFailed');
