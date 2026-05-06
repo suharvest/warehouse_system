@@ -620,6 +620,8 @@ class MCPConnectionItem(BaseModel):
     role: str = 'operate'
     auto_start: bool
     status: str  # stopped | running | error
+    websocket_status: str = 'not_started'  # not_started | connecting | connected | disconnected | error
+    websocket_error: Optional[str] = None
     error_message: Optional[str] = None
     restart_count: int = 0
     pid: Optional[int] = None

@@ -1,6 +1,6 @@
 // ============ MCP 连接管理模块 ============
 import { t } from '../../../i18n.js';
-import { API_BASE_URL, currentWarehouse } from '../state.js';
+import { API_BASE_URL } from '../state.js';
 import { getCurrentWarehouseId } from '../api.js';
 
 // API 封装
@@ -12,7 +12,15 @@ async function mcpFetch(url, options = {}) {
     });
     if (!response.ok) {
         const error = new Error(`HTTP ${response.status}`);
-        try { error.data = await response.json(); } catch {}
+        try {
+            error.data = await response.json();
+            if (error.data?.detail) {
+                error.message = typeof error.data.detail === 'string'
+                    ? error.data.detail
+                    : JSON.stringify(error.data.detail);
+            }
+        } catch {}
+        error.status = response.status;
         throw error;
     }
     return response.json();
@@ -32,7 +40,8 @@ export async function loadMCPConnections() {
         renderConnections();
     } catch (error) {
         console.error('加载MCP连接失败:', error);
-        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-gray-400 py-8">${t('loadError')}</td></tr>`;
+        const detail = error.status ? `HTTP ${error.status}: ${escapeHtml(error.message)}` : escapeHtml(error.message || t('loadError'));
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-gray-400 py-8">${t('loadError')}<br><span class="text-xs">${detail}</span></td></tr>`;
     }
 }
 
@@ -41,13 +50,14 @@ function renderConnections() {
     if (!tbody) return;
 
     if (!connections || connections.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-gray-400 py-8">${t('mcpNoConnections')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-gray-400 py-8">${t('mcpNoConnections')}</td></tr>`;
         return;
     }
 
     tbody.innerHTML = connections.map(conn => {
         const statusIcon = getStatusIcon(conn.status);
         const statusText = getStatusText(conn);
+        const wsStatus = getWebSocketStatus(conn);
         const maskedEndpoint = maskEndpoint(conn.mcp_endpoint);
         const actions = getConnectionActions(conn);
 
@@ -64,6 +74,9 @@ function renderConnections() {
                 </td>
                 <td>
                     <span class="mcp-status-badge ${conn.status}">${statusText}</span>
+                </td>
+                <td>
+                    <span class="mcp-status-badge ${wsStatus.className}" title="${escapeHtml(wsStatus.title)}">${wsStatus.text}</span>
                 </td>
                 <td class="text-sm text-gray-500">${conn.uptime_seconds ? formatUptime(conn.uptime_seconds) : '-'}</td>
                 <td class="text-sm text-gray-500">${conn.auto_start ? t('mcpAutoStartYes') : t('mcpAutoStartNo')}</td>
@@ -86,6 +99,23 @@ function getStatusText(conn) {
         case 'running': return t('mcpStatusRunning');
         case 'error': return conn.error_message || t('mcpStatusError');
         default: return t('mcpStatusStopped');
+    }
+}
+
+function getWebSocketStatus(conn) {
+    const status = conn.websocket_status || 'not_started';
+    const error = conn.websocket_error || '';
+    switch (status) {
+        case 'connected':
+            return { text: t('mcpWsConnected'), className: 'connected', title: t('mcpWsConnected') };
+        case 'connecting':
+            return { text: t('mcpWsConnecting'), className: 'connecting', title: t('mcpWsConnecting') };
+        case 'disconnected':
+            return { text: t('mcpWsDisconnected'), className: 'disconnected', title: error || t('mcpWsDisconnected') };
+        case 'error':
+            return { text: t('mcpWsError'), className: 'error', title: error || t('mcpWsError') };
+        default:
+            return { text: t('mcpWsNotStarted'), className: 'stopped', title: t('mcpWsNotStarted') };
     }
 }
 
