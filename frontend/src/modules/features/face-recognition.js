@@ -251,14 +251,11 @@ function renderConfigTab() {
                         <label>${tt('faceEndpoint', '远端服务地址')}</label>
                         <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group span-2">
                         <label>${tt('faceAuthToken', '认证 Token')}</label>
                         <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
                     </div>
-                    <div class="form-group">
-                        <label>${tt('faceModelTag', '嵌入模型标签')}</label>
-                        <input type="text" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}" placeholder="arcface-r100">
-                    </div>
+                    <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
                 </div>
                 <div class="face-config-actions">
                     <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', t('submit') || '保存')}</button>
@@ -624,17 +621,21 @@ export function showFaceEnrollModal() {
                     </div>
                     <div class="form-group">
                         <label>${tt('faceAppliesToWarehouses', '生效仓库')}</label>
-                        <label class="checkbox-label">
+                        <label class="checkbox-label face-enroll-all-row">
                             <input type="checkbox" id="face-enroll-all-wh" checked>
                             <span>${tt('faceAppliesAll', '全部仓库')}</span>
+                            <span class="face-enroll-all-hint">${tt('faceAppliesAllHint', '取消勾选可单独指定下方仓库')}</span>
                         </label>
-                        <div id="face-enroll-wh-list" style="display:none;max-height:160px;overflow:auto;border:1px solid var(--border-color, #e5e7eb);border-radius:4px;padding:8px;margin-top:8px;">
-                            ${allWarehouses.map(w => `
-                                <label class="checkbox-label" style="display:block;">
-                                    <input type="checkbox" value="${w.id}">
-                                    <span>${escapeHtml(w.name)}</span>
-                                </label>
-                            `).join('')}
+                        <div id="face-enroll-wh-list" class="face-enroll-wh-list is-disabled">
+                            ${allWarehouses.length === 0
+                                ? `<div class="face-enroll-wh-empty">${t('noData')}</div>`
+                                : allWarehouses.map(w => `
+                                    <label class="checkbox-label face-enroll-wh-item">
+                                        <input type="checkbox" value="${w.id}" disabled>
+                                        <span>${escapeHtml(w.name)}</span>
+                                    </label>
+                                `).join('')
+                            }
                         </div>
                     </div>
                     <div class="form-error" id="face-enroll-error" hidden></div>
@@ -650,7 +651,15 @@ export function showFaceEnrollModal() {
     const allBox = document.getElementById('face-enroll-all-wh');
     const list = document.getElementById('face-enroll-wh-list');
     if (allBox && list) {
-        allBox.addEventListener('change', () => { list.style.display = allBox.checked ? 'none' : ''; });
+        const sync = () => {
+            list.classList.toggle('is-disabled', allBox.checked);
+            list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.disabled = allBox.checked;
+                if (allBox.checked) cb.checked = false;
+            });
+        };
+        allBox.addEventListener('change', sync);
+        sync();
     }
 }
 
