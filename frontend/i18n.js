@@ -514,6 +514,7 @@ const translations = {
         roleOperator: '操作员',
         faceEnrolledItems: '条',
         faceEnrollNoItems: '该用户尚未录入人脸',
+        faceAppliesAllHint: '取消勾选可单独指定下方仓库',
     },
     en: {
         pageTitle: 'Smart Warehouse - Dashboard',
@@ -1018,6 +1019,7 @@ const translations = {
         roleOperator: 'Operator',
         faceEnrolledItems: 'items',
         faceEnrollNoItems: 'No face enrolled for this user yet',
+        faceAppliesAllHint: 'Uncheck to pick specific warehouses below',
     }
 };
 
