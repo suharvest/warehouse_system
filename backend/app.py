@@ -5768,13 +5768,19 @@ class FaceRulePayload(BaseModel):
     warehouse_id: Optional[int] = None
     operation: str
     require_face: bool = False
-    allowed_user_ids: Optional[List[int]] = None
+    allowed_subject_ids: Optional[List[int]] = None
     min_confidence_override: Optional[float] = None
 
 class FaceEnrollmentPayload(BaseModel):
-    user_id: int
+    subject_id: int
     images_b64: List[str] = Field(default_factory=list)
     applies_to_warehouse_ids: Optional[List[int]] = None
+
+class FaceSubjectPayload(BaseModel):
+    name: str
+    employee_id: Optional[str] = None
+    note: Optional[str] = None
+    is_active: bool = True
 
 class FaceTestConnectionPayload(BaseModel):
     endpoint: str
@@ -5869,13 +5875,13 @@ async def face_list_rules(
         out = []
         for r in cur.fetchall():
             try:
-                allowed = _face_json.loads(r["allowed_user_ids"]) if r["allowed_user_ids"] else []
+                allowed = _face_json.loads(r["allowed_subject_ids"]) if r["allowed_subject_ids"] else []
             except Exception:
                 allowed = []
             out.append({
                 "id": r["id"], "tenant_id": r["tenant_id"], "warehouse_id": r["warehouse_id"],
                 "operation": r["operation"], "require_face": bool(r["require_face"]),
-                "allowed_user_ids": allowed,
+                "allowed_subject_ids": allowed,
                 "min_confidence_override": r["min_confidence_override"],
             })
         return out
@@ -5888,13 +5894,13 @@ async def face_create_rule(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    allowed_raw = _face_json.dumps(payload.allowed_user_ids) if payload.allowed_user_ids else None
+    allowed_raw = _face_json.dumps(payload.allowed_subject_ids) if payload.allowed_subject_ids else None
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO tenant_face_operation_rules
                 (tenant_id, warehouse_id, operation, require_face,
-                 allowed_user_ids, min_confidence_override)
+                 allowed_subject_ids, min_confidence_override)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (tid, payload.warehouse_id, payload.operation,
               1 if payload.require_face else 0, allowed_raw, payload.min_confidence_override))
@@ -5911,7 +5917,7 @@ async def face_update_rule(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    allowed_raw = _face_json.dumps(payload.allowed_user_ids) if payload.allowed_user_ids else None
+    allowed_raw = _face_json.dumps(payload.allowed_subject_ids) if payload.allowed_subject_ids else None
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT tenant_id FROM tenant_face_operation_rules WHERE id = ?", (rule_id,))
@@ -5923,7 +5929,7 @@ async def face_update_rule(
         cur.execute("""
             UPDATE tenant_face_operation_rules
             SET warehouse_id = ?, operation = ?, require_face = ?,
-                allowed_user_ids = ?, min_confidence_override = ?
+                allowed_subject_ids = ?, min_confidence_override = ?
             WHERE id = ?
         """, (payload.warehouse_id, payload.operation,
               1 if payload.require_face else 0, allowed_raw, payload.min_confidence_override, rule_id))
@@ -5953,7 +5959,7 @@ async def face_delete_rule(
 
 @app.get("/api/face/enrollments")
 async def face_list_enrollments(
-    user_id: Optional[int] = None,
+    subject_id: Optional[int] = None,
     tenant_id: Optional[int] = None,
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
@@ -5961,17 +5967,17 @@ async def face_list_enrollments(
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_db() as conn:
         cur = conn.cursor()
-        if user_id is not None:
+        if subject_id is not None:
             cur.execute("""
-                SELECT id, user_id, tenant_id, model_tag, applies_to_warehouse_ids,
+                SELECT id, subject_id, tenant_id, model_tag, applies_to_warehouse_ids,
                        is_active, enrolled_at, enrolled_by
                 FROM face_enrollments
-                WHERE tenant_id = ? AND user_id = ?
+                WHERE tenant_id = ? AND subject_id = ?
                 ORDER BY id DESC
-            """, (tid, user_id))
+            """, (tid, subject_id))
         else:
             cur.execute("""
-                SELECT id, user_id, tenant_id, model_tag, applies_to_warehouse_ids,
+                SELECT id, subject_id, tenant_id, model_tag, applies_to_warehouse_ids,
                        is_active, enrolled_at, enrolled_by
                 FROM face_enrollments
                 WHERE tenant_id = ?
@@ -5984,7 +5990,7 @@ async def face_list_enrollments(
             except Exception:
                 applies = None
             out.append({
-                "id": r["id"], "user_id": r["user_id"], "tenant_id": r["tenant_id"],
+                "id": r["id"], "subject_id": r["subject_id"], "tenant_id": r["tenant_id"],
                 "model_tag": r["model_tag"], "applies_to_warehouse_ids": applies,
                 "is_active": bool(r["is_active"]),
                 "enrolled_at": r["enrolled_at"], "enrolled_by": r["enrolled_by"],
@@ -6001,16 +6007,14 @@ async def face_create_enrollment(
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.images_b64:
         raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片")
-    # ensure target user belongs to this tenant
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM users WHERE id = ?", (payload.user_id,))
-        u = cur.fetchone()
-        if not u:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        # users.tenant_id may be NULL for global admin; require strict match for normal users
-        if u["tenant_id"] is not None and u["tenant_id"] != tid:
-            raise HTTPException(status_code=403, detail="用户不属于该租户")
+        cur.execute("SELECT tenant_id FROM face_subjects WHERE id = ?", (payload.subject_id,))
+        s = cur.fetchone()
+        if not s:
+            raise HTTPException(status_code=404, detail="人员档案不存在")
+        if int(s["tenant_id"]) != int(tid):
+            raise HTTPException(status_code=403, detail="人员档案不属于该租户")
         try:
             from backend.face.orchestrator import enroll_face as _enroll
             from backend.face.endpoint_client import FaceEndpointError
@@ -6020,7 +6024,7 @@ async def face_create_enrollment(
         try:
             result = await _enroll(
                 conn,
-                user_id=payload.user_id,
+                subject_id=payload.subject_id,
                 tenant_id=tid,
                 images_b64=payload.images_b64,
                 applies_to_warehouse_ids=payload.applies_to_warehouse_ids,
@@ -6136,7 +6140,7 @@ async def face_verify_mcp(
     # tenant_id must be concrete; global admin without tenant has no rules to evaluate
     if current_user.tenant_id is None:
         return {"status": "skipped", "failure_reason": "no_tenant_context",
-                "confidence": None, "matched_user_id": None}
+                "confidence": None, "matched_subject_id": None}
     try:
         from backend.face.orchestrator import verify_mcp_face as _verify
     except ImportError:
@@ -6154,8 +6158,120 @@ async def face_verify_mcp(
         "status": decision.status,
         "failure_reason": decision.failure_reason,
         "confidence": decision.confidence,
-        "matched_user_id": decision.matched_user_id,
+        "matched_subject_id": decision.matched_subject_id,
     }
+
+
+# ============ Face Subjects CRUD ============
+
+@app.get("/api/face/subjects")
+async def face_list_subjects(
+    tenant_id: Optional[int] = None,
+    include_inactive: bool = False,
+    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+):
+    tid = _face_resolve_tenant(current_user, tenant_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        sql = """
+            SELECT s.id, s.tenant_id, s.name, s.employee_id, s.note,
+                   s.is_active, s.created_by, s.created_at, s.updated_at,
+                   (SELECT COUNT(*) FROM face_enrollments e
+                    WHERE e.subject_id = s.id AND e.is_active = 1) AS enrollment_count
+            FROM face_subjects s
+            WHERE s.tenant_id = ?
+        """
+        params = [tid]
+        if not include_inactive:
+            sql += " AND s.is_active = 1"
+        sql += " ORDER BY s.id ASC"
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+@app.post("/api/face/subjects")
+async def face_create_subject(
+    payload: FaceSubjectPayload,
+    tenant_id: Optional[int] = None,
+    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+):
+    tid = _face_resolve_tenant(current_user, tenant_id)
+    if not payload.name or not payload.name.strip():
+        raise HTTPException(status_code=400, detail="姓名不能为空")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO face_subjects
+                (tenant_id, name, employee_id, note, is_active, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (tid, payload.name.strip(),
+             (payload.employee_id or None),
+             (payload.note or None),
+             1 if payload.is_active else 0,
+             current_user.id),
+        )
+        sid = cur.lastrowid
+        conn.commit()
+        return {"id": sid, "success": True}
+
+
+@app.put("/api/face/subjects/{subject_id}")
+async def face_update_subject(
+    subject_id: int,
+    payload: FaceSubjectPayload,
+    tenant_id: Optional[int] = None,
+    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+):
+    tid = _face_resolve_tenant(current_user, tenant_id)
+    if not payload.name or not payload.name.strip():
+        raise HTTPException(status_code=400, detail="姓名不能为空")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT tenant_id FROM face_subjects WHERE id = ?", (subject_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="人员档案不存在")
+        if int(row["tenant_id"]) != int(tid):
+            raise HTTPException(status_code=403, detail="无权修改该档案")
+        cur.execute(
+            """
+            UPDATE face_subjects
+            SET name = ?, employee_id = ?, note = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (payload.name.strip(),
+             (payload.employee_id or None),
+             (payload.note or None),
+             1 if payload.is_active else 0,
+             subject_id),
+        )
+        conn.commit()
+        return {"success": True, "id": subject_id}
+
+
+@app.delete("/api/face/subjects/{subject_id}")
+async def face_delete_subject(
+    subject_id: int,
+    tenant_id: Optional[int] = None,
+    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+):
+    tid = _face_resolve_tenant(current_user, tenant_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT tenant_id FROM face_subjects WHERE id = ?", (subject_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="人员档案不存在")
+        if int(row["tenant_id"]) != int(tid):
+            raise HTTPException(status_code=403, detail="无权删除该档案")
+        # ON DELETE CASCADE drops the enrollments; rules referencing this
+        # subject will be silently dropped from allowed lists by stale-id
+        # tolerance in the matcher (no explicit cleanup needed).
+        cur.execute("DELETE FROM face_subjects WHERE id = ?", (subject_id,))
+        conn.commit()
+        return {"success": True}
 
 
 # ============ 前端静态文件（all-in-one 部署）============
