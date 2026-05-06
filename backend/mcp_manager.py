@@ -28,6 +28,8 @@ class MCPProcess:
     api_key: str
     process: Optional[asyncio.subprocess.Process] = None
     status: str = 'stopped'  # stopped | running | error
+    websocket_status: str = 'not_started'  # not_started | connecting | connected | disconnected | error
+    websocket_error: Optional[str] = None
     error_message: Optional[str] = None
     restart_count: int = 0
     started_at: Optional[datetime] = None
@@ -101,6 +103,7 @@ class MCPProcessManager:
                 api_key=api_key,
                 process=process,
                 status='running',
+                websocket_status='connecting',
                 started_at=datetime.now(),
                 restart_count=0
             )
@@ -121,6 +124,8 @@ class MCPProcessManager:
                 endpoint=endpoint,
                 api_key=api_key,
                 status='error',
+                websocket_status='error',
+                websocket_error=str(e),
                 error_message=str(e)
             )
             return False
@@ -153,6 +158,8 @@ class MCPProcessManager:
             proc._log_task.cancel()
 
         proc.status = 'stopped'
+        proc.websocket_status = 'not_started'
+        proc.websocket_error = None
         proc.error_message = None
         logger.info(f"MCP connection '{conn_id}' stopped")
         return True
@@ -184,6 +191,9 @@ class MCPProcessManager:
             if proc.status == 'running':
                 proc.status = 'error'
                 proc.error_message = f'Process exited with code {proc.process.returncode}'
+                if proc.websocket_status in ('connecting', 'connected'):
+                    proc.websocket_status = 'disconnected'
+                    proc.websocket_error = proc.error_message
 
         uptime = None
         if proc.started_at and proc.status == 'running':
@@ -191,6 +201,8 @@ class MCPProcessManager:
 
         return {
             'status': proc.status,
+            'websocket_status': proc.websocket_status,
+            'websocket_error': proc.websocket_error,
             'pid': proc.process.pid if proc.process and proc.process.returncode is None else None,
             'error_message': proc.error_message,
             'restart_count': proc.restart_count,
@@ -247,6 +259,7 @@ class MCPProcessManager:
                     text = line.decode('utf-8', errors='replace').rstrip()
                     timestamp = datetime.now().strftime('%H:%M:%S')
                     proc.logs.append(f"[{timestamp}] {prefix} {text}")
+                    self._update_websocket_status_from_log(proc, text)
 
             if proc.process:
                 await asyncio.gather(
@@ -257,6 +270,21 @@ class MCPProcessManager:
             pass
         except Exception as e:
             logger.debug(f"Log collection ended for '{proc.conn_id}': {e}")
+
+    def _update_websocket_status_from_log(self, proc: MCPProcess, text: str):
+        """从 mcp_pipe 日志中提取 WebSocket 连接状态。"""
+        if 'Connecting to WebSocket server' in text:
+            proc.websocket_status = 'connecting'
+            proc.websocket_error = None
+        elif 'Successfully connected to WebSocket server' in text:
+            proc.websocket_status = 'connected'
+            proc.websocket_error = None
+        elif 'WebSocket connection closed' in text:
+            proc.websocket_status = 'disconnected'
+            proc.websocket_error = text
+        elif 'Connection error' in text or 'Connection closed' in text:
+            proc.websocket_status = 'error'
+            proc.websocket_error = text
 
     async def _monitor_loop(self):
         """每 30s 检查进程状态，崩溃时自动重启"""
