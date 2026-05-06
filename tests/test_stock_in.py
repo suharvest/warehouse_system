@@ -39,6 +39,26 @@ class TestStockIn:
         assert data['batch']['quantity'] == 30
         assert data['batch']['batch_id'] is not None
 
+    def test_stock_in_uses_only_accessible_warehouse_when_omitted(self, admin_client, sample_material):
+        """When the user has exactly one writable warehouse, warehouse_id may be omitted."""
+        from database import get_db_connection
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET tenant_id = 1 WHERE username = 'admin'")
+        conn.commit()
+        conn.close()
+
+        resp = admin_client.post("/api/materials/stock-in", json={
+            "product_name": sample_material['name'],
+            "quantity": 10,
+            "reason_category": "purchase"
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert data['product']['new_quantity'] == 110
+
     def test_stock_in_zero_quantity_rejected(self, admin_client, sample_material):
         """Stock-in with zero quantity should be rejected."""
         resp = admin_client.post("/api/materials/stock-in", json={

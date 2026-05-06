@@ -1,7 +1,7 @@
 // ============ 导入导出模块 ============
 import { t } from '../../../i18n.js';
 import { API_BASE_URL, getCurrentWarehouseId } from '../api.js';
-import { currentProductName, currentTab, currentWarehouse } from '../state.js';
+import { getCurrentProductName, getCurrentTab, getCurrentWarehouse } from '../state.js';
 
 // 回调函数引用
 let loadAllProductsFn = null;
@@ -86,18 +86,24 @@ export function exportRecords() {
     if (endDate) params.set('end_date', endDate);
     if (productName) params.set('product_name', productName);
     if (type) params.set('record_type', type);
+    const warehouseId = getCurrentWarehouseId();
+    if (warehouseId) params.set('warehouse_id', warehouseId);
 
     window.location.href = `${API_BASE_URL}/inventory/export-excel?${params}`;
 }
 
 export function exportProductRecords() {
-    if (!currentProductName) return;
-    window.location.href = `${API_BASE_URL}/inventory/export-excel?product_name=${encodeURIComponent(currentProductName)}`;
+    if (!getCurrentProductName()) return;
+    const params = new URLSearchParams();
+    params.set('product_name', getCurrentProductName());
+    const warehouseId = getCurrentWarehouseId();
+    if (warehouseId) params.set('warehouse_id', warehouseId);
+    window.location.href = `${API_BASE_URL}/inventory/export-excel?${params}`;
 }
 
 // ============ 导入功能 ============
 export async function showImportModal() {
-    if (!currentWarehouse) {
+    if (!getCurrentWarehouse()) {
         alert(t('writeRequiresWarehouse') || '写操作需要选择具体仓库');
         return;
     }
@@ -135,9 +141,13 @@ export async function handleFileSelect(event) {
 
     const formData = new FormData();
     formData.append('file', file);
+    const params = new URLSearchParams();
+    const warehouseId = getCurrentWarehouseId();
+    if (warehouseId) params.set('warehouse_id', warehouseId);
+    const query = params.toString();
 
     try {
-        const response = await fetch(`${API_BASE_URL}/materials/import-excel/preview`, {
+        const response = await fetch(`${API_BASE_URL}/materials/import-excel/preview${query ? `?${query}` : ''}`, {
             method: 'POST',
             body: formData,
             credentials: 'include'
@@ -470,8 +480,8 @@ async function executeImport(confirmNewSkusFlag) {
             closeImportModal();
             if (loadAllProductsFn) loadAllProductsFn();
             if (loadCategoriesFn) loadCategoriesFn();
-            if (currentTab === 'inventory' && loadInventoryFn) loadInventoryFn();
-            if (currentTab === 'dashboard' && loadDashboardDataFn) loadDashboardDataFn();
+            if (getCurrentTab() === 'inventory' && loadInventoryFn) loadInventoryFn();
+            if (getCurrentTab() === 'dashboard' && loadDashboardDataFn) loadDashboardDataFn();
         } else {
             alert(data.message || t('importFailed'));
         }

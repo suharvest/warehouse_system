@@ -68,6 +68,56 @@ class TestImportPreview:
         data = resp.json()
         assert data['success'] is True
 
+    def test_preview_rejects_records_export_template(self, admin_client):
+        """Inventory records exports should not be accepted as inventory import templates."""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(['物料名称', '规格', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '操作人', '原因类别', '备注', '时间'])
+        ws.append(['测试物料', '', 'SKU-001', '分类', '入库', 10, 'BATCH-001', '', 'admin', '采购入库', '', '2026-04-13 17:17:27'])
+
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        resp = admin_client.post(
+            "/api/materials/import-excel/preview",
+            files={"file": ("inventory_records.xlsx", buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is False
+        assert '出入库记录导出文件' in data['message']
+
+    def test_preview_inventory_export_with_empty_batch_column(self, admin_client, sample_material):
+        """Old inventory exports with an empty batch column should import as a simple snapshot."""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存', '批次号', '变体', '库存', '存放位置', '联系方'])
+        row = [sample_material['name'], sample_material['sku'], 'Test Category', 'pcs', 20, None, None, 120, 'A-01', None]
+        ws.append(row)
+        ws.append(row)
+
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        resp = admin_client.post(
+            "/api/materials/import-excel/preview",
+            files={"file": ("inventory.xlsx", buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        assert data['is_batch_mode'] is False
+        assert len(data['preview']) == 1
+        assert '重复行' in data['message']
+
 
 class TestImportConfirm:
     """Excel import confirmation tests."""
