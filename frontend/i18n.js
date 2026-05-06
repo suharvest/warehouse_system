@@ -510,6 +510,10 @@ const translations = {
         mode_hello: 'Hello 服务',
         mode_jetson: 'Jetson 服务',
         mode_custom: '自定义',
+        roleAdmin: '管理员',
+        roleOperator: '操作员',
+        faceEnrolledItems: '条',
+        faceEnrollNoItems: '该用户尚未录入人脸',
     },
     en: {
         pageTitle: 'Smart Warehouse - Dashboard',
@@ -1010,6 +1014,10 @@ const translations = {
         mode_hello: 'Hello Service',
         mode_jetson: 'Jetson Service',
         mode_custom: 'Custom',
+        roleAdmin: 'Admin',
+        roleOperator: 'Operator',
+        faceEnrolledItems: 'items',
+        faceEnrollNoItems: 'No face enrolled for this user yet',
     }
 };
 

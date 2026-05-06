@@ -376,7 +376,7 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER UNIQUE NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 0,
-            mode TEXT CHECK(mode IN('local','lan','hello','jetson','custom')),
+            mode TEXT CHECK(mode IN('local','lan')),
             endpoint TEXT,
             auth_token TEXT,
             embedding_model_tag TEXT,
