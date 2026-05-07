@@ -1,7 +1,8 @@
 // ============ MCP 连接管理模块 ============
 import { t } from '../../../i18n.js';
 import { API_BASE_URL } from '../state.js';
-import { getCurrentWarehouseId } from '../api.js';
+import { getCurrentWarehouseId, warehousesApi } from '../api.js';
+import { getCurrentUser } from '../state.js';
 
 // API 封装
 async function mcpFetch(url, options = {}) {
@@ -36,12 +37,14 @@ export async function loadMCPConnections() {
     if (!tbody) return;
 
     try {
-        connections = await mcpFetch('/mcp/connections');
+        const whId = getCurrentWarehouseId();
+        const url = whId ? `/mcp/connections?warehouse_id=${whId}` : '/mcp/connections';
+        connections = await mcpFetch(url);
         renderConnections();
     } catch (error) {
         console.error('加载MCP连接失败:', error);
         const detail = error.status ? `HTTP ${error.status}: ${escapeHtml(error.message)}` : escapeHtml(error.message || t('loadError'));
-        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-gray-400 py-8">${t('loadError')}<br><span class="text-xs">${detail}</span></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-gray-400 py-8">${t('loadError')}<br><span class="text-xs">${detail}</span></td></tr>`;
     }
 }
 
@@ -49,8 +52,16 @@ function renderConnections() {
     const tbody = document.getElementById('mcp-connections-tbody');
     if (!tbody) return;
 
+    // 全局管理员（tenant_id=null）显示租户列
+    const user = getCurrentUser();
+    const showTenantCol = user && (user.tenant_id === null || user.tenant_id === undefined);
+    document.querySelectorAll('.mcp-tenant-col').forEach(el => {
+        el.style.display = showTenantCol ? '' : 'none';
+    });
+    const colSpan = showTenantCol ? 8 : 7;
+
     if (!connections || connections.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-gray-400 py-8">${t('mcpNoConnections')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${colSpan}" class="text-center text-gray-400 py-8">${t('mcpNoConnections')}</td></tr>`;
         return;
     }
 
@@ -72,6 +83,8 @@ function renderConnections() {
                         </div>
                     </div>
                 </td>
+                ${showTenantCol ? `<td class="mcp-tenant-col text-sm">${escapeHtml(conn.tenant_name || '-')}</td>` : ''}
+                <td class="text-sm">${escapeHtml(conn.warehouse_name || '-')}</td>
                 <td>
                     <span class="mcp-status-badge ${conn.status}">${statusText}</span>
                 </td>
@@ -155,7 +168,7 @@ function escapeHtml(str) {
 }
 
 // ============ 添加连接 ============
-export function showAddMCPModal() {
+export async function showAddMCPModal() {
     const modal = document.getElementById('mcp-modal');
     if (!modal) return;
 
@@ -166,6 +179,24 @@ export function showAddMCPModal() {
     document.getElementById('mcp-conn-endpoint').value = '';
     document.getElementById('mcp-conn-autostart').checked = true;
     document.getElementById('mcp-modal-error').style.display = 'none';
+
+    // 加载仓库列表
+    const whSelect = document.getElementById('mcp-conn-warehouse');
+    whSelect.innerHTML = `<option value='' data-i18n='selectWarehouse'>${t('selectWarehouse')}</option>`;
+    try {
+        const data = await warehousesApi.getList();
+        const warehouses = data.warehouses || data || [];
+        warehouses.forEach(w => {
+            const opt = document.createElement('option');
+            opt.value = w.id;
+            opt.textContent = w.name;
+            whSelect.appendChild(opt);
+        });
+        const curWhId = getCurrentWarehouseId();
+        if (curWhId) whSelect.value = curWhId;
+    } catch (e) {
+        console.error('加载仓库列表失败:', e);
+    }
 
     modal.classList.add('show');
 }
@@ -181,10 +212,16 @@ export async function handleSaveMCP() {
     const endpoint = document.getElementById('mcp-conn-endpoint').value.trim();
     const role = 'operate';  // MCP 智能体固定使用操作员权限
     const autoStart = document.getElementById('mcp-conn-autostart').checked;
+    const whId = document.getElementById('mcp-conn-warehouse').value;
     const errorDiv = document.getElementById('mcp-modal-error');
 
     if (!name || !endpoint) {
         errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+    if (!whId) {
+        errorDiv.textContent = t('selectWarehouse');
         errorDiv.style.display = 'block';
         return;
     }
@@ -194,13 +231,13 @@ export async function handleSaveMCP() {
             // 编辑模式
             await mcpFetch(`/mcp/connections/${connId}`, {
                 method: 'PUT',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10) })
             });
         } else {
             // 新建模式
             await mcpFetch('/mcp/connections', {
                 method: 'POST',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: getCurrentWarehouseId() })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10) })
             });
         }
         closeMCPModal();
@@ -213,7 +250,7 @@ export async function handleSaveMCP() {
 }
 
 // ============ 编辑连接 ============
-export function editMCPConnection(connId) {
+export async function editMCPConnection(connId) {
     const conn = connections.find(c => c.id === connId);
     if (!conn) return;
 
@@ -226,6 +263,23 @@ export function editMCPConnection(connId) {
     document.getElementById('mcp-conn-endpoint').value = conn.mcp_endpoint;
     document.getElementById('mcp-conn-autostart').checked = conn.auto_start;
     document.getElementById('mcp-modal-error').style.display = 'none';
+
+    // 加载仓库列表
+    const whSelect = document.getElementById('mcp-conn-warehouse');
+    whSelect.innerHTML = `<option value='' data-i18n='selectWarehouse'>${t('selectWarehouse')}</option>`;
+    try {
+        const data = await warehousesApi.getList();
+        const warehouses = data.warehouses || data || [];
+        warehouses.forEach(w => {
+            const opt = document.createElement('option');
+            opt.value = w.id;
+            opt.textContent = w.name;
+            whSelect.appendChild(opt);
+        });
+        if (conn.warehouse_id) whSelect.value = conn.warehouse_id;
+    } catch (e) {
+        console.error('加载仓库列表失败:', e);
+    }
 
     modal.classList.add('show');
 }
