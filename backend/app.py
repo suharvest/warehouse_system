@@ -314,6 +314,9 @@ class CurrentUser:
                 (warehouse_id, self.tenant_id)
             )
             return cursor.fetchone() is not None
+        # API key 携带仓库绑定即作为授权依据（MCP/Agent 场景）
+        if self.source == 'api_key' and self.warehouse_id is not None:
+            return self.warehouse_id == warehouse_id
         cursor = conn.cursor()
         cursor.execute(
             'SELECT 1 FROM user_warehouses WHERE user_id = ? AND warehouse_id = ?',
@@ -4988,7 +4991,7 @@ async def shutdown_mcp_manager():
     await mcp_manager.stop_all()
 
 
-def _build_connection_item(row, status_info: dict, warehouse_name: str = None) -> MCPConnectionItem:
+def _build_connection_item(row, status_info: dict, warehouse_name: str = None, tenant_name: str = None) -> MCPConnectionItem:
     """从数据库行和实时状态构建响应对象"""
     return MCPConnectionItem(
         id=row['id'],
@@ -5007,7 +5010,8 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None) -
         updated_at=row['updated_at'],
         warehouse_id=row['warehouse_id'] if 'warehouse_id' in row.keys() else None,
         warehouse_name=warehouse_name,
-        tenant_id=row['tenant_id'] if 'tenant_id' in row.keys() else None
+        tenant_id=row['tenant_id'] if 'tenant_id' in row.keys() else None,
+        tenant_name=tenant_name
     )
 
 
@@ -5022,18 +5026,23 @@ async def list_mcp_connections(
         cursor = conn.cursor()
         scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id, 'mc')
         cursor.execute(f'''
-            SELECT mc.*, w.name as warehouse_name
+            SELECT mc.*, w.name as warehouse_name, t.name as tenant_name
             FROM mcp_connections mc
             LEFT JOIN warehouses w ON mc.warehouse_id = w.id
+            LEFT JOIN tenants t ON mc.tenant_id = t.id
             WHERE 1=1{scope_filter}
-            ORDER BY mc.created_at DESC
+            ORDER BY mc.tenant_id, mc.warehouse_id, mc.created_at DESC
         ''', scope_params)
         rows = cursor.fetchall()
 
     items = []
     for row in rows:
         status_info = mcp_manager.get_connection_status(row['id'])
-        items.append(_build_connection_item(row, status_info, warehouse_name=row['warehouse_name']))
+        items.append(_build_connection_item(
+            row, status_info,
+            warehouse_name=row['warehouse_name'],
+            tenant_name=row['tenant_name']
+        ))
 
     return items
 
@@ -5119,6 +5128,8 @@ async def update_mcp_connection(
         if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
+        old_endpoint = row['mcp_endpoint']
+
         updates = []
         params = []
         key_hash = hash_api_key(row['api_key'])
@@ -5171,6 +5182,12 @@ async def update_mcp_connection(
 
         cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
         row = cursor.fetchone()
+
+    if request.mcp_endpoint is not None and request.mcp_endpoint != old_endpoint:
+        if (conn_id in mcp_manager.connections
+            and mcp_manager.connections[conn_id].process
+            and mcp_manager.connections[conn_id].process.returncode is None):
+            await mcp_manager.restart_connection(conn_id, row['mcp_endpoint'], row['api_key'])
 
     status_info = mcp_manager.get_connection_status(conn_id)
     return MCPConnectionResponse(

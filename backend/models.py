@@ -631,6 +631,7 @@ class MCPConnectionItem(BaseModel):
     warehouse_id: Optional[int] = None
     warehouse_name: Optional[str] = None
     tenant_id: Optional[int] = None
+    tenant_name: Optional[str] = None
 
 
 class MCPConnectionResponse(BaseModel):
