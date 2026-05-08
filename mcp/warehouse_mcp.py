@@ -244,11 +244,14 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
 @mcp.tool()
 def stock_in(product_name: str, quantity: int,
              reason_category: str = "purchase", reason_note: str = "",
-             operator: str = "MCP系统", fuzzy: bool = True,
+             operator: str = "MCP系统",
              location: str = None, contact_id: int = None,
              variant: str = None) -> dict:
     """
-    产品入库。可直接传入模糊名称，自动解析为精确产品。
+    产品入库。直接传入名称即可，工具内部始终启用模糊匹配。
+
+    MCP 上游通常是 ASR（语音识别），输入注定带噪声（如"螺丝"被识别成"螺司"），
+    所以模糊匹配是工具的硬性前提，不暴露开关。
 
     参数:
         product_name: 产品名称（支持模糊输入，如"螺丝"会自动匹配"M3螺丝"）
@@ -262,7 +265,6 @@ def stock_in(product_name: str, quantity: int,
             - "other_in": 其他入库
         reason_note: 备注详情（可选），如"张三归还"、"供应商A"
         operator: 操作人（默认"MCP系统"）
-        fuzzy: 是否启用模糊匹配（默认 true）
         location: 存放位置（可选，如"A区-01架"）
         contact_id: 关联联系方 ID（可选，如供应商 ID）
         variant: 变体标识（可选，如"红"、"大号"等）。
@@ -276,19 +278,22 @@ def stock_in(product_name: str, quantity: int,
     if blocked is not None:
         return blocked
     return _provider.stock_in(product_name, quantity, reason_category, reason_note,
-                              operator, fuzzy, location, contact_id, variant)
+                              operator, True, location, contact_id, variant)
 
 
 @mcp.tool()
 def stock_out(product_name: str, quantity: int,
               reason_category: str, reason_note: str = "",
-              operator: str = "MCP系统", fuzzy: bool = True,
+              operator: str = "MCP系统",
               variant: str = None, location: str = None,
               batch_no: str = None) -> dict:
     """
     产品出库。可直接传入模糊名称，自动解析为精确产品。
     默认按 FIFO 消耗批次；若指定 variant / location，则仅从匹配批次中 FIFO 消耗。
     若指定 batch_no，则仅从该批次扣减，不 fallback 到 FIFO。
+
+    MCP 上游通常是 ASR（语音识别），输入注定带噪声，
+    所以模糊匹配始终启用，不暴露开关。
 
     参数：
         product_name: 产品名称（支持模糊输入，如"指示灯"会匹配到"LED指示灯"）
@@ -303,7 +308,6 @@ def stock_out(product_name: str, quantity: int,
             - "other_out": 其他出库
         reason_note: 详情备注（如"销售给XX公司"、"借给小王"），选填
         operator: 操作员姓名（默认"MCP系统"）
-        fuzzy: 是否启用产品名模糊匹配（默认 True）
         variant: 变体过滤（可选，如"红"）。指定后仅消耗该变体的批次。精确匹配。
         location: 库位过滤（可选，如"A-01"）。
                   MCP 场景自动开启作用域模糊匹配：用户口述"A 区"可匹配到 A-01。
@@ -322,18 +326,21 @@ def stock_out(product_name: str, quantity: int,
     if blocked is not None:
         return blocked
     return _provider.stock_out(product_name, quantity, reason_category, reason_note,
-                               operator, fuzzy, variant, location,
+                               operator, True, variant, location,
                                batch_no=batch_no, location_fuzzy=True)
 
 
 @mcp.tool()
 def search(query: str = None, entity_type: str = "material",
            category: str = None, status: str = None,
-           contact_type: str = None, fuzzy: bool = True,
+           contact_type: str = None,
            include_batches: bool = False,
            max_results: int = 0) -> dict:
     """
-    统一搜索工具，可搜索物料、联系方、操作员。支持模糊匹配。
+    统一搜索工具，可搜索物料、联系方、操作员。
+
+    MCP 上游通常是 ASR（语音识别），输入注定带噪声，
+    所以模糊匹配始终启用，不暴露开关。
 
     常见用法：
     - 搜物料："帮我找螺丝相关的产品" → search(query="螺丝", entity_type="material")
@@ -349,7 +356,6 @@ def search(query: str = None, entity_type: str = "material",
         status: 库存状态过滤（仅 material 有效），可选值：
                 "normal"(正常) / "warning"(偏低) / "danger"(告急)，多个用逗号分隔
         contact_type: 联系方类型过滤（仅 contact 有效），"supplier"(供应商) / "customer"(客户)
-        fuzzy: 是否启用模糊匹配（默认 true）
         include_batches: 搜索物料时是否附带每个物料的批次列表（默认 false，仅 entity_type="material" 有效）
         max_results: 返回结果上限（0 表示使用配置默认值）
 
@@ -358,7 +364,7 @@ def search(query: str = None, entity_type: str = "material",
                每个批次含 variant 变体标识）
         total: 总匹配数（可能大于返回的 items 数量）
     """
-    return _provider.search(query, entity_type, category, status, contact_type, fuzzy,
+    return _provider.search(query, entity_type, category, status, contact_type, True,
                             include_batches, max_results)
 
 
