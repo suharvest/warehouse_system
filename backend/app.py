@@ -467,6 +467,27 @@ def infer_single_writable_warehouse_id(current_user: CurrentUser) -> Optional[in
         return rows[0]['id'] if len(rows) == 1 else None
 
 
+def ensure_contact_tenant(cursor, current_user: CurrentUser, contact_id: Optional[int],
+                           target_tenant_id: Optional[int] = None):
+    """确认 contact_id 属于当前租户（写操作场景）。
+
+    contact_id 为 None 时直接通过。租户用户只能引用本租户联系方；
+    全局 admin 必须显式提供 target_tenant_id（写入目标租户），并校验联系方属于该租户。
+    不匹配抛 400，避免跨租户写入引用。
+    """
+    if contact_id is None:
+        return
+    cursor.execute('SELECT tenant_id FROM contacts WHERE id = ?', (contact_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail=f"联系方 {contact_id} 不存在")
+    expected_tenant = current_user.tenant_id if current_user.tenant_id is not None else target_tenant_id
+    if expected_tenant is None:
+        raise HTTPException(status_code=400, detail="无法确定联系方所属租户")
+    if row['tenant_id'] != expected_tenant:
+        raise HTTPException(status_code=403, detail=f"联系方 {contact_id} 不属于当前租户")
+
+
 def check_warehouse_access(conn, current_user: CurrentUser, warehouse_id: int):
     """检查用户是否有权访问指定仓库，无权限则抛出403"""
     if current_user.role == 'admin' and current_user.tenant_id is None:
@@ -513,19 +534,28 @@ def build_scope_filter(tenant_id: int, warehouse_id: Optional[int] = None, table
 def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
     """Resolve the tenant that should own a write record.
 
-    Tenant users always write to their own tenant. Global admins write to the
-    tenant that owns the selected warehouse; operations without a warehouse
-    fall back to the default tenant for backward compatibility.
+    Tenant users always write to their own tenant. Global admins must specify
+    a warehouse — the record is owned by that warehouse's tenant. Falling back
+    to a default tenant silently is unsafe (it lets a global admin's writes
+    land in the default tenant by accident) so we now reject it with HTTP 400.
     """
     if current_user.tenant_id is not None:
         return current_user.tenant_id
     if warehouse_id is None:
-        return 1
+        raise HTTPException(
+            status_code=400,
+            detail="全局管理员写操作必须指定 warehouse_id（无法推导目标租户）"
+        )
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT tenant_id FROM warehouses WHERE id = ?', (warehouse_id,))
         row = cursor.fetchone()
-        return row['tenant_id'] if row and row['tenant_id'] is not None else 1
+        if not row or row['tenant_id'] is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"warehouse_id={warehouse_id} 无效或未关联租户"
+            )
+        return row['tenant_id']
 
 
 # ============ 仓库管理 API ============
@@ -1058,16 +1088,28 @@ async def get_current_user_info(current_user: CurrentUser = Depends(require_auth
 
 @app.get("/api/auth/warehouses")
 async def get_my_warehouses(current_user: CurrentUser = Depends(require_auth('view'))):
-    """获取当前用户可访问的仓库列表"""
+    """获取当前用户可访问的仓库列表（含 tenant 信息，便于全局 admin 分组展示）"""
     with get_db() as conn:
         warehouses = current_user.get_authorized_warehouses(conn)
         cursor = conn.cursor()
         result = []
         for wh_id in warehouses:
-            cursor.execute('SELECT id, slug, name, is_default FROM warehouses WHERE id = ?', (wh_id,))
+            cursor.execute('''
+                SELECT w.id, w.slug, w.name, w.is_default, w.tenant_id, t.name AS tenant_name
+                FROM warehouses w
+                LEFT JOIN tenants t ON w.tenant_id = t.id
+                WHERE w.id = ?
+            ''', (wh_id,))
             wh = cursor.fetchone()
             if wh:
-                result.append({"id": wh['id'], "slug": wh['slug'], "name": wh['name'], "is_default": bool(wh['is_default'])})
+                result.append({
+                    "id": wh['id'],
+                    "slug": wh['slug'],
+                    "name": wh['name'],
+                    "is_default": bool(wh['is_default']),
+                    "tenant_id": wh['tenant_id'],
+                    "tenant_name": wh['tenant_name'],
+                })
         return {"warehouses": result}
 
 
@@ -1290,10 +1332,14 @@ async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'
     """获取API密钥列表（仅管理员）"""
     with get_db() as conn:
         cursor = conn.cursor()
-        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='')
+        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='ak')
         cursor.execute(f'''
-            SELECT id, name, role, is_disabled, created_at, last_used_at
-            FROM api_keys WHERE is_system = 0{tenant_filter} ORDER BY created_at DESC
+            SELECT ak.id, ak.name, ak.role, ak.is_disabled, ak.created_at, ak.last_used_at,
+                   ak.warehouse_id, w.name AS warehouse_name
+            FROM api_keys ak
+            LEFT JOIN warehouses w ON ak.warehouse_id = w.id
+            WHERE ak.is_system = 0{tenant_filter}
+            ORDER BY ak.created_at DESC
         ''', tenant_params)
 
         return [
@@ -1303,7 +1349,9 @@ async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'
                 role=row['role'],
                 is_disabled=bool(row['is_disabled']),
                 created_at=row['created_at'],
-                last_used_at=row['last_used_at']
+                last_used_at=row['last_used_at'],
+                warehouse_id=row['warehouse_id'],
+                warehouse_name=row['warehouse_name'],
             )
             for row in cursor.fetchall()
         ]
@@ -1327,7 +1375,19 @@ async def create_api_key(
         wh_id = request.warehouse_id
         if wh_id is not None:
             wh_id = resolve_warehouse_id(current_user, wh_id)
-        key_tenant_id = current_user.tenant_id if wh_id is None else resolve_tenant_id_for_write(current_user, wh_id)
+
+        # 全局 admin 必须指定 wh，否则会生成 tenant_id=NULL 的跨租户 key（数据安全风险）
+        if current_user.tenant_id is None and wh_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="全局管理员创建 API Key 必须指定 warehouse_id（无法推导目标租户）"
+            )
+        # 租户用户：tenant_id 跟随自身；全局 admin：从 wh 推导
+        if current_user.tenant_id is not None:
+            key_tenant_id = current_user.tenant_id
+        else:
+            key_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+
         cursor.execute('''
             INSERT INTO api_keys (key_hash, name, role, user_id, tenant_id, warehouse_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1915,15 +1975,13 @@ async def list_contacts(
     contact_type: Optional[str] = Query(None, description="类型: supplier/customer/all"),
     include_disabled: bool = Query(False, description="是否包含禁用的联系方"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
-    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取联系方列表（分页）"""
+    """获取联系方列表（分页）— 联系方为租户级，不按仓库过滤"""
     with get_db() as conn:
         cursor = conn.cursor()
 
-        wh_id = resolve_warehouse_id(current_user, warehouse_id)
-        scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id, '')
+        scope_filter, scope_params = build_scope_filter(current_user.tenant_id, None, '')
         base_query = f'''
             SELECT id, name, address, phone, email, is_supplier, is_customer,
                    notes, is_disabled, created_at
@@ -1991,12 +2049,10 @@ async def list_contacts(
 
 @app.get("/api/contacts/suppliers", response_model=List[ContactListItem])
 async def list_suppliers(
-    warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取供应商列表（用于下拉选择）"""
-    wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id, '')
+    """获取供应商列表（用于下拉选择）— 联系方为租户级"""
+    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, None, '')
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(f'''
@@ -2018,12 +2074,10 @@ async def list_suppliers(
 
 @app.get("/api/contacts/customers", response_model=List[ContactListItem])
 async def list_customers(
-    warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取客户列表（用于下拉选择）"""
-    wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id, '')
+    """获取客户列表（用于下拉选择）— 联系方为租户级"""
+    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, None, '')
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(f'''
@@ -2044,17 +2098,19 @@ async def list_customers(
 
 
 @app.get("/api/operators", response_model=List[OperatorListItem])
-async def get_operators_for_filter():
+async def get_operators_for_filter(
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
     """获取操作员列表（用于筛选下拉）- 返回所有有操作权限的用户"""
     with get_db() as conn:
         cursor = conn.cursor()
-        # 获取所有有操作权限的用户（operate或admin角色）
-        cursor.execute('''
+        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id)
+        cursor.execute(f'''
             SELECT id as user_id, username, display_name
             FROM users
-            WHERE is_disabled = 0 AND role IN ('operate', 'admin')
+            WHERE is_disabled = 0 AND role IN ('operate', 'admin'){tenant_filter}
             ORDER BY display_name, username
-        ''')
+        ''', tenant_params)
         return [
             OperatorListItem(
                 user_id=row['user_id'],
@@ -2112,12 +2168,24 @@ async def create_contact(
         cursor = conn.cursor()
         created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # 解析仓库ID（新建联系人时关联仓库）
-        wh_id = resolve_warehouse_id(current_user, request.warehouse_id) if hasattr(request, 'warehouse_id') else resolve_warehouse_id(current_user, None)
-        contact_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+        # 联系方为租户级（不绑定仓库）。租户用户用自身 tenant_id；
+        # 全局 admin 必须显式指定 tenant_id。
+        if current_user.tenant_id is not None:
+            contact_tenant_id = current_user.tenant_id
+        else:
+            if request.tenant_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="全局管理员创建联系方必须指定 tenant_id"
+                )
+            cursor.execute('SELECT id FROM tenants WHERE id = ? AND is_active = 1', (request.tenant_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=400, detail="租户不存在或已停用")
+            contact_tenant_id = request.tenant_id
+
         cursor.execute('''
             INSERT INTO contacts (name, address, phone, email, is_supplier, is_customer, notes, warehouse_id, tenant_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         ''', (
             request.name,
             request.address,
@@ -2126,7 +2194,6 @@ async def create_contact(
             1 if request.is_supplier else 0,
             1 if request.is_customer else 0,
             request.notes,
-            wh_id,
             contact_tenant_id,
             created_at
         ))
@@ -2251,7 +2318,7 @@ async def delete_contact(
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
 def get_dashboard_stats(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取仪表盘统计数据（排除禁用物料）"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2338,7 +2405,7 @@ def get_dashboard_stats(
 @app.get("/api/dashboard/category-distribution", response_model=List[CategoryItem])
 def get_category_distribution(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取库存类型分布"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2364,7 +2431,7 @@ def get_category_distribution(
 @app.get("/api/dashboard/weekly-trend", response_model=WeeklyTrend)
 def get_weekly_trend(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取近7天出入库趋势"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2408,7 +2475,7 @@ def get_weekly_trend(
 @app.get("/api/dashboard/top-stock", response_model=TopStock)
 def get_top_stock(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取库存TOP10"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2440,7 +2507,7 @@ def get_top_stock(
 @app.get("/api/dashboard/low-stock-alert", response_model=List[LowStockItem])
 def get_low_stock_alert(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
     """获取库存预警列表"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2479,12 +2546,16 @@ def fuzzy_match_endpoint(
     entity_type: str = Query("all", description="实体类型: material/contact/operator/all"),
     top_k: int = Query(5, ge=1, le=50, description="返回前k个结果"),
     threshold: float = Query(50.0, ge=0, le=100, description="最低分数阈值"),
-    warehouse_id: Optional[int] = Query(None, description="仓库ID（预留，暂未生效）"),
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """模糊匹配搜索"""
+    """模糊匹配搜索（按当前租户/仓库范围过滤候选）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
     matcher = get_fuzzy_matcher()
-    result = matcher.resolve(q, entity_type=entity_type)
-    candidates_raw = matcher.search(q, entity_type=entity_type, top_k=top_k, threshold=threshold)
+    result = matcher.resolve(q, entity_type=entity_type,
+                             tenant_id=current_user.tenant_id, warehouse_id=wh_id)
+    candidates_raw = matcher.search(q, entity_type=entity_type, top_k=top_k, threshold=threshold,
+                                    tenant_id=current_user.tenant_id, warehouse_id=wh_id)
 
     candidates = [FuzzyMatchCandidate(**c) for c in candidates_raw]
     best_match = FuzzyMatchCandidate(**result['best_match']) if result['best_match'] else None
@@ -2522,27 +2593,37 @@ def unified_search(
 ):
     """统一搜索端点"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
+    tenant_id = current_user.tenant_id
     with get_db() as conn:
         cursor = conn.cursor()
 
         if entity_type == "material":
-            return _search_materials(cursor, q, category, status, fuzzy, format, include_batches, page, page_size, wh_filter, wh_params)
+            scope_filter, scope_params = build_scope_filter(tenant_id, wh_id)
+            return _search_materials(cursor, q, category, status, fuzzy, format, include_batches,
+                                     page, page_size, scope_filter, scope_params,
+                                     tenant_id=tenant_id, warehouse_id=wh_id)
         elif entity_type == "contact":
-            return _search_contacts(cursor, q, contact_type, fuzzy, format, page, page_size, wh_filter, wh_params)
+            # 联系方为租户级（无 wh 过滤）
+            scope_filter, scope_params = build_scope_filter(tenant_id, None)
+            return _search_contacts(cursor, q, contact_type, fuzzy, format, page, page_size,
+                                    scope_filter, scope_params, tenant_id=tenant_id)
         elif entity_type == "operator":
-            return _search_operators(cursor, q, fuzzy, format, page, page_size, wh_filter, wh_params)
+            # users 表无 warehouse_id 列，只按 tenant 过滤
+            scope_filter, scope_params = build_scope_filter(tenant_id, None)
+            return _search_operators(cursor, q, fuzzy, format, page, page_size,
+                                     scope_filter, scope_params, tenant_id=tenant_id)
         else:
             raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
 
 
-def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=()):
+def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=(), tenant_id=None, warehouse_id=None):
     """搜索物料"""
     # 获取匹配的 material IDs (fuzzy mode)
     matched_ids = None
     if q and fuzzy:
         matcher = get_fuzzy_matcher()
-        results = matcher.search(q, entity_type="material", top_k=100, threshold=50.0)
+        results = matcher.search(q, entity_type="material", top_k=100, threshold=50.0,
+                                 tenant_id=tenant_id, warehouse_id=warehouse_id)
         matched_ids = [r['entity_id'] for r in results]
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
@@ -2670,12 +2751,14 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, 
     return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
 
 
-def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size, scope_filter='', scope_params=()):
-    """搜索联系方"""
+def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size, scope_filter='', scope_params=(), tenant_id=None):
+    """搜索联系方（租户级）"""
     matched_ids = None
     if q and fuzzy:
         matcher = get_fuzzy_matcher()
-        results = matcher.search(q, entity_type="contact", top_k=100, threshold=50.0)
+        # 联系方为租户级，不传 warehouse_id
+        results = matcher.search(q, entity_type="contact", top_k=100, threshold=50.0,
+                                 tenant_id=tenant_id)
         matched_ids = [r['entity_id'] for r in results]
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
@@ -2726,12 +2809,13 @@ def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size, scope
     return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
 
 
-def _search_operators(cursor, q, fuzzy, fmt, page, page_size, scope_filter='', scope_params=()):
-    """搜索操作员"""
+def _search_operators(cursor, q, fuzzy, fmt, page, page_size, scope_filter='', scope_params=(), tenant_id=None):
+    """搜索操作员（按 tenant 过滤；users 表无 warehouse_id）"""
     matched_ids = None
     if q and fuzzy:
         matcher = get_fuzzy_matcher()
-        results = matcher.search(q, entity_type="operator", top_k=100, threshold=50.0)
+        results = matcher.search(q, entity_type="operator", top_k=100, threshold=50.0,
+                                 tenant_id=tenant_id)
         matched_ids = [r['entity_id'] for r in results]
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
@@ -2854,7 +2938,8 @@ def get_materials_list(
         fuzzy_ids = None
         if name and fuzzy:
             matcher = get_fuzzy_matcher()
-            results = matcher.search(name, entity_type="material", top_k=100, threshold=50.0)
+            results = matcher.search(name, entity_type="material", top_k=100, threshold=50.0,
+                                     tenant_id=current_user.tenant_id, warehouse_id=wh_id)
             fuzzy_ids = [r['entity_id'] for r in results]
             if not fuzzy_ids:
                 return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
@@ -3152,19 +3237,20 @@ def get_product_trend(
     if not name:
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id)
+
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 查询产品ID
-        cursor.execute('SELECT id FROM materials WHERE name = ?', (name,))
+        # 查询产品ID（限定到当前租户/仓库，避免跨租户存在性探针）
+        m_filter, m_params = build_scope_filter(current_user.tenant_id, wh_id)
+        cursor.execute(f'SELECT id FROM materials WHERE name = ?{m_filter}', (name,) + m_params)
         product = cursor.fetchone()
         if not product:
             raise HTTPException(status_code=404, detail="产品不存在")
 
         material_id = product['id']
-
-        wh_id = resolve_warehouse_id(current_user, warehouse_id)
-        scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id)
 
         # 获取近7天的日期
         dates = []
@@ -3215,8 +3301,9 @@ def get_product_records(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 查询产品ID
-        cursor.execute('SELECT id FROM materials WHERE name = ?', (name,))
+        # 查询产品ID（限定到当前租户/仓库，避免拿到其他租户同名 SKU）
+        m_filter, m_params = build_scope_filter(current_user.tenant_id, wh_id)
+        cursor.execute(f'SELECT id FROM materials WHERE name = ?{m_filter}', (name,) + m_params)
         product = cursor.fetchone()
         if not product:
             raise HTTPException(status_code=404, detail="产品不存在")
@@ -3564,6 +3651,9 @@ async def stock_in(
     with get_db() as conn:
         check_warehouse_access(conn, current_user, wh_id)
         cursor = conn.cursor()
+        # 校验 contact_id 跨租户归属（防止恶意/前端误传）
+        ensure_contact_tenant(cursor, current_user, request.contact_id,
+                              resolve_tenant_id_for_write(current_user, wh_id))
         wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
 
         # 查询产品（先精确匹配，按仓库过滤）
@@ -3573,7 +3663,8 @@ async def stock_in(
         # 模糊匹配
         if not row and request.fuzzy:
             matcher = get_fuzzy_matcher()
-            result = matcher.resolve(product_name, entity_type="material")
+            result = matcher.resolve(product_name, entity_type="material",
+                                     tenant_id=current_user.tenant_id, warehouse_id=wh_id)
 
             if result['confident'] and result['best_match']:
                 resolved_from = product_name
@@ -3676,6 +3767,8 @@ async def stock_out(
     with get_db() as conn:
         check_warehouse_access(conn, current_user, wh_id)
         cursor = conn.cursor()
+        ensure_contact_tenant(cursor, current_user, stock_data.contact_id,
+                              resolve_tenant_id_for_write(current_user, wh_id))
         wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
 
         cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ?{wh_filter}',
@@ -3684,7 +3777,8 @@ async def stock_out(
 
         if not row and stock_data.fuzzy:
             matcher = get_fuzzy_matcher()
-            result = matcher.resolve(product_name, entity_type="material")
+            result = matcher.resolve(product_name, entity_type="material",
+                                     tenant_id=current_user.tenant_id, warehouse_id=wh_id)
             if result['confident'] and result['best_match']:
                 resolved_from = product_name
                 best = result['best_match']
@@ -3746,11 +3840,11 @@ async def stock_out(
         # ─── 分支 A：指定批次精确扣减 ───
         if stock_data.batch_no:
             cursor.execute(
-                """SELECT id, batch_no, quantity, location, variant, material_id, warehouse_id
-                   FROM batches WHERE batch_no = ?""",
-                (stock_data.batch_no,))
+                f"""SELECT id, batch_no, quantity, location, variant, material_id, warehouse_id
+                    FROM batches WHERE batch_no = ?{wh_filter}""",
+                (stock_data.batch_no,) + wh_params)
             batch = cursor.fetchone()
-            if not batch or batch['material_id'] != material_id or batch['warehouse_id'] != wh_id:
+            if not batch or batch['material_id'] != material_id:
                 return StockOutResponse(
                     success=False, error="batch_not_found",
                     message=f"批次 '{stock_data.batch_no}' 不存在或不属于当前产品/仓库")
@@ -4161,7 +4255,7 @@ async def preview_import_excel(
     request: Request,
     file: UploadFile = File(...),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(get_current_user)  # 需要登录
+    current_user: CurrentUser = Depends(require_auth('operate'))
 ):
     """预览Excel导入内容，自动检测简化模式/批次模式"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -4265,13 +4359,17 @@ async def preview_import_excel(
     with get_db() as conn:
         cursor = conn.cursor()
 
+        # 联系方为租户级（不绑定仓库），用 tenant 单独构造 scope
+        contact_tenant_id = resolve_tenant_id_for_write(current_user, wh_id) if wh_id is not None else current_user.tenant_id
+        contact_scope_filter, contact_scope_params = build_scope_filter(contact_tenant_id, None)
+
         # 联系方解析辅助
         def resolve_contact(name):
             if not name:
                 return None, None
             cursor.execute(
-                f'SELECT id FROM contacts WHERE name = ? AND is_disabled = 0{wh_filter}',
-                (name,) + wh_params
+                f'SELECT id FROM contacts WHERE name = ? AND is_disabled = 0{contact_scope_filter}',
+                (name,) + contact_scope_params
             )
             r = cursor.fetchone()
             if r:
@@ -4508,6 +4606,12 @@ async def confirm_import_excel(
         check_warehouse_access(conn, current_user, wh_id)
         cursor = conn.cursor()
 
+        # 校验所有显式传入的 contact_id 都属于本租户（防止跨租户写入引用）
+        target_tenant_for_contacts = resolve_tenant_id_for_write(current_user, wh_id)
+        seen_contact_ids = {item.contact_id for item in request.changes if item.contact_id}
+        for cid in seen_contact_ids:
+            ensure_contact_tenant(cursor, current_user, cid, target_tenant_for_contacts)
+
         # 收集导入文件中的所有SKU
         import_skus = set(item.sku for item in request.changes)
 
@@ -4521,23 +4625,24 @@ async def confirm_import_excel(
                 warnings.append("已跳过禁用导入文件之外的SKU，如需禁用请勾选确认选项后重试。")
             cursor.execute(f'UPDATE materials SET is_disabled = 0 WHERE sku IN ({placeholders}){wh_filter}', list(import_skus) + list(wh_params))
 
-        # 前置：创建新联系方
+        # 前置：创建新联系方（联系方为租户级，不绑定仓库）
+        contact_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+        contact_scope_filter, contact_scope_params = build_scope_filter(contact_tenant_id, None)
         contact_name_to_id = {}
         for item in request.changes:
             if item.contact_name and not item.contact_id:
                 if item.contact_name not in contact_name_to_id:
-                    # 再查一次（可能预览后用户已手动创建）
                     cursor.execute(
-                        f'SELECT id FROM contacts WHERE name = ? AND is_disabled = 0{wh_filter}',
-                        (item.contact_name,) + wh_params
+                        f'SELECT id FROM contacts WHERE name = ? AND is_disabled = 0{contact_scope_filter}',
+                        (item.contact_name,) + contact_scope_params
                     )
                     existing = cursor.fetchone()
                     if existing:
                         contact_name_to_id[item.contact_name] = existing['id']
                     else:
                         cursor.execute(
-                            'INSERT INTO contacts (name, is_supplier, warehouse_id, tenant_id, created_at) VALUES (?, 1, ?, ?, ?)',
-                            (item.contact_name, wh_id, resolve_tenant_id_for_write(current_user, wh_id), now)
+                            'INSERT INTO contacts (name, is_supplier, warehouse_id, tenant_id, created_at) VALUES (?, 1, NULL, ?, ?)',
+                            (item.contact_name, contact_tenant_id, now)
                         )
                         contact_name_to_id[item.contact_name] = cursor.lastrowid
 
@@ -4918,12 +5023,17 @@ async def add_inventory_record(
             ),
             current_user
         )
-        # 入库成功且填写了库位时，更新产品汇总库位
+        # 入库成功且填写了库位时，更新产品汇总库位（必须限定到 stock_in 实际写入的仓库/租户，
+        # 否则同名 SKU 在其他租户/仓库的 location 会被一起改掉）
         if result.success and request.location:
+            wh_id = require_warehouse_id(current_user, request.warehouse_id)
+            scope_filter, scope_params = build_scope_filter(
+                resolve_tenant_id_for_write(current_user, wh_id), wh_id
+            )
             with get_db() as conn:
                 conn.execute(
-                    'UPDATE materials SET location = ? WHERE name = ?',
-                    (request.location, request.product_name)
+                    f'UPDATE materials SET location = ? WHERE name = ?{scope_filter}',
+                    (request.location, request.product_name) + scope_params
                 )
                 conn.commit()
         return result
@@ -5402,9 +5512,13 @@ async def set_system_mode(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 切换到外部ERP模式时，必须先有激活的Provider
+        # 切换到外部ERP模式时，必须先有激活的Provider（按当前租户范围）
         if mode == 'external_erp':
-            cursor.execute("SELECT id FROM erp_providers WHERE is_active = 1")
+            tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id)
+            cursor.execute(
+                f"SELECT id FROM erp_providers WHERE is_active = 1{tenant_filter}",
+                tenant_params
+            )
             if not cursor.fetchone():
                 raise HTTPException(status_code=400, detail="切换到外部ERP模式前，请先激活一个 Provider")
 
@@ -5520,6 +5634,12 @@ async def upload_erp_provider(
     }
 
 
+def _ensure_provider_tenant(row, current_user: CurrentUser):
+    """确认 provider 属于当前租户（全局 admin 例外）。失败抛 403。"""
+    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权操作其他租户的 Provider")
+
+
 @app.get("/api/erp/providers/{provider_id}")
 async def get_erp_provider(
     provider_id: int,
@@ -5533,6 +5653,7 @@ async def get_erp_provider(
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
+    _ensure_provider_tenant(row, current_user)
 
     p = dict(row)
     p['config'] = _json.loads(p['config']) if p['config'] else {}
@@ -5553,9 +5674,11 @@ async def update_erp_provider(
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM erp_providers WHERE id = ?", (provider_id,))
-        if not cursor.fetchone():
+        cursor.execute("SELECT id, tenant_id FROM erp_providers WHERE id = ?", (provider_id,))
+        existing = cursor.fetchone()
+        if not existing:
             raise HTTPException(status_code=404, detail="Provider 不存在")
+        _ensure_provider_tenant(existing, current_user)
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         updates = []
@@ -5594,6 +5717,7 @@ async def delete_erp_provider(
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
+    _ensure_provider_tenant(row, current_user)
 
     if row['is_active']:
         raise HTTPException(status_code=400, detail="请先停用 Provider 再删除")
@@ -5628,6 +5752,7 @@ async def test_erp_provider(
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
+    _ensure_provider_tenant(row, current_user)
 
     config = _json.loads(row['config']) if row['config'] else {}
     custom_dir = _get_providers_custom_dir()
@@ -5679,6 +5804,7 @@ async def activate_erp_provider(
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
+    _ensure_provider_tenant(row, current_user)
 
     # 校验 Level 1 测试通过
     test_results = _json.loads(row['test_results']) if row['test_results'] else None
@@ -5687,11 +5813,20 @@ async def activate_erp_provider(
         raise HTTPException(status_code=400, detail="请先通过 Level 1 测试再激活")
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # 仅停用同租户的其他 Provider —— 不能误伤其他租户的激活记录
+    target_tenant_id = row['tenant_id']
     with get_db() as conn:
         cursor = conn.cursor()
-        # 先停用所有其他 Provider
-        cursor.execute("UPDATE erp_providers SET is_active = 0, updated_at = ?", (now,))
-        # 激活指定 Provider
+        if target_tenant_id is None:
+            cursor.execute(
+                "UPDATE erp_providers SET is_active = 0, updated_at = ? WHERE tenant_id IS NULL",
+                (now,)
+            )
+        else:
+            cursor.execute(
+                "UPDATE erp_providers SET is_active = 0, updated_at = ? WHERE tenant_id = ?",
+                (now, target_tenant_id)
+            )
         cursor.execute(
             "UPDATE erp_providers SET is_active = 1, updated_at = ? WHERE id = ?",
             (now, provider_id)
@@ -5746,6 +5881,7 @@ async def get_erp_provider_status(
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
+    _ensure_provider_tenant(row, current_user)
 
     config = _json.loads(row['config']) if row['config'] else {}
     custom_dir = _get_providers_custom_dir()
