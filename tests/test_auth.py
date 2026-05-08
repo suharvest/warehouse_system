@@ -100,19 +100,24 @@ class TestLogout:
 class TestPermissions:
     """Permission control tests."""
 
-    def test_guest_can_read_dashboard(self, app_instance):
-        """Guest users can read dashboard stats."""
+    def test_guest_cannot_read_dashboard(self, app_instance):
+        """Guest users must log in before reading dashboard data.
+
+        Previously the dashboard was open to guests; in multi-tenant mode
+        that leaked aggregated stats across tenants because guest tenant_id
+        was None and build_scope_filter returned an empty filter.
+        """
         from fastapi.testclient import TestClient
         fresh_client = TestClient(app_instance)
         resp = fresh_client.get("/api/dashboard/stats")
-        assert resp.status_code == 200
+        assert resp.status_code == 401
 
-    def test_guest_can_read_materials(self, app_instance):
-        """Guest users can read materials list."""
+    def test_guest_cannot_read_materials(self, app_instance):
+        """Guest users must log in before reading materials list."""
         from fastapi.testclient import TestClient
         fresh_client = TestClient(app_instance)
         resp = fresh_client.get("/api/materials/list")
-        assert resp.status_code == 200
+        assert resp.status_code == 401
 
     def test_guest_cannot_stock_in(self, app_instance):
         """Guest cannot perform stock-in."""
