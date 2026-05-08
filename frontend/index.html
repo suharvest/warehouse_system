@@ -1716,6 +1716,11 @@
             <div class="modal-body">
                 <form id="contact-form">
                     <input type="hidden" id="contact-id">
+                    <!-- 仅全局管理员（跨租户）需要选择租户，其它身份隐藏 -->
+                    <div class="form-group" id="contact-tenant-group" style="display:none;">
+                        <label><span>租户</span> <span class="required">*</span></label>
+                        <select id="contact-tenant"></select>
+                    </div>
                     <div class="form-group">
                         <label><span data-i18n="contactName">名称</span> <span class="required">*</span></label>
                         <input type="text" id="contact-name" required>
