@@ -408,13 +408,16 @@ def require_auth(min_role: str = 'view'):
     - view: 只读访问
     - operate: 入库/出库/导入/导出/管理联系方
     - admin: 用户管理
+
+    访客始终拒绝（哪怕 min_role='view'）：默认访客角色为 'view' 会绕过
+    has_permission 检查，多租户模式下 tenant_id=None 还会让 build_scope_filter
+    退化为空，导致跨租户聚合泄露。所有走 require_auth 的端点都必须登录。
     """
     async def dependency(current_user: CurrentUser = Depends(get_current_user)):
+        if current_user.is_guest:
+            raise HTTPException(status_code=401, detail="请先登录")
         if not current_user.has_permission(min_role):
-            if current_user.is_guest:
-                raise HTTPException(status_code=401, detail="请先登录")
-            else:
-                raise HTTPException(status_code=403, detail="权限不足")
+            raise HTTPException(status_code=403, detail="权限不足")
         return current_user
     return dependency
 
