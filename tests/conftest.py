@@ -74,11 +74,31 @@ def _admin_setup(client):
 
 
 @pytest.fixture()
-def admin_client(app_instance, _admin_setup):
+def admin_client(app_instance, _admin_setup, test_db):
     """
     A fresh TestClient that is logged in as admin.
     Function-scoped: each test gets a clean admin session.
+
+    Defensive resets so a previous test's mutations don't poison this one:
+    - test_face.py reloads `database` while monkeypatching DATABASE_PATH;
+      its module-level value can stick around at a deleted temp file.
+    - test_tenants.py / test_multi_tenant_isolation.py promote admin to
+      global admin (tenant_id = NULL); subsequent tests assume tenant_id = 1.
     """
+    import os as _os
+    _os.environ['DATABASE_PATH'] = test_db
+    import database as _database
+    _database.DATABASE_PATH = test_db
+    try:
+        conn = _database.get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET tenant_id = 1 WHERE username = ?",
+                    (_admin_setup['username'],))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
     from fastapi.testclient import TestClient
     c = TestClient(app_instance)
 
