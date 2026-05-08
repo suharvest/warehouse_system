@@ -83,11 +83,26 @@ export function setProductSelectorHighlightIndex(idx) { productSelectorHighlight
 export function setRecordProductHighlightIndex(idx) { recordProductHighlightIndex = idx; }
 
 // 仓库状态
+const WAREHOUSE_SLUG_KEY = 'current_warehouse_slug';
 export let currentWarehouse = null;  // { id, slug, name, is_default } or null (全局视图)
 export let allWarehouses = [];
 export const getCurrentWarehouse = () => currentWarehouse;
 export const getAllWarehouses = () => allWarehouses;
-export function setCurrentWarehouse(wh) { currentWarehouse = wh; }
+export function setCurrentWarehouse(wh) {
+    currentWarehouse = wh;
+    // 持久化 slug：刷新或后续会话能恢复上下文，避免 URL 是 / 时丢仓库
+    try {
+        if (wh && wh.slug) {
+            localStorage.setItem(WAREHOUSE_SLUG_KEY, wh.slug);
+        } else {
+            localStorage.removeItem(WAREHOUSE_SLUG_KEY);
+        }
+    } catch (_) { /* 隐私模式下 localStorage 不可用，忽略 */ }
+}
+export function getStoredWarehouseSlug() {
+    try { return localStorage.getItem(WAREHOUSE_SLUG_KEY); }
+    catch (_) { return null; }
+}
 export function setAllWarehouses(list) { allWarehouses = list; }
 
 // 联系方分页状态

@@ -6,7 +6,7 @@ import {
     trendChart, categoryChart, topStockChart,
     detailTrendChart, detailPieChart,
     currentProductName,
-    currentWarehouse, setCurrentWarehouse, allWarehouses, setAllWarehouses
+    currentWarehouse, setCurrentWarehouse, allWarehouses, setAllWarehouses, getStoredWarehouseSlug
 } from '../state.js';
 
 // 功能模块引用（由 main.js 设置）
@@ -132,6 +132,7 @@ export function initFromHash() {
 }
 
 // 从 URL path 解析仓库上下文
+// 优先级：URL > localStorage > （多仓库时为 null，单仓库由 renderWarehouseSwitcher 自动选）
 function initWarehouseFromPath() {
     const path = window.location.pathname;
     const match = path.match(/^\/w\/([a-z0-9][a-z0-9\-]*)\/?\s*$/);
@@ -140,6 +141,21 @@ function initWarehouseFromPath() {
         const wh = allWarehouses.find(w => w.slug === slug);
         if (wh) {
             setCurrentWarehouse(wh);
+            updateWarehouseSwitcherDisplay();
+            return;
+        }
+    }
+    // URL 没有 → 尝试从 localStorage 恢复（避免刷新或访问 / 时丢仓库上下文）
+    const storedSlug = getStoredWarehouseSlug();
+    if (storedSlug && allWarehouses.length > 0) {
+        const wh = allWarehouses.find(w => w.slug === storedSlug);
+        if (wh) {
+            setCurrentWarehouse(wh);
+            // 同步 URL，让后续刷新仍然指向具体仓库
+            const newPath = `/w/${wh.slug}/`;
+            if (window.location.pathname !== newPath) {
+                window.history.replaceState(null, '', newPath + window.location.hash);
+            }
             updateWarehouseSwitcherDisplay();
             return;
         }
@@ -204,14 +220,44 @@ export function renderWarehouseSwitcher() {
         ${t('allWarehouses')}
     </div>`;
 
-    for (const wh of allWarehouses) {
-        const active = currentWarehouse && currentWarehouse.id === wh.id ? ' active' : '';
-        html += `<div class="warehouse-option${active}" data-action="selectWarehouse" data-slug="${wh.slug}">
-            ${wh.name}${wh.is_default ? ' ★' : ''}
-        </div>`;
+    // 跨租户场景（全局 admin）：按 tenant_name 分组，避免同名仓库无法区分
+    const distinctTenants = new Set(
+        allWarehouses.map(w => w.tenant_id ?? null).filter(t => t !== null)
+    );
+    const isCrossTenant = distinctTenants.size > 1;
+
+    if (isCrossTenant) {
+        const groups = new Map();
+        for (const wh of allWarehouses) {
+            const key = wh.tenant_name || `Tenant #${wh.tenant_id ?? '?'}`;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(wh);
+        }
+        for (const [tenantName, list] of groups) {
+            html += `<div class="warehouse-group-label">${escapeHtml(tenantName)}</div>`;
+            for (const wh of list) {
+                const active = currentWarehouse && currentWarehouse.id === wh.id ? ' active' : '';
+                html += `<div class="warehouse-option warehouse-option-indent${active}" data-action="selectWarehouse" data-slug="${wh.slug}">
+                    ${escapeHtml(wh.name)}${wh.is_default ? ' ★' : ''}
+                </div>`;
+            }
+        }
+    } else {
+        for (const wh of allWarehouses) {
+            const active = currentWarehouse && currentWarehouse.id === wh.id ? ' active' : '';
+            html += `<div class="warehouse-option${active}" data-action="selectWarehouse" data-slug="${wh.slug}">
+                ${escapeHtml(wh.name)}${wh.is_default ? ' ★' : ''}
+            </div>`;
+        }
     }
 
     dropdown.innerHTML = html;
+}
+
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
 }
 
 export function toggleWarehouseSwitcher() {

@@ -3,8 +3,41 @@ import { t } from '../../../i18n.js';
 import { contactsApi } from '../api.js';
 import {
     contactsCurrentPage, contactsPageSize, contactsTotalPages,
-    setContactsCurrentPage, setContactsPageSize, setContactsTotalPages
+    setContactsCurrentPage, setContactsPageSize, setContactsTotalPages,
+    getCurrentUser, API_BASE_URL
 } from '../state.js';
+
+// 全局 admin (tenant_id == null) 创建联系方时需选择目标租户
+function isGlobalAdmin() {
+    const u = getCurrentUser();
+    return !!(u && u.role === 'admin' && (u.tenant_id === null || u.tenant_id === undefined));
+}
+
+async function _populateContactTenantSelect() {
+    const group = document.getElementById('contact-tenant-group');
+    const select = document.getElementById('contact-tenant');
+    if (!group || !select) return;
+    if (!isGlobalAdmin()) {
+        group.style.display = 'none';
+        return;
+    }
+    group.style.display = '';
+    select.innerHTML = '<option value="">请选择租户</option>';
+    try {
+        const resp = await fetch(`${API_BASE_URL}/tenants`, { credentials: 'include' });
+        if (!resp.ok) return;
+        const tenants = await resp.json();
+        for (const tn of tenants) {
+            if (tn.is_active === false) continue;
+            const opt = document.createElement('option');
+            opt.value = tn.id;
+            opt.textContent = tn.name;
+            select.appendChild(opt);
+        }
+    } catch (e) {
+        console.error('加载租户列表失败:', e);
+    }
+}
 
 // ============ 联系方列表 ============
 export async function loadContacts() {
@@ -104,11 +137,12 @@ export function resetContactsFilter() {
 }
 
 // ============ 添加/编辑联系方 ============
-export function showAddContactModal() {
+export async function showAddContactModal() {
     document.getElementById('contact-modal-title').textContent = t('addContact');
     document.getElementById('contact-id').value = '';
     document.getElementById('contact-form').reset();
     document.getElementById('contact-error').style.display = 'none';
+    await _populateContactTenantSelect();
     document.getElementById('contact-modal').classList.add('show');
     document.getElementById('contact-name').focus();
 }
@@ -173,6 +207,18 @@ export async function handleSaveContact() {
         address: address || null,
         notes: notes || null
     };
+
+    // 全局 admin 创建时必须带 tenant_id
+    if (!contactId && isGlobalAdmin()) {
+        const tenantSel = document.getElementById('contact-tenant');
+        const tenantId = tenantSel ? tenantSel.value : '';
+        if (!tenantId) {
+            errorDiv.textContent = '请选择租户';
+            errorDiv.style.display = 'block';
+            return;
+        }
+        data.tenant_id = parseInt(tenantId, 10);
+    }
 
     try {
         if (contactId) {
