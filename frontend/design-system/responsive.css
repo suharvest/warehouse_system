@@ -1,0 +1,549 @@
+/**
+ * Mobile Responsive Overrides
+ * ============================
+ *
+ * Centralised mobile / narrow-viewport rules. Wrapped in `@layer utilities`
+ * so PostCSS/Tailwind appends the rules to the utilities layer — which is
+ * the last layer in the build output and therefore wins the cascade against
+ * component-layer (@apply) rules with the same selector.
+ *
+ * Two breakpoints:
+ *   - 768px: tablet & phone-landscape (small layout adjustments)
+ *   - 640px: phone-portrait (compact mode, target iPhone 13 = 390px / 13 mini = 375px)
+ */
+
+@layer utilities {
+
+/* =====================================================================
+   Tablet & smaller (≤ 768px)
+   ===================================================================== */
+@media (max-width: 768px) {
+
+  /* ---- Layout: sidebar collapses to top bar ---- */
+  html, body {
+    height: auto;
+    overflow-x: hidden;
+  }
+
+  body {
+    overflow-y: auto;
+  }
+
+  .app-wrapper {
+    flex-direction: column !important;
+    height: auto !important;
+    min-height: 100vh;
+    width: 100%;
+    overflow-y: visible;
+  }
+
+  .sidebar {
+    width: 100% !important;
+    height: auto !important;
+    flex-shrink: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border, #e8e8e8);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: #fff;
+  }
+
+  .logo-area {
+    height: 52px;
+    padding: 0 16px;
+    justify-content: flex-start;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  .logo-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .logo-text .brand {
+    font-size: 15px;
+  }
+
+  .side-nav {
+    flex-direction: row !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 6px 8px;
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+  .side-nav::-webkit-scrollbar { display: none; }
+
+  .nav-item {
+    flex: 0 0 auto;
+    width: auto !important;
+    flex-direction: row !important;
+    gap: 6px !important;
+    padding: 8px 12px !important;
+    font-size: 13px;
+    white-space: nowrap;
+    text-align: left !important;
+    min-height: 40px;
+  }
+
+  .nav-item svg {
+    width: 16px !important;
+    height: 16px !important;
+    margin-right: 0 !important;
+  }
+
+  .nav-item span {
+    flex: none;
+  }
+
+  .main-content {
+    width: 100%;
+    min-height: 0;
+    height: auto !important;
+  }
+
+  .content-scroll-area {
+    overflow: visible;
+    padding: 12px;
+  }
+
+  /* ---- Top header ---- */
+  .top-header {
+    height: auto;
+    min-height: 48px;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    padding: 8px 12px;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  /* Breadcrumb on mobile is redundant with each tab's own page-header
+     (大字标题), so hide it to free vertical space and avoid double titles. */
+  .breadcrumb {
+    display: none;
+  }
+
+  .header-right {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+    align-items: center;
+    min-width: 0;
+  }
+
+  /* Compact header buttons */
+  .header-right .lang-btn,
+  .header-right .refresh-btn,
+  .header-right .warehouse-btn,
+  .header-right .login-btn,
+  .header-right .logout-btn {
+    height: 32px;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  /* Hide auto-update countdown on narrow screens to save room */
+  .update-info {
+    display: none;
+  }
+
+  /* Trim role/user labels */
+  .user-display {
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+  }
+
+  .user-display svg {
+    flex-shrink: 0;
+  }
+
+  /* Header dropdowns: align/size to viewport */
+  .warehouse-dropdown,
+  .lang-dropdown-menu {
+    right: 0;
+    left: auto;
+    max-width: calc(100vw - 24px);
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+
+  /* ---- Page header (title + actions) ---- */
+  .page-header {
+    margin-bottom: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .page-title {
+    font-size: 17px;
+  }
+
+  /* ---- Section header (table title + action buttons) ---- */
+  .section-header {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px 14px;
+  }
+
+  .section-title {
+    font-size: 15px;
+    flex: 1 1 100%;
+  }
+
+  .action-buttons {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .action-buttons .action-btn {
+    flex: 1 1 auto;
+    min-height: 40px;
+    justify-content: center;
+  }
+
+  /* ---- Sub-tabs (settings) ---- */
+  .sub-tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    margin-bottom: 12px;
+  }
+  .sub-tabs::-webkit-scrollbar { display: none; }
+
+  .sub-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    min-height: 40px;
+    padding: 8px 14px;
+  }
+
+  /* ---- Filter bar ---- */
+  .filter-bar {
+    padding: 12px;
+    gap: 10px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-group {
+    width: 100%;
+    gap: 4px;
+  }
+
+  .filter-group input,
+  .filter-group select {
+    width: 100%;
+    min-width: 0 !important;
+    min-height: 40px;
+  }
+
+  .filter-actions {
+    margin-left: 0;
+    width: 100%;
+    gap: 8px;
+  }
+
+  .filter-actions .filter-btn {
+    flex: 1 1 0;
+    min-height: 40px;
+  }
+
+  /* Multi-select dropdown trigger */
+  .dropdown-multiselect {
+    width: 100%;
+  }
+  .dropdown-multiselect .dropdown-trigger {
+    min-height: 40px;
+  }
+  .dropdown-multiselect .dropdown-menu {
+    max-width: 100%;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+
+  /* ---- Tables: horizontal scroll ---- */
+  .table-container {
+    overflow: hidden;
+  }
+
+  .table-container table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+    border-collapse: collapse;
+  }
+
+  .table-container thead,
+  .table-container tbody,
+  .table-container tr {
+    display: table;
+    width: max-content;
+    min-width: 100%;
+    table-layout: auto;
+  }
+
+  .table-container th,
+  .table-container td {
+    padding: 10px 12px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  /* Stand-alone tables (outside .table-container) */
+  main table:not(.table-container table):not(#preview-table) {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  /* ---- Pagination ---- */
+  .pagination {
+    flex-direction: column;
+    gap: 10px;
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .pagination-info {
+    text-align: center;
+    font-size: 12px;
+  }
+
+  .pagination-controls {
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .pagination-controls button {
+    min-height: 36px;
+    flex: 0 0 auto;
+  }
+
+  /* ---- Stats grid: 2-up (still compact, fits 2 KPIs in viewport) ---- */
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+    margin-bottom: 14px !important;
+  }
+
+  .stat-card {
+    padding: 14px !important;
+  }
+
+  .stat-label {
+    font-size: 12px;
+    margin-bottom: 6px !important;
+  }
+
+  .stat-value {
+    font-size: 20px;
+  }
+
+  /* Dashboard / charts already stack via existing rule */
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+    gap: 14px !important;
+  }
+
+  /* Force full-width chart card to span the (single) column. Without this,
+   * the unlayered base rule `.chart-card.full-width { grid-column: span 2 }`
+   * wins over the existing mobile `span 1` rule (same specificity, but later
+   * in compiled source order) and forces an implicit 2nd column, breaking
+   * the single-column layout. */
+  .chart-card.full-width {
+    grid-column: 1 / -1 !important;
+  }
+
+  /* ---- Modals: near full-screen ---- */
+  .modal {
+    align-items: flex-start;
+  }
+
+  .modal-content {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 100vh !important;
+    height: 100vh;
+    border-radius: 0 !important;
+    margin: 0;
+  }
+
+  .modal-content.modal-small,
+  .modal-content.modal-large {
+    max-width: 100% !important;
+  }
+
+  .modal-header {
+    padding: 14px 16px;
+    position: sticky;
+    top: 0;
+    background: #fff;
+    z-index: 5;
+  }
+
+  .modal-header h3 {
+    font-size: 16px;
+  }
+
+  .close-btn {
+    width: 40px;
+    height: 40px;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    line-height: 1;
+  }
+
+  .modal-body {
+    padding: 14px 16px;
+  }
+
+  .modal-footer {
+    padding: 12px 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+    position: sticky;
+    bottom: 0;
+    background: #fff;
+    z-index: 5;
+  }
+
+  .modal-footer .btn,
+  .modal-footer button {
+    flex: 1 1 auto;
+    min-height: 44px;
+  }
+
+  /* Form grids inside modals → single column */
+  .form-grid,
+  .form-grid-2,
+  .form-row,
+  .face-config-grid {
+    grid-template-columns: 1fr !important;
+    display: grid !important;
+    gap: 10px !important;
+  }
+
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    min-height: 40px;
+    font-size: 14px;
+  }
+
+  /* Radio segmented controls: full-width */
+  .radio-group {
+    width: 100%;
+    display: flex;
+  }
+  .radio-group .radio-label {
+    flex: 1 1 0;
+    padding: 8px 12px;
+    text-align: center;
+    justify-content: center;
+  }
+
+  /* Checkbox group: wrap & full width */
+  .checkbox-group {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .checkbox-label {
+    flex: 1 1 calc(50% - 4px);
+    min-height: 40px;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  /* ---- Toasts: avoid full-width offscreen ---- */
+  .toast {
+    max-width: calc(100vw - 24px);
+  }
+
+  /* ---- Touch targets: bump anything that looked clickable ---- */
+  .action-btn-small {
+    min-height: 36px;
+    padding: 8px 10px;
+  }
+
+  /* ---- Tenant info card already has 640px rule, nothing extra ---- */
+}
+
+/* =====================================================================
+   Phone portrait (≤ 640px) — extra-compact tweaks
+   ===================================================================== */
+@media (max-width: 640px) {
+
+  .top-header {
+    padding: 6px 10px;
+  }
+
+  /* Hide login button text — keep icon-only */
+  .header-right .login-btn,
+  .header-right .logout-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+
+  /* Header buttons: drop chevron / extra svg children spacing */
+  .header-right .lang-btn,
+  .header-right .warehouse-btn,
+  .header-right .refresh-btn {
+    gap: 4px;
+  }
+
+  .header-right .refresh-btn span {
+    display: none; /* keep icon only */
+  }
+
+  .lang-btn span#current-lang-text {
+    max-width: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+  }
+
+  .warehouse-btn span {
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+  }
+
+  /* Single column on the very narrow phones for stats */
+  .stats-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .checkbox-label {
+    flex: 1 1 100%;
+  }
+
+  /* Filter bar inputs slightly smaller for density */
+  .filter-bar {
+    padding: 10px;
+  }
+}
+
+} /* end @layer utilities */

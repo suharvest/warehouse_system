@@ -12,11 +12,15 @@
 /* Design System Imports (must come before @tailwind for postcss-import) */
 @import '../design-system/base.css';
 @import '../design-system/components.css';
+/* Mobile responsive overrides — imported AFTER @tailwind utilities so its
+ * rules win in cascade. postcss-import is configured to allow late imports. */
+@import '../design-system/responsive.css';
 
 /* Tailwind CSS Directives */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
 
 /* Warehouse switcher: tenant-grouped dropdown (multi-tenant only) */
 .warehouse-group-label {
