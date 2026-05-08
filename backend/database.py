@@ -517,7 +517,7 @@ def init_database():
 
     # 修复历史数据中 tenant_id 与 warehouse_id 所属租户不一致的问题。
     # 这类数据会导致“写入成功但当前租户列表/看板查不到”。
-    for table in ('contacts', 'materials', 'batches', 'inventory_records', 'api_keys', 'mcp_connections'):
+    for table in ('materials', 'batches', 'inventory_records', 'api_keys', 'mcp_connections'):
         cursor.execute(f'''
             UPDATE {table}
             SET tenant_id = (
@@ -533,14 +533,8 @@ def init_database():
               )
         ''')
 
-    # contacts 的 warehouse_id 回填：按 contact 的 tenant 找该租户的默认仓库
-    cursor.execute('''
-        UPDATE contacts SET warehouse_id = (
-            SELECT w.id FROM warehouses w
-            WHERE w.tenant_id = contacts.tenant_id AND w.is_default = 1
-            LIMIT 1
-        ) WHERE contacts.warehouse_id IS NULL
-    ''')
+    # 联系方为租户级（不绑定仓库）：清空所有 contacts.warehouse_id
+    cursor.execute('UPDATE contacts SET warehouse_id = NULL WHERE warehouse_id IS NOT NULL')
 
     # 检查并添加 reason_category / reason_note 字段到 inventory_records
     need_reason_backfill = False
@@ -577,7 +571,8 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_warehouses_tenant ON warehouses(tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_contacts_warehouse ON contacts(warehouse_id)')
+    # 联系方已改为租户级，warehouse_id 始终为 NULL，不再建该索引
+    cursor.execute('DROP INDEX IF EXISTS idx_contacts_warehouse')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_connections_tenant ON mcp_connections(tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_materials_tenant ON materials(tenant_id)')
