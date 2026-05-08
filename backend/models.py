@@ -465,7 +465,7 @@ class ContactBase(BaseModel):
 
 class CreateContactRequest(ContactBase):
     """创建联系方请求"""
-    pass
+    tenant_id: Optional[int] = None  # 仅全局 admin 跨租户建联系方时使用
 
 
 class UpdateContactRequest(BaseModel):

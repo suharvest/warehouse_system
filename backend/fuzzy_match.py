@@ -35,7 +35,7 @@ class FuzzyMatcher:
         return ' '.join(lazy_pinyin(text, style=Style.NORMAL))
 
     def _build_index(self):
-        """从数据库加载所有可搜索实体名称，构建索引（含拼音）"""
+        """从数据库加载所有可搜索实体名称，构建索引（含拼音 + tenant_id/warehouse_id 用于隔离过滤）"""
         index = []
         conn = self._get_conn()
         try:
@@ -43,51 +43,57 @@ class FuzzyMatcher:
 
             # 索引 materials: name 和 sku 都作为可搜索名称
             cursor.execute(
-                "SELECT id, name, sku, category FROM materials WHERE is_disabled = 0"
+                "SELECT id, name, sku, category, tenant_id, warehouse_id FROM materials WHERE is_disabled = 0"
             )
             for row in cursor.fetchall():
                 mid, name, sku, category = row['id'], row['name'], row['sku'], row['category']
+                tid, whid = row['tenant_id'], row['warehouse_id']
                 extra = {"sku": sku, "category": category}
-                # 索引 name
                 index.append({
                     "name": name,
                     "entity_type": "material",
                     "entity_id": mid,
+                    "tenant_id": tid,
+                    "warehouse_id": whid,
                     "extra": extra,
                     "pinyin": self._get_pinyin(self._normalize(name)),
                 })
-                # 索引 sku（如果 sku 与 name 不同）
                 if sku and sku != name:
                     index.append({
                         "name": sku,
                         "entity_type": "material",
                         "entity_id": mid,
+                        "tenant_id": tid,
+                        "warehouse_id": whid,
                         "extra": extra,
                         "pinyin": self._get_pinyin(self._normalize(sku)),
                     })
 
             # 索引 "name + variant" 组合，让 "七彩灯A" 能直接匹配
             cursor.execute(
-                "SELECT DISTINCT m.id, m.name, m.sku, m.category, b.variant "
+                "SELECT DISTINCT m.id, m.name, m.sku, m.category, m.tenant_id, m.warehouse_id, b.variant "
                 "FROM batches b JOIN materials m ON b.material_id = m.id "
                 "WHERE m.is_disabled = 0 AND b.variant IS NOT NULL AND b.variant != ''"
             )
             for row in cursor.fetchall():
-                mid, name, sku, category, variant = (
-                    row['id'], row['name'], row['sku'], row['category'], row['variant']
+                mid, name, sku, category, tid, whid, variant = (
+                    row['id'], row['name'], row['sku'], row['category'],
+                    row['tenant_id'], row['warehouse_id'], row['variant']
                 )
                 combined = f"{name} {variant}"
                 index.append({
                     "name": combined,
                     "entity_type": "material",
                     "entity_id": mid,
+                    "tenant_id": tid,
+                    "warehouse_id": whid,
                     "extra": {"sku": sku, "category": category, "variant": variant},
                     "pinyin": self._get_pinyin(self._normalize(combined)),
                 })
 
             # 索引 contacts: name
             cursor.execute(
-                "SELECT id, name, is_supplier, is_customer FROM contacts WHERE is_disabled = 0"
+                "SELECT id, name, is_supplier, is_customer, tenant_id, warehouse_id FROM contacts WHERE is_disabled = 0"
             )
             for row in cursor.fetchall():
                 cid, name = row['id'], row['name']
@@ -95,32 +101,37 @@ class FuzzyMatcher:
                     "name": name,
                     "entity_type": "contact",
                     "entity_id": cid,
+                    "tenant_id": row['tenant_id'],
+                    "warehouse_id": row['warehouse_id'],
                     "extra": {"is_supplier": bool(row['is_supplier']), "is_customer": bool(row['is_customer'])},
                     "pinyin": self._get_pinyin(self._normalize(name)),
                 })
 
             # 索引 users: display_name 和 username（仅 operate/admin 且未禁用）
             cursor.execute(
-                "SELECT id, username, display_name FROM users "
+                "SELECT id, username, display_name, tenant_id FROM users "
                 "WHERE is_disabled = 0 AND role IN ('operate', 'admin')"
             )
             for row in cursor.fetchall():
                 uid, username, display_name = row['id'], row['username'], row['display_name']
-                # 索引 display_name（如果有）
+                tid = row['tenant_id']
                 if display_name:
                     index.append({
                         "name": display_name,
                         "entity_type": "operator",
                         "entity_id": uid,
+                        "tenant_id": tid,
+                        "warehouse_id": None,
                         "extra": {},
                         "pinyin": self._get_pinyin(self._normalize(display_name)),
                     })
-                # 索引 username（如果与 display_name 不同）
                 if username != display_name:
                     index.append({
                         "name": username,
                         "entity_type": "operator",
                         "entity_id": uid,
+                        "tenant_id": tid,
+                        "warehouse_id": None,
                         "extra": {},
                         "pinyin": self._get_pinyin(self._normalize(username)),
                     })
@@ -195,12 +206,19 @@ class FuzzyMatcher:
         return max(text_score, pinyin_score)
 
     def search(self, query: str, entity_type: str = "all",
-               top_k: int = 5, threshold: float = 50.0) -> list[dict]:
+               top_k: int = 5, threshold: float = 50.0,
+               tenant_id: int | None = None,
+               warehouse_id: int | None = None) -> list[dict]:
         """
         模糊搜索，返回 top_k 个候选。
 
         算法: 文本包含 > 文本相似度(ratio+partial混合) > 拼音相似度(ratio+token_sort)
         过滤 score < threshold 的结果，按 score 降序排序。
+
+        scope 过滤:
+        - tenant_id 非 None：只返回该租户的实体（operator 类除外，跨租户全局可见暂不限制）
+        - tenant_id 为 None：不限定（全局 admin / 历史调用方）
+        - warehouse_id 非 None：进一步限定到该仓库
         """
         self._ensure_index()
 
@@ -213,6 +231,17 @@ class FuzzyMatcher:
         for entry in self._index:
             if entity_type != "all" and entry["entity_type"] != entity_type:
                 continue
+
+            # 租户隔离：调用方提供 tenant_id 时强制过滤
+            if tenant_id is not None:
+                entry_tid = entry.get("tenant_id")
+                if entry_tid is not None and entry_tid != tenant_id:
+                    continue
+            if warehouse_id is not None:
+                entry_whid = entry.get("warehouse_id")
+                # operator/contact 为租户级（warehouse_id=None），不参与仓库过滤
+                if entry_whid is not None and entry_whid != warehouse_id:
+                    continue
 
             norm_name = self._normalize(entry["name"])
             name_pinyin = entry["pinyin"]
@@ -246,13 +275,19 @@ class FuzzyMatcher:
 
         return deduped[:top_k]
 
-    def resolve(self, query: str, entity_type: str = "all") -> dict:
+    def resolve(self, query: str, entity_type: str = "all",
+                tenant_id: int | None = None,
+                warehouse_id: int | None = None) -> dict:
         """
         解析模糊文本为最佳匹配。
 
         置信度判定: 最高分 > confident_score 且与第二名差距 > confident_gap → confident=True
+        scope 参数同 search()。
         """
-        candidates = self.search(query, entity_type=entity_type, top_k=5, threshold=50.0)
+        candidates = self.search(
+            query, entity_type=entity_type, top_k=5, threshold=50.0,
+            tenant_id=tenant_id, warehouse_id=warehouse_id,
+        )
 
         if not candidates:
             return {
