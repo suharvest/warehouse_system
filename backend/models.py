@@ -1,10 +1,35 @@
 """
 Pydantic models for API request/response validation
 """
+from enum import Enum
 from pydantic import BaseModel
 from typing import List, Optional, Generic, TypeVar
 
 T = TypeVar('T')
+
+
+# ============ R3: Wire-format string enums ============
+#
+# These enums subclass ``str`` so members compare equal to and serialize as
+# their string values. ``RoleName.ADMIN == "admin"`` is True, and FastAPI /
+# Pydantic emit ``"admin"`` (not ``"RoleName.ADMIN"``) on the wire. They
+# replace raw string literals in backend code while keeping the API wire
+# format byte-identical to pre-R3 ("admin"/"operate"/"view", "in"/"out").
+#
+# ``Role(IntEnum)`` in ``app.py`` is unrelated — it represents *level
+# ordering* used by ``require_permission``.
+
+class RoleName(str, Enum):
+    """Role wire-format string. Use everywhere a role literal was used."""
+    ADMIN = "admin"
+    OPERATE = "operate"
+    VIEW = "view"
+
+
+class RecordType(str, Enum):
+    """Inventory record direction wire-format string."""
+    IN = "in"
+    OUT = "out"
 
 
 # ============ Tenant Models ============
