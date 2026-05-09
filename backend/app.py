@@ -6389,13 +6389,13 @@ async def update_erp_provider(
     config = body.get('config', {})
 
     with get_engine().begin() as sa_conn:
-        existing = sa_conn.execute(
-            select(_t_erp_providers.c.id, _t_erp_providers.c.tenant_id)
-            .where(_t_erp_providers.c.id == provider_id)
-        ).first()
-        if not existing:
-            raise HTTPException(status_code=404, detail="Provider 不存在")
-        _ensure_provider_tenant({'tenant_id': existing.tenant_id}, current_user)
+        existing = load_or_404(
+            sa_conn, _t_erp_providers, provider_id,
+            columns=[_t_erp_providers.c.id, _t_erp_providers.c.tenant_id],
+            not_found="Provider 不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的 Provider",
+        )
 
         values = {'updated_at': datetime.now()}
         if name is not None:
@@ -6567,18 +6567,17 @@ async def deactivate_erp_provider(
 ):
     """停用指定 Provider"""
     with get_engine().connect() as sa_conn:
-        row = sa_conn.execute(
-            select(
+        row = load_or_404(
+            sa_conn, _t_erp_providers, provider_id,
+            columns=[
                 _t_erp_providers.c.id,
                 _t_erp_providers.c.provider_name,
                 _t_erp_providers.c.tenant_id,
-            ).where(_t_erp_providers.c.id == provider_id)
-        ).first()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Provider 不存在")
-    if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权操作其他租户的 Provider")
+            ],
+            not_found="Provider 不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的 Provider",
+        )
 
     now_dt = datetime.now()
     with get_engine().begin() as sa_conn:
