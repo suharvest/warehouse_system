@@ -591,6 +591,93 @@ def _audit_routes() -> None:
         )
 
 
+# ============ R1: load_or_404 helper ============
+
+def load_or_404(
+    sa_conn,
+    table,
+    id_value,
+    *,
+    not_found: str,
+    id_column=None,
+    columns=None,
+    tenant_id=None,
+    tenant_column=None,
+    forbidden: Optional[str] = None,
+):
+    """Fetch a single row by id with consistent 404 / 403 semantics.
+
+    Centralizes the repeated pattern across CRUD routes:
+
+        row = sa_conn.execute(select(...).where(id == X)).first()
+        if not row: raise HTTPException(404, "...不存在")
+        if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
+            raise HTTPException(403, "...")
+
+    Parameters
+    ----------
+    sa_conn : sqlalchemy.engine.Connection
+        An already-open connection (from ``get_engine().connect()`` or
+        ``.begin()``). The helper does not manage connection lifecycle.
+    table : sqlalchemy.Table
+        The table to query.
+    id_value :
+        The id value to match.
+    not_found : str
+        Detail string for the 404 ``HTTPException``.
+    id_column : sqlalchemy.Column, optional
+        Column to match ``id_value`` against. Defaults to ``table.c.id``.
+    columns : list[Column], optional
+        Specific columns to select. When ``None`` the whole row is selected
+        (``select(table)``), preserving the all-columns behaviour of the
+        original sites.
+    tenant_id :
+        When not ``None``, the returned row's ``tenant_column`` value must
+        equal this. Pass the caller's ``current_user.tenant_id`` (or a
+        resolved ``tid``) — when the caller is a global admin with no
+        tenant scope, pass ``None`` to skip the check.
+    tenant_column : sqlalchemy.Column, optional
+        Column used for the tenant comparison. Defaults to
+        ``table.c.tenant_id`` when ``tenant_id`` is provided.
+    forbidden : str, optional
+        Detail string for the 403 ``HTTPException``. Required when
+        ``tenant_id`` is provided.
+
+    Returns
+    -------
+    sqlalchemy Row
+        The fetched row (whatever was selected).
+
+    Raises
+    ------
+    HTTPException
+        404 if no row matches; 403 if the tenant check fails.
+    """
+    if id_column is None:
+        id_column = table.c.id
+    if columns is None:
+        stmt = select(table).where(id_column == id_value)
+    else:
+        stmt = select(*columns).where(id_column == id_value)
+    row = sa_conn.execute(stmt).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=not_found)
+    if tenant_id is not None:
+        if forbidden is None:
+            raise RuntimeError("load_or_404: 'forbidden' is required when tenant_id is provided")
+        col = tenant_column if tenant_column is not None else table.c.tenant_id
+        # Resolve the tenant value from the row by column name. Works for
+        # both Row (attribute) and dict-mapping access.
+        col_name = col.name if hasattr(col, 'name') else str(col)
+        try:
+            row_tenant = getattr(row, col_name)
+        except AttributeError:
+            row_tenant = row._mapping.get(col_name)
+        if row_tenant != tenant_id:
+            raise HTTPException(status_code=403, detail=forbidden)
+    return row
+
+
 # ============ 仓库上下文辅助 ============
 
 def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> Optional[int]:
