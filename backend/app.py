@@ -5296,7 +5296,8 @@ async def create_mcp_connection(
 ):
     """创建MCP连接（自动创建关联的API Key）"""
     conn_id = str(uuid.uuid4())[:8]
-    now = datetime.now().isoformat()
+    now_dt = datetime.now()
+    now = now_dt.isoformat()
 
     # 验证角色
     role = request.role if request.role in ('admin', 'operate', 'view') else 'operate'
@@ -5306,39 +5307,53 @@ async def create_mcp_connection(
     key_hash = hash_api_key(api_key_plain)
 
     with get_db() as conn:
-        cursor = conn.cursor()
         wh_id = request.warehouse_id
         if wh_id is not None:
             wh_id = resolve_warehouse_id(current_user, wh_id)
             check_warehouse_access(conn, current_user, wh_id)
         conn_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
 
+    with get_engine().begin() as sa_conn:
         # 创建关联的 API Key（is_system=1，不在用户管理中显示）
-        cursor.execute('''
-            INSERT INTO api_keys (key_hash, name, role, user_id, is_system, warehouse_id, tenant_id, created_at)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?)
-        ''', (key_hash, f'Agent: {request.name}', role, current_user.id,
-              wh_id, conn_tenant_id, now))
-
+        sa_conn.execute(
+            insert(_t_api_keys).values(
+                key_hash=key_hash,
+                name=f'Agent: {request.name}',
+                role=role,
+                user_id=current_user.id,
+                is_system=1,
+                warehouse_id=wh_id,
+                tenant_id=conn_tenant_id,
+                created_at=now_dt,
+            )
+        )
         # 创建 MCP 连接记录
-        cursor.execute('''
-            INSERT INTO mcp_connections (id, name, mcp_endpoint, api_key, role, auto_start, warehouse_id, tenant_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)
-        ''', (conn_id, request.name, request.mcp_endpoint, api_key_plain, role,
-              1 if request.auto_start else 0, wh_id, conn_tenant_id, now, now))
-        conn.commit()
+        sa_conn.execute(
+            insert(_t_mcp_connections).values(
+                id=conn_id,
+                name=request.name,
+                mcp_endpoint=request.mcp_endpoint,
+                api_key=api_key_plain,
+                role=role,
+                auto_start=1 if request.auto_start else 0,
+                warehouse_id=wh_id,
+                tenant_id=conn_tenant_id,
+                status='stopped',
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
     # 如果 auto_start，立即启动
     if request.auto_start:
         await mcp_manager.start_connection(conn_id, request.mcp_endpoint, api_key_plain)
         status_info = mcp_manager.get_connection_status(conn_id)
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'UPDATE mcp_connections SET status = ?, updated_at = ? WHERE id = ?',
-                (status_info['status'], datetime.now().isoformat(), conn_id)
+        with get_engine().begin() as sa_conn:
+            sa_conn.execute(
+                update(_t_mcp_connections)
+                .where(_t_mcp_connections.c.id == conn_id)
+                .values(status=status_info['status'], updated_at=datetime.now().isoformat())
             )
-            conn.commit()
 
     # 获取创建的记录
     with get_db() as conn:
@@ -5371,57 +5386,51 @@ async def update_mcp_connection(
             raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
         old_endpoint = row['mcp_endpoint']
-
-        updates = []
-        params = []
         key_hash = hash_api_key(row['api_key'])
 
-        if request.name is not None:
-            updates.append('name = ?')
-            params.append(request.name)
-            # 同步更新关联的 API Key 名称
-            cursor.execute(
-                'UPDATE api_keys SET name = ? WHERE key_hash = ?',
-                (f'Agent: {request.name}', key_hash)
-            )
-        if request.mcp_endpoint is not None:
-            updates.append('mcp_endpoint = ?')
-            params.append(request.mcp_endpoint)
-        if request.role is not None and request.role in ('admin', 'operate', 'view'):
-            updates.append('role = ?')
-            params.append(request.role)
-            # 同步更新关联的 API Key 角色
-            cursor.execute(
-                'UPDATE api_keys SET role = ? WHERE key_hash = ?',
-                (request.role, key_hash)
-            )
-        if request.auto_start is not None:
-            updates.append('auto_start = ?')
-            params.append(1 if request.auto_start else 0)
+        # Resolve warehouse access (uses sqlite conn helper) before opening SA txn
+        new_wh_id = None
+        new_tenant_id = None
         if request.warehouse_id is not None:
-            wh_id = resolve_warehouse_id(current_user, request.warehouse_id)
-            check_warehouse_access(conn, current_user, wh_id)
-            new_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
-            updates.append('warehouse_id = ?')
-            params.append(wh_id)
-            updates.append('tenant_id = ?')
-            params.append(new_tenant_id)
-            # 同步更新关联的 API Key 仓库
-            cursor.execute(
-                'UPDATE api_keys SET warehouse_id = ?, tenant_id = ? WHERE key_hash = ?',
-                (wh_id, new_tenant_id, key_hash)
+            new_wh_id = resolve_warehouse_id(current_user, request.warehouse_id)
+            check_warehouse_access(conn, current_user, new_wh_id)
+            new_tenant_id = resolve_tenant_id_for_write(current_user, new_wh_id)
+
+    mcp_values = {}
+    apikey_values = {}
+    if request.name is not None:
+        mcp_values['name'] = request.name
+        apikey_values['name'] = f'Agent: {request.name}'
+    if request.mcp_endpoint is not None:
+        mcp_values['mcp_endpoint'] = request.mcp_endpoint
+    if request.role is not None and request.role in ('admin', 'operate', 'view'):
+        mcp_values['role'] = request.role
+        apikey_values['role'] = request.role
+    if request.auto_start is not None:
+        mcp_values['auto_start'] = 1 if request.auto_start else 0
+    if request.warehouse_id is not None:
+        mcp_values['warehouse_id'] = new_wh_id
+        mcp_values['tenant_id'] = new_tenant_id
+        apikey_values['warehouse_id'] = new_wh_id
+        apikey_values['tenant_id'] = new_tenant_id
+
+    if mcp_values:
+        mcp_values['updated_at'] = datetime.now().isoformat()
+        with get_engine().begin() as sa_conn:
+            if apikey_values:
+                sa_conn.execute(
+                    update(_t_api_keys)
+                    .where(_t_api_keys.c.key_hash == key_hash)
+                    .values(**apikey_values)
+                )
+            sa_conn.execute(
+                update(_t_mcp_connections)
+                .where(_t_mcp_connections.c.id == conn_id)
+                .values(**mcp_values)
             )
 
-        if updates:
-            updates.append('updated_at = ?')
-            params.append(datetime.now().isoformat())
-            params.append(conn_id)
-            cursor.execute(
-                f'UPDATE mcp_connections SET {", ".join(updates)} WHERE id = ?',
-                params
-            )
-            conn.commit()
-
+    with get_db() as conn:
+        cursor = conn.cursor()
         cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
         row = cursor.fetchone()
 
@@ -5459,14 +5468,12 @@ async def delete_mcp_connection(
     mcp_manager.remove_connection(conn_id)
 
     # 删除数据库记录及关联的 API Key
-    with get_db() as conn:
-        cursor = conn.cursor()
-        api_key_plain = row['api_key']
+    api_key_plain = row['api_key']
+    with get_engine().begin() as sa_conn:
         if api_key_plain:
             key_hash = hash_api_key(api_key_plain)
-            cursor.execute('DELETE FROM api_keys WHERE key_hash = ?', (key_hash,))
-        cursor.execute('DELETE FROM mcp_connections WHERE id = ?', (conn_id,))
-        conn.commit()
+            sa_conn.execute(delete(_t_api_keys).where(_t_api_keys.c.key_hash == key_hash))
+        sa_conn.execute(delete(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id))
 
     return {"success": True, "message": "连接已删除"}
 
@@ -5491,14 +5498,19 @@ async def start_mcp_connection(
     )
 
     status_info = mcp_manager.get_connection_status(conn_id)
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_mcp_connections)
+            .where(_t_mcp_connections.c.id == conn_id)
+            .values(
+                status=status_info['status'],
+                error_message=status_info.get('error_message'),
+                restart_count=0,
+                updated_at=datetime.now().isoformat(),
+            )
+        )
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE mcp_connections SET status = ?, error_message = ?, restart_count = 0, updated_at = ? WHERE id = ?',
-            (status_info['status'], status_info.get('error_message'),
-             datetime.now().isoformat(), conn_id)
-        )
-        conn.commit()
         cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
         row = cursor.fetchone()
 
@@ -5527,13 +5539,14 @@ async def stop_mcp_connection(
     await mcp_manager.stop_connection(conn_id)
 
     status_info = mcp_manager.get_connection_status(conn_id)
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_mcp_connections)
+            .where(_t_mcp_connections.c.id == conn_id)
+            .values(status='stopped', error_message=None, updated_at=datetime.now().isoformat())
+        )
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE mcp_connections SET status = ?, error_message = NULL, updated_at = ? WHERE id = ?',
-            ('stopped', datetime.now().isoformat(), conn_id)
-        )
-        conn.commit()
         cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
         row = cursor.fetchone()
 
@@ -5564,14 +5577,19 @@ async def restart_mcp_connection(
     )
 
     status_info = mcp_manager.get_connection_status(conn_id)
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_mcp_connections)
+            .where(_t_mcp_connections.c.id == conn_id)
+            .values(
+                status=status_info['status'],
+                error_message=status_info.get('error_message'),
+                restart_count=0,
+                updated_at=datetime.now().isoformat(),
+            )
+        )
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE mcp_connections SET status = ?, error_message = ?, restart_count = 0, updated_at = ? WHERE id = ?',
-            (status_info['status'], status_info.get('error_message'),
-             datetime.now().isoformat(), conn_id)
-        )
-        conn.commit()
         cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
         row = cursor.fetchone()
 
@@ -5760,23 +5778,27 @@ async def upload_erp_provider(
         f.write(content)
 
     # 写入数据库
-    with get_db() as conn:
-        cursor = conn.cursor()
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # 使用文件名（去掉.py）作为默认显示名
-        display_name = file.filename.replace('.py', '')
-        try:
-            cursor.execute("""
-                INSERT INTO erp_providers
-                    (name, provider_name, class_name, filename, tenant_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (display_name, provider_name, class_name, filename, current_user.tenant_id or 1, now, now))
-            conn.commit()
-            provider_id = cursor.lastrowid
-        except Exception as e:
-            # provider_name 唯一约束冲突
-            os.unlink(dest_path)
-            raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 已存在")
+    now_dt = datetime.now()
+    # 使用文件名（去掉.py）作为默认显示名
+    display_name = file.filename.replace('.py', '')
+    try:
+        with get_engine().begin() as sa_conn:
+            result = sa_conn.execute(
+                insert(_t_erp_providers).values(
+                    name=display_name,
+                    provider_name=provider_name,
+                    class_name=class_name,
+                    filename=filename,
+                    tenant_id=current_user.tenant_id or 1,
+                    created_at=now_dt,
+                    updated_at=now_dt,
+                )
+            )
+            provider_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
+    except Exception:
+        # provider_name 唯一约束冲突
+        os.unlink(dest_path)
+        raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 已存在")
 
     logger.info(f"上传 ERP Provider: {provider_name} ({class_name})，操作人: {current_user.display_name}")
     return {
@@ -5898,32 +5920,25 @@ async def update_erp_provider(
     name = body.get('name')
     config = body.get('config', {})
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, tenant_id FROM erp_providers WHERE id = ?", (provider_id,))
-        existing = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_erp_providers.c.id, _t_erp_providers.c.tenant_id)
+            .where(_t_erp_providers.c.id == provider_id)
+        ).first()
         if not existing:
             raise HTTPException(status_code=404, detail="Provider 不存在")
-        _ensure_provider_tenant(existing, current_user)
+        _ensure_provider_tenant({'tenant_id': existing.tenant_id}, current_user)
 
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        updates = []
-        params = []
+        values = {'updated_at': datetime.now()}
         if name is not None:
-            updates.append("name = ?")
-            params.append(name)
+            values['name'] = name
         if config is not None:
-            updates.append("config = ?")
-            params.append(_json.dumps(config))
-        updates.append("updated_at = ?")
-        params.append(now)
-        params.append(provider_id)
-
-        cursor.execute(
-            f"UPDATE erp_providers SET {', '.join(updates)} WHERE id = ?",
-            params
+            values['config'] = config
+        sa_conn.execute(
+            update(_t_erp_providers)
+            .where(_t_erp_providers.c.id == provider_id)
+            .values(**values)
         )
-        conn.commit()
 
     return {"success": True}
 
@@ -5955,10 +5970,8 @@ async def delete_erp_provider(
         os.unlink(filepath)
 
     # 删除数据库记录
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM erp_providers WHERE id = ?", (provider_id,))
-        conn.commit()
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(delete(_t_erp_providers).where(_t_erp_providers.c.id == provider_id))
 
     logger.info(f"删除 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
     return {"success": True}
@@ -5994,24 +6007,30 @@ async def test_erp_provider(
         test_result = run_level2_tests(filepath, config)
 
     # 存储测试结果（分级保存，L1 和 L2 独立存储）
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with get_db() as conn:
-        cursor = conn.cursor()
+    now_dt = datetime.now()
+    with get_engine().begin() as sa_conn:
         # 读取现有测试结果
-        cursor.execute("SELECT test_results FROM erp_providers WHERE id = ?", (provider_id,))
-        existing = cursor.fetchone()
-        all_results = _json.loads(existing['test_results']) if existing and existing['test_results'] else {}
+        existing = sa_conn.execute(
+            select(_t_erp_providers.c.test_results).where(_t_erp_providers.c.id == provider_id)
+        ).first()
+        existing_tr = existing.test_results if existing else None
+        if isinstance(existing_tr, (bytes, bytearray)):
+            existing_tr = existing_tr.decode('utf-8')
+        if isinstance(existing_tr, str):
+            all_results = _json.loads(existing_tr) if existing_tr else {}
+        else:
+            all_results = existing_tr if existing_tr else {}
         all_results[f'level{level}'] = test_result
 
         # L1 通过才更新 test_passed_at
         l1 = all_results.get('level1', {})
-        test_passed_at = now if l1.get('all_passed') else None
+        test_passed_at = now_dt if l1.get('all_passed') else None
 
-        cursor.execute(
-            "UPDATE erp_providers SET test_results = ?, test_passed_at = ?, updated_at = ? WHERE id = ?",
-            (_json.dumps(all_results), test_passed_at, now, provider_id)
+        sa_conn.execute(
+            update(_t_erp_providers)
+            .where(_t_erp_providers.c.id == provider_id)
+            .values(test_results=all_results, test_passed_at=test_passed_at, updated_at=now_dt)
         )
-        conn.commit()
 
     logger.info(f"测试 ERP Provider: {row['provider_name']} L{level}，all_passed={test_result['all_passed']}")
     return test_result
@@ -6038,26 +6057,27 @@ async def activate_erp_provider(
     if not l1.get('all_passed'):
         raise HTTPException(status_code=400, detail="请先通过 Level 1 测试再激活")
 
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_dt = datetime.now()
     # 仅停用同租户的其他 Provider —— 不能误伤其他租户的激活记录
     target_tenant_id = row['tenant_id']
-    with get_db() as conn:
-        cursor = conn.cursor()
+    with get_engine().begin() as sa_conn:
         if target_tenant_id is None:
-            cursor.execute(
-                "UPDATE erp_providers SET is_active = 0, updated_at = ? WHERE tenant_id IS NULL",
-                (now,)
+            sa_conn.execute(
+                update(_t_erp_providers)
+                .where(_t_erp_providers.c.tenant_id.is_(None))
+                .values(is_active=0, updated_at=now_dt)
             )
         else:
-            cursor.execute(
-                "UPDATE erp_providers SET is_active = 0, updated_at = ? WHERE tenant_id = ?",
-                (now, target_tenant_id)
+            sa_conn.execute(
+                update(_t_erp_providers)
+                .where(_t_erp_providers.c.tenant_id == target_tenant_id)
+                .values(is_active=0, updated_at=now_dt)
             )
-        cursor.execute(
-            "UPDATE erp_providers SET is_active = 1, updated_at = ? WHERE id = ?",
-            (now, provider_id)
+        sa_conn.execute(
+            update(_t_erp_providers)
+            .where(_t_erp_providers.c.id == provider_id)
+            .values(is_active=1, updated_at=now_dt)
         )
-        conn.commit()
 
     logger.info(f"激活 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
     return {"success": True, "provider_name": row['provider_name']}
@@ -6079,14 +6099,13 @@ async def deactivate_erp_provider(
     if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="无权操作其他租户的 Provider")
 
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE erp_providers SET is_active = 0, updated_at = ? WHERE id = ?",
-            (now, provider_id)
+    now_dt = datetime.now()
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_erp_providers)
+            .where(_t_erp_providers.c.id == provider_id)
+            .values(is_active=0, updated_at=now_dt)
         )
-        conn.commit()
 
     logger.info(f"停用 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
     return {"success": True}
@@ -6222,27 +6241,38 @@ async def face_put_config(
     if payload.mode is not None and payload.mode not in ("local", "hello", "jetson", "custom"):
         raise HTTPException(status_code=400, detail="mode 必须是 local/hello/jetson/custom")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM tenant_face_config WHERE tenant_id = ?", (tid,))
-        existing = cur.fetchone()
+    with get_engine().begin() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_tenant_face_config.c.id).where(_t_tenant_face_config.c.tenant_id == tid)
+        ).first()
         if existing:
-            cur.execute("""
-                UPDATE tenant_face_config
-                SET enabled = ?, mode = ?, endpoint = ?, auth_token = ?,
-                    embedding_model_tag = ?, min_confidence = ?, updated_at = ?
-                WHERE tenant_id = ?
-            """, (1 if payload.enabled else 0, payload.mode, payload.endpoint, payload.auth_token,
-                  payload.embedding_model_tag, payload.min_confidence, now, tid))
+            sa_conn.execute(
+                update(_t_tenant_face_config)
+                .where(_t_tenant_face_config.c.tenant_id == tid)
+                .values(
+                    enabled=1 if payload.enabled else 0,
+                    mode=payload.mode,
+                    endpoint=payload.endpoint,
+                    auth_token=payload.auth_token,
+                    embedding_model_tag=payload.embedding_model_tag,
+                    min_confidence=payload.min_confidence,
+                    updated_at=now,
+                )
+            )
         else:
-            cur.execute("""
-                INSERT INTO tenant_face_config
-                    (tenant_id, enabled, mode, endpoint, auth_token,
-                     embedding_model_tag, min_confidence, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (tid, 1 if payload.enabled else 0, payload.mode, payload.endpoint, payload.auth_token,
-                  payload.embedding_model_tag, payload.min_confidence, now, now))
-        conn.commit()
+            sa_conn.execute(
+                insert(_t_tenant_face_config).values(
+                    tenant_id=tid,
+                    enabled=1 if payload.enabled else 0,
+                    mode=payload.mode,
+                    endpoint=payload.endpoint,
+                    auth_token=payload.auth_token,
+                    embedding_model_tag=payload.embedding_model_tag,
+                    min_confidence=payload.min_confidence,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
     return {"success": True, "tenant_id": tid}
 
 
@@ -6291,19 +6321,20 @@ async def face_create_rule(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    allowed_raw = _face_json.dumps(payload.allowed_subject_ids) if payload.allowed_subject_ids else None
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO tenant_face_operation_rules
-                (tenant_id, warehouse_id, operation, require_face,
-                 allowed_subject_ids, min_confidence_override)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (tid, payload.warehouse_id, payload.operation,
-              1 if payload.require_face else 0, allowed_raw, payload.min_confidence_override))
-        rid = cur.lastrowid
-        conn.commit()
-        return {"id": rid}
+    allowed_value = payload.allowed_subject_ids if payload.allowed_subject_ids else None
+    with get_engine().begin() as sa_conn:
+        result = sa_conn.execute(
+            insert(_t_tenant_face_rules).values(
+                tenant_id=tid,
+                warehouse_id=payload.warehouse_id,
+                operation=payload.operation,
+                require_face=1 if payload.require_face else 0,
+                allowed_subject_ids=allowed_value,
+                min_confidence_override=payload.min_confidence_override,
+            )
+        )
+        rid = result.inserted_primary_key[0] if result.inserted_primary_key else None
+    return {"id": rid}
 
 
 @app.put("/api/face/rules/{rule_id}")
@@ -6314,24 +6345,27 @@ async def face_update_rule(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    allowed_raw = _face_json.dumps(payload.allowed_subject_ids) if payload.allowed_subject_ids else None
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM tenant_face_operation_rules WHERE id = ?", (rule_id,))
-        row = cur.fetchone()
+    allowed_value = payload.allowed_subject_ids if payload.allowed_subject_ids else None
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_tenant_face_rules.c.tenant_id).where(_t_tenant_face_rules.c.id == rule_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="规则不存在")
-        if row["tenant_id"] != tid:
+        if row.tenant_id != tid:
             raise HTTPException(status_code=403, detail="无权修改该规则")
-        cur.execute("""
-            UPDATE tenant_face_operation_rules
-            SET warehouse_id = ?, operation = ?, require_face = ?,
-                allowed_subject_ids = ?, min_confidence_override = ?
-            WHERE id = ?
-        """, (payload.warehouse_id, payload.operation,
-              1 if payload.require_face else 0, allowed_raw, payload.min_confidence_override, rule_id))
-        conn.commit()
-        return {"success": True, "id": rule_id}
+        sa_conn.execute(
+            update(_t_tenant_face_rules)
+            .where(_t_tenant_face_rules.c.id == rule_id)
+            .values(
+                warehouse_id=payload.warehouse_id,
+                operation=payload.operation,
+                require_face=1 if payload.require_face else 0,
+                allowed_subject_ids=allowed_value,
+                min_confidence_override=payload.min_confidence_override,
+            )
+        )
+    return {"success": True, "id": rule_id}
 
 
 @app.delete("/api/face/rules/{rule_id}")
@@ -6341,17 +6375,18 @@ async def face_delete_rule(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM tenant_face_operation_rules WHERE id = ?", (rule_id,))
-        row = cur.fetchone()
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_tenant_face_rules.c.tenant_id).where(_t_tenant_face_rules.c.id == rule_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="规则不存在")
-        if row["tenant_id"] != tid:
+        if row.tenant_id != tid:
             raise HTTPException(status_code=403, detail="无权删除该规则")
-        cur.execute("DELETE FROM tenant_face_operation_rules WHERE id = ?", (rule_id,))
-        conn.commit()
-        return {"success": True}
+        sa_conn.execute(
+            delete(_t_tenant_face_rules).where(_t_tenant_face_rules.c.id == rule_id)
+        )
+    return {"success": True}
 
 
 @app.get("/api/face/enrollments")
@@ -6443,17 +6478,18 @@ async def face_delete_enrollment(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM face_enrollments WHERE id = ?", (enrollment_id,))
-        row = cur.fetchone()
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_face_enrollments.c.tenant_id).where(_t_face_enrollments.c.id == enrollment_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="enrollment 不存在")
-        if row["tenant_id"] != tid:
+        if row.tenant_id != tid:
             raise HTTPException(status_code=403, detail="无权删除该 enrollment")
-        cur.execute("DELETE FROM face_enrollments WHERE id = ?", (enrollment_id,))
-        conn.commit()
-        return {"success": True}
+        sa_conn.execute(
+            delete(_t_face_enrollments).where(_t_face_enrollments.c.id == enrollment_id)
+        )
+    return {"success": True}
 
 
 @app.post("/api/face/test-connection")
