@@ -361,3 +361,103 @@ class TestDatabaseOpsViaRequirePermission:
         guest = TestClient(client.app)
         resp = guest.get("/api/database/export")
         assert resp.status_code == 401
+
+
+class TestMaterialsViaRequirePermission:
+    """End-to-end: /api/materials/* goes through require_permission (MATERIALS)."""
+
+    def test_view_token_can_list_materials(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/materials/list", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+
+    def test_materials_list_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/materials/list")
+        assert resp.status_code == 401
+
+    def test_view_token_cannot_import_materials(self, admin_client, client):
+        # import-excel/preview is operate-level
+        api_key = _create_view_api_key(admin_client)
+        resp = client.post(
+            "/api/materials/import-excel/preview",
+            headers={"X-API-Key": api_key},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+
+class TestInventoryViaRequirePermission:
+    """End-to-end: /api/inventory/* and stock-in/out go through require_permission (INVENTORY)."""
+
+    def test_view_token_can_read_inventory_records(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/inventory/records", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+
+    def test_inventory_records_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/inventory/records")
+        assert resp.status_code == 401
+
+    def test_view_token_cannot_stock_in(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.post(
+            "/api/materials/stock-in",
+            json={"items": []},
+            headers={"X-API-Key": api_key},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+
+class TestFaceViaRequirePermission:
+    """End-to-end: /api/face/* goes through require_permission (FACE)."""
+
+    def test_admin_can_get_face_config(self, admin_client):
+        resp = admin_client.get("/api/face/config")
+        # 200 if face config exists, or other domain status — just not 401/403.
+        assert resp.status_code not in (401, 403)
+
+    def test_view_token_cannot_get_face_config(self, admin_client, client):
+        # face_get_config preserves legacy admin level
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/face/config", headers={"X-API-Key": api_key})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_face_config_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/face/config")
+        assert resp.status_code == 401
+
+
+class TestAuthMeViaRequirePermission:
+    """End-to-end: /api/auth/me goes through require_permission (AUTH, READ)."""
+
+    def test_view_token_can_get_auth_me(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/auth/me", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+
+    def test_auth_me_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/auth/me")
+        assert resp.status_code == 401
+
+
+def test_no_more_require_auth_callsites():
+    """Once everything is ported, app.py should have zero require_auth(...)
+    callsites (the function definition itself can stay until PR5 deletes it).
+    """
+    import re
+    from pathlib import Path
+    app_path = Path(__file__).parent.parent / "backend" / "app.py"
+    content = app_path.read_text()
+    # Match calls like Depends(require_auth(...)) but NOT the def
+    callsites = re.findall(r"Depends\(\s*require_auth\(", content)
+    assert len(callsites) == 0, f"Found {len(callsites)} remaining require_auth callsites"
