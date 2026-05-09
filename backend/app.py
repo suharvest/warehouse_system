@@ -1314,16 +1314,18 @@ async def create_user(
     if len(request.password) < 4:
         raise HTTPException(status_code=400, detail="密码长度至少4位")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    # bcrypt is CPU-bound; do it outside the transaction
+    password_hash = hash_password(request.password)
+    created_at_dt = datetime.now()
+    created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
 
+    with get_engine().begin() as sa_conn:
         # 检查用户名是否已存在
-        cursor.execute('SELECT id FROM users WHERE username = ?', (request.username,))
-        if cursor.fetchone():
+        existing = sa_conn.execute(
+            select(_t_users.c.id).where(_t_users.c.username == request.username)
+        ).first()
+        if existing:
             raise HTTPException(status_code=400, detail="用户名已存在")
-
-        password_hash = hash_password(request.password)
-        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         # 确定 tenant_id：全局 admin 可指定，租户 admin 只能创建在自己租户下
         if current_user.tenant_id is None:
@@ -1338,18 +1340,26 @@ async def create_user(
         else:
             new_tenant_id = current_user.tenant_id  # 继承创建者的租户
         if new_tenant_id is not None:
-            cursor.execute("SELECT id FROM tenants WHERE id = ? AND is_active = 1", (new_tenant_id,))
-            if not cursor.fetchone():
+            tenant_row = sa_conn.execute(
+                select(_t_tenants.c.id).where(
+                    and_(_t_tenants.c.id == new_tenant_id, _t_tenants.c.is_active == 1)
+                )
+            ).first()
+            if not tenant_row:
                 raise HTTPException(status_code=400, detail="租户不存在或已停用")
 
-        cursor.execute('''
-            INSERT INTO users (username, password_hash, role, display_name, created_by, tenant_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (request.username, password_hash, request.role,
-              request.display_name, current_user.id, new_tenant_id, created_at))
-
-        user_id = cursor.lastrowid
-        conn.commit()
+        result = sa_conn.execute(
+            insert(_t_users).values(
+                username=request.username,
+                password_hash=password_hash,
+                role=request.role,
+                display_name=request.display_name,
+                created_by=current_user.id,
+                tenant_id=new_tenant_id,
+                created_at=created_at_dt,
+            )
+        )
+        user_id = result.inserted_primary_key[0]
         get_fuzzy_matcher().invalidate_cache()
 
         return UserListItem(
@@ -1370,75 +1380,82 @@ async def update_user(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """更新用户（仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    # bcrypt outside transaction
+    new_password_hash = None
+    if request.password is not None:
+        if len(request.password) < 4:
+            raise HTTPException(status_code=400, detail="密码长度至少4位")
+        new_password_hash = hash_password(request.password)
 
-        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-        user = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        user = sa_conn.execute(
+            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
+        ).first()
         if not user:
             raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and user['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and user.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权操作其他租户的用户")
 
-        updates = []
-        params = []
+        values = {}
 
         if request.username is not None:
             # 检查用户名是否已被占用
-            cursor.execute('SELECT id FROM users WHERE username = ? AND id != ?', (request.username, user_id))
-            if cursor.fetchone():
+            dup = sa_conn.execute(
+                select(_t_users.c.id).where(
+                    and_(_t_users.c.username == request.username, _t_users.c.id != user_id)
+                )
+            ).first()
+            if dup:
                 raise HTTPException(status_code=400, detail="用户名已存在")
             if len(request.username) < 2:
                 raise HTTPException(status_code=400, detail="用户名长度至少2位")
-            updates.append('username = ?')
-            params.append(request.username)
+            values['username'] = request.username
 
         if request.display_name is not None:
-            updates.append('display_name = ?')
-            params.append(request.display_name)
+            values['display_name'] = request.display_name
 
         if request.role is not None:
             if request.role not in ['admin', 'operate', 'view']:
                 raise HTTPException(status_code=400, detail="无效的角色")
-            updates.append('role = ?')
-            params.append(request.role)
+            values['role'] = request.role
 
-        if request.password is not None:
-            if len(request.password) < 4:
-                raise HTTPException(status_code=400, detail="密码长度至少4位")
-            updates.append('password_hash = ?')
-            params.append(hash_password(request.password))
+        if new_password_hash is not None:
+            values['password_hash'] = new_password_hash
 
         if request.is_disabled is not None:
-            updates.append('is_disabled = ?')
-            params.append(1 if request.is_disabled else 0)
+            values['is_disabled'] = 1 if request.is_disabled else 0
 
-        if updates:
-            params.append(user_id)
-            cursor.execute(f'''
-                UPDATE users SET {', '.join(updates)} WHERE id = ?
-            ''', params)
-            conn.commit()
+        if values:
+            sa_conn.execute(
+                update(_t_users).where(_t_users.c.id == user_id).values(**values)
+            )
             get_fuzzy_matcher().invalidate_cache()
 
         # 密码变更或禁用用户时吊销所有会话
         if request.password is not None or (request.is_disabled is not None and request.is_disabled):
-            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            cursor.execute('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL',
-                          (now_str, user_id))
-            conn.commit()
+            sa_conn.execute(
+                update(_t_sessions)
+                .where(and_(_t_sessions.c.user_id == user_id, _t_sessions.c.revoked_at.is_(None)))
+                .values(revoked_at=datetime.now())
+            )
 
-        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-        updated = cursor.fetchone()
+        updated = sa_conn.execute(
+            select(
+                _t_users.c.id, _t_users.c.username, _t_users.c.display_name,
+                _t_users.c.role, _t_users.c.is_disabled, _t_users.c.created_at,
+                _t_users.c.tenant_id,
+            ).where(_t_users.c.id == user_id)
+        ).first()
 
         return UserListItem(
-            id=updated['id'],
-            username=updated['username'],
-            display_name=updated['display_name'],
-            role=updated['role'],
-            is_disabled=bool(updated['is_disabled']),
-            created_at=updated['created_at'],
-            tenant_id=updated['tenant_id'] if 'tenant_id' in updated.keys() else None
+            id=updated.id,
+            username=updated.username,
+            display_name=updated.display_name,
+            role=updated.role,
+            is_disabled=bool(updated.is_disabled),
+            created_at=(updated.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                        if isinstance(updated.created_at, datetime) else updated.created_at),
+            tenant_id=updated.tenant_id,
         )
 
 
@@ -1451,21 +1468,23 @@ async def delete_user(
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="不能禁用自己")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-        user = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        user = sa_conn.execute(
+            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
+        ).first()
         if not user:
             raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and user['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and user.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权操作其他租户的用户")
 
-        cursor.execute('UPDATE users SET is_disabled = 1 WHERE id = ?', (user_id,))
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL',
-                      (now_str, user_id))
-        conn.commit()
+        sa_conn.execute(
+            update(_t_users).where(_t_users.c.id == user_id).values(is_disabled=1)
+        )
+        sa_conn.execute(
+            update(_t_sessions)
+            .where(and_(_t_sessions.c.user_id == user_id, _t_sessions.c.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now())
+        )
         get_fuzzy_matcher().invalidate_cache()
 
         return {"success": True, "message": "用户已禁用"}
@@ -1519,12 +1538,13 @@ async def create_api_key(
     if request.role not in ['admin', 'operate', 'view']:
         raise HTTPException(status_code=400, detail="无效的角色")
 
+    # secrets/sha256 are CPU-bound; outside the transaction
     api_key = generate_api_key()
     key_hash = hash_api_key(api_key)
-    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    created_at_dt = datetime.now()
+    created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    with get_engine().begin() as sa_conn:
         wh_id = request.warehouse_id
         if wh_id is not None:
             wh_id = resolve_warehouse_id(current_user, wh_id)
@@ -1541,14 +1561,18 @@ async def create_api_key(
         else:
             key_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
 
-        cursor.execute('''
-            INSERT INTO api_keys (key_hash, name, role, user_id, tenant_id, warehouse_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (key_hash, request.name, request.role, current_user.id,
-              key_tenant_id, wh_id, created_at))
-
-        key_id = cursor.lastrowid
-        conn.commit()
+        result = sa_conn.execute(
+            insert(_t_api_keys).values(
+                key_hash=key_hash,
+                name=request.name,
+                role=request.role,
+                user_id=current_user.id,
+                tenant_id=key_tenant_id,
+                warehouse_id=wh_id,
+                created_at=created_at_dt,
+            )
+        )
+        key_id = result.inserted_primary_key[0]
 
         return ApiKeyResponse(
             id=key_id,
@@ -1565,18 +1589,16 @@ async def delete_api_key(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """删除API密钥（仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT * FROM api_keys WHERE id = ?', (key_id,))
-        row = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_api_keys.c.id, _t_api_keys.c.tenant_id).where(_t_api_keys.c.id == key_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="API密钥不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权操作其他租户的API密钥")
 
-        cursor.execute('DELETE FROM api_keys WHERE id = ?', (key_id,))
-        conn.commit()
+        sa_conn.execute(delete(_t_api_keys).where(_t_api_keys.c.id == key_id))
 
         return {"success": True, "message": "API密钥已删除"}
 
@@ -1588,19 +1610,20 @@ async def toggle_api_key_status(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """切换API密钥状态（仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT * FROM api_keys WHERE id = ?', (key_id,))
-        row = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_api_keys.c.id, _t_api_keys.c.tenant_id).where(_t_api_keys.c.id == key_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="API密钥不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权操作其他租户的API密钥")
 
-        cursor.execute('UPDATE api_keys SET is_disabled = ? WHERE id = ?',
-                      (1 if request.disabled else 0, key_id))
-        conn.commit()
+        sa_conn.execute(
+            update(_t_api_keys).where(_t_api_keys.c.id == key_id).values(
+                is_disabled=1 if request.disabled else 0
+            )
+        )
 
         status_text = "已禁用" if request.disabled else "已启用"
         return {"success": True, "message": f"API密钥{status_text}"}
@@ -2315,10 +2338,10 @@ async def create_contact(
     if not request.is_supplier and not request.is_customer:
         raise HTTPException(status_code=400, detail="必须选择供应商或客户至少一项")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    created_at_dt = datetime.now()
+    created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
 
+    with get_engine().begin() as sa_conn:
         # 联系方为租户级（不绑定仓库）。租户用户用自身 tenant_id；
         # 全局 admin 必须显式指定 tenant_id。
         if current_user.tenant_id is not None:
@@ -2329,28 +2352,30 @@ async def create_contact(
                     status_code=400,
                     detail="全局管理员创建联系方必须指定 tenant_id"
                 )
-            cursor.execute('SELECT id FROM tenants WHERE id = ? AND is_active = 1', (request.tenant_id,))
-            if not cursor.fetchone():
+            tenant_row = sa_conn.execute(
+                select(_t_tenants.c.id).where(
+                    and_(_t_tenants.c.id == request.tenant_id, _t_tenants.c.is_active == 1)
+                )
+            ).first()
+            if not tenant_row:
                 raise HTTPException(status_code=400, detail="租户不存在或已停用")
             contact_tenant_id = request.tenant_id
 
-        cursor.execute('''
-            INSERT INTO contacts (name, address, phone, email, is_supplier, is_customer, notes, warehouse_id, tenant_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-        ''', (
-            request.name,
-            request.address,
-            request.phone,
-            request.email,
-            1 if request.is_supplier else 0,
-            1 if request.is_customer else 0,
-            request.notes,
-            contact_tenant_id,
-            created_at
-        ))
-
-        contact_id = cursor.lastrowid
-        conn.commit()
+        result = sa_conn.execute(
+            insert(_t_contacts).values(
+                name=request.name,
+                address=request.address,
+                phone=request.phone,
+                email=request.email,
+                is_supplier=1 if request.is_supplier else 0,
+                is_customer=1 if request.is_customer else 0,
+                notes=request.notes,
+                warehouse_id=None,
+                tenant_id=contact_tenant_id,
+                created_at=created_at_dt,
+            )
+        )
+        contact_id = result.inserted_primary_key[0]
         get_fuzzy_matcher().invalidate_cache()
 
         return ContactItem(
@@ -2374,70 +2399,61 @@ async def update_contact(
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
     """更新联系方（需要operate权限）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT * FROM contacts WHERE id = ?', (contact_id,))
-        contact = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        contact = sa_conn.execute(
+            select(_t_contacts.c.id, _t_contacts.c.tenant_id).where(_t_contacts.c.id == contact_id)
+        ).first()
         if not contact:
             raise HTTPException(status_code=404, detail="联系方不存在")
-        if current_user.tenant_id is not None and contact['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and contact.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权访问该联系方")
 
-        updates = []
-        params = []
-
+        values = {}
         if request.name is not None:
-            updates.append('name = ?')
-            params.append(request.name)
+            values['name'] = request.name
         if request.address is not None:
-            updates.append('address = ?')
-            params.append(request.address)
+            values['address'] = request.address
         if request.phone is not None:
-            updates.append('phone = ?')
-            params.append(request.phone)
+            values['phone'] = request.phone
         if request.email is not None:
-            updates.append('email = ?')
-            params.append(request.email)
+            values['email'] = request.email
         if request.is_supplier is not None:
-            updates.append('is_supplier = ?')
-            params.append(1 if request.is_supplier else 0)
+            values['is_supplier'] = 1 if request.is_supplier else 0
         if request.is_customer is not None:
-            updates.append('is_customer = ?')
-            params.append(1 if request.is_customer else 0)
+            values['is_customer'] = 1 if request.is_customer else 0
         if request.notes is not None:
-            updates.append('notes = ?')
-            params.append(request.notes)
+            values['notes'] = request.notes
         if request.is_disabled is not None:
-            updates.append('is_disabled = ?')
-            params.append(1 if request.is_disabled else 0)
+            values['is_disabled'] = 1 if request.is_disabled else 0
 
-        if updates:
-            params.append(contact_id)
-            cursor.execute(f'''
-                UPDATE contacts SET {', '.join(updates)} WHERE id = ?
-            ''', params)
-            conn.commit()
+        if values:
+            sa_conn.execute(
+                update(_t_contacts).where(_t_contacts.c.id == contact_id).values(**values)
+            )
             get_fuzzy_matcher().invalidate_cache()
 
-        cursor.execute('''
-            SELECT id, name, address, phone, email, is_supplier, is_customer,
-                   notes, is_disabled, created_at
-            FROM contacts WHERE id = ?
-        ''', (contact_id,))
-        updated = cursor.fetchone()
+        updated = sa_conn.execute(
+            select(
+                _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+                _t_contacts.c.phone, _t_contacts.c.email,
+                _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
+                _t_contacts.c.notes, _t_contacts.c.is_disabled,
+                _t_contacts.c.created_at,
+            ).where(_t_contacts.c.id == contact_id)
+        ).first()
 
         return ContactItem(
-            id=updated['id'],
-            name=updated['name'],
-            address=updated['address'],
-            phone=updated['phone'],
-            email=updated['email'],
-            is_supplier=bool(updated['is_supplier']),
-            is_customer=bool(updated['is_customer']),
-            notes=updated['notes'],
-            is_disabled=bool(updated['is_disabled']),
-            created_at=updated['created_at']
+            id=updated.id,
+            name=updated.name,
+            address=updated.address,
+            phone=updated.phone,
+            email=updated.email,
+            is_supplier=bool(updated.is_supplier),
+            is_customer=bool(updated.is_customer),
+            notes=updated.notes,
+            is_disabled=bool(updated.is_disabled),
+            created_at=(updated.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                        if isinstance(updated.created_at, datetime) else updated.created_at),
         )
 
 
@@ -2447,18 +2463,18 @@ async def delete_contact(
     current_user: CurrentUser = Depends(require_auth('operate'))
 ):
     """禁用联系方（需要operate权限）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT * FROM contacts WHERE id = ?', (contact_id,))
-        contact = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        contact = sa_conn.execute(
+            select(_t_contacts.c.id, _t_contacts.c.tenant_id).where(_t_contacts.c.id == contact_id)
+        ).first()
         if not contact:
             raise HTTPException(status_code=404, detail="联系方不存在")
-        if current_user.tenant_id is not None and contact['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and contact.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权访问该联系方")
 
-        cursor.execute('UPDATE contacts SET is_disabled = 1 WHERE id = ?', (contact_id,))
-        conn.commit()
+        sa_conn.execute(
+            update(_t_contacts).where(_t_contacts.c.id == contact_id).values(is_disabled=1)
+        )
         get_fuzzy_matcher().invalidate_cache()
 
         return {"success": True, "message": "联系方已禁用"}
@@ -6601,22 +6617,20 @@ async def face_create_subject(
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.name or not payload.name.strip():
         raise HTTPException(status_code=400, detail="姓名不能为空")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO face_subjects
-                (tenant_id, name, employee_id, note, is_active, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            (tid, payload.name.strip(),
-             (payload.employee_id or None),
-             (payload.note or None),
-             1 if payload.is_active else 0,
-             current_user.id),
+    with get_engine().begin() as sa_conn:
+        result = sa_conn.execute(
+            insert(_t_face_subjects).values(
+                tenant_id=tid,
+                name=payload.name.strip(),
+                employee_id=(payload.employee_id or None),
+                note=(payload.note or None),
+                is_active=1 if payload.is_active else 0,
+                created_by=current_user.id,
+                created_at=_sa_func.current_timestamp(),
+                updated_at=_sa_func.current_timestamp(),
+            )
         )
-        sid = cur.lastrowid
-        conn.commit()
+        sid = result.inserted_primary_key[0]
         return {"id": sid, "success": True}
 
 
@@ -6630,27 +6644,23 @@ async def face_update_subject(
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.name or not payload.name.strip():
         raise HTTPException(status_code=400, detail="姓名不能为空")
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM face_subjects WHERE id = ?", (subject_id,))
-        row = cur.fetchone()
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_face_subjects.c.tenant_id).where(_t_face_subjects.c.id == subject_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="人员档案不存在")
-        if int(row["tenant_id"]) != int(tid):
+        if int(row.tenant_id) != int(tid):
             raise HTTPException(status_code=403, detail="无权修改该档案")
-        cur.execute(
-            """
-            UPDATE face_subjects
-            SET name = ?, employee_id = ?, note = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (payload.name.strip(),
-             (payload.employee_id or None),
-             (payload.note or None),
-             1 if payload.is_active else 0,
-             subject_id),
+        sa_conn.execute(
+            update(_t_face_subjects).where(_t_face_subjects.c.id == subject_id).values(
+                name=payload.name.strip(),
+                employee_id=(payload.employee_id or None),
+                note=(payload.note or None),
+                is_active=1 if payload.is_active else 0,
+                updated_at=_sa_func.current_timestamp(),
+            )
         )
-        conn.commit()
         return {"success": True, "id": subject_id}
 
 
@@ -6661,19 +6671,20 @@ async def face_delete_subject(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM face_subjects WHERE id = ?", (subject_id,))
-        row = cur.fetchone()
+    with get_engine().begin() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_face_subjects.c.tenant_id).where(_t_face_subjects.c.id == subject_id)
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="人员档案不存在")
-        if int(row["tenant_id"]) != int(tid):
+        if int(row.tenant_id) != int(tid):
             raise HTTPException(status_code=403, detail="无权删除该档案")
         # ON DELETE CASCADE drops the enrollments; rules referencing this
         # subject will be silently dropped from allowed lists by stale-id
         # tolerance in the matcher (no explicit cleanup needed).
-        cur.execute("DELETE FROM face_subjects WHERE id = ?", (subject_id,))
-        conn.commit()
+        sa_conn.execute(
+            delete(_t_face_subjects).where(_t_face_subjects.c.id == subject_id)
+        )
         return {"success": True}
 
 
