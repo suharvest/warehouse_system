@@ -343,17 +343,19 @@ class MCPProcessManager:
                           error_message: Optional[str], restart_count: int):
         """更新数据库中的连接状态"""
         try:
-            from database import get_db_connection
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE mcp_connections
-                SET status = ?, error_message = ?, restart_count = ?,
-                    updated_at = ?
-                WHERE id = ?
-            ''', (status, error_message, restart_count,
-                  datetime.now().isoformat(), conn_id))
-            conn.commit()
-            conn.close()
+            from db import get_engine
+            from metadata import mcp_connections as _t_mcp
+            from sqlalchemy import update as _sa_update
+            with get_engine().begin() as conn:
+                conn.execute(
+                    _sa_update(_t_mcp)
+                    .where(_t_mcp.c.id == conn_id)
+                    .values(
+                        status=status,
+                        error_message=error_message,
+                        restart_count=restart_count,
+                        updated_at=datetime.now().isoformat(),
+                    )
+                )
         except Exception as e:
             logger.error(f"Failed to update DB status for '{conn_id}': {e}")
