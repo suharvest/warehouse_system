@@ -71,6 +71,8 @@ from metadata import (
     contacts as _t_contacts,
     materials as _t_materials,
     batches as _t_batches,
+    inventory_records as _t_inventory_records,
+    batch_consumptions as _t_batch_consumptions,
 )
 from sqlalchemy import func as _sa_func
 import math
@@ -2408,74 +2410,82 @@ def get_dashboard_stats(
     warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取仪表盘统计数据（排除禁用物料）"""
+    """获取仪表盘统计数据（排除禁用物料）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter_m, wh_params_m = build_scope_filter(current_user.tenant_id, wh_id, 'm')
-    wh_filter_r, wh_params_r = build_scope_filter(current_user.tenant_id, wh_id, 'r')
+    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_s = today_start.strftime('%Y-%m-%d %H:%M:%S')
+    yesterday_start_s = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
 
+    with get_engine().connect() as sa_conn:
         # 库存总量（排除禁用）
-        cursor.execute(
-            f'SELECT SUM(m.quantity) as total FROM materials m WHERE m.is_disabled = 0{wh_filter_m}',
-            wh_params_m
-        )
-        total_stock = cursor.fetchone()['total'] or 0
+        total_stock = sa_conn.execute(
+            select(_sa_func.sum(_t_materials.c.quantity))
+            .where(and_(_t_materials.c.is_disabled == 0, *m_scope))
+        ).scalar() or 0
 
-        # 今日入库量（排除禁用物料的记录）
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        cursor.execute(f'''
-            SELECT SUM(r.quantity) as total
-            FROM inventory_records r
-            JOIN materials m ON r.material_id = m.id
-            WHERE r.type = 'in' AND r.created_at >= ? AND m.is_disabled = 0{wh_filter_r}
-        ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),) + wh_params_r)
-        today_in = cursor.fetchone()['total'] or 0
+        # 今日入库量
+        j = _t_inventory_records.join(_t_materials, _t_inventory_records.c.material_id == _t_materials.c.id)
+        today_in = sa_conn.execute(
+            select(_sa_func.sum(_t_inventory_records.c.quantity)).select_from(j)
+            .where(and_(
+                _t_inventory_records.c.type == 'in',
+                _t_inventory_records.c.created_at >= today_start_s,
+                _t_materials.c.is_disabled == 0,
+                *r_scope,
+            ))
+        ).scalar() or 0
 
-        # 今日出库量（排除禁用物料的记录）
-        cursor.execute(f'''
-            SELECT SUM(r.quantity) as total
-            FROM inventory_records r
-            JOIN materials m ON r.material_id = m.id
-            WHERE r.type = 'out' AND r.created_at >= ? AND m.is_disabled = 0{wh_filter_r}
-        ''', (today_start.strftime('%Y-%m-%d %H:%M:%S'),) + wh_params_r)
-        today_out = cursor.fetchone()['total'] or 0
+        today_out = sa_conn.execute(
+            select(_sa_func.sum(_t_inventory_records.c.quantity)).select_from(j)
+            .where(and_(
+                _t_inventory_records.c.type == 'out',
+                _t_inventory_records.c.created_at >= today_start_s,
+                _t_materials.c.is_disabled == 0,
+                *r_scope,
+            ))
+        ).scalar() or 0
 
-        # 库存预警（低于安全库存，排除禁用）
-        cursor.execute(f'''
-            SELECT COUNT(*) as count
-            FROM materials m
-            WHERE m.safe_stock IS NOT NULL AND m.quantity < m.safe_stock AND m.is_disabled = 0{wh_filter_m}
-        ''', wh_params_m)
-        low_stock_count = cursor.fetchone()['count']
+        # 库存预警
+        low_stock_count = sa_conn.execute(
+            select(_sa_func.count()).select_from(_t_materials)
+            .where(and_(
+                _t_materials.c.safe_stock.is_not(None),
+                _t_materials.c.quantity < _t_materials.c.safe_stock,
+                _t_materials.c.is_disabled == 0,
+                *m_scope,
+            ))
+        ).scalar() or 0
 
-        # 物料种类数（排除禁用）
-        cursor.execute(
-            f'SELECT COUNT(*) as count FROM materials m WHERE m.is_disabled = 0{wh_filter_m}',
-            wh_params_m
-        )
-        material_types = cursor.fetchone()['count']
+        # 物料种类数
+        material_types = sa_conn.execute(
+            select(_sa_func.count()).select_from(_t_materials)
+            .where(and_(_t_materials.c.is_disabled == 0, *m_scope))
+        ).scalar() or 0
 
-        # 计算昨日数据用于百分比变化
-        yesterday_start = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday_end = today_start
+        # 昨日入库
+        yesterday_in = sa_conn.execute(
+            select(_sa_func.sum(_t_inventory_records.c.quantity))
+            .where(and_(
+                _t_inventory_records.c.type == 'in',
+                _t_inventory_records.c.created_at >= yesterday_start_s,
+                _t_inventory_records.c.created_at < today_start_s,
+                *r_scope,
+            ))
+        ).scalar() or 1
 
-        cursor.execute(f'''
-            SELECT SUM(r.quantity) as total
-            FROM inventory_records r
-            WHERE r.type = 'in' AND r.created_at >= ? AND r.created_at < ?{wh_filter_r}
-        ''', (yesterday_start.strftime('%Y-%m-%d %H:%M:%S'), yesterday_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params_r)
-        yesterday_in = cursor.fetchone()['total'] or 1
+        yesterday_out = sa_conn.execute(
+            select(_sa_func.sum(_t_inventory_records.c.quantity))
+            .where(and_(
+                _t_inventory_records.c.type == 'out',
+                _t_inventory_records.c.created_at >= yesterday_start_s,
+                _t_inventory_records.c.created_at < today_start_s,
+                *r_scope,
+            ))
+        ).scalar() or 1
 
-        cursor.execute(f'''
-            SELECT SUM(r.quantity) as total
-            FROM inventory_records r
-            WHERE r.type = 'out' AND r.created_at >= ? AND r.created_at < ?{wh_filter_r}
-        ''', (yesterday_start.strftime('%Y-%m-%d %H:%M:%S'), yesterday_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params_r)
-        yesterday_out = cursor.fetchone()['total'] or 1
-
-        # 计算百分比变化
         in_change = round(((today_in - yesterday_in) / yesterday_in * 100), 1) if yesterday_in > 0 else 0
         out_change = round(((today_out - yesterday_out) / yesterday_out * 100), 1) if yesterday_out > 0 else 0
 
@@ -2495,25 +2505,16 @@ def get_category_distribution(
     warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取库存类型分布"""
+    """获取库存类型分布 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'm')
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(f'''
-            SELECT m.category, SUM(m.quantity) as total
-            FROM materials m
-            WHERE 1=1{wh_filter}
-            GROUP BY m.category
-            ORDER BY total DESC
-        ''', wh_params)
-
-        return [
-            CategoryItem(name=row['category'], value=row['total'])
-            for row in cursor.fetchall()
-        ]
+    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    total_col = _sa_func.sum(_t_materials.c.quantity).label('total')
+    stmt = select(_t_materials.c.category, total_col).group_by(_t_materials.c.category).order_by(total_col.desc())
+    if preds:
+        stmt = stmt.where(and_(*preds))
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+        return [CategoryItem(name=row.category, value=row.total) for row in rows]
 
 
 @app.get("/api/dashboard/weekly-trend", response_model=WeeklyTrend)
@@ -2521,43 +2522,44 @@ def get_weekly_trend(
     warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取近7天出入库趋势"""
+    """获取近7天出入库趋势 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'r')
+    scope_preds = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        dates = []
-        in_data = []
-        out_data = []
-
+    dates = []
+    in_data = []
+    out_data = []
+    with get_engine().connect() as sa_conn:
         for i in range(6, -1, -1):
             date = datetime.now() - timedelta(days=i)
             date_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
             date_end = date_start + timedelta(days=1)
+            ds = date_start.strftime('%Y-%m-%d %H:%M:%S')
+            de = date_end.strftime('%Y-%m-%d %H:%M:%S')
 
             dates.append(date.strftime('%m-%d'))
 
-            # 入库数据
-            cursor.execute(f'''
-                SELECT SUM(r.quantity) as total
-                FROM inventory_records r
-                WHERE r.type = 'in' AND r.created_at >= ? AND r.created_at < ?{wh_filter}
-            ''', (date_start.strftime('%Y-%m-%d %H:%M:%S'), date_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params)
-            in_total = cursor.fetchone()['total'] or 0
+            in_preds = [
+                _t_inventory_records.c.type == 'in',
+                _t_inventory_records.c.created_at >= ds,
+                _t_inventory_records.c.created_at < de,
+            ] + scope_preds
+            in_total = sa_conn.execute(
+                select(_sa_func.sum(_t_inventory_records.c.quantity)).where(and_(*in_preds))
+            ).scalar() or 0
             in_data.append(in_total)
 
-            # 出库数据
-            cursor.execute(f'''
-                SELECT SUM(r.quantity) as total
-                FROM inventory_records r
-                WHERE r.type = 'out' AND r.created_at >= ? AND r.created_at < ?{wh_filter}
-            ''', (date_start.strftime('%Y-%m-%d %H:%M:%S'), date_end.strftime('%Y-%m-%d %H:%M:%S')) + wh_params)
-            out_total = cursor.fetchone()['total'] or 0
+            out_preds = [
+                _t_inventory_records.c.type == 'out',
+                _t_inventory_records.c.created_at >= ds,
+                _t_inventory_records.c.created_at < de,
+            ] + scope_preds
+            out_total = sa_conn.execute(
+                select(_sa_func.sum(_t_inventory_records.c.quantity)).where(and_(*out_preds))
+            ).scalar() or 0
             out_data.append(out_total)
 
-        return WeeklyTrend(dates=dates, in_data=in_data, out_data=out_data)
+    return WeeklyTrend(dates=dates, in_data=in_data, out_data=out_data)
 
 
 @app.get("/api/dashboard/top-stock", response_model=TopStock)
@@ -2565,30 +2567,17 @@ def get_top_stock(
     warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取库存TOP10"""
+    """获取库存TOP10 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'm')
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(f'''
-            SELECT m.name, m.quantity, m.category
-            FROM materials m
-            WHERE 1=1{wh_filter}
-            ORDER BY m.quantity DESC
-            LIMIT 10
-        ''', wh_params)
-
-        names = []
-        quantities = []
-        categories = []
-
-        for row in cursor.fetchall():
-            names.append(row['name'])
-            quantities.append(row['quantity'])
-            categories.append(row['category'])
-
+    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    stmt = select(_t_materials.c.name, _t_materials.c.quantity, _t_materials.c.category).order_by(_t_materials.c.quantity.desc()).limit(10)
+    if preds:
+        stmt = stmt.where(and_(*preds))
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+        names = [row.name for row in rows]
+        quantities = [row.quantity for row in rows]
+        categories = [row.category for row in rows]
         return TopStock(names=names, quantities=quantities, categories=categories)
 
 
@@ -2597,32 +2586,35 @@ def get_low_stock_alert(
     warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取库存预警列表"""
+    """获取库存预警列表 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'm')
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(f'''
-            SELECT m.name, m.sku, m.category, m.quantity, m.safe_stock, m.location
-            FROM materials m
-            WHERE m.safe_stock IS NOT NULL AND m.quantity < m.safe_stock AND m.is_disabled = 0{wh_filter}
-            ORDER BY (m.quantity - m.safe_stock) ASC
-            LIMIT 20
-        ''', wh_params)
-
+    preds = [
+        _t_materials.c.safe_stock.is_not(None),
+        _t_materials.c.quantity < _t_materials.c.safe_stock,
+        _t_materials.c.is_disabled == 0,
+    ]
+    preds.extend(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    stmt = (
+        select(
+            _t_materials.c.name, _t_materials.c.sku, _t_materials.c.category,
+            _t_materials.c.quantity, _t_materials.c.safe_stock, _t_materials.c.location,
+        )
+        .where(and_(*preds))
+        .order_by((_t_materials.c.quantity - _t_materials.c.safe_stock).asc())
+        .limit(20)
+    )
+    with get_engine().connect() as sa_conn:
         return [
             LowStockItem(
-                name=row['name'],
-                sku=row['sku'],
-                category=row['category'],
-                quantity=row['quantity'],
-                safe_stock=row['safe_stock'],
-                location=row['location'],
-                shortage=row['safe_stock'] - row['quantity']
+                name=row.name,
+                sku=row.sku,
+                category=row.category,
+                quantity=row.quantity,
+                safe_stock=row.safe_stock,
+                location=row.location,
+                shortage=row.safe_stock - row.quantity
             )
-            for row in cursor.fetchall()
+            for row in sa_conn.execute(stmt).fetchall()
         ]
 
 
@@ -2948,23 +2940,22 @@ def get_all_materials(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取所有库存（兼容旧API）"""
+    """获取所有库存（兼容旧API）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(f'''
-            SELECT name, sku, category, quantity, unit, safe_stock, location, is_disabled
-            FROM materials
-            WHERE is_disabled = 0{wh_filter}
-            ORDER BY name ASC
-        ''', wh_params)
+    preds = [_t_materials.c.is_disabled == 0]
+    preds.extend(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    stmt = select(
+        _t_materials.c.name, _t_materials.c.sku, _t_materials.c.category,
+        _t_materials.c.quantity, _t_materials.c.unit, _t_materials.c.safe_stock,
+        _t_materials.c.location, _t_materials.c.is_disabled,
+    ).where(and_(*preds)).order_by(_t_materials.c.name.asc())
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
 
         result = []
-        for row in cursor.fetchall():
-            quantity = row['quantity']
-            safe_stock = row['safe_stock']
+        for row in rows:
+            quantity = row.quantity
+            safe_stock = row.safe_stock
 
             # 判断状态
             if safe_stock is not None:
@@ -2982,13 +2973,13 @@ def get_all_materials(
                 status_text = '正常'
 
             result.append(MaterialItem(
-                name=row['name'],
-                sku=row['sku'],
-                category=row['category'],
+                name=row.name,
+                sku=row.sku,
+                category=row.category,
                 quantity=quantity,
-                unit=row['unit'],
+                unit=row.unit,
                 safe_stock=safe_stock,
-                location=row['location'],
+                location=row.location,
                 status=status,
                 status_text=status_text
             ))
@@ -3160,13 +3151,14 @@ def get_categories(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取所有物料分类"""
+    """获取所有物料分类 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f'SELECT DISTINCT category FROM materials WHERE 1=1{wh_filter} ORDER BY category', wh_params)
-        return [row['category'] for row in cursor.fetchall()]
+    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    stmt = select(_t_materials.c.category).distinct().order_by(_t_materials.c.category)
+    if preds:
+        stmt = stmt.where(and_(*preds))
+    with get_engine().connect() as sa_conn:
+        return [row.category for row in sa_conn.execute(stmt).fetchall()]
 
 
 @app.get("/api/materials/product-stats", response_model=ProductStats)
@@ -3175,93 +3167,64 @@ def get_product_stats(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取单个产品的统计数据"""
+    """获取单个产品的统计数据 — Phase 2e: SA Core read."""
     if not name:
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
+    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
 
+    today = datetime.now().strftime('%Y-%m-%d')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+
+    with get_engine().connect() as sa_conn:
         # 查询产品基本信息（支持 name 或 SKU）
-        cursor.execute(f'''
-            SELECT id, name, sku, quantity, unit, safe_stock, location
-            FROM materials
-            WHERE (name = ? OR sku = ?){wh_filter}
-        ''', (name, name) + wh_params)
-
-        product = cursor.fetchone()
+        m_stmt = select(
+            _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
+            _t_materials.c.quantity, _t_materials.c.unit,
+            _t_materials.c.safe_stock, _t_materials.c.location,
+        ).where(and_(
+            or_(_t_materials.c.name == name, _t_materials.c.sku == name),
+            *m_scope,
+        ))
+        product = sa_conn.execute(m_stmt).fetchone()
         if not product:
             raise HTTPException(status_code=404, detail="产品不存在")
 
-        material_id = product['id']
-        current_stock = product['quantity']
-        unit = product['unit']
-        safe_stock = product['safe_stock']
+        material_id = product.id
+        current_stock = product.quantity
+        unit = product.unit
+        safe_stock = product.safe_stock
 
-        # 获取今天的日期
-        today = datetime.now().strftime('%Y-%m-%d')
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        def _sum_records(rtype: str, date_str: Optional[str] = None) -> int:
+            preds = [
+                _t_inventory_records.c.material_id == material_id,
+                _t_inventory_records.c.type == rtype,
+            ]
+            if date_str is not None:
+                preds.append(_sa_func.date(_t_inventory_records.c.created_at) == date_str)
+            return sa_conn.execute(
+                select(_sa_func.coalesce(_sa_func.sum(_t_inventory_records.c.quantity), 0))
+                .where(and_(*preds))
+            ).scalar() or 0
 
-        # 查询今日入库
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total
-            FROM inventory_records
-            WHERE material_id = ? AND type = 'in' AND DATE(created_at) = ?
-        ''', (material_id, today))
-        today_in = cursor.fetchone()['total']
+        today_in = _sum_records('in', today)
+        yesterday_in = _sum_records('in', yesterday)
+        today_out = _sum_records('out', today)
+        yesterday_out = _sum_records('out', yesterday)
+        total_in = _sum_records('in')
+        total_out = _sum_records('out')
 
-        # 查询昨日入库
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total
-            FROM inventory_records
-            WHERE material_id = ? AND type = 'in' AND DATE(created_at) = ?
-        ''', (material_id, yesterday))
-        yesterday_in = cursor.fetchone()['total']
-
-        # 查询今日出库
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total
-            FROM inventory_records
-            WHERE material_id = ? AND type = 'out' AND DATE(created_at) = ?
-        ''', (material_id, today))
-        today_out = cursor.fetchone()['total']
-
-        # 查询昨日出库
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total
-            FROM inventory_records
-            WHERE material_id = ? AND type = 'out' AND DATE(created_at) = ?
-        ''', (material_id, yesterday))
-        yesterday_out = cursor.fetchone()['total']
-
-        # 查询总入库和总出库（用于饼图）
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total
-            FROM inventory_records
-            WHERE material_id = ? AND type = 'in'
-        ''', (material_id,))
-        total_in = cursor.fetchone()['total']
-
-        cursor.execute('''
-            SELECT COALESCE(SUM(quantity), 0) as total
-            FROM inventory_records
-            WHERE material_id = ? AND type = 'out'
-        ''', (material_id,))
-        total_out = cursor.fetchone()['total']
-
-        # 计算变化百分比
         in_change = ((today_in - yesterday_in) / yesterday_in * 100) if yesterday_in > 0 else 0
         out_change = ((today_out - yesterday_out) / yesterday_out * 100) if yesterday_out > 0 else 0
 
         return ProductStats(
             name=name,
-            sku=product['sku'],
+            sku=product.sku,
             current_stock=current_stock,
             unit=unit,
             safe_stock=safe_stock,
-            location=product['location'],
+            location=product.location,
             today_in=today_in,
             today_out=today_out,
             in_change=round(in_change, 1),
@@ -3381,52 +3344,54 @@ def get_product_records(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取单个产品的出入库记录（分页）"""
+    """获取单个产品的出入库记录（分页）— Phase 2e: SA Core read."""
     if not name:
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'r')
-    with get_db() as conn:
-        cursor = conn.cursor()
+    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
 
-        # 查询产品ID（限定到当前租户/仓库，避免拿到其他租户同名 SKU）
-        m_filter, m_params = build_scope_filter(current_user.tenant_id, wh_id)
-        cursor.execute(f'SELECT id FROM materials WHERE name = ?{m_filter}', (name,) + m_params)
-        product = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        product = sa_conn.execute(
+            select(_t_materials.c.id).where(and_(_t_materials.c.name == name, *m_scope))
+        ).fetchone()
         if not product:
             raise HTTPException(status_code=404, detail="产品不存在")
 
-        material_id = product['id']
+        material_id = product.id
+        base_preds = [_t_inventory_records.c.material_id == material_id, *r_scope]
 
-        # 获取总数
-        cursor.execute(f'SELECT COUNT(*) as total FROM inventory_records r WHERE r.material_id = ?{wh_filter}', (material_id,) + wh_params)
-        total = cursor.fetchone()['total']
+        total = sa_conn.execute(
+            select(_sa_func.count()).select_from(_t_inventory_records).where(and_(*base_preds))
+        ).scalar() or 0
 
-        # 分页查询
         offset = (page - 1) * page_size
-        cursor.execute(f'''
-            SELECT r.type, r.quantity, r.operator, r.reason_category, r.reason_note, r.created_at,
-                   b.variant, b.batch_no
-            FROM inventory_records r
-            LEFT JOIN batches b ON r.batch_id = b.id
-            WHERE r.material_id = ?{wh_filter}
-            ORDER BY r.created_at DESC
-            LIMIT ? OFFSET ?
-        ''', (material_id,) + wh_params + (page_size, offset))
+        j = _t_inventory_records.outerjoin(_t_batches, _t_inventory_records.c.batch_id == _t_batches.c.id)
+        rows = sa_conn.execute(
+            select(
+                _t_inventory_records.c.type, _t_inventory_records.c.quantity,
+                _t_inventory_records.c.operator, _t_inventory_records.c.reason_category,
+                _t_inventory_records.c.reason_note, _t_inventory_records.c.created_at,
+                _t_batches.c.variant, _t_batches.c.batch_no,
+            ).select_from(j)
+            .where(and_(*base_preds))
+            .order_by(_t_inventory_records.c.created_at.desc())
+            .limit(page_size).offset(offset)
+        ).fetchall()
 
         items = [
             ProductRecord(
-                type=row['type'],
-                quantity=row['quantity'],
-                operator=row['operator'],
-                reason_category=row['reason_category'],
-                reason_note=row['reason_note'],
-                created_at=row['created_at'],
-                variant=row['variant'] or '',
-                batch_no=row['batch_no'] or '',
+                type=row.type,
+                quantity=row.quantity,
+                operator=row.operator,
+                reason_category=row.reason_category,
+                reason_note=row.reason_note,
+                created_at=row.created_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.created_at, datetime) else row.created_at,
+                variant=row.variant or '',
+                batch_no=row.batch_no or '',
             )
-            for row in cursor.fetchall()
+            for row in rows
         ]
 
         total_pages = math.ceil(total / page_size) if total > 0 else 1
@@ -3469,120 +3434,107 @@ def get_inventory_records_paginated(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取所有进出库记录（分页+筛选）"""
+    """获取所有进出库记录（分页+筛选）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'r')
-    with get_db() as conn:
-        cursor = conn.cursor()
+    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
 
-        # 解析状态筛选
-        status_filter = status.split(',') if status else None
+    # 解析状态筛选
+    status_filter = status.split(',') if status else None
 
-        # 构建查询（含联系方、批次、操作员和仓库信息）
-        base_query = f'''
-            SELECT r.id, m.name as material_name, m.sku as material_sku, m.category,
-                   r.type, r.quantity, r.operator, r.operator_user_id,
-                   r.reason_category, r.reason_note, r.created_at,
-                   m.quantity as current_quantity, m.safe_stock, m.is_disabled,
-                   r.contact_id, c.name as contact_name,
-                   r.batch_id, b.batch_no, b.variant,
-                   u.display_name as operator_display_name, u.username as operator_username,
-                   r.warehouse_id, w.name as warehouse_name
-            FROM inventory_records r
-            JOIN materials m ON r.material_id = m.id
-            LEFT JOIN contacts c ON r.contact_id = c.id
-            LEFT JOIN batches b ON r.batch_id = b.id
-            LEFT JOIN users u ON r.operator_user_id = u.id
-            LEFT JOIN warehouses w ON r.warehouse_id = w.id
-            WHERE 1=1{wh_filter}
-        '''
-        count_query = f'''
-            SELECT COUNT(*) as total
-            FROM inventory_records r
-            JOIN materials m ON r.material_id = m.id
-            WHERE 1=1{wh_filter}
-        '''
-        params = list(wh_params)
+    # 构建过滤谓词（不含状态筛选 — 该项需在 Python 端二次过滤）
+    preds = list(r_scope)
+    if start_date:
+        preds.append(_sa_func.date(_t_inventory_records.c.created_at) >= start_date)
+    if end_date:
+        preds.append(_sa_func.date(_t_inventory_records.c.created_at) <= end_date)
+    if product_name:
+        like = f'%{product_name}%'
+        preds.append(or_(_t_materials.c.name.like(like), _t_materials.c.sku.like(like)))
+    if category:
+        preds.append(_t_materials.c.category == category)
+    if record_type:
+        preds.append(_t_inventory_records.c.type == record_type)
+    if contact_id:
+        preds.append(_t_inventory_records.c.contact_id == contact_id)
+    if operator_user_id:
+        preds.append(_t_inventory_records.c.operator_user_id == operator_user_id)
+    if reason_category:
+        preds.append(_t_inventory_records.c.reason_category == reason_category)
+    if reason:
+        rl = f'%{reason}%'
+        preds.append(or_(
+            _t_inventory_records.c.reason_note.like(rl),
+            _t_inventory_records.c.reason_category.like(rl),
+        ))
 
-        # 时间范围筛选
-        if start_date:
-            base_query += ' AND DATE(r.created_at) >= ?'
-            count_query += ' AND DATE(r.created_at) >= ?'
-            params.append(start_date)
-        if end_date:
-            base_query += ' AND DATE(r.created_at) <= ?'
-            count_query += ' AND DATE(r.created_at) <= ?'
-            params.append(end_date)
+    # 主查询 join
+    j = (
+        _t_inventory_records
+        .join(_t_materials, _t_inventory_records.c.material_id == _t_materials.c.id)
+        .outerjoin(_t_contacts, _t_inventory_records.c.contact_id == _t_contacts.c.id)
+        .outerjoin(_t_batches, _t_inventory_records.c.batch_id == _t_batches.c.id)
+        .outerjoin(_t_users, _t_inventory_records.c.operator_user_id == _t_users.c.id)
+        .outerjoin(_t_warehouses, _t_inventory_records.c.warehouse_id == _t_warehouses.c.id)
+    )
 
-        # 产品名称/SKU搜索
-        if product_name:
-            base_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
-            count_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
-            params.extend([f'%{product_name}%', f'%{product_name}%'])
+    sort_column_map = {
+        'created_at': _t_inventory_records.c.created_at,
+        'quantity': _t_inventory_records.c.quantity,
+        'material_name': _t_materials.c.name,
+    }
+    sort_col = sort_column_map.get(sort_by, _t_inventory_records.c.created_at)
+    sort_expr = sort_col.asc() if sort_order.lower() == 'asc' else sort_col.desc()
 
-        # 商品类型/分类筛选
-        if category:
-            base_query += ' AND m.category = ?'
-            count_query += ' AND m.category = ?'
-            params.append(category)
+    cols = [
+        _t_inventory_records.c.id,
+        _t_materials.c.name.label('material_name'),
+        _t_materials.c.sku.label('material_sku'),
+        _t_materials.c.category.label('category'),
+        _t_inventory_records.c.type,
+        _t_inventory_records.c.quantity,
+        _t_inventory_records.c.operator,
+        _t_inventory_records.c.operator_user_id,
+        _t_inventory_records.c.reason_category,
+        _t_inventory_records.c.reason_note,
+        _t_inventory_records.c.created_at,
+        _t_materials.c.quantity.label('current_quantity'),
+        _t_materials.c.safe_stock,
+        _t_materials.c.is_disabled,
+        _t_inventory_records.c.contact_id,
+        _t_contacts.c.name.label('contact_name'),
+        _t_inventory_records.c.batch_id,
+        _t_batches.c.batch_no,
+        _t_batches.c.variant,
+        _t_users.c.display_name.label('operator_display_name'),
+        _t_users.c.username.label('operator_username'),
+        _t_inventory_records.c.warehouse_id,
+        _t_warehouses.c.name.label('warehouse_name'),
+    ]
 
-        # 记录类型筛选
-        if record_type:
-            base_query += ' AND r.type = ?'
-            count_query += ' AND r.type = ?'
-            params.append(record_type)
+    count_join = _t_inventory_records.join(_t_materials, _t_inventory_records.c.material_id == _t_materials.c.id)
 
-        # 联系方筛选
-        if contact_id:
-            base_query += ' AND r.contact_id = ?'
-            count_query += ' AND r.contact_id = ?'
-            params.append(contact_id)
+    offset = (page - 1) * page_size
 
-        # 操作员筛选
-        if operator_user_id:
-            base_query += ' AND r.operator_user_id = ?'
-            count_query += ' AND r.operator_user_id = ?'
-            params.append(operator_user_id)
-
-        # 原因分类筛选
-        if reason_category:
-            base_query += ' AND r.reason_category = ?'
-            count_query += ' AND r.reason_category = ?'
-            params.append(reason_category)
-
-        # 原因/备注关键词搜索
-        if reason:
-            base_query += ' AND (r.reason_note LIKE ? OR r.reason_category LIKE ?)'
-            count_query += ' AND (r.reason_note LIKE ? OR r.reason_category LIKE ?)'
-            params.extend([f'%{reason}%', f'%{reason}%'])
-
+    with get_engine().connect() as sa_conn:
         # 获取总数
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()['total']
+        count_stmt = select(_sa_func.count()).select_from(count_join)
+        if preds:
+            count_stmt = count_stmt.where(and_(*preds))
+        total = sa_conn.execute(count_stmt).scalar() or 0
 
-        # 排序和分页
-        sort_column_map = {
-            'created_at': 'r.created_at',
-            'quantity': 'r.quantity',
-            'material_name': 'm.name',
-        }
-        sort_col = sort_column_map.get(sort_by, 'r.created_at')
-        sort_dir = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
-        base_query += f' ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?'
-        offset = (page - 1) * page_size
-        params.extend([page_size, offset])
-
-        cursor.execute(base_query, params)
-        rows = cursor.fetchall()
+        # 主查询
+        main_stmt = select(*cols).select_from(j)
+        if preds:
+            main_stmt = main_stmt.where(and_(*preds))
+        main_stmt = main_stmt.order_by(sort_expr).limit(page_size).offset(offset)
+        rows = sa_conn.execute(main_stmt).fetchall()
 
         result = []
-        filtered_count = 0
         for row in rows:
-            quantity = row['current_quantity']
-            safe_stock = row['safe_stock']
-            is_disabled = bool(row['is_disabled'])
+            quantity = row.current_quantity
+            safe_stock = row.safe_stock
+            is_disabled = bool(row.is_disabled)
 
-            # 计算物料当前状态
             if is_disabled:
                 material_status = 'disabled'
             elif safe_stock is not None:
@@ -3595,97 +3547,88 @@ def get_inventory_records_paginated(
             else:
                 material_status = 'normal'
 
-            # 状态筛选
             if status_filter and material_status not in status_filter:
                 continue
 
-            # 获取批次详情
             batch_details = None
-            record_id = row['id']
-            record_type_val = row['type']
+            record_id = row.id
+            record_type_val = row.type
+            ca = row.created_at
+            if isinstance(ca, datetime):
+                ca = ca.strftime('%Y-%m-%d %H:%M:%S')
 
             if record_type_val == 'out':
-                # 出库记录：查询批次消耗详情
-                cursor.execute('''
-                    SELECT b.batch_no, bc.quantity
-                    FROM batch_consumptions bc
-                    JOIN batches b ON bc.batch_id = b.id
-                    WHERE bc.record_id = ?
-                    ORDER BY b.created_at ASC
-                ''', (record_id,))
-                consumptions = cursor.fetchall()
+                cj = _t_batch_consumptions.join(_t_batches, _t_batch_consumptions.c.batch_id == _t_batches.c.id)
+                consumptions = sa_conn.execute(
+                    select(_t_batches.c.batch_no, _t_batch_consumptions.c.quantity)
+                    .select_from(cj)
+                    .where(_t_batch_consumptions.c.record_id == record_id)
+                    .order_by(_t_batches.c.created_at.asc())
+                ).fetchall()
                 if consumptions:
-                    details = [f"{c['batch_no']}×{c['quantity']}" for c in consumptions]
+                    details = [f"{c.batch_no}×{c.quantity}" for c in consumptions]
                     batch_details = ', '.join(details)
 
-            # 操作员名称：优先使用用户表中的显示名称，否则使用旧的operator字段
-            operator_name = row['operator_display_name'] or row['operator_username'] or row['operator']
+            operator_name = row.operator_display_name or row.operator_username or row.operator
 
             if format == "brief":
                 result.append({
                     "id": record_id,
-                    "material_name": row['material_name'],
+                    "material_name": row.material_name,
                     "type": record_type_val,
-                    "quantity": row['quantity'],
-                    "created_at": row['created_at'],
+                    "quantity": row.quantity,
+                    "created_at": ca,
                 })
             else:
                 result.append(InventoryRecordItem(
                     id=record_id,
-                    material_name=row['material_name'],
-                    material_sku=row['material_sku'],
-                    category=row['category'],
+                    material_name=row.material_name,
+                    material_sku=row.material_sku,
+                    category=row.category,
                     type=record_type_val,
-                    quantity=row['quantity'],
-                    operator=row['operator'],
-                    operator_user_id=row['operator_user_id'],
+                    quantity=row.quantity,
+                    operator=row.operator,
+                    operator_user_id=row.operator_user_id,
                     operator_name=operator_name,
-                    reason_category=row['reason_category'],
-                    reason_note=row['reason_note'],
-                    created_at=row['created_at'],
+                    reason_category=row.reason_category,
+                    reason_note=row.reason_note,
+                    created_at=ca,
                     material_status=material_status,
                     is_disabled=is_disabled,
-                    contact_id=row['contact_id'],
-                    contact_name=row['contact_name'],
-                    batch_id=row['batch_id'],
-                    batch_no=row['batch_no'],
+                    contact_id=row.contact_id,
+                    contact_name=row.contact_name,
+                    batch_id=row.batch_id,
+                    batch_no=row.batch_no,
                     batch_details=batch_details,
-                    variant=row['variant'] or '',
-                    warehouse_id=row['warehouse_id'],
-                    warehouse_name=row['warehouse_name'],
+                    variant=row.variant or '',
+                    warehouse_id=row.warehouse_id,
+                    warehouse_name=row.warehouse_name,
                 ))
-            filtered_count += 1
 
-        # 如果有状态筛选，需要重新计算总数
+        # 如果有状态筛选，需要重新计算总数（与原逻辑一致：仅 start/end_date、product_name、record_type 参与该子查询）
         if status_filter:
-            # 需要遍历所有数据来计算真实的筛选后总数
-            count_base_query = f'''
-                SELECT m.quantity, m.safe_stock, m.is_disabled
-                FROM inventory_records r
-                JOIN materials m ON r.material_id = m.id
-                WHERE 1=1{wh_filter}
-            '''
-            count_params = list(wh_params)
+            count_preds = list(r_scope)
             if start_date:
-                count_base_query += ' AND DATE(r.created_at) >= ?'
-                count_params.append(start_date)
+                count_preds.append(_sa_func.date(_t_inventory_records.c.created_at) >= start_date)
             if end_date:
-                count_base_query += ' AND DATE(r.created_at) <= ?'
-                count_params.append(end_date)
+                count_preds.append(_sa_func.date(_t_inventory_records.c.created_at) <= end_date)
             if product_name:
-                count_base_query += ' AND (m.name LIKE ? OR m.sku LIKE ?)'
-                count_params.extend([f'%{product_name}%', f'%{product_name}%'])
+                like = f'%{product_name}%'
+                count_preds.append(or_(_t_materials.c.name.like(like), _t_materials.c.sku.like(like)))
             if record_type:
-                count_base_query += ' AND r.type = ?'
-                count_params.append(record_type)
+                count_preds.append(_t_inventory_records.c.type == record_type)
 
-            cursor.execute(count_base_query, count_params)
-            all_rows = cursor.fetchall()
+            stat_stmt = select(
+                _t_materials.c.quantity, _t_materials.c.safe_stock, _t_materials.c.is_disabled
+            ).select_from(count_join)
+            if count_preds:
+                stat_stmt = stat_stmt.where(and_(*count_preds))
+            all_rows = sa_conn.execute(stat_stmt).fetchall()
             total = 0
-            for r in all_rows:
-                qty = r['quantity']
-                ss = r['safe_stock']
-                dis = bool(r['is_disabled'])
+            for rr in all_rows:
+                qty = rr.quantity
+                ss = rr.safe_stock
+                dis = bool(rr.is_disabled)
                 if dis:
                     s = 'disabled'
                 elif ss is not None:
@@ -3700,17 +3643,17 @@ def get_inventory_records_paginated(
                 if s in status_filter:
                     total += 1
 
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
 
-        if format == "brief":
-            return {"items": result, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
-        return PaginatedRecordsResponse(
-            items=result,
-            page=page,
-            page_size=page_size,
-            total=total,
-            total_pages=total_pages
-        )
+    if format == "brief":
+        return {"items": result, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
+    return PaginatedRecordsResponse(
+        items=result,
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=total_pages
+    )
 
 
 # ============ Stock Operation APIs (for MCP) ============
