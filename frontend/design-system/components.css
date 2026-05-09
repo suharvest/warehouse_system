@@ -1440,7 +1440,12 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+    padding: 12px 14px;
   }
+  .face-config-body { padding: 12px 14px; }
+  .face-config-actions { gap: 8px; flex-wrap: wrap; }
+  .face-config-actions .btn,
+  .face-config-actions button { flex: 1 1 auto; min-height: 40px; }
 }
 
 /* ---- Face enrollment ---- */

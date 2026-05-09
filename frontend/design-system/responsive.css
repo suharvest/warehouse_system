@@ -74,6 +74,12 @@
     padding: 6px 8px;
     gap: 4px;
     flex-wrap: nowrap;
+    /* Right-edge fade: hint that more nav items exist off-screen.
+       Pure-CSS affordance — opaque from 0% to (100% - 24px), then fades
+       to transparent over the final 24px. The mask is anchored to the
+       container's padding box, so it stays put while content scrolls. */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
+            mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
   }
   .side-nav::-webkit-scrollbar { display: none; }
 
@@ -107,7 +113,10 @@
 
   .content-scroll-area {
     overflow: visible;
-    padding: 12px;
+    /* Unify outer page gutters across all pages on mobile.
+       Was 12px (felt edge-touching on cards inside `.face-config-card` etc.).
+       Now 16px (matches the iOS HIG 16pt baseline gutter). */
+    padding: 12px 16px;
   }
 
   /* ---- Top header ---- */
@@ -220,6 +229,9 @@
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
     margin-bottom: 12px;
+    /* Right-edge fade for horizontally-scrollable sub-tabs (mirrors .side-nav). */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
+            mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
   }
   .sub-tabs::-webkit-scrollbar { display: none; }
 
@@ -375,13 +387,36 @@
   /* ---- Modals: near full-screen ---- */
   .modal {
     align-items: flex-start;
+    /* Force the overlay to cover the entire layout viewport, not just the
+       initial fixed-positioning rect. `100dvh` accounts for the dynamic
+       toolbar on iOS Safari / Chrome Android; `100vh` is the fallback. */
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    /* Bg already set by `bg-black/50` utility — re-assert to dodge any
+       transparent inheritance on stacking-context regressions. */
+    background-color: rgba(0, 0, 0, 0.5);
+    overscroll-behavior: contain;
+  }
+
+  /* When any modal is open, lock body scroll so the underlying records
+     table can't peek through during full-page renders / over-scroll.
+     `:has()` is supported on all modern mobile browsers (iOS 15.4+,
+     Chrome 105+, FF 121+); harmless no-op on older engines. */
+  body:has(.modal.show),
+  body:has(.modal[style*="display: flex"]),
+  body:has(.modal[style*="display:flex"]) {
+    overflow: hidden !important;
+    position: relative;
   }
 
   .modal-content {
     width: 100% !important;
     max-width: 100% !important;
     max-height: 100vh !important;
+    max-height: 100dvh !important;
     height: 100vh;
+    height: 100dvh;
     border-radius: 0 !important;
     margin: 0;
   }
@@ -531,9 +566,21 @@
     display: inline-block;
   }
 
-  /* Single column on the very narrow phones for stats */
+  /* Stats: keep 2-up even on the narrowest phones (375px).
+     Originally collapsed to 1fr here, but that pushed every KPI to its own
+     row and made the dashboard scroll forever. 2-col with tighter padding
+     keeps the four standard KPIs above the fold on iPhone 13 mini. */
   .stats-grid {
-    grid-template-columns: 1fr !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+
+  .stat-card {
+    padding: 12px !important;
+  }
+
+  .stat-value {
+    font-size: 18px;
   }
 
   .checkbox-label {
@@ -543,6 +590,85 @@
   /* Filter bar inputs slightly smaller for density */
   .filter-bar {
     padding: 10px;
+  }
+
+  /* ---- Filter group: glue label to input (looks like one block) ---- */
+  .filter-group {
+    gap: 2px !important;
+  }
+
+  .filter-group label {
+    margin: 0 0 0 2px;
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--color-text-secondary, #8c8c8c);
+  }
+
+  /* ---- Header: icon-only refresh + tighter gaps so the bar fits one row
+     when possible. The user info badge takes a lot of horizontal space; we
+     trim it and let logout/lang/warehouse share a single wrap row. ---- */
+  .header-right .refresh-btn {
+    padding: 4px;
+    min-width: 32px;
+    width: 32px;
+    justify-content: center;
+  }
+
+  .user-display {
+    max-width: 90px;
+  }
+
+  .user-role-badge {
+    font-size: 10px;
+    padding: 1px 4px;
+  }
+
+  /* Hide auto-update countdown on phones (already hidden ≤768px, but keep
+     the rule local in case the 768 cascade is overridden somewhere). */
+  .update-info { display: none; }
+}
+
+/* =====================================================================
+   Very narrow phones (≤ 480px) — last-mile compaction
+   ===================================================================== */
+@media (max-width: 480px) {
+
+  /* Header: drop the "登录" / "登出" text label down to 30px square button
+     when icon-only would be unambiguous from context. Keep text for now
+     (no icon on those buttons) but pad tighter and shrink role badge. */
+  .top-header {
+    padding: 6px 8px;
+    gap: 4px 6px;
+  }
+
+  .header-right {
+    gap: 4px;
+  }
+
+  .header-right .lang-btn,
+  .header-right .warehouse-btn,
+  .header-right .login-btn,
+  .header-right .logout-btn {
+    height: 30px;
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+
+  /* Drop the chevron on lang/warehouse triggers to claw back ~14px each */
+  .lang-btn > svg:last-child,
+  .warehouse-btn > svg:last-child {
+    display: none;
+  }
+
+  .user-display {
+    max-width: 72px;
+    font-size: 11px;
+  }
+
+  /* Sub-tabs: smaller for settings sub-nav */
+  .sub-tab {
+    padding: 6px 10px;
+    font-size: 12px;
   }
 }
 
