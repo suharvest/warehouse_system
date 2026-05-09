@@ -1,0 +1,11 @@
+{
+  "json": {
+    "message": "连接已删除",
+    "success": true
+  },
+  "json_keys": [
+    "message",
+    "success"
+  ],
+  "status": 200
+}

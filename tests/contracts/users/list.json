@@ -1,0 +1,17 @@
+{
+  "json": [
+    {
+      "created_at": "<ts>",
+      "display_name": "<str>",
+      "id": "<int>",
+      "is_disabled": false,
+      "role": "operate",
+      "tenant_id": "<int>",
+      "username": "<str>",
+      "warehouse_ids": [],
+      "warehouse_names": []
+    }
+  ],
+  "json_keys": null,
+  "status": 200
+}

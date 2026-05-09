@@ -1,0 +1,25 @@
+{
+  "json": {
+    "address": null,
+    "created_at": "<ts>",
+    "id": "<int>",
+    "is_default": false,
+    "is_disabled": false,
+    "name": "<str>",
+    "slug": "<str>",
+    "tenant_id": "<int>",
+    "tenant_name": null
+  },
+  "json_keys": [
+    "address",
+    "created_at",
+    "id",
+    "is_default",
+    "is_disabled",
+    "name",
+    "slug",
+    "tenant_id",
+    "tenant_name"
+  ],
+  "status": 200
+}

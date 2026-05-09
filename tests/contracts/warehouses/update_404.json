@@ -1,0 +1,9 @@
+{
+  "json": {
+    "error": "仓库不存在"
+  },
+  "json_keys": [
+    "error"
+  ],
+  "status": 404
+}

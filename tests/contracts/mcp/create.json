@@ -1,0 +1,32 @@
+{
+  "json": {
+    "connection": {
+      "auto_start": false,
+      "created_at": "<ts>",
+      "error_message": null,
+      "id": "<str>",
+      "mcp_endpoint": "<str>",
+      "name": "<str>",
+      "pid": null,
+      "restart_count": 0,
+      "role": "operate",
+      "status": "stopped",
+      "tenant_id": "<int>",
+      "tenant_name": null,
+      "updated_at": "<ts>",
+      "uptime_seconds": null,
+      "warehouse_id": "<int>",
+      "warehouse_name": null,
+      "websocket_error": null,
+      "websocket_status": "not_started"
+    },
+    "message": "连接已创建",
+    "success": true
+  },
+  "json_keys": [
+    "connection",
+    "message",
+    "success"
+  ],
+  "status": 200
+}
