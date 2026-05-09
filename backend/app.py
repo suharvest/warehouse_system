@@ -73,6 +73,15 @@ from metadata import (
     batches as _t_batches,
     inventory_records as _t_inventory_records,
     batch_consumptions as _t_batch_consumptions,
+    api_keys as _t_api_keys,
+    system_settings as _t_system_settings,
+    erp_providers as _t_erp_providers,
+    mcp_connections as _t_mcp_connections,
+    tenant_face_config as _t_tenant_face_config,
+    tenant_face_operation_rules as _t_tenant_face_rules,
+    face_subjects as _t_face_subjects,
+    face_enrollments as _t_face_enrollments,
+    face_auth_logs as _t_face_auth_logs,
 )
 from sqlalchemy import func as _sa_func
 import math
@@ -861,22 +870,25 @@ async def list_tenants(current_user: CurrentUser = Depends(require_auth("admin")
     if get_deploy_mode() == "single_tenant":
         raise HTTPException(status_code=403, detail="单租户模式下不可用")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # 全局 admin (tenant_id IS NULL) 看到所有租户
-        # 普通 admin 只看到自己的租户
-        if current_user.tenant_id is None:
-            cursor.execute("SELECT * FROM tenants ORDER BY id ASC")
-        else:
-            cursor.execute("SELECT * FROM tenants WHERE id = ? ORDER BY id ASC", (current_user.tenant_id,))
-        return [
-            TenantItem(
-                id=r["id"], slug=r["slug"], name=r["name"],
-                is_active=bool(r["is_active"]),
-                created_at=r["created_at"]
-            )
-            for r in cursor.fetchall()
-        ]
+    # Phase 2f: SA Core read.
+    stmt = select(
+        _t_tenants.c.id, _t_tenants.c.slug, _t_tenants.c.name,
+        _t_tenants.c.is_active, _t_tenants.c.created_at,
+    )
+    if current_user.tenant_id is not None:
+        stmt = stmt.where(_t_tenants.c.id == current_user.tenant_id)
+    stmt = stmt.order_by(_t_tenants.c.id.asc())
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [
+        TenantItem(
+            id=r.id, slug=r.slug, name=r.name,
+            is_active=bool(r.is_active),
+            created_at=(r.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                        if isinstance(r.created_at, datetime) else r.created_at),
+        )
+        for r in rows
+    ]
 
 
 @app.post("/api/tenants", response_model=TenantItem)
@@ -1421,32 +1433,39 @@ async def delete_user(
 
 @app.get("/api/api-keys", response_model=List[ApiKeyListItem])
 async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'))):
-    """获取API密钥列表（仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='ak')
-        cursor.execute(f'''
-            SELECT ak.id, ak.name, ak.role, ak.is_disabled, ak.created_at, ak.last_used_at,
-                   ak.warehouse_id, w.name AS warehouse_name
-            FROM api_keys ak
-            LEFT JOIN warehouses w ON ak.warehouse_id = w.id
-            WHERE ak.is_system = 0{tenant_filter}
-            ORDER BY ak.created_at DESC
-        ''', tenant_params)
-
-        return [
-            ApiKeyListItem(
-                id=row['id'],
-                name=row['name'],
-                role=row['role'],
-                is_disabled=bool(row['is_disabled']),
-                created_at=row['created_at'],
-                last_used_at=row['last_used_at'],
-                warehouse_id=row['warehouse_id'],
-                warehouse_name=row['warehouse_name'],
-            )
-            for row in cursor.fetchall()
-        ]
+    """获取API密钥列表（仅管理员）— Phase 2f: SA Core read."""
+    preds = [_t_api_keys.c.is_system == 0]
+    preds.extend(build_scope_predicates(_t_api_keys, current_user.tenant_id, None))
+    stmt = (
+        select(
+            _t_api_keys.c.id, _t_api_keys.c.name, _t_api_keys.c.role,
+            _t_api_keys.c.is_disabled, _t_api_keys.c.created_at,
+            _t_api_keys.c.last_used_at, _t_api_keys.c.warehouse_id,
+            _t_warehouses.c.name.label('warehouse_name'),
+        )
+        .select_from(
+            _t_api_keys.outerjoin(_t_warehouses, _t_api_keys.c.warehouse_id == _t_warehouses.c.id)
+        )
+        .where(and_(*preds))
+        .order_by(_t_api_keys.c.created_at.desc())
+    )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [
+        ApiKeyListItem(
+            id=row.id,
+            name=row.name,
+            role=row.role,
+            is_disabled=bool(row.is_disabled),
+            created_at=(row.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                        if isinstance(row.created_at, datetime) else row.created_at),
+            last_used_at=(row.last_used_at.strftime('%Y-%m-%d %H:%M:%S')
+                          if isinstance(row.last_used_at, datetime) else row.last_used_at),
+            warehouse_id=row.warehouse_id,
+            warehouse_name=row.warehouse_name,
+        )
+        for row in rows
+    ]
 
 
 @app.post("/api/api-keys", response_model=ApiKeyResponse)
@@ -3240,43 +3259,49 @@ def get_material_batches(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取物料的活跃批次列表"""
+    """获取物料的活跃批次列表 — Phase 2f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'b')
-    mat_wh_filter, mat_wh_params = build_scope_filter(current_user.tenant_id, wh_id, '')
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if wh_id is not None:
+    if wh_id is not None:
+        with get_db() as conn:
             check_warehouse_access(conn, current_user, wh_id)
-        cursor.execute(f'SELECT id FROM materials WHERE name = ?{mat_wh_filter}', (name,) + mat_wh_params)
-        material = cursor.fetchone()
+    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    b_scope = list(build_scope_predicates(_t_batches, current_user.tenant_id, wh_id))
+    with get_engine().connect() as sa_conn:
+        material = sa_conn.execute(
+            select(_t_materials.c.id).where(and_(_t_materials.c.name == name, *m_scope))
+        ).first()
         if not material:
             raise HTTPException(status_code=404, detail="产品不存在")
+        rows = sa_conn.execute(
+            select(
+                _t_batches.c.batch_no, _t_batches.c.quantity, _t_batches.c.location,
+                _t_batches.c.created_at, _t_batches.c.variant,
+                _t_contacts.c.name.label('contact_name'),
+            ).select_from(
+                _t_batches.outerjoin(_t_contacts, _t_batches.c.contact_id == _t_contacts.c.id)
+            ).where(and_(
+                _t_batches.c.material_id == material.id,
+                _t_batches.c.is_exhausted == 0,
+                *b_scope,
+            )).order_by(_t_batches.c.created_at.asc())
+        ).fetchall()
 
-        cursor.execute(f'''
-            SELECT b.batch_no, b.quantity, b.location, b.created_at, b.variant, c.name as contact_name
-            FROM batches b
-            LEFT JOIN contacts c ON b.contact_id = c.id
-            WHERE b.material_id = ? AND b.is_exhausted = 0{wh_filter}
-            ORDER BY b.created_at ASC
-        ''', (material['id'],) + wh_params)
-        batches = cursor.fetchall()
-
-        total_quantity = sum(b['quantity'] for b in batches)
-        return {
-            "batches": [
-                {
-                    "batch_no": b['batch_no'],
-                    "quantity": b['quantity'],
-                    "location": b['location'] or '',
-                    "contact_name": b['contact_name'] or '',
-                    "created_at": b['created_at'],
-                    "variant": b['variant'] or '',
-                }
-                for b in batches
-            ],
-            "total_quantity": total_quantity,
-        }
+    total_quantity = sum(b.quantity for b in rows)
+    return {
+        "batches": [
+            {
+                "batch_no": b.batch_no,
+                "quantity": b.quantity,
+                "location": b.location or '',
+                "contact_name": b.contact_name or '',
+                "created_at": (b.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                               if isinstance(b.created_at, datetime) else b.created_at),
+                "variant": b.variant or '',
+            }
+            for b in rows
+        ],
+        "total_quantity": total_quantity,
+    }
 
 
 @app.get("/api/materials/product-trend", response_model=WeeklyTrend)
@@ -3290,48 +3315,48 @@ def get_product_trend(
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id)
+    # Phase 2f: SA Core read.
+    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # 查询产品ID（限定到当前租户/仓库，避免跨租户存在性探针）
-        m_filter, m_params = build_scope_filter(current_user.tenant_id, wh_id)
-        cursor.execute(f'SELECT id FROM materials WHERE name = ?{m_filter}', (name,) + m_params)
-        product = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        product = sa_conn.execute(
+            select(_t_materials.c.id).where(and_(_t_materials.c.name == name, *m_scope))
+        ).first()
         if not product:
             raise HTTPException(status_code=404, detail="产品不存在")
 
-        material_id = product['id']
+        material_id = product.id
 
-        # 获取近7天的日期
         dates = []
-        for i in range(6, -1, -1):
-            date = (datetime.now() - timedelta(days=i)).strftime('%m-%d')
-            dates.append(date)
-
-        # 查询每天的入库和出库数据
         in_data = []
         out_data = []
-
         for i in range(6, -1, -1):
-            date = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
+            d = datetime.now() - timedelta(days=i)
+            dates.append(d.strftime('%m-%d'))
+            day = d.strftime('%Y-%m-%d')
 
-            # 查询当天入库
-            cursor.execute('''
-                SELECT COALESCE(SUM(quantity), 0) as total
-                FROM inventory_records
-                WHERE material_id = ? AND type = 'in' AND DATE(created_at) = ?''' + scope_filter,
-                (material_id, date) + scope_params)
-            in_data.append(cursor.fetchone()['total'])
+            in_total = sa_conn.execute(
+                select(_sa_func.coalesce(_sa_func.sum(_t_inventory_records.c.quantity), 0))
+                .where(and_(
+                    _t_inventory_records.c.material_id == material_id,
+                    _t_inventory_records.c.type == 'in',
+                    _sa_func.date(_t_inventory_records.c.created_at) == day,
+                    *r_scope,
+                ))
+            ).scalar() or 0
+            in_data.append(in_total)
 
-            # 查询当天出库
-            cursor.execute('''
-                SELECT COALESCE(SUM(quantity), 0) as total
-                FROM inventory_records
-                WHERE material_id = ? AND type = 'out' AND DATE(created_at) = ?''' + scope_filter,
-                (material_id, date) + scope_params)
-            out_data.append(cursor.fetchone()['total'])
+            out_total = sa_conn.execute(
+                select(_sa_func.coalesce(_sa_func.sum(_t_inventory_records.c.quantity), 0))
+                .where(and_(
+                    _t_inventory_records.c.material_id == material_id,
+                    _t_inventory_records.c.type == 'out',
+                    _sa_func.date(_t_inventory_records.c.created_at) == day,
+                    *r_scope,
+                ))
+            ).scalar() or 0
+            out_data.append(out_total)
 
         return WeeklyTrend(dates=dates, in_data=in_data, out_data=out_data)
 
@@ -5162,28 +5187,45 @@ async def list_mcp_connections(
     warehouse_id: Optional[int] = Query(None),
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
-    """列出所有MCP连接（含实时状态）"""
+    """列出所有MCP连接（含实时状态）— Phase 2f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id, 'mc')
-        cursor.execute(f'''
-            SELECT mc.*, w.name as warehouse_name, t.name as tenant_name
-            FROM mcp_connections mc
-            LEFT JOIN warehouses w ON mc.warehouse_id = w.id
-            LEFT JOIN tenants t ON mc.tenant_id = t.id
-            WHERE 1=1{scope_filter}
-            ORDER BY mc.tenant_id, mc.warehouse_id, mc.created_at DESC
-        ''', scope_params)
-        rows = cursor.fetchall()
+    preds = list(build_scope_predicates(_t_mcp_connections, current_user.tenant_id, wh_id))
+    stmt = (
+        select(
+            _t_mcp_connections.c.id, _t_mcp_connections.c.name,
+            _t_mcp_connections.c.mcp_endpoint, _t_mcp_connections.c.api_key,
+            _t_mcp_connections.c.role, _t_mcp_connections.c.auto_start,
+            _t_mcp_connections.c.status, _t_mcp_connections.c.error_message,
+            _t_mcp_connections.c.restart_count,
+            _t_mcp_connections.c.created_at, _t_mcp_connections.c.updated_at,
+            _t_mcp_connections.c.warehouse_id, _t_mcp_connections.c.tenant_id,
+            _t_warehouses.c.name.label('warehouse_name'),
+            _t_tenants.c.name.label('tenant_name'),
+        )
+        .select_from(
+            _t_mcp_connections
+            .outerjoin(_t_warehouses, _t_mcp_connections.c.warehouse_id == _t_warehouses.c.id)
+            .outerjoin(_t_tenants, _t_mcp_connections.c.tenant_id == _t_tenants.c.id)
+        )
+        .order_by(
+            _t_mcp_connections.c.tenant_id,
+            _t_mcp_connections.c.warehouse_id,
+            _t_mcp_connections.c.created_at.desc(),
+        )
+    )
+    if preds:
+        stmt = stmt.where(and_(*preds))
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
 
     items = []
-    for row in rows:
-        status_info = mcp_manager.get_connection_status(row['id'])
+    for r in rows:
+        row_dict = dict(r._mapping)
+        status_info = mcp_manager.get_connection_status(row_dict['id'])
         items.append(_build_connection_item(
-            row, status_info,
-            warehouse_name=row['warehouse_name'],
-            tenant_name=row['tenant_name']
+            row_dict, status_info,
+            warehouse_name=row_dict.get('warehouse_name'),
+            tenant_name=row_dict.get('tenant_name'),
         ))
 
     return items
@@ -5521,12 +5563,12 @@ def _get_providers_custom_dir() -> str:
 
 @app.get("/api/system/mode")
 async def get_system_mode(current_user: CurrentUser = Depends(require_auth('view'))):
-    """查询系统当前运行模式（self_owned / external_erp）及部署模式（single_tenant / multi_tenant）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM system_settings WHERE key = 'system_mode'")
-        row = cursor.fetchone()
-        mode = row['value'] if row else 'self_owned'
+    """查询系统当前运行模式（self_owned / external_erp）及部署模式（single_tenant / multi_tenant）— Phase 2f: SA Core read."""
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_system_settings.c.value).where(_t_system_settings.c.key == 'system_mode')
+        ).first()
+    mode = row.value if row else 'self_owned'
     return {"mode": mode, "deploy_mode": get_deploy_mode()}
 
 
@@ -5570,23 +5612,45 @@ async def set_system_mode(
 
 @app.get("/api/erp/providers")
 async def list_erp_providers(current_user: CurrentUser = Depends(require_auth('admin'))):
-    """列出所有 ERP Provider"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='')
-        cursor.execute(f"""
-            SELECT id, name, provider_name, class_name, filename,
-                   config, test_results, test_passed_at, is_active,
-                   created_at, updated_at
-            FROM erp_providers WHERE 1=1{tenant_filter} ORDER BY created_at DESC
-        """, tenant_params)
-        rows = cursor.fetchall()
+    """列出所有 ERP Provider — Phase 2f: SA Core read."""
+    preds = list(build_scope_predicates(_t_erp_providers, current_user.tenant_id, None))
+    stmt = select(
+        _t_erp_providers.c.id, _t_erp_providers.c.name,
+        _t_erp_providers.c.provider_name, _t_erp_providers.c.class_name,
+        _t_erp_providers.c.filename, _t_erp_providers.c.config,
+        _t_erp_providers.c.test_results, _t_erp_providers.c.test_passed_at,
+        _t_erp_providers.c.is_active, _t_erp_providers.c.created_at,
+        _t_erp_providers.c.updated_at,
+    )
+    if preds:
+        stmt = stmt.where(and_(*preds))
+    stmt = stmt.order_by(_t_erp_providers.c.created_at.desc())
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
 
     providers = []
     for row in rows:
-        p = dict(row)
-        p['config'] = _json.loads(p['config']) if p['config'] else {}
-        p['test_results'] = _json.loads(p['test_results']) if p['test_results'] else None
+        p = dict(row._mapping)
+        cfg = p.get('config')
+        if isinstance(cfg, (bytes, bytearray)):
+            cfg = cfg.decode('utf-8')
+        if isinstance(cfg, str):
+            p['config'] = _json.loads(cfg) if cfg else {}
+        else:
+            p['config'] = cfg if cfg else {}
+        tr = p.get('test_results')
+        if isinstance(tr, (bytes, bytearray)):
+            tr = tr.decode('utf-8')
+        if isinstance(tr, str):
+            p['test_results'] = _json.loads(tr) if tr else None
+        else:
+            p['test_results'] = tr if tr else None
+        if isinstance(p.get('created_at'), datetime):
+            p['created_at'] = p['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+        if isinstance(p.get('updated_at'), datetime):
+            p['updated_at'] = p['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+        if isinstance(p.get('test_passed_at'), datetime):
+            p['test_passed_at'] = p['test_passed_at'].strftime('%Y-%m-%d %H:%M:%S')
         providers.append(p)
     return {"providers": providers}
 
@@ -5686,27 +5750,27 @@ async def get_active_provider_for_mcp(
         - external_erp 但当前租户没有激活的 Provider：404
         - 否则：{"mode": "external_erp", "provider": {id, provider_name, filename, config}}
     """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM system_settings WHERE key = 'system_mode'")
-        row = cursor.fetchone()
-        mode = row['value'] if row else 'self_owned'
+    # Phase 2f: SA Core read.
+    with get_engine().connect() as sa_conn:
+        m = sa_conn.execute(
+            select(_t_system_settings.c.value).where(_t_system_settings.c.key == 'system_mode')
+        ).first()
+        mode = m.value if m else 'self_owned'
 
         if mode != 'external_erp':
             return {"mode": "self_owned", "provider": None}
 
-        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='')
-        cursor.execute(
-            f"""
-            SELECT id, provider_name, filename, config
-            FROM erp_providers
-            WHERE is_active = 1{tenant_filter}
-            ORDER BY id ASC
-            LIMIT 1
-            """,
-            tenant_params,
-        )
-        provider_row = cursor.fetchone()
+        preds = [_t_erp_providers.c.is_active == 1]
+        preds.extend(build_scope_predicates(_t_erp_providers, current_user.tenant_id, None))
+        provider_row = sa_conn.execute(
+            select(
+                _t_erp_providers.c.id, _t_erp_providers.c.provider_name,
+                _t_erp_providers.c.filename, _t_erp_providers.c.config,
+            )
+            .where(and_(*preds))
+            .order_by(_t_erp_providers.c.id.asc())
+            .limit(1)
+        ).first()
 
     if not provider_row:
         raise HTTPException(
@@ -5714,13 +5778,20 @@ async def get_active_provider_for_mcp(
             detail="当前租户没有激活的 ERP Provider"
         )
 
+    cfg = provider_row.config
+    if isinstance(cfg, (bytes, bytearray)):
+        cfg = cfg.decode('utf-8')
+    if isinstance(cfg, str):
+        cfg_obj = _json.loads(cfg) if cfg else {}
+    else:
+        cfg_obj = cfg if cfg else {}
     return {
         "mode": "external_erp",
         "provider": {
-            "id": provider_row['id'],
-            "provider_name": provider_row['provider_name'],
-            "filename": provider_row['filename'],
-            "config": _json.loads(provider_row['config']) if provider_row['config'] else {},
+            "id": provider_row.id,
+            "provider_name": provider_row.provider_name,
+            "filename": provider_row.filename,
+            "config": cfg_obj,
         },
     }
 
@@ -5730,19 +5801,31 @@ async def get_erp_provider(
     provider_id: int,
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
-    """获取单个 Provider 详情"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
-        row = cursor.fetchone()
+    """获取单个 Provider 详情 — Phase 2f: SA Core read."""
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
+        ).first()
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
-    _ensure_provider_tenant(row, current_user)
+    p = dict(row._mapping)
+    _ensure_provider_tenant(p, current_user)
 
-    p = dict(row)
-    p['config'] = _json.loads(p['config']) if p['config'] else {}
-    p['test_results'] = _json.loads(p['test_results']) if p['test_results'] else None
+    cfg = p.get('config')
+    if isinstance(cfg, (bytes, bytearray)):
+        cfg = cfg.decode('utf-8')
+    p['config'] = (_json.loads(cfg) if cfg else {}) if isinstance(cfg, str) else (cfg if cfg else {})
+    tr = p.get('test_results')
+    if isinstance(tr, (bytes, bytearray)):
+        tr = tr.decode('utf-8')
+    p['test_results'] = (_json.loads(tr) if tr else None) if isinstance(tr, str) else (tr if tr else None)
+    if isinstance(p.get('created_at'), datetime):
+        p['created_at'] = p['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(p.get('updated_at'), datetime):
+        p['updated_at'] = p['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(p.get('test_passed_at'), datetime):
+        p['test_passed_at'] = p['test_passed_at'].strftime('%Y-%m-%d %H:%M:%S')
     return p
 
 
@@ -6044,24 +6127,31 @@ async def face_get_config(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM tenant_face_config WHERE tenant_id = ?", (tid,))
-        row = cur.fetchone()
-        if not row:
-            return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
-                    "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65}
-        return {
-            "tenant_id": row["tenant_id"],
-            "enabled": bool(row["enabled"]),
-            "mode": row["mode"],
-            "endpoint": row["endpoint"],
-            "auth_token": row["auth_token"],
-            "embedding_model_tag": row["embedding_model_tag"],
-            "min_confidence": row["min_confidence"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+    # Phase 2f: SA Core read.
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(
+                _t_tenant_face_config.c.tenant_id, _t_tenant_face_config.c.enabled,
+                _t_tenant_face_config.c.mode, _t_tenant_face_config.c.endpoint,
+                _t_tenant_face_config.c.auth_token, _t_tenant_face_config.c.embedding_model_tag,
+                _t_tenant_face_config.c.min_confidence, _t_tenant_face_config.c.created_at,
+                _t_tenant_face_config.c.updated_at,
+            ).where(_t_tenant_face_config.c.tenant_id == tid)
+        ).first()
+    if not row:
+        return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
+                "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65}
+    return {
+        "tenant_id": row.tenant_id,
+        "enabled": bool(row.enabled),
+        "mode": row.mode,
+        "endpoint": row.endpoint,
+        "auth_token": row.auth_token,
+        "embedding_model_tag": row.embedding_model_tag,
+        "min_confidence": row.min_confidence,
+        "created_at": row.created_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.created_at, datetime) else row.created_at,
+        "updated_at": row.updated_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.updated_at, datetime) else row.updated_at,
+    }
 
 
 @app.put("/api/face/config")
@@ -6104,25 +6194,36 @@ async def face_list_rules(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT * FROM tenant_face_operation_rules
-            WHERE tenant_id = ? ORDER BY id ASC
-        """, (tid,))
-        out = []
-        for r in cur.fetchall():
-            try:
-                allowed = _face_json.loads(r["allowed_subject_ids"]) if r["allowed_subject_ids"] else []
-            except Exception:
-                allowed = []
-            out.append({
-                "id": r["id"], "tenant_id": r["tenant_id"], "warehouse_id": r["warehouse_id"],
-                "operation": r["operation"], "require_face": bool(r["require_face"]),
-                "allowed_subject_ids": allowed,
-                "min_confidence_override": r["min_confidence_override"],
-            })
-        return out
+    # Phase 2f: SA Core read.
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(
+            select(
+                _t_tenant_face_rules.c.id, _t_tenant_face_rules.c.tenant_id,
+                _t_tenant_face_rules.c.warehouse_id, _t_tenant_face_rules.c.operation,
+                _t_tenant_face_rules.c.require_face, _t_tenant_face_rules.c.allowed_subject_ids,
+                _t_tenant_face_rules.c.min_confidence_override,
+            ).where(_t_tenant_face_rules.c.tenant_id == tid)
+            .order_by(_t_tenant_face_rules.c.id.asc())
+        ).fetchall()
+    out = []
+    for r in rows:
+        raw = r.allowed_subject_ids
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode('utf-8')
+        try:
+            if isinstance(raw, str):
+                allowed = _face_json.loads(raw) if raw else []
+            else:
+                allowed = raw if raw else []
+        except Exception:
+            allowed = []
+        out.append({
+            "id": r.id, "tenant_id": r.tenant_id, "warehouse_id": r.warehouse_id,
+            "operation": r.operation, "require_face": bool(r.require_face),
+            "allowed_subject_ids": allowed,
+            "min_confidence_override": r.min_confidence_override,
+        })
+    return out
 
 
 @app.post("/api/face/rules")
@@ -6201,39 +6302,43 @@ async def face_list_enrollments(
     tenant_id: Optional[int] = None,
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
-    """List face enrollments. Big columns (embedding/source_image_b64) are stripped by default."""
+    """List face enrollments. Big columns (embedding/source_image_b64) are stripped by default. — Phase 2f: SA Core read."""
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        if subject_id is not None:
-            cur.execute("""
-                SELECT id, subject_id, tenant_id, model_tag, applies_to_warehouse_ids,
-                       is_active, enrolled_at, enrolled_by
-                FROM face_enrollments
-                WHERE tenant_id = ? AND subject_id = ?
-                ORDER BY id DESC
-            """, (tid, subject_id))
-        else:
-            cur.execute("""
-                SELECT id, subject_id, tenant_id, model_tag, applies_to_warehouse_ids,
-                       is_active, enrolled_at, enrolled_by
-                FROM face_enrollments
-                WHERE tenant_id = ?
-                ORDER BY id DESC
-            """, (tid,))
-        out = []
-        for r in cur.fetchall():
-            try:
-                applies = _face_json.loads(r["applies_to_warehouse_ids"]) if r["applies_to_warehouse_ids"] else None
-            except Exception:
-                applies = None
-            out.append({
-                "id": r["id"], "subject_id": r["subject_id"], "tenant_id": r["tenant_id"],
-                "model_tag": r["model_tag"], "applies_to_warehouse_ids": applies,
-                "is_active": bool(r["is_active"]),
-                "enrolled_at": r["enrolled_at"], "enrolled_by": r["enrolled_by"],
-            })
-        return out
+    preds = [_t_face_enrollments.c.tenant_id == tid]
+    if subject_id is not None:
+        preds.append(_t_face_enrollments.c.subject_id == subject_id)
+    stmt = (
+        select(
+            _t_face_enrollments.c.id, _t_face_enrollments.c.subject_id,
+            _t_face_enrollments.c.tenant_id, _t_face_enrollments.c.model_tag,
+            _t_face_enrollments.c.applies_to_warehouse_ids,
+            _t_face_enrollments.c.is_active, _t_face_enrollments.c.enrolled_at,
+            _t_face_enrollments.c.enrolled_by,
+        )
+        .where(and_(*preds))
+        .order_by(_t_face_enrollments.c.id.desc())
+    )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    out = []
+    for r in rows:
+        raw = r.applies_to_warehouse_ids
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode('utf-8')
+        try:
+            if isinstance(raw, str):
+                applies = _face_json.loads(raw) if raw else None
+            else:
+                applies = raw if raw else None
+        except Exception:
+            applies = None
+        out.append({
+            "id": r.id, "subject_id": r.subject_id, "tenant_id": r.tenant_id,
+            "model_tag": r.model_tag, "applies_to_warehouse_ids": applies,
+            "is_active": bool(r.is_active),
+            "enrolled_at": r.enrolled_at, "enrolled_by": r.enrolled_by,
+        })
+    return out
 
 
 @app.post("/api/face/enrollments")
@@ -6325,37 +6430,34 @@ async def face_list_logs(
         page = 1
     if page_size < 1 or page_size > 500:
         page_size = 50
-    where = ["tenant_id = ?"]
-    params: list = [tid]
+    # Phase 2f: SA Core read.
+    preds = [_t_face_auth_logs.c.tenant_id == tid]
     if user_id is not None:
-        where.append("user_id = ?")
-        params.append(user_id)
+        preds.append(_t_face_auth_logs.c.user_id == user_id)
     if operation:
-        where.append("operation = ?")
-        params.append(operation)
+        preds.append(_t_face_auth_logs.c.operation == operation)
     if start:
-        where.append("created_at >= ?")
-        params.append(start)
+        preds.append(_t_face_auth_logs.c.created_at >= start)
     if end:
-        where.append("created_at <= ?")
-        params.append(end)
-    where_sql = " AND ".join(where)
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) AS cnt FROM face_auth_logs WHERE {where_sql}", params)
-        total = cur.fetchone()["cnt"]
-        offset = (page - 1) * page_size
-        cur.execute(
-            f"""
-            SELECT * FROM face_auth_logs
-            WHERE {where_sql}
-            ORDER BY created_at DESC, id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (*params, page_size, offset),
-        )
-        items = [dict(r) for r in cur.fetchall()]
-        return {"items": items, "total": total, "page": page, "page_size": page_size}
+        preds.append(_t_face_auth_logs.c.created_at <= end)
+    offset = (page - 1) * page_size
+    with get_engine().connect() as sa_conn:
+        total = sa_conn.execute(
+            select(_sa_func.count()).select_from(_t_face_auth_logs).where(and_(*preds))
+        ).scalar() or 0
+        rows = sa_conn.execute(
+            select(_t_face_auth_logs)
+            .where(and_(*preds))
+            .order_by(_t_face_auth_logs.c.created_at.desc(), _t_face_auth_logs.c.id.desc())
+            .limit(page_size).offset(offset)
+        ).fetchall()
+    items = []
+    for r in rows:
+        d = dict(r._mapping)
+        if isinstance(d.get('created_at'), datetime):
+            d['created_at'] = d['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+        items.append(d)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 # ============ MCP-only Face Verify Bridge ============
@@ -6409,22 +6511,43 @@ async def face_list_subjects(
     current_user: 'CurrentUser' = Depends(require_auth("admin")),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    with get_db() as conn:
-        cur = conn.cursor()
-        sql = """
-            SELECT s.id, s.tenant_id, s.name, s.employee_id, s.note,
-                   s.is_active, s.created_by, s.created_at, s.updated_at,
-                   (SELECT COUNT(*) FROM face_enrollments e
-                    WHERE e.subject_id = s.id AND e.is_active = 1) AS enrollment_count
-            FROM face_subjects s
-            WHERE s.tenant_id = ?
-        """
-        params = [tid]
-        if not include_inactive:
-            sql += " AND s.is_active = 1"
-        sql += " ORDER BY s.id ASC"
-        cur.execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
+    # Phase 2f: SA Core read.
+    enroll_count = (
+        select(_sa_func.count())
+        .select_from(_t_face_enrollments)
+        .where(and_(
+            _t_face_enrollments.c.subject_id == _t_face_subjects.c.id,
+            _t_face_enrollments.c.is_active == 1,
+        ))
+        .correlate(_t_face_subjects)
+        .scalar_subquery()
+        .label('enrollment_count')
+    )
+    preds = [_t_face_subjects.c.tenant_id == tid]
+    if not include_inactive:
+        preds.append(_t_face_subjects.c.is_active == 1)
+    stmt = (
+        select(
+            _t_face_subjects.c.id, _t_face_subjects.c.tenant_id,
+            _t_face_subjects.c.name, _t_face_subjects.c.employee_id,
+            _t_face_subjects.c.note, _t_face_subjects.c.is_active,
+            _t_face_subjects.c.created_by, _t_face_subjects.c.created_at,
+            _t_face_subjects.c.updated_at, enroll_count,
+        )
+        .where(and_(*preds))
+        .order_by(_t_face_subjects.c.id.asc())
+    )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r._mapping)
+        if isinstance(d.get('created_at'), datetime):
+            d['created_at'] = d['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+        if isinstance(d.get('updated_at'), datetime):
+            d['updated_at'] = d['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+        out.append(d)
+    return out
 
 
 @app.post("/api/face/subjects")
