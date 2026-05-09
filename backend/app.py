@@ -6831,13 +6831,13 @@ async def face_update_rule(
     tid = _face_resolve_tenant(current_user, tenant_id)
     allowed_value = payload.allowed_subject_ids if payload.allowed_subject_ids else None
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_tenant_face_rules.c.tenant_id).where(_t_tenant_face_rules.c.id == rule_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="规则不存在")
-        if row.tenant_id != tid:
-            raise HTTPException(status_code=403, detail="无权修改该规则")
+        load_or_404(
+            sa_conn, _t_tenant_face_rules, rule_id,
+            columns=[_t_tenant_face_rules.c.tenant_id],
+            not_found="规则不存在",
+            tenant_id=tid,
+            forbidden="无权修改该规则",
+        )
         sa_conn.execute(
             update(_t_tenant_face_rules)
             .where(_t_tenant_face_rules.c.id == rule_id)
@@ -6860,13 +6860,13 @@ async def face_delete_rule(
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_tenant_face_rules.c.tenant_id).where(_t_tenant_face_rules.c.id == rule_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="规则不存在")
-        if row.tenant_id != tid:
-            raise HTTPException(status_code=403, detail="无权删除该规则")
+        load_or_404(
+            sa_conn, _t_tenant_face_rules, rule_id,
+            columns=[_t_tenant_face_rules.c.tenant_id],
+            not_found="规则不存在",
+            tenant_id=tid,
+            forbidden="无权删除该规则",
+        )
         sa_conn.execute(
             delete(_t_tenant_face_rules).where(_t_tenant_face_rules.c.id == rule_id)
         )
@@ -6928,13 +6928,13 @@ async def face_create_enrollment(
     if not payload.images_b64:
         raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片")
     with get_engine().connect() as sa_conn:
-        s = sa_conn.execute(
-            select(_t_face_subjects.c.tenant_id).where(_t_face_subjects.c.id == payload.subject_id)
-        ).first()
-    if not s:
-        raise HTTPException(status_code=404, detail="人员档案不存在")
-    if int(s.tenant_id) != int(tid):
-        raise HTTPException(status_code=403, detail="人员档案不属于该租户")
+        load_or_404(
+            sa_conn, _t_face_subjects, payload.subject_id,
+            columns=[_t_face_subjects.c.tenant_id],
+            not_found="人员档案不存在",
+            tenant_id=int(tid),
+            forbidden="人员档案不属于该租户",
+        )
     # TODO: migrate to SA Core in a future pass — orchestrator currently
     # expects a sqlite-style ``conn`` for its internal writes.
     with get_db() as conn:
@@ -6966,13 +6966,13 @@ async def face_delete_enrollment(
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_face_enrollments.c.tenant_id).where(_t_face_enrollments.c.id == enrollment_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="enrollment 不存在")
-        if row.tenant_id != tid:
-            raise HTTPException(status_code=403, detail="无权删除该 enrollment")
+        load_or_404(
+            sa_conn, _t_face_enrollments, enrollment_id,
+            columns=[_t_face_enrollments.c.tenant_id],
+            not_found="enrollment 不存在",
+            tenant_id=tid,
+            forbidden="无权删除该 enrollment",
+        )
         sa_conn.execute(
             delete(_t_face_enrollments).where(_t_face_enrollments.c.id == enrollment_id)
         )
@@ -7166,13 +7166,13 @@ async def face_update_subject(
     if not payload.name or not payload.name.strip():
         raise HTTPException(status_code=400, detail="姓名不能为空")
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_face_subjects.c.tenant_id).where(_t_face_subjects.c.id == subject_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="人员档案不存在")
-        if int(row.tenant_id) != int(tid):
-            raise HTTPException(status_code=403, detail="无权修改该档案")
+        load_or_404(
+            sa_conn, _t_face_subjects, subject_id,
+            columns=[_t_face_subjects.c.tenant_id],
+            not_found="人员档案不存在",
+            tenant_id=int(tid),
+            forbidden="无权修改该档案",
+        )
         sa_conn.execute(
             update(_t_face_subjects).where(_t_face_subjects.c.id == subject_id).values(
                 name=payload.name.strip(),
@@ -7193,13 +7193,13 @@ async def face_delete_subject(
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_face_subjects.c.tenant_id).where(_t_face_subjects.c.id == subject_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="人员档案不存在")
-        if int(row.tenant_id) != int(tid):
-            raise HTTPException(status_code=403, detail="无权删除该档案")
+        load_or_404(
+            sa_conn, _t_face_subjects, subject_id,
+            columns=[_t_face_subjects.c.tenant_id],
+            not_found="人员档案不存在",
+            tenant_id=int(tid),
+            forbidden="无权删除该档案",
+        )
         # ON DELETE CASCADE drops the enrollments; rules referencing this
         # subject will be silently dropped from allowed lists by stale-id
         # tolerance in the matcher (no explicit cleanup needed).
