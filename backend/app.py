@@ -69,6 +69,8 @@ from metadata import (
     sessions as _t_sessions,
     tenants as _t_tenants,
     contacts as _t_contacts,
+    materials as _t_materials,
+    batches as _t_batches,
 )
 from sqlalchemy import func as _sa_func
 import math
@@ -580,6 +582,26 @@ def build_scope_filter(tenant_id: int, warehouse_id: Optional[int] = None, table
         clauses.append(f'{prefix}warehouse_id = ?')
         params.append(warehouse_id)
     return ' AND ' + ' AND '.join(clauses), tuple(params)
+
+
+def build_scope_predicates(table, tenant_id, warehouse_id=None) -> list:
+    """Return a list of SA Core boolean predicates that scope a query
+    by tenant_id and (optionally) warehouse_id. Mirrors the semantics
+    of build_scope_filter but returns ColumnElements instead of a
+    SQL fragment string.
+
+    Behavior parity with build_scope_filter:
+      - tenant_id is None -> no tenant filter (global admin)
+      - tenant_id is int  -> add table.c.tenant_id == tenant_id
+      - warehouse_id is None -> no warehouse filter
+      - warehouse_id is int  -> add table.c.warehouse_id == warehouse_id
+    """
+    preds = []
+    if tenant_id is not None:
+        preds.append(table.c.tenant_id == tenant_id)
+    if warehouse_id is not None:
+        preds.append(table.c.warehouse_id == warehouse_id)
+    return preds
 
 
 def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
@@ -2683,7 +2705,7 @@ def unified_search(
 
 
 def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=(), tenant_id=None, warehouse_id=None):
-    """搜索物料"""
+    """搜索物料 — Phase 2d: SA Core read. ``cursor``/``wh_filter``/``wh_params`` retained for signature compatibility but unused."""
     # 获取匹配的 material IDs (fuzzy mode)
     matched_ids = None
     if q and fuzzy:
@@ -2694,131 +2716,128 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, 
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
-    base_query = f'SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled FROM materials WHERE is_disabled = 0{wh_filter}'
-    count_query = f'SELECT COUNT(*) as total FROM materials WHERE is_disabled = 0{wh_filter}'
-    params = list(wh_params)
-
+    preds = [_t_materials.c.is_disabled == 0]
+    preds.extend(build_scope_predicates(_t_materials, tenant_id, warehouse_id))
     if matched_ids is not None:
-        placeholders = ','.join('?' * len(matched_ids))
-        base_query += f' AND id IN ({placeholders})'
-        count_query += f' AND id IN ({placeholders})'
-        params.extend(matched_ids)
+        preds.append(_t_materials.c.id.in_(matched_ids))
     elif q and not fuzzy:
-        base_query += ' AND (name LIKE ? OR sku LIKE ?)'
-        count_query += ' AND (name LIKE ? OR sku LIKE ?)'
-        params.extend([f'%{q}%', f'%{q}%'])
-
+        like = f'%{q}%'
+        preds.append(or_(_t_materials.c.name.like(like), _t_materials.c.sku.like(like)))
     if category:
-        base_query += ' AND category = ?'
-        count_query += ' AND category = ?'
-        params.append(category)
+        preds.append(_t_materials.c.category == category)
 
-    # Status filter — computed in Python, so when active we fetch all rows and paginate manually
+    cols = [
+        _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
+        _t_materials.c.category, _t_materials.c.quantity, _t_materials.c.unit,
+        _t_materials.c.safe_stock, _t_materials.c.location, _t_materials.c.is_disabled,
+    ]
+    base_stmt = select(*cols).where(and_(*preds)).order_by(_t_materials.c.name.asc())
+
     status_filter = status.split(',') if status else None
 
-    if status_filter:
-        # Fetch all matching rows (no SQL pagination), filter by computed status in Python
-        base_query += ' ORDER BY name ASC'
-        cursor.execute(base_query, params)
-        rows = cursor.fetchall()
-
-        all_items = []
-        for row in rows:
-            qty = row['quantity']
-            ss = row['safe_stock']
-            if ss is not None:
-                if qty >= ss:
-                    item_status = 'normal'
-                elif qty >= ss * 0.5:
-                    item_status = 'warning'
+    with get_engine().connect() as sa_conn:
+        if status_filter:
+            rows = sa_conn.execute(base_stmt).fetchall()
+            all_items = []
+            for row in rows:
+                qty = row.quantity
+                ss = row.safe_stock
+                if ss is not None:
+                    if qty >= ss:
+                        item_status = 'normal'
+                    elif qty >= ss * 0.5:
+                        item_status = 'warning'
+                    else:
+                        item_status = 'danger'
                 else:
-                    item_status = 'danger'
-            else:
-                item_status = 'normal'
-
-            if item_status not in status_filter:
-                continue
-
-            if fmt == "brief":
-                all_items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
-            else:
-                all_items.append({
-                    "id": row['id'], "name": row['name'], "sku": row['sku'],
-                    "category": row['category'], "quantity": qty, "unit": row['unit'],
-                    "safe_stock": ss, "location": row['location'], "status": item_status,
-                })
-
-        total = len(all_items)
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
-        offset = (page - 1) * page_size
-        items = all_items[offset:offset + page_size]
-    else:
-        # No status filter — use SQL pagination
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()['total']
-
-        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
-        offset = (page - 1) * page_size
-        params.extend([page_size, offset])
-
-        cursor.execute(base_query, params)
-        rows = cursor.fetchall()
-
-        items = []
-        for row in rows:
-            qty = row['quantity']
-            ss = row['safe_stock']
-            if ss is not None:
-                if qty >= ss:
                     item_status = 'normal'
-                elif qty >= ss * 0.5:
-                    item_status = 'warning'
+
+                if item_status not in status_filter:
+                    continue
+
+                if fmt == "brief":
+                    all_items.append({"id": row.id, "name": row.name, "sku": row.sku})
                 else:
-                    item_status = 'danger'
-            else:
-                item_status = 'normal'
+                    all_items.append({
+                        "id": row.id, "name": row.name, "sku": row.sku,
+                        "category": row.category, "quantity": qty, "unit": row.unit,
+                        "safe_stock": ss, "location": row.location, "status": item_status,
+                    })
 
-            if fmt == "brief":
-                items.append({"id": row['id'], "name": row['name'], "sku": row['sku']})
-            else:
-                items.append({
-                    "id": row['id'], "name": row['name'], "sku": row['sku'],
-                    "category": row['category'], "quantity": qty, "unit": row['unit'],
-                    "safe_stock": ss, "location": row['location'], "status": item_status,
+            total = len(all_items)
+            total_pages = math.ceil(total / page_size) if total > 0 else 1
+            offset = (page - 1) * page_size
+            items = all_items[offset:offset + page_size]
+        else:
+            count_stmt = select(_sa_func.count()).select_from(_t_materials).where(and_(*preds))
+            total = sa_conn.execute(count_stmt).scalar() or 0
+
+            offset = (page - 1) * page_size
+            paged = base_stmt.limit(page_size).offset(offset)
+            rows = sa_conn.execute(paged).fetchall()
+
+            items = []
+            for row in rows:
+                qty = row.quantity
+                ss = row.safe_stock
+                if ss is not None:
+                    if qty >= ss:
+                        item_status = 'normal'
+                    elif qty >= ss * 0.5:
+                        item_status = 'warning'
+                    else:
+                        item_status = 'danger'
+                else:
+                    item_status = 'normal'
+
+                if fmt == "brief":
+                    items.append({"id": row.id, "name": row.name, "sku": row.sku})
+                else:
+                    items.append({
+                        "id": row.id, "name": row.name, "sku": row.sku,
+                        "category": row.category, "quantity": qty, "unit": row.unit,
+                        "safe_stock": ss, "location": row.location, "status": item_status,
+                    })
+
+            total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+        # 批量加载批次信息（一次 SQL 替代 N 次 HTTP）
+        if include_batches and items:
+            material_ids = [item['id'] for item in items]
+            batch_stmt = (
+                select(
+                    _t_batches.c.material_id, _t_batches.c.batch_no,
+                    _t_batches.c.quantity, _t_batches.c.location,
+                    _t_batches.c.variant,
+                    _t_contacts.c.name.label('contact_name'),
+                )
+                .select_from(
+                    _t_batches.outerjoin(_t_contacts, _t_batches.c.contact_id == _t_contacts.c.id)
+                )
+                .where(and_(
+                    _t_batches.c.material_id.in_(material_ids),
+                    _t_batches.c.is_exhausted == 0,
+                    _t_batches.c.quantity > 0,
+                ))
+                .order_by(_t_batches.c.created_at.asc())
+            )
+            batches_by_material = {}
+            for row in sa_conn.execute(batch_stmt).fetchall():
+                batches_by_material.setdefault(row.material_id, []).append({
+                    'batch_no': row.batch_no,
+                    'quantity': row.quantity,
+                    'location': row.location or '',
+                    'variant': row.variant or '',
+                    'contact_name': row.contact_name or '',
                 })
-
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
-
-    # 批量加载批次信息（一次 SQL 替代 N 次 HTTP）
-    if include_batches and items:
-        material_ids = [item['id'] for item in items]
-        placeholders = ','.join('?' * len(material_ids))
-        cursor.execute(f'''
-            SELECT b.material_id, b.batch_no, b.quantity, b.location, b.variant,
-                   c.name as contact_name
-            FROM batches b
-            LEFT JOIN contacts c ON b.contact_id = c.id
-            WHERE b.material_id IN ({placeholders}) AND b.is_exhausted = 0 AND b.quantity > 0
-            ORDER BY b.created_at ASC
-        ''', material_ids)
-        batches_by_material = {}
-        for row in cursor.fetchall():
-            mid = row['material_id']
-            batches_by_material.setdefault(mid, []).append({
-                'batch_no': row['batch_no'],
-                'quantity': row['quantity'],
-                'location': row['location'] or '',
-                'variant': row['variant'] or '',
-                'contact_name': row['contact_name'] or '',
-            })
-        for item in items:
-            item['batches'] = batches_by_material.get(item['id'], [])
+            for item in items:
+                item['batches'] = batches_by_material.get(item['id'], [])
 
     return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
 
 
 def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size, scope_filter='', scope_params=(), tenant_id=None):
-    """搜索联系方（租户级）"""
+    """搜索联系方（租户级） — Phase 2d: SA Core read. ``cursor``/``scope_filter``/``scope_params`` retained for signature compatibility but unused."""
     matched_ids = None
     if q and fuzzy:
         matcher = get_fuzzy_matcher()
@@ -2829,46 +2848,47 @@ def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size, scope
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
-    base_query = f'SELECT id, name, address, phone, email, is_supplier, is_customer, notes, is_disabled, created_at FROM contacts WHERE is_disabled = 0{scope_filter}'
-    count_query = f'SELECT COUNT(*) as total FROM contacts WHERE is_disabled = 0{scope_filter}'
-    params = list(scope_params)
-
+    preds = [_t_contacts.c.is_disabled == 0]
+    preds.extend(build_scope_predicates(_t_contacts, tenant_id, None))
     if matched_ids is not None:
-        placeholders = ','.join('?' * len(matched_ids))
-        base_query += f' AND id IN ({placeholders})'
-        count_query += f' AND id IN ({placeholders})'
-        params.extend(matched_ids)
+        preds.append(_t_contacts.c.id.in_(matched_ids))
     elif q and not fuzzy:
-        base_query += ' AND name LIKE ?'
-        count_query += ' AND name LIKE ?'
-        params.append(f'%{q}%')
+        preds.append(_t_contacts.c.name.like(f'%{q}%'))
 
     if contact_type == 'supplier':
-        base_query += ' AND is_supplier = 1'
-        count_query += ' AND is_supplier = 1'
+        preds.append(_t_contacts.c.is_supplier == 1)
     elif contact_type == 'customer':
-        base_query += ' AND is_customer = 1'
-        count_query += ' AND is_customer = 1'
+        preds.append(_t_contacts.c.is_customer == 1)
 
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()['total']
-
-    base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
+    cols = [
+        _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+        _t_contacts.c.phone, _t_contacts.c.email,
+        _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
+        _t_contacts.c.notes, _t_contacts.c.is_disabled, _t_contacts.c.created_at,
+    ]
+    where = and_(*preds)
+    count_stmt = select(_sa_func.count()).select_from(_t_contacts).where(where)
     offset = (page - 1) * page_size
-    params.extend([page_size, offset])
+    page_stmt = (
+        select(*cols).where(where)
+        .order_by(_t_contacts.c.name.asc())
+        .limit(page_size).offset(offset)
+    )
 
-    cursor.execute(base_query, params)
-    rows = cursor.fetchall()
+    with get_engine().connect() as sa_conn:
+        total = sa_conn.execute(count_stmt).scalar() or 0
+        rows = sa_conn.execute(page_stmt).fetchall()
 
     if fmt == "brief":
-        items = [{"id": row['id'], "name": row['name']} for row in rows]
+        items = [{"id": row.id, "name": row.name} for row in rows]
     else:
         items = [{
-            "id": row['id'], "name": row['name'], "address": row['address'],
-            "phone": row['phone'], "email": row['email'],
-            "is_supplier": bool(row['is_supplier']), "is_customer": bool(row['is_customer']),
-            "notes": row['notes'], "is_disabled": bool(row['is_disabled']),
-            "created_at": row['created_at'],
+            "id": row.id, "name": row.name, "address": row.address,
+            "phone": row.phone, "email": row.email,
+            "is_supplier": bool(row.is_supplier), "is_customer": bool(row.is_customer),
+            "notes": row.notes, "is_disabled": bool(row.is_disabled),
+            "created_at": (row.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                           if isinstance(row.created_at, datetime) else row.created_at),
         } for row in rows]
 
     total_pages = math.ceil(total / page_size) if total > 0 else 1
@@ -2876,7 +2896,7 @@ def _search_contacts(cursor, q, contact_type, fuzzy, fmt, page, page_size, scope
 
 
 def _search_operators(cursor, q, fuzzy, fmt, page, page_size, scope_filter='', scope_params=(), tenant_id=None):
-    """搜索操作员（按 tenant 过滤；users 表无 warehouse_id）"""
+    """搜索操作员（按 tenant 过滤；users 表无 warehouse_id） — Phase 2d: SA Core read. ``cursor``/``scope_filter``/``scope_params`` retained for signature compatibility but unused."""
     matched_ids = None
     if q and fuzzy:
         matcher = get_fuzzy_matcher()
@@ -2886,37 +2906,35 @@ def _search_operators(cursor, q, fuzzy, fmt, page, page_size, scope_filter='', s
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
-    base_query = f'SELECT id, username, display_name FROM users WHERE is_disabled = 0{scope_filter}'
-    count_query = f'SELECT COUNT(*) as total FROM users WHERE is_disabled = 0{scope_filter}'
-    params = list(scope_params)
-
+    preds = [_t_users.c.is_disabled == 0]
+    preds.extend(build_scope_predicates(_t_users, tenant_id, None))
     if matched_ids is not None:
-        placeholders = ','.join('?' * len(matched_ids))
-        base_query += f' AND id IN ({placeholders})'
-        count_query += f' AND id IN ({placeholders})'
-        params.extend(matched_ids)
+        preds.append(_t_users.c.id.in_(matched_ids))
     elif q and not fuzzy:
-        base_query += ' AND (username LIKE ? OR display_name LIKE ?)'
-        count_query += ' AND (username LIKE ? OR display_name LIKE ?)'
-        params.extend([f'%{q}%', f'%{q}%'])
+        like = f'%{q}%'
+        preds.append(or_(_t_users.c.username.like(like), _t_users.c.display_name.like(like)))
 
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()['total']
-
-    base_query += ' ORDER BY username ASC LIMIT ? OFFSET ?'
+    where = and_(*preds)
+    count_stmt = select(_sa_func.count()).select_from(_t_users).where(where)
     offset = (page - 1) * page_size
-    params.extend([page_size, offset])
+    page_stmt = (
+        select(_t_users.c.id, _t_users.c.username, _t_users.c.display_name)
+        .where(where)
+        .order_by(_t_users.c.username.asc())
+        .limit(page_size).offset(offset)
+    )
 
-    cursor.execute(base_query, params)
-    rows = cursor.fetchall()
+    with get_engine().connect() as sa_conn:
+        total = sa_conn.execute(count_stmt).scalar() or 0
+        rows = sa_conn.execute(page_stmt).fetchall()
 
     if fmt == "brief":
-        items = [{"id": row['id'], "name": row['display_name'] or row['username']} for row in rows]
+        items = [{"id": row.id, "name": row.display_name or row.username} for row in rows]
     else:
         items = [{
-            "id": row['id'], "username": row['username'],
-            "display_name": row['display_name'],
-            "name": row['display_name'] or row['username'],
+            "id": row.id, "username": row.username,
+            "display_name": row.display_name,
+            "name": row.display_name or row.username,
         } for row in rows]
 
     total_pages = math.ceil(total / page_size) if total > 0 else 1
@@ -2993,143 +3011,148 @@ def get_materials_list(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取物料列表（分页+筛选）— 一行一批次"""
+    """获取物料列表（分页+筛选）— 一行一批次 — Phase 2d: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
 
-        status_filter = status.split(',') if status else None
+    status_filter = status.split(',') if status else None
 
-        # Fuzzy name search
-        fuzzy_ids = None
-        if name and fuzzy:
-            matcher = get_fuzzy_matcher()
-            results = matcher.search(name, entity_type="material", top_k=100, threshold=50.0,
-                                     tenant_id=current_user.tenant_id, warehouse_id=wh_id)
-            fuzzy_ids = [r['entity_id'] for r in results]
-            if not fuzzy_ids:
-                return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
+    # Fuzzy name search
+    fuzzy_ids = None
+    if name and fuzzy:
+        matcher = get_fuzzy_matcher()
+        results = matcher.search(name, entity_type="material", top_k=100, threshold=50.0,
+                                 tenant_id=current_user.tenant_id, warehouse_id=wh_id)
+        fuzzy_ids = [r['entity_id'] for r in results]
+        if not fuzzy_ids:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
-        # 构建物料筛选条件
-        where_clauses = []
-        params = []
+    # 构建物料筛选条件
+    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
 
-        scope_filter, scope_params = build_scope_filter(current_user.tenant_id, wh_id, 'm')
-        if scope_filter:
-            where_clauses.append(scope_filter.removeprefix(' AND '))
-            params.extend(scope_params)
+    if not status_filter or 'disabled' not in status_filter:
+        preds.append(_t_materials.c.is_disabled == 0)
 
-        if not status_filter or 'disabled' not in status_filter:
-            where_clauses.append('m.is_disabled = 0')
+    if fuzzy_ids is not None:
+        preds.append(_t_materials.c.id.in_(fuzzy_ids))
+    elif name and not fuzzy:
+        like = f'%{name}%'
+        preds.append(or_(_t_materials.c.name.like(like), _t_materials.c.sku.like(like)))
 
-        if fuzzy_ids is not None:
-            placeholders = ','.join('?' * len(fuzzy_ids))
-            where_clauses.append(f'm.id IN ({placeholders})')
-            params.extend(fuzzy_ids)
-        elif name and not fuzzy:
-            where_clauses.append('(m.name LIKE ? OR m.sku LIKE ?)')
-            params.extend([f'%{name}%', f'%{name}%'])
+    if category:
+        preds.append(_t_materials.c.category == category)
 
-        if category:
-            where_clauses.append('m.category = ?')
-            params.append(category)
+    if location:
+        loc_like = f'%{location}%'
+        preds.append(or_(_t_batches.c.location.like(loc_like), _t_materials.c.location.like(loc_like)))
 
-        if location:
-            where_clauses.append('(b.location LIKE ? OR m.location LIKE ?)')
-            params.extend([f'%{location}%', f'%{location}%'])
+    # 查询：一行一批次（LEFT JOIN batches）
+    join_expr = (
+        _t_materials
+        .outerjoin(
+            _t_batches,
+            and_(_t_batches.c.material_id == _t_materials.c.id, _t_batches.c.is_exhausted == 0),
+        )
+        .outerjoin(_t_contacts, _t_batches.c.contact_id == _t_contacts.c.id)
+        .outerjoin(_t_warehouses, _t_materials.c.warehouse_id == _t_warehouses.c.id)
+    )
 
-        where_sql = ' AND '.join(where_clauses) if where_clauses else '1=1'
+    stmt = (
+        select(
+            _t_materials.c.id.label('material_id'),
+            _t_materials.c.name,
+            _t_materials.c.sku,
+            _t_materials.c.category,
+            _t_materials.c.quantity.label('total_quantity'),
+            _t_materials.c.unit,
+            _t_materials.c.safe_stock,
+            _t_materials.c.location.label('material_location'),
+            _t_materials.c.is_disabled,
+            _t_batches.c.batch_no,
+            _t_batches.c.quantity.label('batch_quantity'),
+            _t_batches.c.location.label('batch_location'),
+            _t_batches.c.variant,
+            _t_contacts.c.name.label('contact_name'),
+            _t_materials.c.warehouse_id,
+            _t_warehouses.c.name.label('warehouse_name'),
+        )
+        .select_from(join_expr)
+        .where(and_(*preds) if preds else and_())
+        .order_by(_t_materials.c.name.asc(), _t_batches.c.created_at.asc())
+    )
 
-        # 查询：一行一批次（LEFT JOIN batches）
-        # 对于有批次的物料，每个活跃批次一行
-        # 对于无批次的物料（quantity=0），显示一行空批次
-        base_query = f'''
-            SELECT m.id as material_id, m.name, m.sku, m.category, m.quantity as total_quantity,
-                   m.unit, m.safe_stock, m.location as material_location, m.is_disabled,
-                   b.batch_no, b.quantity as batch_quantity, b.location as batch_location,
-                   b.variant, c.name as contact_name,
-                   m.warehouse_id, w.name as warehouse_name
-            FROM materials m
-            LEFT JOIN batches b ON b.material_id = m.id AND b.is_exhausted = 0
-            LEFT JOIN contacts c ON b.contact_id = c.id
-            LEFT JOIN warehouses w ON m.warehouse_id = w.id
-            WHERE {where_sql}
-            ORDER BY m.name ASC, b.created_at ASC
-        '''
+    with get_engine().connect() as sa_conn:
+        all_rows = sa_conn.execute(stmt).fetchall()
 
-        cursor.execute(base_query, params)
-        all_rows = cursor.fetchall()
+    # 应用状态筛选和库存范围筛选（在应用层做，因为状态是计算值）
+    filtered = []
+    for row in all_rows:
+        total_qty = row.total_quantity
+        safe_stock_val = row.safe_stock
+        is_disabled = bool(row.is_disabled)
 
-        # 应用状态筛选和库存范围筛选（在应用层做，因为状态是计算值）
-        filtered = []
-        for row in all_rows:
-            total_qty = row['total_quantity']
-            safe_stock_val = row['safe_stock']
-            is_disabled = bool(row['is_disabled'])
-
-            if is_disabled:
-                item_status = 'disabled'
-            elif safe_stock_val is not None:
-                if total_qty >= safe_stock_val:
-                    item_status = 'normal'
-                elif total_qty >= safe_stock_val * 0.5:
-                    item_status = 'warning'
-                else:
-                    item_status = 'danger'
-            else:
+        if is_disabled:
+            item_status = 'disabled'
+        elif safe_stock_val is not None:
+            if total_qty >= safe_stock_val:
                 item_status = 'normal'
-
-            if status_filter and item_status not in status_filter:
-                continue
-            if min_stock is not None and total_qty < min_stock:
-                continue
-            if max_stock is not None and total_qty > max_stock:
-                continue
-
-            filtered.append((row, item_status))
-
-        total = len(filtered)
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
-        offset = (page - 1) * page_size
-        page_rows = filtered[offset:offset + page_size]
-
-        result = []
-        for row, item_status in page_rows:
-            is_disabled = bool(row['is_disabled'])
-            status_text_map = {'normal': '正常', 'warning': '偏低', 'danger': '告急', 'disabled': '禁用'}
-
-            batch_qty = row['batch_quantity'] if row['batch_quantity'] is not None else row['total_quantity']
-            batch_loc = row['batch_location'] if row['batch_location'] else (row['material_location'] or '')
-
-            if format == "brief":
-                result.append({"id": row['material_id'], "name": row['name'], "sku": row['sku']})
+            elif total_qty >= safe_stock_val * 0.5:
+                item_status = 'warning'
             else:
-                result.append(MaterialItemWithDisabled(
-                    name=row['name'],
-                    sku=row['sku'],
-                    category=row['category'],
-                    quantity=batch_qty,
-                    unit=row['unit'],
-                    safe_stock=row['safe_stock'],
-                    location=batch_loc,
-                    status=item_status,
-                    status_text=status_text_map.get(item_status, ''),
-                    is_disabled=is_disabled,
-                    batch_no=row['batch_no'] or '',
-                    contact_name=row['contact_name'] or '',
-                    total_quantity=row['total_quantity'],
-                    variant=row['variant'] or '',
-                    warehouse_id=row['warehouse_id'],
-                    warehouse_name=row['warehouse_name'],
-                ))
+                item_status = 'danger'
+        else:
+            item_status = 'normal'
 
-        return {
-            "items": result,
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-        }
+        if status_filter and item_status not in status_filter:
+            continue
+        if min_stock is not None and total_qty < min_stock:
+            continue
+        if max_stock is not None and total_qty > max_stock:
+            continue
+
+        filtered.append((row, item_status))
+
+    total = len(filtered)
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    offset = (page - 1) * page_size
+    page_rows = filtered[offset:offset + page_size]
+
+    result = []
+    for row, item_status in page_rows:
+        is_disabled = bool(row.is_disabled)
+        status_text_map = {'normal': '正常', 'warning': '偏低', 'danger': '告急', 'disabled': '禁用'}
+
+        batch_qty = row.batch_quantity if row.batch_quantity is not None else row.total_quantity
+        batch_loc = row.batch_location if row.batch_location else (row.material_location or '')
+
+        if format == "brief":
+            result.append({"id": row.material_id, "name": row.name, "sku": row.sku})
+        else:
+            result.append(MaterialItemWithDisabled(
+                name=row.name,
+                sku=row.sku,
+                category=row.category,
+                quantity=batch_qty,
+                unit=row.unit,
+                safe_stock=row.safe_stock,
+                location=batch_loc,
+                status=item_status,
+                status_text=status_text_map.get(item_status, ''),
+                is_disabled=is_disabled,
+                batch_no=row.batch_no or '',
+                contact_name=row.contact_name or '',
+                total_quantity=row.total_quantity,
+                variant=row.variant or '',
+                warehouse_id=row.warehouse_id,
+                warehouse_name=row.warehouse_name,
+            ))
+
+    return {
+        "items": result,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
 
 
 @app.get("/api/materials/categories", response_model=List[str])
