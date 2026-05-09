@@ -11,6 +11,12 @@ from sqlalchemy import select, and_
 from db import get_engine
 from metadata import materials, contacts, users, batches
 
+# R3: wire-format string enum. Tolerate both bare and package import styles.
+try:
+    from models import RoleName  # type: ignore
+except ImportError:  # pragma: no cover
+    from backend.models import RoleName  # type: ignore
+
 
 class FuzzyMatcher:
     """模糊匹配器，支持文本编辑距离和中文拼音相似度两层匹配"""
@@ -130,7 +136,7 @@ class FuzzyMatcher:
             ).where(
                 and_(
                     users.c.is_disabled == 0,
-                    users.c.role.in_(("operate", "admin")),
+                    users.c.role.in_((RoleName.OPERATE.value, RoleName.ADMIN.value)),
                 )
             )
             for row in conn.execute(stmt).fetchall():
