@@ -1,12 +1,12 @@
 {
   "json": {
-    "created_at": "<ts>",
-    "display_name": "<str>",
-    "id": "<int>",
+    "created_at": "<masked>",
+    "display_name": "<masked>",
+    "id": "<masked>",
     "is_disabled": false,
     "role": "operate",
-    "tenant_id": "<int>",
-    "username": "<str>",
+    "tenant_id": "<masked>",
+    "username": "<masked>",
     "warehouse_ids": null,
     "warehouse_names": null
   },

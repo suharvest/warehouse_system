@@ -1,13 +1,13 @@
 {
   "json": {
-    "address": null,
-    "created_at": "<ts>",
-    "id": "<int>",
+    "address": "<masked>",
+    "created_at": "<masked>",
+    "id": "<masked>",
     "is_default": false,
     "is_disabled": false,
-    "name": "<str>",
-    "slug": "<str>",
-    "tenant_id": "<int>",
+    "name": "<masked>",
+    "slug": "<masked>",
+    "tenant_id": "<masked>",
     "tenant_name": null
   },
   "json_keys": [

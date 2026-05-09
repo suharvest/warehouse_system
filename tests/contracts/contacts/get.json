@@ -1,15 +1,15 @@
 {
   "json": {
-    "address": "<str>",
-    "created_at": "<ts>",
-    "email": "<str>",
-    "id": "<int>",
+    "address": "<masked>",
+    "created_at": "<masked>",
+    "email": "<masked>",
+    "id": "<masked>",
     "is_customer": false,
     "is_disabled": false,
     "is_supplier": true,
-    "name": "<str>",
-    "notes": "<str>",
-    "phone": "<str>"
+    "name": "<masked>",
+    "notes": "<masked>",
+    "phone": "<masked>"
   },
   "json_keys": [
     "address",

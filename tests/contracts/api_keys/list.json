@@ -1,14 +1,14 @@
 {
   "json": [
     {
-      "created_at": "<ts>",
-      "id": "<int>",
-      "is_disabled": false,
-      "last_used_at": null,
-      "name": "<str>",
-      "role": "operate",
-      "warehouse_id": "<int>",
-      "warehouse_name": "默认仓库"
+      "created_at": "<any>",
+      "id": "<any>",
+      "is_disabled": "<any>",
+      "last_used_at": "<any>",
+      "name": "<any>",
+      "role": "<any>",
+      "warehouse_id": "<any>",
+      "warehouse_name": "<any>"
     }
   ],
   "json_keys": null,

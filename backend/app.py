@@ -2550,26 +2550,28 @@ async def get_operators_for_filter(
     ]
 
 
-@app.get("/api/contacts/{contact_id}", response_model=ContactItem)
-async def get_contact(
-    contact_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
-):
-    """获取单个联系方详情。Phase 2c: SA Core read."""
-    with get_engine().connect() as sa_conn:
-        row = load_or_404(
-            sa_conn, _t_contacts, contact_id,
-            columns=[
-                _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
-                _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
-                _t_contacts.c.is_customer, _t_contacts.c.notes,
-                _t_contacts.c.is_disabled, _t_contacts.c.created_at, _t_contacts.c.tenant_id,
-            ],
-            not_found="联系方不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权访问该联系方",
-        )
+# ---- contacts CRUD migrated to ResourceRouter (R2 phase 1) ----
+# GET / POST / PUT / DELETE on /api/contacts/{id} are registered by the
+# factory below. LIST stays as ``list_contacts`` above because of its
+# resource-specific filters (name / contact_type / include_disabled /
+# format=brief) and paginated response shape. ``list_suppliers`` and
+# ``list_customers`` are also kept above (they aren't standard CRUD).
 
+_CONTACT_GET_COLUMNS = [
+    _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+    _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
+    _t_contacts.c.is_customer, _t_contacts.c.notes,
+    _t_contacts.c.is_disabled, _t_contacts.c.created_at, _t_contacts.c.tenant_id,
+]
+_CONTACT_OUT_COLUMNS = [
+    _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+    _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
+    _t_contacts.c.is_customer, _t_contacts.c.notes,
+    _t_contacts.c.is_disabled, _t_contacts.c.created_at,
+]
+
+
+def _contact_to_out(row) -> ContactItem:
     ca = row.created_at
     if isinstance(ca, datetime):
         ca = ca.strftime('%Y-%m-%d %H:%M:%S')
@@ -2587,155 +2589,93 @@ async def get_contact(
     )
 
 
-@app.post("/api/contacts", response_model=ContactItem)
-async def create_contact(
-    request: CreateContactRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.WRITE))
-):
-    """创建联系方（需要operate权限）"""
+def _contact_before_create(sa_conn, current_user, request: CreateContactRequest):
     if not request.is_supplier and not request.is_customer:
         raise HTTPException(status_code=400, detail="必须选择供应商或客户至少一项")
 
-    created_at_dt = datetime.now()
-    created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    with get_engine().begin() as sa_conn:
-        # 联系方为租户级（不绑定仓库）。租户用户用自身 tenant_id；
-        # 全局 admin 必须显式指定 tenant_id。
-        if current_user.tenant_id is not None:
-            contact_tenant_id = current_user.tenant_id
-        else:
-            if request.tenant_id is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="全局管理员创建联系方必须指定 tenant_id"
-                )
-            tenant_row = sa_conn.execute(
-                select(_t_tenants.c.id).where(
-                    and_(_t_tenants.c.id == request.tenant_id, _t_tenants.c.is_active == 1)
-                )
-            ).first()
-            if not tenant_row:
-                raise HTTPException(status_code=400, detail="租户不存在或已停用")
-            contact_tenant_id = request.tenant_id
-
-        result = sa_conn.execute(
-            insert(_t_contacts).values(
-                name=request.name,
-                address=request.address,
-                phone=request.phone,
-                email=request.email,
-                is_supplier=1 if request.is_supplier else 0,
-                is_customer=1 if request.is_customer else 0,
-                notes=request.notes,
-                warehouse_id=None,
-                tenant_id=contact_tenant_id,
-                created_at=created_at_dt,
+def _contact_values_for_create(sa_conn, current_user, request: CreateContactRequest) -> dict:
+    # Tenant resolution: tenant users write to their own tenant; global
+    # admin must specify request.tenant_id and the tenant must exist + be active.
+    if current_user.tenant_id is not None:
+        contact_tenant_id = current_user.tenant_id
+    else:
+        if request.tenant_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="全局管理员创建联系方必须指定 tenant_id"
             )
-        )
-        contact_id = result.inserted_primary_key[0]
-        get_fuzzy_matcher().invalidate_cache()
-
-        return ContactItem(
-            id=contact_id,
-            name=request.name,
-            address=request.address,
-            phone=request.phone,
-            email=request.email,
-            is_supplier=request.is_supplier,
-            is_customer=request.is_customer,
-            notes=request.notes,
-            is_disabled=False,
-            created_at=created_at
-        )
-
-
-@app.put("/api/contacts/{contact_id}", response_model=ContactItem)
-async def update_contact(
-    contact_id: int,
-    request: UpdateContactRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.WRITE))
-):
-    """更新联系方（需要operate权限）"""
-    with get_engine().begin() as sa_conn:
-        contact = load_or_404(
-            sa_conn, _t_contacts, contact_id,
-            columns=[_t_contacts.c.id, _t_contacts.c.tenant_id],
-            not_found="联系方不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权访问该联系方",
-        )
-
-        values = {}
-        if request.name is not None:
-            values['name'] = request.name
-        if request.address is not None:
-            values['address'] = request.address
-        if request.phone is not None:
-            values['phone'] = request.phone
-        if request.email is not None:
-            values['email'] = request.email
-        if request.is_supplier is not None:
-            values['is_supplier'] = 1 if request.is_supplier else 0
-        if request.is_customer is not None:
-            values['is_customer'] = 1 if request.is_customer else 0
-        if request.notes is not None:
-            values['notes'] = request.notes
-        if request.is_disabled is not None:
-            values['is_disabled'] = 1 if request.is_disabled else 0
-
-        if values:
-            sa_conn.execute(
-                update(_t_contacts).where(_t_contacts.c.id == contact_id).values(**values)
+        tenant_row = sa_conn.execute(
+            select(_t_tenants.c.id).where(
+                and_(_t_tenants.c.id == request.tenant_id, _t_tenants.c.is_active == 1)
             )
-            get_fuzzy_matcher().invalidate_cache()
-
-        updated = sa_conn.execute(
-            select(
-                _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
-                _t_contacts.c.phone, _t_contacts.c.email,
-                _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
-                _t_contacts.c.notes, _t_contacts.c.is_disabled,
-                _t_contacts.c.created_at,
-            ).where(_t_contacts.c.id == contact_id)
         ).first()
+        if not tenant_row:
+            raise HTTPException(status_code=400, detail="租户不存在或已停用")
+        contact_tenant_id = request.tenant_id
 
-        return ContactItem(
-            id=updated.id,
-            name=updated.name,
-            address=updated.address,
-            phone=updated.phone,
-            email=updated.email,
-            is_supplier=bool(updated.is_supplier),
-            is_customer=bool(updated.is_customer),
-            notes=updated.notes,
-            is_disabled=bool(updated.is_disabled),
-            created_at=(updated.created_at.strftime('%Y-%m-%d %H:%M:%S')
-                        if isinstance(updated.created_at, datetime) else updated.created_at),
-        )
+    return {
+        "name": request.name,
+        "address": request.address,
+        "phone": request.phone,
+        "email": request.email,
+        "is_supplier": 1 if request.is_supplier else 0,
+        "is_customer": 1 if request.is_customer else 0,
+        "notes": request.notes,
+        "warehouse_id": None,
+        "tenant_id": contact_tenant_id,
+        "created_at": datetime.now(),
+    }
 
 
-@app.delete("/api/contacts/{contact_id}")
-async def delete_contact(
-    contact_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.WRITE))
-):
-    """禁用联系方（需要operate权限）"""
-    with get_engine().begin() as sa_conn:
-        contact = load_or_404(
-            sa_conn, _t_contacts, contact_id,
-            columns=[_t_contacts.c.id, _t_contacts.c.tenant_id],
-            not_found="联系方不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权访问该联系方",
-        )
+def _contact_values_for_update(sa_conn, current_user, request: UpdateContactRequest, row) -> dict:
+    values: dict = {}
+    if request.name is not None:
+        values['name'] = request.name
+    if request.address is not None:
+        values['address'] = request.address
+    if request.phone is not None:
+        values['phone'] = request.phone
+    if request.email is not None:
+        values['email'] = request.email
+    if request.is_supplier is not None:
+        values['is_supplier'] = 1 if request.is_supplier else 0
+    if request.is_customer is not None:
+        values['is_customer'] = 1 if request.is_customer else 0
+    if request.notes is not None:
+        values['notes'] = request.notes
+    if request.is_disabled is not None:
+        values['is_disabled'] = 1 if request.is_disabled else 0
+    return values
 
-        sa_conn.execute(
-            update(_t_contacts).where(_t_contacts.c.id == contact_id).values(is_disabled=1)
-        )
-        get_fuzzy_matcher().invalidate_cache()
 
-        return {"success": True, "message": "联系方已禁用"}
+def _contact_after_commit(operation, sa_conn, current_user, row_id):
+    # Fuzzy match index pulls from contacts; any mutation invalidates it.
+    get_fuzzy_matcher().invalidate_cache()
+
+
+from resource_router import ResourceRouter as _ResourceRouter  # noqa: E402
+
+_ResourceRouter(
+    app=app,
+    prefix="/api/contacts",
+    table=_t_contacts,
+    response_model=ContactItem,
+    create_model=CreateContactRequest,
+    update_model=UpdateContactRequest,
+    permission_read=require_permission(Resource.CONTACTS, Action.READ),
+    permission_write=require_permission(Resource.CONTACTS, Action.WRITE),
+    not_found_detail="联系方不存在",
+    forbidden_detail="无权访问该联系方",
+    to_out=_contact_to_out,
+    values_for_create=_contact_values_for_create,
+    values_for_update=_contact_values_for_update,
+    before_create=_contact_before_create,
+    after_commit=_contact_after_commit,
+    get_columns=_CONTACT_GET_COLUMNS,
+    update_select_columns=_CONTACT_OUT_COLUMNS,
+    delete_response={"success": True, "message": "联系方已禁用"},
+).register()
 
 
 # ============ Dashboard APIs ============

@@ -201,11 +201,7 @@ class ResourceRouter:
         update_select_columns = self.update_select_columns
         to_out = self.to_out
 
-        @self.app.post(prefix, response_model=self.response_model)
-        async def create_item(
-            request: create_model,  # type: ignore[valid-type]
-            current_user=Depends(permission_write),
-        ):
+        async def create_item(request, current_user=Depends(permission_write)):
             with get_engine().begin() as sa_conn:
                 if before_create is not None:
                     before_create(sa_conn, current_user, request)
@@ -227,7 +223,11 @@ class ResourceRouter:
                 fresh = sa_conn.execute(stmt).first()
             return to_out(fresh)
 
+        # Set the body-param annotation programmatically so FastAPI sees a
+        # real Pydantic class, not a ForwardRef of a closure-local name.
+        create_item.__annotations__["request"] = create_model
         create_item.__name__ = f"{table.name}_create"
+        self.app.post(prefix, response_model=self.response_model)(create_item)
         return create_item
 
     def _register_put(self, get_engine, load_or_404):
@@ -244,15 +244,7 @@ class ResourceRouter:
         forbidden = self.forbidden_detail
         to_out = self.to_out
 
-        @self.app.put(
-            f"{prefix}/{{item_id}}",
-            response_model=self.response_model,
-        )
-        async def update_item(
-            item_id: int,
-            request: update_model,  # type: ignore[valid-type]
-            current_user=Depends(permission_write),
-        ):
+        async def update_item(item_id: int, request=None, current_user=Depends(permission_write)):
             with get_engine().begin() as sa_conn:
                 row = load_or_404(
                     sa_conn,
@@ -282,7 +274,12 @@ class ResourceRouter:
                 fresh = sa_conn.execute(stmt).first()
             return to_out(fresh)
 
+        update_item.__annotations__["request"] = update_model
         update_item.__name__ = f"{table.name}_update"
+        self.app.put(
+            f"{prefix}/{{item_id}}",
+            response_model=self.response_model,
+        )(update_item)
         return update_item
 
     def _register_delete(self, get_engine, load_or_404):
