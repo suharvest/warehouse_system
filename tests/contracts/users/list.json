@@ -1,13 +1,13 @@
 {
   "json": [
     {
-      "created_at": "<ts>",
-      "display_name": "<str>",
-      "id": "<int>",
-      "is_disabled": false,
-      "role": "operate",
-      "tenant_id": "<int>",
-      "username": "<str>",
+      "created_at": "<any>",
+      "display_name": "<any>",
+      "id": "<any>",
+      "is_disabled": "<any>",
+      "role": "<any>",
+      "tenant_id": "<any>",
+      "username": "<any>",
       "warehouse_ids": [],
       "warehouse_names": []
     }

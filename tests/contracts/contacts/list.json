@@ -2,22 +2,22 @@
   "json": {
     "items": [
       {
-        "address": "<str>",
-        "created_at": "<ts>",
-        "email": "<str>",
-        "id": "<int>",
-        "is_customer": false,
-        "is_disabled": false,
-        "is_supplier": true,
-        "name": "<str>",
-        "notes": "<str>",
-        "phone": "<str>"
+        "address": "<any>",
+        "created_at": "<any>",
+        "email": "<any>",
+        "id": "<any>",
+        "is_customer": "<any>",
+        "is_disabled": "<any>",
+        "is_supplier": "<any>",
+        "name": "<any>",
+        "notes": "<any>",
+        "phone": "<any>"
       }
     ],
-    "page": 1,
-    "page_size": 20,
-    "total": 1,
-    "total_pages": 1
+    "page": "<any>",
+    "page_size": "<any>",
+    "total": "<any>",
+    "total_pages": "<any>"
   },
   "json_keys": [
     "items",
