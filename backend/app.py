@@ -60,7 +60,7 @@ from models import (
     UserWarehouseAssignment,
 )
 from fuzzy_match import FuzzyMatcher
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, insert, update, delete
 from db import get_engine
 from metadata import (
     warehouses as _t_warehouses,
@@ -690,28 +690,37 @@ async def create_warehouse(
     if not re.match(r'^[a-z0-9][a-z0-9\-]*$', request.slug):
         raise HTTPException(status_code=400, detail="仓库标识只能包含小写字母、数字和连字符，且不能以连字符开头")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id FROM warehouses WHERE slug = ?', (request.slug,))
-        if cursor.fetchone():
+    with get_engine().begin() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_warehouses.c.id).where(_t_warehouses.c.slug == request.slug)
+        ).first()
+        if existing:
             raise HTTPException(status_code=400, detail="仓库标识已存在")
 
-        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        created_at_dt = datetime.now()
+        created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
         if current_user.tenant_id is None:
             wh_tenant_id = request.tenant_id or 1
-            cursor.execute('SELECT id FROM tenants WHERE id = ? AND is_active = 1', (wh_tenant_id,))
-            if not cursor.fetchone():
+            tenant_row = sa_conn.execute(
+                select(_t_tenants.c.id).where(
+                    and_(_t_tenants.c.id == wh_tenant_id, _t_tenants.c.is_active == 1)
+                )
+            ).first()
+            if not tenant_row:
                 raise HTTPException(status_code=400, detail="租户不存在或已停用")
         else:
             if request.tenant_id is not None and request.tenant_id != current_user.tenant_id:
                 raise HTTPException(status_code=403, detail="无权在其他租户下创建仓库")
             wh_tenant_id = current_user.tenant_id
-        cursor.execute('''
-            INSERT INTO warehouses (slug, name, address, tenant_id, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (request.slug, request.name, request.address, wh_tenant_id, created_at))
-        wh_id = cursor.lastrowid
-        conn.commit()
+
+        result = sa_conn.execute(
+            insert(_t_warehouses).values(
+                slug=request.slug, name=request.name,
+                address=request.address, tenant_id=wh_tenant_id,
+                created_at=created_at_dt,
+            )
+        )
+        wh_id = result.inserted_primary_key[0]
 
         return WarehouseItem(
             id=wh_id, slug=request.slug, name=request.name,
@@ -727,42 +736,50 @@ async def update_warehouse(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """更新仓库（仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM warehouses WHERE id = ?', (warehouse_id,))
-        wh = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        wh = sa_conn.execute(
+            select(
+                _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
+                _t_warehouses.c.address, _t_warehouses.c.is_default,
+                _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
+                _t_warehouses.c.tenant_id,
+            ).where(_t_warehouses.c.id == warehouse_id)
+        ).first()
         if not wh:
             raise HTTPException(status_code=404, detail="仓库不存在")
-        if current_user.tenant_id is not None and wh['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and wh.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权操作该仓库")
 
-        updates = []
-        params = []
+        values = {}
         if request.name is not None:
-            updates.append('name = ?')
-            params.append(request.name)
+            values['name'] = request.name
         if request.address is not None:
-            updates.append('address = ?')
-            params.append(request.address)
+            values['address'] = request.address
         if request.is_disabled is not None:
-            if wh['is_default'] and request.is_disabled:
+            if wh.is_default and request.is_disabled:
                 raise HTTPException(status_code=400, detail="不能禁用默认仓库")
-            updates.append('is_disabled = ?')
-            params.append(1 if request.is_disabled else 0)
+            values['is_disabled'] = 1 if request.is_disabled else 0
 
-        if updates:
-            params.append(warehouse_id)
-            cursor.execute(f'UPDATE warehouses SET {", ".join(updates)} WHERE id = ?', params)
-            conn.commit()
+        if values:
+            sa_conn.execute(
+                update(_t_warehouses).where(_t_warehouses.c.id == warehouse_id).values(**values)
+            )
 
-        cursor.execute('SELECT * FROM warehouses WHERE id = ?', (warehouse_id,))
-        wh = cursor.fetchone()
+        wh2 = sa_conn.execute(
+            select(
+                _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
+                _t_warehouses.c.address, _t_warehouses.c.is_default,
+                _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
+                _t_warehouses.c.tenant_id,
+            ).where(_t_warehouses.c.id == warehouse_id)
+        ).first()
         return WarehouseItem(
-            id=wh['id'], slug=wh['slug'], name=wh['name'],
-            address=wh['address'], is_default=bool(wh['is_default']),
-            is_disabled=bool(wh['is_disabled']),
-            created_at=wh['created_at'],
-            tenant_id=wh['tenant_id'] if 'tenant_id' in wh.keys() else None
+            id=wh2.id, slug=wh2.slug, name=wh2.name,
+            address=wh2.address, is_default=bool(wh2.is_default),
+            is_disabled=bool(wh2.is_disabled),
+            created_at=(wh2.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                        if isinstance(wh2.created_at, datetime) else wh2.created_at),
+            tenant_id=wh2.tenant_id,
         )
 
 
@@ -772,24 +789,31 @@ async def delete_warehouse(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """禁用仓库（软删除，仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM warehouses WHERE id = ?', (warehouse_id,))
-        wh = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        wh = sa_conn.execute(
+            select(
+                _t_warehouses.c.id, _t_warehouses.c.is_default, _t_warehouses.c.tenant_id,
+            ).where(_t_warehouses.c.id == warehouse_id)
+        ).first()
         if not wh:
             raise HTTPException(status_code=404, detail="仓库不存在")
-        if current_user.tenant_id is not None and wh['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and wh.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权操作该仓库")
-        if wh['is_default']:
+        if wh.is_default:
             raise HTTPException(status_code=400, detail="不能删除默认仓库")
 
         # 拒绝删除非空仓库（防止产生"幽灵库存"）
-        cursor.execute('SELECT COUNT(*) AS n FROM materials WHERE warehouse_id = ? AND is_disabled = 0', (warehouse_id,))
-        if cursor.fetchone()['n'] > 0:
+        n = sa_conn.execute(
+            select(_sa_func.count()).select_from(_t_materials).where(
+                and_(_t_materials.c.warehouse_id == warehouse_id, _t_materials.c.is_disabled == 0)
+            )
+        ).scalar()
+        if n and n > 0:
             raise HTTPException(status_code=400, detail="仓库内仍有物料，无法删除")
 
-        cursor.execute('UPDATE warehouses SET is_disabled = 1 WHERE id = ?', (warehouse_id,))
-        conn.commit()
+        sa_conn.execute(
+            update(_t_warehouses).where(_t_warehouses.c.id == warehouse_id).values(is_disabled=1)
+        )
         return {"success": True, "message": "仓库已禁用"}
 
 
@@ -827,36 +851,40 @@ async def set_user_warehouses(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """设置用户授权的仓库列表"""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    with get_engine().begin() as sa_conn:
         # 验证用户属于当前租户
-        cursor.execute('SELECT id, tenant_id FROM users WHERE id = ?', (user_id,))
-        target_user = cursor.fetchone()
+        target_user = sa_conn.execute(
+            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
+        ).first()
         if not target_user:
             raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and target_user['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and target_user.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权访问其他租户的用户")
 
         # 验证所有仓库ID存在
         for wh_id in request.warehouse_ids:
             if current_user.tenant_id is None:
-                cursor.execute('SELECT id FROM warehouses WHERE id = ?', (wh_id,))
+                wh_check = sa_conn.execute(
+                    select(_t_warehouses.c.id).where(_t_warehouses.c.id == wh_id)
+                ).first()
             else:
-                cursor.execute(
-                    'SELECT id FROM warehouses WHERE id = ? AND tenant_id = ?',
-                    (wh_id, current_user.tenant_id)
-                )
-            if not cursor.fetchone():
+                wh_check = sa_conn.execute(
+                    select(_t_warehouses.c.id).where(
+                        and_(_t_warehouses.c.id == wh_id,
+                             _t_warehouses.c.tenant_id == current_user.tenant_id)
+                    )
+                ).first()
+            if not wh_check:
                 raise HTTPException(status_code=400, detail=f"仓库ID {wh_id} 不存在")
 
         # 替换授权
-        cursor.execute('DELETE FROM user_warehouses WHERE user_id = ?', (user_id,))
+        sa_conn.execute(
+            delete(_t_user_warehouses).where(_t_user_warehouses.c.user_id == user_id)
+        )
         for wh_id in request.warehouse_ids:
-            cursor.execute(
-                'INSERT INTO user_warehouses (user_id, warehouse_id) VALUES (?, ?)',
-                (user_id, wh_id)
+            sa_conn.execute(
+                insert(_t_user_warehouses).values(user_id=user_id, warehouse_id=wh_id)
             )
-        conn.commit()
         return {"success": True, "message": "仓库授权已更新", "warehouse_ids": request.warehouse_ids}
 
 
@@ -908,19 +936,21 @@ async def create_tenant(
     if current_user.tenant_id is not None:
         raise HTTPException(status_code=403, detail="仅全局 admin 可创建租户")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM tenants WHERE slug = ?", (request.slug,))
-        if cursor.fetchone():
+    with get_engine().begin() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_tenants.c.id).where(_t_tenants.c.slug == request.slug)
+        ).first()
+        if existing:
             raise HTTPException(status_code=400, detail="租户标识已存在")
 
-        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("""
-            INSERT INTO tenants (slug, name, created_at)
-            VALUES (?, ?, ?)
-        """, (request.slug, request.name, created_at))
-        tenant_id = cursor.lastrowid
-        conn.commit()
+        created_at_dt = datetime.now()
+        created_at = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+        result = sa_conn.execute(
+            insert(_t_tenants).values(
+                slug=request.slug, name=request.name, created_at=created_at_dt,
+            )
+        )
+        tenant_id = result.inserted_primary_key[0]
 
         return TenantItem(
             id=tenant_id, slug=request.slug, name=request.name,
@@ -941,36 +971,41 @@ async def update_tenant(
     if current_user.tenant_id is not None:
         raise HTTPException(status_code=403, detail="仅全局 admin 可修改租户")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,))
-        tenant = cursor.fetchone()
+    with get_engine().begin() as sa_conn:
+        tenant = sa_conn.execute(
+            select(
+                _t_tenants.c.id, _t_tenants.c.slug, _t_tenants.c.name,
+                _t_tenants.c.is_active, _t_tenants.c.created_at,
+            ).where(_t_tenants.c.id == tenant_id)
+        ).first()
         if not tenant:
             raise HTTPException(status_code=404, detail="租户不存在")
 
         if tenant_id == 1:
             raise HTTPException(status_code=400, detail="不能修改默认租户")
 
-        updates = []
-        params = []
+        values = {}
         if request.name is not None:
-            updates.append("name = ?")
-            params.append(request.name)
+            values["name"] = request.name
         if request.is_active is not None:
-            updates.append("is_active = ?")
-            params.append(1 if request.is_active else 0)
+            values["is_active"] = 1 if request.is_active else 0
 
-        if updates:
-            params.append(tenant_id)
-            cursor.execute(f"UPDATE tenants SET {', '.join(updates)} WHERE id = ?", params)
-            conn.commit()
+        if values:
+            sa_conn.execute(
+                update(_t_tenants).where(_t_tenants.c.id == tenant_id).values(**values)
+            )
 
-        cursor.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,))
-        r = cursor.fetchone()
+        r = sa_conn.execute(
+            select(
+                _t_tenants.c.id, _t_tenants.c.slug, _t_tenants.c.name,
+                _t_tenants.c.is_active, _t_tenants.c.created_at,
+            ).where(_t_tenants.c.id == tenant_id)
+        ).first()
         return TenantItem(
-            id=r["id"], slug=r["slug"], name=r["name"],
-            is_active=bool(r["is_active"]),
-            created_at=r["created_at"]
+            id=r.id, slug=r.slug, name=r.name,
+            is_active=bool(r.is_active),
+            created_at=(r.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                        if isinstance(r.created_at, datetime) else r.created_at),
         )
 
 
@@ -989,19 +1024,26 @@ async def delete_tenant(
     if tenant_id == 1:
         raise HTTPException(status_code=400, detail="不能停用默认租户")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,))
-        if not cursor.fetchone():
+    with get_engine().begin() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_tenants.c.id).where(_t_tenants.c.id == tenant_id)
+        ).first()
+        if not existing:
             raise HTTPException(status_code=404, detail="租户不存在")
 
-        cursor.execute("UPDATE tenants SET is_active = 0 WHERE id = ?", (tenant_id,))
-        cursor.execute("""
-            UPDATE sessions SET revoked_at = ?
-            WHERE user_id IN (SELECT id FROM users WHERE tenant_id = ?)
-              AND revoked_at IS NULL
-        """, (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), tenant_id))
-        conn.commit()
+        sa_conn.execute(
+            update(_t_tenants).where(_t_tenants.c.id == tenant_id).values(is_active=0)
+        )
+        revoked_at_dt = datetime.now()
+        users_subq = select(_t_users.c.id).where(_t_users.c.tenant_id == tenant_id)
+        sa_conn.execute(
+            update(_t_sessions).where(
+                and_(
+                    _t_sessions.c.user_id.in_(users_subq),
+                    _t_sessions.c.revoked_at.is_(None),
+                )
+            ).values(revoked_at=revoked_at_dt)
+        )
         return {"success": True, "message": "租户已停用"}
 
 
