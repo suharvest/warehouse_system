@@ -5,7 +5,14 @@
 """
 import sqlite3
 import os
+import sys
 from datetime import datetime
+
+# 一次性脚本，仅 SQLite。其他方言（MySQL）下直接退出。
+_url = os.environ.get('DATABASE_URL', '')
+if _url and not _url.startswith('sqlite'):
+    print('migrate_data.py is sqlite-only; current DATABASE_URL is non-sqlite, skipping.')
+    sys.exit(0)
 
 DATABASE_PATH = os.environ.get('DATABASE_PATH', 'warehouse.db')
 

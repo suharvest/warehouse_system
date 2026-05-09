@@ -50,23 +50,243 @@ BCRYPT_ENABLED = os.environ.get('BCRYPT_ENABLED', 'true').lower() == 'true' and 
 SQLITE_PRODUCTION_MODE = os.environ.get('SQLITE_PRODUCTION_MODE', 'false').lower() == 'true'
 
 
+def _is_sqlite() -> bool:
+    """是否使用 SQLite 引擎（基于 DATABASE_URL）。"""
+    url = os.environ.get('DATABASE_URL', '')
+    if url:
+        return url.startswith('sqlite')
+    # 默认走 sqlite (DATABASE_PATH)
+    return True
+
+
 def get_db_connection():
-    """获取数据库连接"""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
+    """获取数据库连接。
 
-    # 生产模式下启用优化配置
-    if SQLITE_PRODUCTION_MODE:
-        cursor = conn.cursor()
-        cursor.execute('PRAGMA journal_mode=WAL')       # 更好的并发性能
-        cursor.execute('PRAGMA foreign_keys=ON')        # 启用外键约束
-        cursor.execute('PRAGMA synchronous=NORMAL')     # 平衡安全与性能
-        cursor.execute('PRAGMA cache_size=-64000')      # 64MB缓存
+    SQLite 路径：返回 sqlite3.Connection（保持向后兼容，row_factory=Row）。
+    其他方言（MySQL）：返回一个 sqlite3-API-shaped shim，包装 SQLAlchemy Connection，
+    自动把 ``?`` 占位符翻译成 ``%s`` / ``:p0`` 等当前驱动支持的形式。
 
-    return conn
+    这是从 raw sqlite3 -> SQLAlchemy Core 渐进迁移的"软桥"。新代码请直接走
+    ``backend.db.get_engine()``。
+    """
+    if _is_sqlite():
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.row_factory = sqlite3.Row
+
+        # 生产模式下启用优化配置
+        if SQLITE_PRODUCTION_MODE:
+            cursor = conn.cursor()
+            cursor.execute('PRAGMA journal_mode=WAL')       # 更好的并发性能
+            cursor.execute('PRAGMA foreign_keys=ON')        # 启用外键约束
+            cursor.execute('PRAGMA synchronous=NORMAL')     # 平衡安全与性能
+            cursor.execute('PRAGMA cache_size=-64000')      # 64MB缓存
+
+        return conn
+
+    # MySQL / 其他方言 → 走 shim
+    from db import get_engine
+    return _SAConnectionShim(get_engine())
+
+
+class _RowShim(dict):
+    """模拟 sqlite3.Row：既能 ``row['col']`` 也能 ``row[0]`` 访问。"""
+
+    def __init__(self, mapping, columns):
+        super().__init__(mapping)
+        self._columns = columns
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self.get(self._columns[key])
+        return super().__getitem__(key)
+
+    @property
+    def keys_list(self):
+        return list(self._columns)
+
+
+class _CursorShim:
+    """模拟 sqlite3.Cursor，包一个 SQLAlchemy Connection。
+
+    支持：
+    - ``execute(sql, params=())``：把 ``?`` 翻译成 ``%s`` 然后通过 ``text()`` 执行；
+      会自动开 / 沿用一个事务（commit 在父连接的 ``commit()`` 上）。
+    - ``executemany(sql, seq_of_params)``：循环 execute。
+    - ``fetchone() / fetchall()``：返回 ``_RowShim``。
+    - ``lastrowid``：从 ``CursorResult.lastrowid`` 取（INSERT 后）。
+    - ``rowcount``：从 ``CursorResult.rowcount`` 取。
+    """
+
+    def __init__(self, parent: '_SAConnectionShim'):
+        self._parent = parent
+        self._result = None
+        self._columns: list[str] = []
+        self._rows_consumed = False
+        self.lastrowid = None
+        self.rowcount = -1
+
+    def _translate_sql(self, sql: str) -> str:
+        # SQLAlchemy text() 用 ``:name`` 形式。把 ``?`` 替换成 ``:p0, :p1, ...``。
+        if '?' not in sql:
+            return sql
+        out = []
+        idx = 0
+        in_str = False
+        quote_char = ''
+        for ch in sql:
+            if in_str:
+                out.append(ch)
+                if ch == quote_char:
+                    in_str = False
+                continue
+            if ch in ("'", '"'):
+                in_str = True
+                quote_char = ch
+                out.append(ch)
+                continue
+            if ch == '?':
+                out.append(f':p{idx}')
+                idx += 1
+            else:
+                out.append(ch)
+        return ''.join(out)
+
+    def execute(self, sql: str, params=()):
+        from sqlalchemy import text as _sa_text
+        translated = self._translate_sql(sql)
+        if isinstance(params, dict):
+            bind = params
+        else:
+            bind = {f'p{i}': v for i, v in enumerate(params or ())}
+        conn = self._parent._ensure_conn()
+        result = conn.execute(_sa_text(translated), bind)
+        self._result = result
+        try:
+            self._columns = list(result.keys()) if result.returns_rows else []
+        except Exception:
+            self._columns = []
+        try:
+            self.lastrowid = result.lastrowid
+        except Exception:
+            self.lastrowid = None
+        try:
+            self.rowcount = result.rowcount
+        except Exception:
+            self.rowcount = -1
+        self._rows_consumed = False
+        return self
+
+    def executemany(self, sql, seq_of_params):
+        last = None
+        for p in seq_of_params:
+            last = self.execute(sql, p)
+        return last
+
+    def fetchone(self):
+        if self._result is None or self._rows_consumed:
+            return None
+        row = self._result.fetchone()
+        if row is None:
+            return None
+        mapping = dict(row._mapping) if hasattr(row, '_mapping') else dict(zip(self._columns, row))
+        return _RowShim(mapping, self._columns)
+
+    def fetchall(self):
+        if self._result is None or self._rows_consumed:
+            return []
+        rows = self._result.fetchall()
+        self._rows_consumed = True
+        out = []
+        for r in rows:
+            mapping = dict(r._mapping) if hasattr(r, '_mapping') else dict(zip(self._columns, r))
+            out.append(_RowShim(mapping, self._columns))
+        return out
+
+    def close(self):
+        self._result = None
+
+
+class _SAConnectionShim:
+    """模拟 sqlite3.Connection，包一个 SQLAlchemy Engine。
+
+    每次 ``cursor()`` / ``execute()`` 操作都共用一个 lazily-opened SA Connection
+    与 ``Transaction``。``commit()`` 提交、``close()`` 关闭。
+    """
+
+    def __init__(self, engine):
+        self._engine = engine
+        self._sa_conn = None
+        self._sa_tx = None
+        self.row_factory = None  # 兼容写入但忽略
+
+    def _ensure_conn(self):
+        if self._sa_conn is None:
+            self._sa_conn = self._engine.connect()
+        if self._sa_tx is None:
+            self._sa_tx = self._sa_conn.begin()
+        return self._sa_conn
+
+    def cursor(self):
+        return _CursorShim(self)
+
+    def execute(self, sql, params=()):
+        # sqlite3.Connection.execute 等价于 cursor.execute，返回 cursor
+        cur = _CursorShim(self)
+        return cur.execute(sql, params)
+
+    def commit(self):
+        if self._sa_tx is not None:
+            try:
+                self._sa_tx.commit()
+            finally:
+                self._sa_tx = None
+        # 立即开一个新事务以承载下一批 statement（贴合 sqlite3 的隐式事务习惯）
+        if self._sa_conn is not None:
+            self._sa_tx = self._sa_conn.begin()
+
+    def rollback(self):
+        if self._sa_tx is not None:
+            try:
+                self._sa_tx.rollback()
+            finally:
+                self._sa_tx = None
+        if self._sa_conn is not None:
+            self._sa_tx = self._sa_conn.begin()
+
+    def close(self):
+        try:
+            if self._sa_tx is not None:
+                # 没显式 commit 的事务回滚（与 sqlite3 行为一致）
+                try:
+                    self._sa_tx.rollback()
+                except Exception:
+                    pass
+                self._sa_tx = None
+        finally:
+            if self._sa_conn is not None:
+                try:
+                    self._sa_conn.close()
+                finally:
+                    self._sa_conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        self.close()
 
 def init_database():
-    """初始化数据库表结构"""
+    """初始化数据库表结构（仅 SQLite）。
+
+    非 sqlite 方言（MySQL）下，schema 由 alembic 管理，本函数是 no-op。
+    保留 sqlite 路径主要服务于历史测试夹具与本地开发。
+    """
+    if not _is_sqlite():
+        return
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -631,28 +851,34 @@ def generate_batch_no(material_id: int, cursor=None) -> str:
     """生成批次号: YYYYMMDD-XXX (globally unique)
 
     传入 cursor 可在同一事务内看到未提交的批次（避免批量创建时序号冲突）。
+    无 cursor 时：dialect-portable 路径走 SA Core。
     """
-    own_conn = cursor is None
-    if own_conn:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
     today = datetime.now().strftime('%Y%m%d')
+    like_pat = f'{today}-%'
 
-    # 查询今天最大序号
-    cursor.execute('''
-        SELECT batch_no FROM batches
-        WHERE batch_no LIKE ?
-        ORDER BY batch_no DESC LIMIT 1
-    ''', (f'{today}-%',))
-    row = cursor.fetchone()
+    if cursor is not None:
+        cursor.execute(
+            "SELECT batch_no FROM batches WHERE batch_no LIKE ? ORDER BY batch_no DESC LIMIT 1",
+            (like_pat,),
+        )
+        row = cursor.fetchone()
+        last_no = row['batch_no'] if row else None
+    else:
+        from sqlalchemy import select
+        from db import get_engine
+        from metadata import batches as _t_batches
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(_t_batches.c.batch_no)
+                .where(_t_batches.c.batch_no.like(like_pat))
+                .order_by(_t_batches.c.batch_no.desc())
+                .limit(1)
+            ).first()
+        last_no = row[0] if row else None
 
-    if own_conn:
-        conn.close()
-
-    if row:
+    if last_no:
         try:
-            last_seq = int(row['batch_no'].split('-')[-1])
+            last_seq = int(last_no.split('-')[-1])
         except (ValueError, IndexError):
             last_seq = 0
         seq = last_seq + 1
@@ -662,13 +888,17 @@ def generate_batch_no(material_id: int, cursor=None) -> str:
 
 
 def has_admin_user():
-    """检查是否存在管理员用户"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND is_disabled = 0")
-    count = cursor.fetchone()['count']
-    conn.close()
-    return count > 0
+    """检查是否存在管理员用户。SA Core 实现，dialect-portable。"""
+    from sqlalchemy import select, func
+    from db import get_engine
+    from metadata import users as _t_users
+    with get_engine().connect() as conn:
+        n = conn.execute(
+            select(func.count()).select_from(_t_users).where(
+                (_t_users.c.role == 'admin') & (_t_users.c.is_disabled == 0)
+            )
+        ).scalar() or 0
+    return n > 0
 
 
 def hash_password(password: str) -> str:
@@ -735,7 +965,12 @@ def hash_api_key(api_key: str) -> str:
 
 
 def generate_mock_data():
-    """生成模拟数据"""
+    """生成模拟数据（仅 SQLite，开发/演示用）。
+
+    非 sqlite 方言下不执行 — 生产 MySQL 不应该被开发期 mock data 污染。
+    """
+    if not _is_sqlite():
+        return
     conn = get_db_connection()
     cursor = conn.cursor()
 

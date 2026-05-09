@@ -66,6 +66,11 @@ def _build_engine(url: str) -> Engine:
             pool_pre_ping=True,
             connect_args=connect_args,
             future=True,
+            # AUTOCOMMIT prevents pooled connections from accumulating
+            # implicit transactions across reads. Writes still use
+            # explicit `engine.begin()` blocks, which override this and
+            # wrap the body in BEGIN/COMMIT.
+            isolation_level="AUTOCOMMIT",
         )
         return eng
 
