@@ -59,6 +59,8 @@ from models import (
     # Warehouse models
     WarehouseItem, CreateWarehouseRequest, UpdateWarehouseRequest,
     UserWarehouseAssignment,
+    # R3: wire-format string enums
+    RoleName, RecordType,
 )
 from fuzzy_match import FuzzyMatcher
 from sqlalchemy import select, and_, or_, insert, update, delete, case
@@ -278,22 +280,33 @@ async def http_exception_handler(request, exc):
 
 # ============ 认证相关 ============
 
-# 权限级别映射（数字越大权限越高）
+_VALID_ROLE_VALUES = {r.value for r in RoleName}  # {'admin', 'operate', 'view'}
+
+
+# 权限级别映射（数字越大权限越高）。RoleName members are str subclasses
+# so they hash equal to their plain-string value — both raw "admin" and
+# RoleName.ADMIN look up the same level.
 ROLE_LEVELS = {
-    'view': 1,
-    'operate': 2,
-    'admin': 3
+    RoleName.VIEW: 1,
+    RoleName.OPERATE: 2,
+    RoleName.ADMIN: 3,
 }
 
 
 class Role(IntEnum):
-    """Numeric role levels. Higher = more privileged."""
+    """Numeric role *level* ordering. Higher = more privileged.
+
+    This is distinct from ``RoleName`` (the wire-format string enum). Use
+    ``Role`` only for comparisons inside ``require_permission``.
+    """
     VIEW = 1
     OPERATE = 2
     ADMIN = 3
 
     @classmethod
     def from_str(cls, s: str) -> "Role":
+        # ``s`` may be a raw string or a ``RoleName`` member (which is also
+        # a str). ``.lower()`` works for both.
         return {"view": cls.VIEW, "operate": cls.OPERATE, "admin": cls.ADMIN}[s.lower()]
 
 
@@ -332,7 +345,7 @@ _ACTION_TO_ROLE: "dict[Action, Role]" = {
 class CurrentUser:
     """当前用户信息"""
     def __init__(self, user_id: int = None, username: str = None,
-                 display_name: str = None, role: str = 'view',
+                 display_name: str = None, role: str = RoleName.VIEW.value,
                  is_guest: bool = True, source: str = 'guest',
                  warehouse_id: int = None,
                  tenant_id: int = 1):
@@ -364,7 +377,7 @@ class CurrentUser:
         compatibility but unused.
         """
         with get_engine().connect() as sa_conn:
-            if self.role == 'admin':
+            if self.role == RoleName.ADMIN:
                 if self.tenant_id is None:
                     stmt = select(_t_warehouses.c.id).where(_t_warehouses.c.is_disabled == 0)
                 else:
@@ -386,7 +399,7 @@ class CurrentUser:
         Phase 2b: read via SQLAlchemy Core. ``conn`` retained for signature
         compatibility but unused.
         """
-        if self.role == 'admin':
+        if self.role == RoleName.ADMIN:
             if self.tenant_id is None:
                 return True
             stmt = select(_t_warehouses.c.id).where(
@@ -710,7 +723,7 @@ def infer_single_writable_warehouse_id(current_user: CurrentUser) -> Optional[in
     """
     if current_user.tenant_id is None:
         return None
-    if current_user.role == 'admin':
+    if current_user.role == RoleName.ADMIN:
         stmt = select(_t_warehouses.c.id).where(
             and_(
                 _t_warehouses.c.tenant_id == current_user.tenant_id,
@@ -757,7 +770,7 @@ def ensure_contact_tenant(cursor, current_user: CurrentUser, contact_id: Optiona
 
 def check_warehouse_access(conn, current_user: CurrentUser, warehouse_id: int):
     """检查用户是否有权访问指定仓库，无权限则抛出403"""
-    if current_user.role == 'admin' and current_user.tenant_id is None:
+    if current_user.role == RoleName.ADMIN and current_user.tenant_id is None:
         return
     if not current_user.can_access_warehouse(conn, warehouse_id):
         raise HTTPException(status_code=403, detail="无权访问该仓库")
@@ -864,7 +877,7 @@ async def list_warehouses(
 ):
     """获取仓库列表 — Phase 2b: read via SQLAlchemy Core."""
     conds = list(build_scope_predicates(_t_warehouses, current_user.tenant_id, None))
-    if not (include_disabled and current_user.role == 'admin'):
+    if not (include_disabled and current_user.role == RoleName.ADMIN):
         conds.append(_t_warehouses.c.is_disabled == 0)
     stmt = select(
         _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
@@ -1306,7 +1319,7 @@ async def setup_admin(request: SetupRequest, response: Response):
             insert(_t_users).values(
                 username=request.username,
                 password_hash=password_hash,
-                role='admin',
+                role=RoleName.ADMIN.value,
                 display_name=request.display_name,
                 tenant_id=setup_tenant_id,
                 created_at=datetime.now(),
@@ -1339,7 +1352,7 @@ async def setup_admin(request: SetupRequest, response: Response):
             id=user_id,
             username=request.username,
             display_name=request.display_name,
-            role='admin',
+            role=RoleName.ADMIN.value,
             tenant_id=setup_tenant_id
         )
     )
@@ -1532,7 +1545,7 @@ async def create_user(
     current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
 ):
     """创建用户（仅管理员）"""
-    if request.role not in ['admin', 'operate', 'view']:
+    if request.role not in _VALID_ROLE_VALUES:
         raise HTTPException(status_code=400, detail="无效的角色")
 
     if len(request.password) < 4:
@@ -1639,7 +1652,7 @@ async def update_user(
             values['display_name'] = request.display_name
 
         if request.role is not None:
-            if request.role not in ['admin', 'operate', 'view']:
+            if request.role not in _VALID_ROLE_VALUES:
                 raise HTTPException(status_code=400, detail="无效的角色")
             values['role'] = request.role
 
@@ -1759,7 +1772,7 @@ async def create_api_key(
     current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
 ):
     """创建API密钥（仅管理员）"""
-    if request.role not in ['admin', 'operate', 'view']:
+    if request.role not in _VALID_ROLE_VALUES:
         raise HTTPException(status_code=400, detail="无效的角色")
 
     # secrets/sha256 are CPU-bound; outside the transaction
@@ -2519,7 +2532,7 @@ async def get_operators_for_filter(
     """获取操作员列表（用于筛选下拉）- 返回所有有操作权限的用户。Phase 2c: SA Core read."""
     conds = [
         _t_users.c.is_disabled == 0,
-        _t_users.c.role.in_(['operate', 'admin']),
+        _t_users.c.role.in_([RoleName.OPERATE.value, RoleName.ADMIN.value]),
     ]
     conds.extend(build_scope_predicates(_t_users, current_user.tenant_id, None))
     stmt = select(
@@ -5706,7 +5719,7 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
         id=row['id'],
         name=row['name'],
         mcp_endpoint=row['mcp_endpoint'],
-        role=row['role'] or 'operate',
+        role=row['role'] or RoleName.OPERATE.value,
         auto_start=bool(row['auto_start']),
         status=status_info.get('status', row['status'] or 'stopped'),
         websocket_status=status_info.get('websocket_status', 'not_started'),
@@ -5784,7 +5797,7 @@ async def create_mcp_connection(
     now = now_dt.isoformat()
 
     # 验证角色
-    role = request.role if request.role in ('admin', 'operate', 'view') else 'operate'
+    role = request.role if request.role in _VALID_ROLE_VALUES else RoleName.OPERATE.value
 
     # 自动生成 API Key
     api_key_plain = generate_api_key()
@@ -5889,7 +5902,7 @@ async def update_mcp_connection(
         apikey_values['name'] = f'Agent: {request.name}'
     if request.mcp_endpoint is not None:
         mcp_values['mcp_endpoint'] = request.mcp_endpoint
-    if request.role is not None and request.role in ('admin', 'operate', 'view'):
+    if request.role is not None and request.role in _VALID_ROLE_VALUES:
         mcp_values['role'] = request.role
         apikey_values['role'] = request.role
     if request.auto_start is not None:
