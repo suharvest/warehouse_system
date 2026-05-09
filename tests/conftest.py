@@ -42,24 +42,30 @@ def test_db():
         # Seed minimal data the sqlite init_database() would have inserted:
         # default tenant (id=1), default warehouse (id=1), system_mode setting.
         from db import get_engine
-        from sqlalchemy import text
+        from sqlalchemy import text, inspect
         eng = get_engine()
+        # Wipe every table (preserving alembic_version) so each pytest session
+        # starts clean. The MySQL DB persists across runs in the docker
+        # container, so without this the admin user from a prior run would
+        # block /api/auth/setup with "系统已初始化".
         with eng.begin() as conn:
+            insp = inspect(eng)
+            tables = [t for t in insp.get_table_names() if t != 'alembic_version']
             conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+            for t in tables:
+                conn.execute(text(f"TRUNCATE TABLE `{t}`"))
+            # Seed minimal data the sqlite init_database() would have inserted.
             conn.execute(text(
-                "INSERT IGNORE INTO tenants (id, slug, name) VALUES (1, 'default', '默认租户')"
+                "INSERT INTO tenants (id, slug, name) VALUES (1, 'default', '默认租户')"
             ))
             conn.execute(text(
-                "INSERT IGNORE INTO warehouses (id, slug, name, is_default) "
+                "INSERT INTO warehouses (id, slug, name, is_default) "
                 "VALUES (1, 'default', '默认仓库', 1)"
             ))
-            try:
-                conn.execute(text(
-                    "INSERT IGNORE INTO settings (`key`, `value`) "
-                    "VALUES ('system_mode', 'self_owned')"
-                ))
-            except Exception:
-                pass
+            conn.execute(text(
+                "INSERT INTO system_settings (`key`, `value`) "
+                "VALUES ('system_mode', 'self_owned')"
+            ))
             conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
         yield database_url
         return
