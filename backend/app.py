@@ -367,92 +367,98 @@ async def get_current_user(request: Request) -> CurrentUser:
     获取当前用户（认证中间件）
     优先级：X-API-Key > session_token Cookie > 访客
     """
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # 1. 检查 X-API-Key Header
-        api_key = request.headers.get('X-API-Key')
-        if api_key:
-            key_hash = hash_api_key(api_key)
-            cursor.execute('''
-                SELECT ak.id, ak.name, ak.role, ak.user_id, ak.warehouse_id, ak.tenant_id,
-                       u.username, u.display_name
-                FROM api_keys ak
-                LEFT JOIN users u ON ak.user_id = u.id
-                LEFT JOIN tenants t ON ak.tenant_id = t.id
-                WHERE ak.key_hash = ? AND ak.is_disabled = 0
-                  AND (ak.tenant_id IS NULL OR t.is_active = 1)
-            ''', (key_hash,))
-            key_row = cursor.fetchone()
-
-            if key_row:
-                # 更新最后使用时间
-                cursor.execute(
-                    'UPDATE api_keys SET last_used_at = ? WHERE id = ?',
-                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), key_row['id'])
-                )
-                conn.commit()
-
-                # 使用关联用户名或API Key名称
-                display_name = key_row['display_name'] or key_row['username'] or key_row['name']
-                return CurrentUser(
-                    user_id=key_row['user_id'],
-                    username=key_row['username'] or key_row['name'],
-                    display_name=display_name,
-                    role=key_row['role'],
-                    is_guest=False,
-                    source='api_key',
-                    warehouse_id=key_row['warehouse_id'],
-                    tenant_id=key_row['tenant_id']
-                )
-
-        # 2. 检查 session_token Cookie
-        # Phase 2b: read via SQLAlchemy Core (pure SELECT).
-        session_token = request.cookies.get('session_token')
-        if session_token:
-            stmt = select(
-                _t_sessions.c.user_id,
-                _t_sessions.c.expires_at,
-                _t_users.c.username,
-                _t_users.c.display_name,
-                _t_users.c.role,
-                _t_users.c.tenant_id,
-            ).select_from(
-                _t_sessions.join(_t_users, _t_sessions.c.user_id == _t_users.c.id)
-                           .outerjoin(_t_tenants, _t_users.c.tenant_id == _t_tenants.c.id)
-            ).where(
-                and_(
-                    _t_sessions.c.token == session_token,
-                    _t_users.c.is_disabled == 0,
-                    _t_sessions.c.revoked_at.is_(None),
-                    or_(_t_users.c.tenant_id.is_(None), _t_tenants.c.is_active == 1),
-                )
+    # 1. 检查 X-API-Key Header — Phase 3e: SA Core single short txn
+    api_key = request.headers.get('X-API-Key')
+    if api_key:
+        key_hash = hash_api_key(api_key)
+        ak_select = select(
+            _t_api_keys.c.id,
+            _t_api_keys.c.name,
+            _t_api_keys.c.role,
+            _t_api_keys.c.user_id,
+            _t_api_keys.c.warehouse_id,
+            _t_api_keys.c.tenant_id,
+            _t_users.c.username,
+            _t_users.c.display_name,
+        ).select_from(
+            _t_api_keys.outerjoin(_t_users, _t_api_keys.c.user_id == _t_users.c.id)
+                       .outerjoin(_t_tenants, _t_api_keys.c.tenant_id == _t_tenants.c.id)
+        ).where(
+            and_(
+                _t_api_keys.c.key_hash == key_hash,
+                _t_api_keys.c.is_disabled == 0,
+                or_(_t_api_keys.c.tenant_id.is_(None), _t_tenants.c.is_active == 1),
             )
-            with get_engine().connect() as sa_conn:
-                session_row = sa_conn.execute(stmt).first()
+        )
+        with get_engine().begin() as sa_conn:
+            key_row = sa_conn.execute(ak_select).first()
+            if key_row:
+                sa_conn.execute(
+                    update(_t_api_keys)
+                    .where(_t_api_keys.c.id == key_row.id)
+                    .values(last_used_at=datetime.now())
+                )
 
-            if session_row:
-                # 检查是否过期 — SA returns DateTime as datetime or string depending on dialect
-                ea = session_row.expires_at
-                if isinstance(ea, datetime):
-                    expires_at = ea
-                else:
-                    expires_at = datetime.strptime(str(ea), '%Y-%m-%d %H:%M:%S')
-                if expires_at > datetime.now():
-                    return CurrentUser(
-                        user_id=session_row.user_id,
-                        username=session_row.username,
-                        display_name=session_row.display_name,
-                        role=session_row.role,
-                        is_guest=False,
-                        source='session',
-                        tenant_id=session_row.tenant_id if session_row.tenant_id is not None else None
-                    )
+        if key_row:
+            display_name = key_row.display_name or key_row.username or key_row.name
+            return CurrentUser(
+                user_id=key_row.user_id,
+                username=key_row.username or key_row.name,
+                display_name=display_name,
+                role=key_row.role,
+                is_guest=False,
+                source='api_key',
+                warehouse_id=key_row.warehouse_id,
+                tenant_id=key_row.tenant_id
+            )
 
-        # 3. 访客模式
-        if get_deploy_mode() == 'multi_tenant':
-            return CurrentUser(tenant_id=None)  # 多租户下访客无 tenant_id
-        return CurrentUser(tenant_id=1)
+    # 2. 检查 session_token Cookie
+    # Phase 2b: read via SQLAlchemy Core (pure SELECT).
+    session_token = request.cookies.get('session_token')
+    if session_token:
+        stmt = select(
+            _t_sessions.c.user_id,
+            _t_sessions.c.expires_at,
+            _t_users.c.username,
+            _t_users.c.display_name,
+            _t_users.c.role,
+            _t_users.c.tenant_id,
+        ).select_from(
+            _t_sessions.join(_t_users, _t_sessions.c.user_id == _t_users.c.id)
+                       .outerjoin(_t_tenants, _t_users.c.tenant_id == _t_tenants.c.id)
+        ).where(
+            and_(
+                _t_sessions.c.token == session_token,
+                _t_users.c.is_disabled == 0,
+                _t_sessions.c.revoked_at.is_(None),
+                or_(_t_users.c.tenant_id.is_(None), _t_tenants.c.is_active == 1),
+            )
+        )
+        with get_engine().connect() as sa_conn:
+            session_row = sa_conn.execute(stmt).first()
+
+        if session_row:
+            # 检查是否过期 — SA returns DateTime as datetime or string depending on dialect
+            ea = session_row.expires_at
+            if isinstance(ea, datetime):
+                expires_at = ea
+            else:
+                expires_at = datetime.strptime(str(ea), '%Y-%m-%d %H:%M:%S')
+            if expires_at > datetime.now():
+                return CurrentUser(
+                    user_id=session_row.user_id,
+                    username=session_row.username,
+                    display_name=session_row.display_name,
+                    role=session_row.role,
+                    is_guest=False,
+                    source='session',
+                    tenant_id=session_row.tenant_id if session_row.tenant_id is not None else None
+                )
+
+    # 3. 访客模式
+    if get_deploy_mode() == 'multi_tenant':
+        return CurrentUser(tenant_id=None)  # 多租户下访客无 tenant_id
+    return CurrentUser(tenant_id=1)
 
 
 def require_auth(min_role: str = 'view'):
@@ -1083,134 +1089,145 @@ async def setup_admin(request: SetupRequest, response: Response):
     if len(request.password) < 4:
         raise HTTPException(status_code=400, detail="密码长度至少4位")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    # bcrypt + token gen 在事务外执行（CPU 密集 / 纯 Python）
+    password_hash = hash_password(request.password)
+    token = generate_session_token()
+    expires_at = datetime.now() + timedelta(hours=24)
+    # 全局 admin（tenant_id = NULL）仅在 multi_tenant 下；single_tenant 下 tenant_id = 1
+    setup_tenant_id = None if get_deploy_mode() == 'multi_tenant' else 1
 
-        # 创建管理员
-        password_hash = hash_password(request.password)
-        # 全局 admin（tenant_id = NULL）仅在 multi_tenant 下；single_tenant 下 tenant_id = 1
-        setup_tenant_id = None if get_deploy_mode() == 'multi_tenant' else 1
-        cursor.execute('''
-            INSERT INTO users (username, password_hash, role, display_name, tenant_id, created_at)
-            VALUES (?, ?, 'admin', ?, ?, ?)
-        ''', (request.username, password_hash, request.display_name,
-              setup_tenant_id,
-              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-
-        user_id = cursor.lastrowid
-
-        # 创建会话
-        token = generate_session_token()
-        expires_at = datetime.now() + timedelta(hours=24)
-        cursor.execute('''
-            INSERT INTO sessions (user_id, token, expires_at, created_at)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, token, expires_at.strftime('%Y-%m-%d %H:%M:%S'),
-              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-
-        conn.commit()
-
-        # 设置Cookie
-        response.set_cookie(
-            key="session_token",
-            value=token,
-            max_age=86400,  # 24小时
-            httponly=True,
-            samesite="lax"
-        )
-
-        return LoginResponse(
-            success=True,
-            message="管理员账号创建成功",
-            user=UserInfo(
-                id=user_id,
+    with get_engine().begin() as sa_conn:
+        result = sa_conn.execute(
+            insert(_t_users).values(
                 username=request.username,
-                display_name=request.display_name,
+                password_hash=password_hash,
                 role='admin',
-                tenant_id=setup_tenant_id
+                display_name=request.display_name,
+                tenant_id=setup_tenant_id,
+                created_at=datetime.now(),
             )
         )
+        user_id = result.inserted_primary_key[0]
+
+        sa_conn.execute(
+            insert(_t_sessions).values(
+                user_id=user_id,
+                token=token,
+                expires_at=expires_at,
+                created_at=datetime.now(),
+            )
+        )
+
+    # 设置Cookie
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        max_age=86400,  # 24小时
+        httponly=True,
+        samesite="lax"
+    )
+
+    return LoginResponse(
+        success=True,
+        message="管理员账号创建成功",
+        user=UserInfo(
+            id=user_id,
+            username=request.username,
+            display_name=request.display_name,
+            role='admin',
+            tenant_id=setup_tenant_id
+        )
+    )
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 @limiter.limit("5/minute")  # 登录接口速率限制：每分钟5次
 async def login(request: Request, login_data: LoginRequest, response: Response):
     """用户登录"""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    user_stmt = select(
+        _t_users.c.id, _t_users.c.username, _t_users.c.password_hash,
+        _t_users.c.display_name, _t_users.c.role, _t_users.c.is_disabled,
+        _t_users.c.tenant_id,
+        _t_tenants.c.is_active.label('tenant_is_active'),
+    ).select_from(
+        _t_users.outerjoin(_t_tenants, _t_users.c.tenant_id == _t_tenants.c.id)
+    ).where(_t_users.c.username == login_data.username)
 
-        cursor.execute('''
-            SELECT u.id, u.username, u.password_hash, u.display_name, u.role,
-                   u.is_disabled, u.tenant_id, t.is_active as tenant_is_active
-            FROM users u
-            LEFT JOIN tenants t ON u.tenant_id = t.id
-            WHERE u.username = ?
-        ''', (login_data.username,))
-        user = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        user = sa_conn.execute(user_stmt).first()
 
-        if not user:
-            return LoginResponse(success=False, message="用户名或密码错误")
+    if not user:
+        return LoginResponse(success=False, message="用户名或密码错误")
 
-        if user['is_disabled']:
-            return LoginResponse(success=False, message="账号已被禁用")
+    if user.is_disabled:
+        return LoginResponse(success=False, message="账号已被禁用")
 
-        if user['tenant_id'] is not None and not bool(user['tenant_is_active']):
-            return LoginResponse(success=False, message="租户已停用")
+    if user.tenant_id is not None and not bool(user.tenant_is_active):
+        return LoginResponse(success=False, message="租户已停用")
 
-        if not verify_password(login_data.password, user['password_hash']):
-            return LoginResponse(success=False, message="用户名或密码错误")
+    # bcrypt verification 在事务外执行（CPU 密集）
+    if not verify_password(login_data.password, user.password_hash):
+        return LoginResponse(success=False, message="用户名或密码错误")
 
-        # 透明密码升级：如果使用旧的SHA256哈希，自动升级到bcrypt
-        if needs_password_rehash(user['password_hash']):
-            new_hash = hash_password(login_data.password)
-            cursor.execute('UPDATE users SET password_hash = ? WHERE id = ?',
-                          (new_hash, user['id']))
-            logger.info(f"Password upgraded to bcrypt for user: {user['username']}")
+    # 透明密码升级：如果使用旧的SHA256哈希，自动升级到bcrypt
+    new_hash = None
+    if needs_password_rehash(user.password_hash):
+        new_hash = hash_password(login_data.password)
 
-        # 创建新会话（允许同账号多端并发登录，不清理旧会话）
-        token = generate_session_token()
-        expires_at = datetime.now() + timedelta(hours=24)
-        cursor.execute('''
-            INSERT INTO sessions (user_id, token, expires_at, created_at)
-            VALUES (?, ?, ?, ?)
-        ''', (user['id'], token, expires_at.strftime('%Y-%m-%d %H:%M:%S'),
-              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    # 创建新会话（允许同账号多端并发登录，不清理旧会话）
+    token = generate_session_token()
+    expires_at = datetime.now() + timedelta(hours=24)
 
-        conn.commit()
-
-        # 审计日志
-        audit_log("LOGIN", user['id'], user['username'], {"role": user['role']})
-
-        # 设置Cookie
-        response.set_cookie(
-            key="session_token",
-            value=token,
-            max_age=86400,
-            httponly=True,
-            samesite="lax"
-        )
-
-        return LoginResponse(
-            success=True,
-            message="登录成功",
-            user=UserInfo(
-                id=user['id'],
-                username=user['username'],
-                display_name=user['display_name'],
-                role=user['role'],
-                tenant_id=user['tenant_id'] if 'tenant_id' in user.keys() else None
+    with get_engine().begin() as sa_conn:
+        if new_hash is not None:
+            sa_conn.execute(
+                update(_t_users).where(_t_users.c.id == user.id).values(password_hash=new_hash)
+            )
+        sa_conn.execute(
+            insert(_t_sessions).values(
+                user_id=user.id,
+                token=token,
+                expires_at=expires_at,
+                created_at=datetime.now(),
             )
         )
+
+    if new_hash is not None:
+        logger.info(f"Password upgraded to bcrypt for user: {user.username}")
+
+    # 审计日志
+    audit_log("LOGIN", user.id, user.username, {"role": user.role})
+
+    # 设置Cookie
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        max_age=86400,
+        httponly=True,
+        samesite="lax"
+    )
+
+    return LoginResponse(
+        success=True,
+        message="登录成功",
+        user=UserInfo(
+            id=user.id,
+            username=user.username,
+            display_name=user.display_name,
+            role=user.role,
+            tenant_id=user.tenant_id
+        )
+    )
 
 
 @app.post("/api/auth/logout")
 async def logout(response: Response, current_user: CurrentUser = Depends(get_current_user)):
     """用户登出"""
     if current_user.source == 'session' and current_user.id:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM sessions WHERE user_id = ?', (current_user.id,))
-            conn.commit()
+        with get_engine().begin() as sa_conn:
+            sa_conn.execute(
+                delete(_t_sessions).where(_t_sessions.c.user_id == current_user.id)
+            )
 
     response.delete_cookie("session_token")
     return {"success": True, "message": "已登出"}
@@ -5264,24 +5281,31 @@ async def startup_mcp_manager():
     """启动时恢复 auto_start 的 MCP 连接"""
     await mcp_manager.start_monitor()
 
-    # 恢复 auto_start 的连接
+    # 恢复 auto_start 的连接 — Phase 3e: subprocess/network 在 engine.begin() 之外
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM mcp_connections WHERE auto_start = 1')
-            rows = cursor.fetchall()
-            for row in rows:
-                logger.info(f"Auto-starting MCP connection: {row['name']}")
-                await mcp_manager.start_connection(
-                    row['id'], row['mcp_endpoint'], row['api_key']
+        with get_engine().connect() as sa_conn:
+            rows = sa_conn.execute(
+                select(
+                    _t_mcp_connections.c.id,
+                    _t_mcp_connections.c.name,
+                    _t_mcp_connections.c.mcp_endpoint,
+                    _t_mcp_connections.c.api_key,
+                ).where(_t_mcp_connections.c.auto_start == 1)
+            ).all()
+
+        for row in rows:
+            logger.info(f"Auto-starting MCP connection: {row.name}")
+            await mcp_manager.start_connection(
+                row.id, row.mcp_endpoint, row.api_key
+            )
+            # 更新数据库状态（status 列为 String，updated_at 为 String(32) ISO 字符串）
+            status_info = mcp_manager.get_connection_status(row.id)
+            with get_engine().begin() as sa_conn:
+                sa_conn.execute(
+                    update(_t_mcp_connections)
+                    .where(_t_mcp_connections.c.id == row.id)
+                    .values(status=status_info['status'], updated_at=datetime.now().isoformat())
                 )
-                # 更新数据库状态
-                status_info = mcp_manager.get_connection_status(row['id'])
-                cursor.execute(
-                    'UPDATE mcp_connections SET status = ?, updated_at = ? WHERE id = ?',
-                    (status_info['status'], datetime.now().isoformat(), row['id'])
-                )
-            conn.commit()
     except Exception as e:
         logger.error(f"Failed to restore MCP connections: {e}")
 
@@ -5735,11 +5759,10 @@ async def set_system_mode(
     if mode not in ('self_owned', 'external_erp'):
         raise HTTPException(status_code=400, detail="mode 必须是 self_owned 或 external_erp")
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # 切换到外部ERP模式时，必须先有激活的Provider（按当前租户范围）
-        if mode == 'external_erp':
+    # 切换到外部ERP模式时，必须先有激活的Provider（按当前租户范围）
+    if mode == 'external_erp':
+        with get_db() as conn:
+            cursor = conn.cursor()
             tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id)
             cursor.execute(
                 f"SELECT id FROM erp_providers WHERE is_active = 1{tenant_filter}",
@@ -5748,15 +5771,17 @@ async def set_system_mode(
             if not cursor.fetchone():
                 raise HTTPException(status_code=400, detail="切换到外部ERP模式前，请先激活一个 Provider")
 
-        cursor.execute(
-            "UPDATE system_settings SET value = ?, updated_at = ? WHERE key = 'system_mode'",
-            (mode, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    # Upsert system_mode — Phase 3e: SA Core
+    with get_engine().begin() as sa_conn:
+        upd = sa_conn.execute(
+            update(_t_system_settings)
+            .where(_t_system_settings.c.key == 'system_mode')
+            .values(value=mode, updated_at=datetime.now())
         )
-        if cursor.rowcount == 0:
-            cursor.execute(
-                "INSERT INTO system_settings (key, value) VALUES ('system_mode', ?)", (mode,)
+        if upd.rowcount == 0:
+            sa_conn.execute(
+                insert(_t_system_settings).values(key='system_mode', value=mode)
             )
-        conn.commit()
 
     logger.info(f"系统模式切换为: {mode}，操作人: {current_user.display_name}")
     return {"mode": mode}
