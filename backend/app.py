@@ -1022,10 +1022,7 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
                           (new_hash, user['id']))
             logger.info(f"Password upgraded to bcrypt for user: {user['username']}")
 
-        # 清理旧会话
-        cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user['id'],))
-
-        # 创建新会话
+        # 创建新会话（允许同账号多端并发登录，不清理旧会话）
         token = generate_session_token()
         expires_at = datetime.now() + timedelta(hours=24)
         cursor.execute('''
