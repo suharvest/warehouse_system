@@ -365,3 +365,205 @@ class TestAddRecordBatchNoForwarding:
         assert len(data['batch_consumptions']) == 1
         assert data['batch_consumptions'][0]['batch_no'] == stocked_material['batch1_no']
         assert data['batch_consumptions'][0]['quantity'] == 5
+
+
+# ===========================================================================
+# Stock-out edge cases (added for SQLAlchemy migration safety net).
+# Pin down the *current* behavior — do not "fix" anything found here.
+# ===========================================================================
+
+import uuid as _uuid
+
+
+class TestStockOutEdgeCases:
+    """Edge cases that lock down current behavior before the SA migration."""
+
+    def test_stock_out_negative_quantity_rejected(self, admin_client,
+                                                  stocked_material):
+        """quantity < 0 must be rejected with success=False (mirrors zero
+        case)."""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": -5,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is False
+
+    def test_stock_out_overdraw_rejected(self, admin_client, stocked_material):
+        """Stock-out > current stock must be rejected ('库存不足')."""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": stocked_material['total_quantity'] + 100,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is False
+        # Pin down the message
+        msg = data.get('error', '') + data.get('message', '')
+        assert "库存不足" in msg, f"unexpected error: {data}"
+
+    def test_stock_out_disabled_material_current_behavior(
+            self, admin_client, default_warehouse_id):
+        """Pin down: stock-out from a `is_disabled=1` material today.
+
+        The endpoint's SELECT does not filter is_disabled, so it likely
+        succeeds. Lock that fact down — if the migration changes this, the
+        test will fail and force a conscious decision.
+        """
+        from database import get_db_connection
+        name = f"DisMat-{_uuid.uuid4().hex[:6]}"
+        sku = f"DS-{_uuid.uuid4().hex[:6]}"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO materials (name, sku, category, quantity, unit, "
+            "safe_stock, location, warehouse_id, is_disabled) "
+            "VALUES (?, ?, 'T', 50, 'pcs', 1, '', ?, 1)",
+            (name, sku, default_warehouse_id))
+        mid = cur.lastrowid
+        # Need a batch for FIFO consumption
+        cur.execute(
+            "INSERT INTO batches (batch_no, material_id, quantity, "
+            "initial_quantity, warehouse_id, created_at) "
+            "VALUES (?, ?, 50, 50, ?, datetime('now'))",
+            (f"B-{sku}", mid, default_warehouse_id))
+        conn.commit()
+        conn.close()
+
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": name,
+            "quantity": 1,
+            "reason_category": "sell",
+            "warehouse_id": default_warehouse_id,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        # Document current behavior: stock_out does NOT block disabled
+        # materials. If the migration changes this, this assertion flips.
+        assert data['success'] is True, (
+            f"Pinned-down current behavior changed: stock-out on disabled "
+            f"material no longer succeeds. Decide whether to update the test "
+            f"or fix the bug. Response: {data}"
+        )
+
+    def test_stock_out_cross_tenant_material_via_api_key(
+            self, admin_client, app_instance, monkeypatch):
+        """An API key for tenant A cannot stock-out a material that lives in
+        tenant B. The expected status is 403 (warehouse access) or 400
+        (warehouse mismatch)."""
+        monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
+
+        # Promote admin to global, build two tenants
+        from database import get_db_connection
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET tenant_id = NULL WHERE username = 'admin'")
+        conn.commit()
+        conn.close()
+
+        try:
+            suffix = _uuid.uuid4().hex[:6]
+            t_a = admin_client.post("/api/tenants", json={
+                "slug": f"sa-{suffix}", "name": f"SA{suffix}"}).json()['id']
+            t_b = admin_client.post("/api/tenants", json={
+                "slug": f"sb-{suffix}", "name": f"SB{suffix}"}).json()['id']
+            wh_a = admin_client.post("/api/warehouses", json={
+                "slug": f"swa-{suffix}", "name": f"SWA{suffix}",
+                "tenant_id": t_a}).json()['id']
+            wh_b = admin_client.post("/api/warehouses", json={
+                "slug": f"swb-{suffix}", "name": f"SWB{suffix}",
+                "tenant_id": t_b}).json()['id']
+
+            # Material in tenant B's warehouse
+            mat_name = f"BMat-{suffix}"
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO materials (name, sku, category, quantity, "
+                "unit, safe_stock, warehouse_id, tenant_id) "
+                "VALUES (?, ?, 'T', 50, 'pcs', 1, ?, ?)",
+                (mat_name, f"bm-{suffix}", wh_b, t_b))
+            mid_b = cur.lastrowid
+            cur.execute(
+                "INSERT INTO batches (batch_no, material_id, quantity, "
+                "initial_quantity, warehouse_id, tenant_id, created_at) "
+                "VALUES (?, ?, 50, 50, ?, ?, datetime('now'))",
+                (f"BB-{suffix}", mid_b, wh_b, t_b))
+            conn.commit()
+            conn.close()
+
+            # API key bound to tenant A's warehouse
+            info = admin_client.post("/api/api-keys", json={
+                "name": f"k-{suffix}", "role": "operate",
+                "warehouse_id": wh_a,
+            }).json()
+
+            from fastapi.testclient import TestClient
+            c = TestClient(app_instance)
+
+            # Try to stock-out tenant B's material via tenant A's key,
+            # specifying tenant B's warehouse — must be denied.
+            resp = c.post("/api/materials/stock-out",
+                          headers={"X-API-Key": info['key']},
+                          json={
+                              "product_name": mat_name,
+                              "quantity": 1,
+                              "reason_category": "sell",
+                              "warehouse_id": wh_b,
+                          })
+            assert resp.status_code in (400, 403, 404), (
+                f"cross-tenant stock-out should be rejected, got "
+                f"{resp.status_code}: {resp.text}")
+        finally:
+            # Always restore admin tenant
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE users SET tenant_id = 1 WHERE username = 'admin'")
+            conn.commit()
+            conn.close()
+
+    def test_stock_out_fifo_decrements_each_batch_correctly(
+            self, admin_client, stocked_material):
+        """When stock-out spans multiple batches, each batch's `quantity`
+        column is decremented by exactly the consumed amount. Lock this down
+        because the SA migration will swap the UPDATE into ORM."""
+        from database import get_db_connection
+
+        # Capture initial batch quantities
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT batch_no, quantity FROM batches WHERE batch_no IN (?, ?)",
+                    (stocked_material['batch1_no'], stocked_material['batch2_no']))
+        before = {r['batch_no']: r['quantity'] for r in cur.fetchall()}
+        conn.close()
+
+        # Consume 35 → 30 from batch1 (full), 5 from batch2
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 35,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+        })
+        assert resp.status_code == 200
+        assert resp.json()['success'] is True
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT batch_no, quantity FROM batches WHERE batch_no IN (?, ?)",
+                    (stocked_material['batch1_no'], stocked_material['batch2_no']))
+        after = {r['batch_no']: r['quantity'] for r in cur.fetchall()}
+        conn.close()
+
+        # batch1 fully drained (was 30 → now 0)
+        assert after[stocked_material['batch1_no']] == \
+            before[stocked_material['batch1_no']] - 30
+        # batch2 lost 5 (was 20 → now 15)
+        assert after[stocked_material['batch2_no']] == \
+            before[stocked_material['batch2_no']] - 5
