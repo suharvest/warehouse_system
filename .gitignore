@@ -43,5 +43,9 @@ CLAUDE.md
 
 # Worktrees
 .worktrees/
+
+# Local-only Docker variants
+backend/Dockerfile.prod
+frontend/Dockerfile.prod
 frontend/stock-out-modal-*-mobile.png
 stock-out-modal-*-mobile.png
