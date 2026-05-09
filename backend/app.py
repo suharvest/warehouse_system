@@ -60,6 +60,15 @@ from models import (
     UserWarehouseAssignment,
 )
 from fuzzy_match import FuzzyMatcher
+from sqlalchemy import select, and_, or_
+from db import get_engine
+from metadata import (
+    warehouses as _t_warehouses,
+    user_warehouses as _t_user_warehouses,
+    users as _t_users,
+    sessions as _t_sessions,
+    tenants as _t_tenants,
+)
 import math
 import uuid
 
@@ -286,43 +295,56 @@ class CurrentUser:
         return "访客"
 
     def get_authorized_warehouses(self, conn) -> List[int]:
-        """获取用户授权的仓库ID列表。全局 admin 可访问所有仓库，租户 admin 仅本租户。"""
-        cursor = conn.cursor()
-        if self.role == 'admin':
-            if self.tenant_id is None:
-                cursor.execute('SELECT id FROM warehouses WHERE is_disabled = 0')
-            else:
-                cursor.execute(
-                    'SELECT id FROM warehouses WHERE tenant_id = ? AND is_disabled = 0',
-                    (self.tenant_id,)
-                )
-            return [r['id'] for r in cursor.fetchall()]
-        cursor.execute(
-            'SELECT warehouse_id FROM user_warehouses WHERE user_id = ?',
-            (self.id,)
-        )
-        return [r['warehouse_id'] for r in cursor.fetchall()]
+        """获取用户授权的仓库ID列表。全局 admin 可访问所有仓库，租户 admin 仅本租户。
+
+        Phase 2b: read via SQLAlchemy Core. ``conn`` retained for signature
+        compatibility but unused.
+        """
+        with get_engine().connect() as sa_conn:
+            if self.role == 'admin':
+                if self.tenant_id is None:
+                    stmt = select(_t_warehouses.c.id).where(_t_warehouses.c.is_disabled == 0)
+                else:
+                    stmt = select(_t_warehouses.c.id).where(
+                        and_(
+                            _t_warehouses.c.tenant_id == self.tenant_id,
+                            _t_warehouses.c.is_disabled == 0,
+                        )
+                    )
+                return [r.id for r in sa_conn.execute(stmt).fetchall()]
+            stmt = select(_t_user_warehouses.c.warehouse_id).where(
+                _t_user_warehouses.c.user_id == self.id
+            )
+            return [r.warehouse_id for r in sa_conn.execute(stmt).fetchall()]
 
     def can_access_warehouse(self, conn, warehouse_id: int) -> bool:
-        """检查用户是否有权访问指定仓库。全局 admin 可访问任意仓库，租户 admin 仅本租户。"""
+        """检查用户是否有权访问指定仓库。全局 admin 可访问任意仓库，租户 admin 仅本租户。
+
+        Phase 2b: read via SQLAlchemy Core. ``conn`` retained for signature
+        compatibility but unused.
+        """
         if self.role == 'admin':
             if self.tenant_id is None:
                 return True
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT 1 FROM warehouses WHERE id = ? AND tenant_id = ?',
-                (warehouse_id, self.tenant_id)
-            )
-            return cursor.fetchone() is not None
+            stmt = select(_t_warehouses.c.id).where(
+                and_(
+                    _t_warehouses.c.id == warehouse_id,
+                    _t_warehouses.c.tenant_id == self.tenant_id,
+                )
+            ).limit(1)
+            with get_engine().connect() as sa_conn:
+                return sa_conn.execute(stmt).first() is not None
         # API key 携带仓库绑定即作为授权依据（MCP/Agent 场景）
         if self.source == 'api_key' and self.warehouse_id is not None:
             return self.warehouse_id == warehouse_id
-        cursor = conn.cursor()
-        cursor.execute(
-            'SELECT 1 FROM user_warehouses WHERE user_id = ? AND warehouse_id = ?',
-            (self.id, warehouse_id)
-        )
-        return cursor.fetchone() is not None
+        stmt = select(_t_user_warehouses.c.id).where(
+            and_(
+                _t_user_warehouses.c.user_id == self.id,
+                _t_user_warehouses.c.warehouse_id == warehouse_id,
+            )
+        ).limit(1)
+        with get_engine().connect() as sa_conn:
+            return sa_conn.execute(stmt).first() is not None
 
 
 async def get_current_user(request: Request) -> CurrentUser:
@@ -370,30 +392,46 @@ async def get_current_user(request: Request) -> CurrentUser:
                 )
 
         # 2. 检查 session_token Cookie
+        # Phase 2b: read via SQLAlchemy Core (pure SELECT).
         session_token = request.cookies.get('session_token')
         if session_token:
-            cursor.execute('''
-                SELECT s.user_id, s.expires_at, u.username, u.display_name, u.role, u.tenant_id
-                FROM sessions s
-                JOIN users u ON s.user_id = u.id
-                LEFT JOIN tenants t ON u.tenant_id = t.id
-                WHERE s.token = ? AND u.is_disabled = 0 AND s.revoked_at IS NULL
-                  AND (u.tenant_id IS NULL OR t.is_active = 1)
-            ''', (session_token,))
-            session_row = cursor.fetchone()
+            stmt = select(
+                _t_sessions.c.user_id,
+                _t_sessions.c.expires_at,
+                _t_users.c.username,
+                _t_users.c.display_name,
+                _t_users.c.role,
+                _t_users.c.tenant_id,
+            ).select_from(
+                _t_sessions.join(_t_users, _t_sessions.c.user_id == _t_users.c.id)
+                           .outerjoin(_t_tenants, _t_users.c.tenant_id == _t_tenants.c.id)
+            ).where(
+                and_(
+                    _t_sessions.c.token == session_token,
+                    _t_users.c.is_disabled == 0,
+                    _t_sessions.c.revoked_at.is_(None),
+                    or_(_t_users.c.tenant_id.is_(None), _t_tenants.c.is_active == 1),
+                )
+            )
+            with get_engine().connect() as sa_conn:
+                session_row = sa_conn.execute(stmt).first()
 
             if session_row:
-                # 检查是否过期
-                expires_at = datetime.strptime(session_row['expires_at'], '%Y-%m-%d %H:%M:%S')
+                # 检查是否过期 — SA returns DateTime as datetime or string depending on dialect
+                ea = session_row.expires_at
+                if isinstance(ea, datetime):
+                    expires_at = ea
+                else:
+                    expires_at = datetime.strptime(str(ea), '%Y-%m-%d %H:%M:%S')
                 if expires_at > datetime.now():
                     return CurrentUser(
-                        user_id=session_row['user_id'],
-                        username=session_row['username'],
-                        display_name=session_row['display_name'],
-                        role=session_row['role'],
+                        user_id=session_row.user_id,
+                        username=session_row.username,
+                        display_name=session_row.display_name,
+                        role=session_row.role,
                         is_guest=False,
                         source='session',
-                        tenant_id=session_row['tenant_id'] if session_row['tenant_id'] is not None else None
+                        tenant_id=session_row.tenant_id if session_row.tenant_id is not None else None
                     )
 
         # 3. 访客模式
@@ -568,23 +606,35 @@ async def list_warehouses(
     include_disabled: bool = False,
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取仓库列表"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='w')
-        if include_disabled and current_user.role == 'admin':
-            cursor.execute(f'SELECT w.*, t.name as tenant_name FROM warehouses w LEFT JOIN tenants t ON w.tenant_id = t.id WHERE 1=1{tenant_filter} ORDER BY w.is_default DESC, w.id ASC', tenant_params)
-        else:
-            cursor.execute(f'SELECT w.*, t.name as tenant_name FROM warehouses w LEFT JOIN tenants t ON w.tenant_id = t.id WHERE w.is_disabled = 0{tenant_filter} ORDER BY w.is_default DESC, w.id ASC', tenant_params)
-        rows = cursor.fetchall()
-        return [WarehouseItem(
-            id=r['id'], slug=r['slug'], name=r['name'],
-            address=r['address'], is_default=bool(r['is_default']),
-            is_disabled=bool(r['is_disabled']),
-            created_at=r['created_at'],
-            tenant_id=r['tenant_id'] if 'tenant_id' in r.keys() else None,
-            tenant_name=r['tenant_name'] if 'tenant_name' in r.keys() else None
-        ) for r in rows]
+    """获取仓库列表 — Phase 2b: read via SQLAlchemy Core."""
+    conds = []
+    if current_user.tenant_id is not None:
+        conds.append(_t_warehouses.c.tenant_id == current_user.tenant_id)
+    if not (include_disabled and current_user.role == 'admin'):
+        conds.append(_t_warehouses.c.is_disabled == 0)
+    stmt = select(
+        _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
+        _t_warehouses.c.address, _t_warehouses.c.is_default,
+        _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
+        _t_warehouses.c.tenant_id,
+        _t_tenants.c.name.label('tenant_name'),
+    ).select_from(
+        _t_warehouses.outerjoin(_t_tenants, _t_warehouses.c.tenant_id == _t_tenants.c.id)
+    )
+    if conds:
+        stmt = stmt.where(and_(*conds))
+    stmt = stmt.order_by(_t_warehouses.c.is_default.desc(), _t_warehouses.c.id.asc())
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [WarehouseItem(
+        id=r.id, slug=r.slug, name=r.name,
+        address=r.address, is_default=bool(r.is_default),
+        is_disabled=bool(r.is_disabled),
+        created_at=(r.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                    if isinstance(r.created_at, datetime) else r.created_at),
+        tenant_id=r.tenant_id,
+        tenant_name=r.tenant_name,
+    ) for r in rows]
 
 
 @app.post("/api/warehouses", response_model=WarehouseItem)
@@ -705,24 +755,26 @@ async def get_user_warehouses(
     user_id: int,
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
-    """获取用户授权的仓库列表"""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    """获取用户授权的仓库列表 — Phase 2b: read via SQLAlchemy Core."""
+    with get_engine().connect() as sa_conn:
         # 验证用户属于当前租户
-        cursor.execute('SELECT id, tenant_id FROM users WHERE id = ?', (user_id,))
-        target_user = cursor.fetchone()
+        target_user = sa_conn.execute(
+            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
+        ).first()
         if not target_user:
             raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and target_user['tenant_id'] != current_user.tenant_id:
+        if current_user.tenant_id is not None and target_user.tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="无权访问其他租户的用户")
-        cursor.execute('''
-            SELECT w.id, w.slug, w.name FROM user_warehouses uw
-            JOIN warehouses w ON uw.warehouse_id = w.id
-            WHERE uw.user_id = ?
-        ''', (user_id,))
-        rows = cursor.fetchall()
-        return {"warehouse_ids": [r['id'] for r in rows],
-                "warehouses": [{"id": r['id'], "slug": r['slug'], "name": r['name']} for r in rows]}
+        stmt = select(
+            _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
+        ).select_from(
+            _t_user_warehouses.join(
+                _t_warehouses, _t_user_warehouses.c.warehouse_id == _t_warehouses.c.id
+            )
+        ).where(_t_user_warehouses.c.user_id == user_id)
+        rows = sa_conn.execute(stmt).fetchall()
+    return {"warehouse_ids": [r.id for r in rows],
+            "warehouses": [{"id": r.id, "slug": r.slug, "name": r.name} for r in rows]}
 
 
 @app.put("/api/users/{user_id}/warehouses")

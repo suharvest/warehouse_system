@@ -6,6 +6,11 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy import select, and_
+
+from db import get_engine
+from metadata import tenant_face_config, tenant_face_operation_rules
+
 from . import endpoint_client
 from .endpoint_client import FaceEndpointError
 from .matcher import topk_match
@@ -17,71 +22,98 @@ logger = logging.getLogger("warehouse.face")
 # ── data access helpers ──
 
 def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM tenant_face_config WHERE tenant_id = ?",
-        (tenant_id,),
-    )
-    row = cur.fetchone()
+    """Phase 2b: read via SQLAlchemy Core. ``conn`` retained for signature
+    compatibility but unused here (SA reads share the same DB)."""
+    stmt = select(
+        tenant_face_config.c.tenant_id,
+        tenant_face_config.c.enabled,
+        tenant_face_config.c.mode,
+        tenant_face_config.c.endpoint,
+        tenant_face_config.c.auth_token,
+        tenant_face_config.c.embedding_model_tag,
+        tenant_face_config.c.min_confidence,
+    ).where(tenant_face_config.c.tenant_id == tenant_id)
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(stmt).first()
     if not row:
         return None
     return FaceConfig(
-        tenant_id=row["tenant_id"],
-        enabled=bool(row["enabled"]),
-        mode=row["mode"],
-        endpoint=row["endpoint"],
-        auth_token=row["auth_token"],
-        embedding_model_tag=row["embedding_model_tag"],
-        min_confidence=float(row["min_confidence"] or 0.65),
+        tenant_id=row.tenant_id,
+        enabled=bool(row.enabled),
+        mode=row.mode,
+        endpoint=row.endpoint,
+        auth_token=row.auth_token,
+        embedding_model_tag=row.embedding_model_tag,
+        min_confidence=float(row.min_confidence or 0.65),
     )
 
 
-def _parse_id_list(raw: Optional[str]) -> List[int]:
-    if not raw:
+def _parse_id_list(raw) -> List[int]:
+    """Accept list | str | None. SA returns JSON columns already decoded as
+    Python lists; the legacy sqlite3 path returned the raw JSON string."""
+    if raw is None or raw == "":
         return []
-    try:
-        v = json.loads(raw)
-        return [int(x) for x in v] if isinstance(v, list) else []
-    except Exception:
-        return []
+    if isinstance(raw, list):
+        try:
+            return [int(x) for x in raw]
+        except Exception:
+            return []
+    if isinstance(raw, str):
+        try:
+            v = json.loads(raw)
+            return [int(x) for x in v] if isinstance(v, list) else []
+        except Exception:
+            return []
+    return []
 
 
 def _pick_rule(conn, tenant_id: int, warehouse_id: Optional[int], operation: str) -> Optional[FaceRule]:
-    """Warehouse-specific rule wins over the tenant default (warehouse_id IS NULL)."""
-    cur = conn.cursor()
-    if warehouse_id is not None:
-        cur.execute(
-            """
-            SELECT * FROM tenant_face_operation_rules
-            WHERE tenant_id = ? AND operation = ? AND warehouse_id = ?
-            LIMIT 1
-            """,
-            (tenant_id, operation, warehouse_id),
-        )
-        row = cur.fetchone()
-        if row:
-            return _row_to_rule(row)
-    cur.execute(
-        """
-        SELECT * FROM tenant_face_operation_rules
-        WHERE tenant_id = ? AND operation = ? AND warehouse_id IS NULL
-        LIMIT 1
-        """,
-        (tenant_id, operation),
+    """Warehouse-specific rule wins over the tenant default (warehouse_id IS NULL).
+
+    Phase 2b: read via SQLAlchemy Core. ``conn`` retained for signature
+    compatibility but unused here.
+    """
+    cols = (
+        tenant_face_operation_rules.c.id,
+        tenant_face_operation_rules.c.tenant_id,
+        tenant_face_operation_rules.c.warehouse_id,
+        tenant_face_operation_rules.c.operation,
+        tenant_face_operation_rules.c.require_face,
+        tenant_face_operation_rules.c.allowed_subject_ids,
+        tenant_face_operation_rules.c.min_confidence_override,
     )
-    row = cur.fetchone()
+    with get_engine().connect() as sa_conn:
+        if warehouse_id is not None:
+            stmt = select(*cols).where(
+                and_(
+                    tenant_face_operation_rules.c.tenant_id == tenant_id,
+                    tenant_face_operation_rules.c.operation == operation,
+                    tenant_face_operation_rules.c.warehouse_id == warehouse_id,
+                )
+            ).limit(1)
+            row = sa_conn.execute(stmt).first()
+            if row:
+                return _row_to_rule(row)
+        stmt = select(*cols).where(
+            and_(
+                tenant_face_operation_rules.c.tenant_id == tenant_id,
+                tenant_face_operation_rules.c.operation == operation,
+                tenant_face_operation_rules.c.warehouse_id.is_(None),
+            )
+        ).limit(1)
+        row = sa_conn.execute(stmt).first()
     return _row_to_rule(row) if row else None
 
 
 def _row_to_rule(row) -> FaceRule:
     return FaceRule(
-        id=row["id"],
-        tenant_id=row["tenant_id"],
-        warehouse_id=row["warehouse_id"],
-        operation=row["operation"],
-        require_face=bool(row["require_face"]),
-        allowed_subject_ids=_parse_id_list(row["allowed_subject_ids"]),
-        min_confidence_override=row["min_confidence_override"],
+        id=row.id,
+        tenant_id=row.tenant_id,
+        warehouse_id=row.warehouse_id,
+        operation=row.operation,
+        require_face=bool(row.require_face),
+        allowed_subject_ids=_parse_id_list(row.allowed_subject_ids),
+        min_confidence_override=row.min_confidence_override,
     )
 
 
