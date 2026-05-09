@@ -6,6 +6,10 @@ import sqlite3
 
 from rapidfuzz import fuzz
 from pypinyin import lazy_pinyin, Style
+from sqlalchemy import select, and_
+
+from db import get_engine
+from metadata import materials, contacts, users, batches
 
 
 class FuzzyMatcher:
@@ -35,19 +39,23 @@ class FuzzyMatcher:
         return ' '.join(lazy_pinyin(text, style=Style.NORMAL))
 
     def _build_index(self):
-        """从数据库加载所有可搜索实体名称，构建索引（含拼音 + tenant_id/warehouse_id 用于隔离过滤）"""
-        index = []
-        conn = self._get_conn()
-        try:
-            cursor = conn.cursor()
+        """从数据库加载所有可搜索实体名称，构建索引（含拼音 + tenant_id/warehouse_id 用于隔离过滤）
 
+        Phase 2a: reads via SQLAlchemy Core engine. The injected ``get_conn``
+        is retained for backward compatibility (and used by other read methods
+        on this class) but is unused here — SA reads share the same DB.
+        """
+        index = []
+        engine = get_engine()
+        with engine.connect() as conn:
             # 索引 materials: name 和 sku 都作为可搜索名称
-            cursor.execute(
-                "SELECT id, name, sku, category, tenant_id, warehouse_id FROM materials WHERE is_disabled = 0"
-            )
-            for row in cursor.fetchall():
-                mid, name, sku, category = row['id'], row['name'], row['sku'], row['category']
-                tid, whid = row['tenant_id'], row['warehouse_id']
+            stmt = select(
+                materials.c.id, materials.c.name, materials.c.sku,
+                materials.c.category, materials.c.tenant_id, materials.c.warehouse_id,
+            ).where(materials.c.is_disabled == 0)
+            for row in conn.execute(stmt).fetchall():
+                mid, name, sku, category = row.id, row.name, row.sku, row.category
+                tid, whid = row.tenant_id, row.warehouse_id
                 extra = {"sku": sku, "category": category}
                 index.append({
                     "name": name,
@@ -70,15 +78,23 @@ class FuzzyMatcher:
                     })
 
             # 索引 "name + variant" 组合，让 "七彩灯A" 能直接匹配
-            cursor.execute(
-                "SELECT DISTINCT m.id, m.name, m.sku, m.category, m.tenant_id, m.warehouse_id, b.variant "
-                "FROM batches b JOIN materials m ON b.material_id = m.id "
-                "WHERE m.is_disabled = 0 AND b.variant IS NOT NULL AND b.variant != ''"
-            )
-            for row in cursor.fetchall():
+            stmt = select(
+                materials.c.id, materials.c.name, materials.c.sku,
+                materials.c.category, materials.c.tenant_id, materials.c.warehouse_id,
+                batches.c.variant,
+            ).select_from(
+                batches.join(materials, batches.c.material_id == materials.c.id)
+            ).where(
+                and_(
+                    materials.c.is_disabled == 0,
+                    batches.c.variant.isnot(None),
+                    batches.c.variant != "",
+                )
+            ).distinct()
+            for row in conn.execute(stmt).fetchall():
                 mid, name, sku, category, tid, whid, variant = (
-                    row['id'], row['name'], row['sku'], row['category'],
-                    row['tenant_id'], row['warehouse_id'], row['variant']
+                    row.id, row.name, row.sku, row.category,
+                    row.tenant_id, row.warehouse_id, row.variant,
                 )
                 combined = f"{name} {variant}"
                 index.append({
@@ -92,29 +108,34 @@ class FuzzyMatcher:
                 })
 
             # 索引 contacts: name
-            cursor.execute(
-                "SELECT id, name, is_supplier, is_customer, tenant_id, warehouse_id FROM contacts WHERE is_disabled = 0"
-            )
-            for row in cursor.fetchall():
-                cid, name = row['id'], row['name']
+            stmt = select(
+                contacts.c.id, contacts.c.name, contacts.c.is_supplier,
+                contacts.c.is_customer, contacts.c.tenant_id, contacts.c.warehouse_id,
+            ).where(contacts.c.is_disabled == 0)
+            for row in conn.execute(stmt).fetchall():
+                cid, name = row.id, row.name
                 index.append({
                     "name": name,
                     "entity_type": "contact",
                     "entity_id": cid,
-                    "tenant_id": row['tenant_id'],
-                    "warehouse_id": row['warehouse_id'],
-                    "extra": {"is_supplier": bool(row['is_supplier']), "is_customer": bool(row['is_customer'])},
+                    "tenant_id": row.tenant_id,
+                    "warehouse_id": row.warehouse_id,
+                    "extra": {"is_supplier": bool(row.is_supplier), "is_customer": bool(row.is_customer)},
                     "pinyin": self._get_pinyin(self._normalize(name)),
                 })
 
             # 索引 users: display_name 和 username（仅 operate/admin 且未禁用）
-            cursor.execute(
-                "SELECT id, username, display_name, tenant_id FROM users "
-                "WHERE is_disabled = 0 AND role IN ('operate', 'admin')"
+            stmt = select(
+                users.c.id, users.c.username, users.c.display_name, users.c.tenant_id,
+            ).where(
+                and_(
+                    users.c.is_disabled == 0,
+                    users.c.role.in_(("operate", "admin")),
+                )
             )
-            for row in cursor.fetchall():
-                uid, username, display_name = row['id'], row['username'], row['display_name']
-                tid = row['tenant_id']
+            for row in conn.execute(stmt).fetchall():
+                uid, username, display_name = row.id, row.username, row.display_name
+                tid = row.tenant_id
                 if display_name:
                     index.append({
                         "name": display_name,
@@ -135,8 +156,6 @@ class FuzzyMatcher:
                         "extra": {},
                         "pinyin": self._get_pinyin(self._normalize(username)),
                     })
-        finally:
-            conn.close()
 
         self._index = index
 
@@ -317,19 +336,19 @@ class FuzzyMatcher:
         if not query:
             return {"best_match": None, "confident": False, "candidates": []}
 
-        conn = self._get_conn()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """SELECT DISTINCT location FROM batches
-                   WHERE material_id = ? AND warehouse_id = ?
-                     AND is_exhausted = 0 AND quantity > 0
-                     AND location IS NOT NULL AND location != ''""",
-                (material_id, warehouse_id),
+        engine = get_engine()
+        stmt = select(batches.c.location).where(
+            and_(
+                batches.c.material_id == material_id,
+                batches.c.warehouse_id == warehouse_id,
+                batches.c.is_exhausted == 0,
+                batches.c.quantity > 0,
+                batches.c.location.isnot(None),
+                batches.c.location != "",
             )
-            locations = [r['location'] for r in cursor.fetchall()]
-        finally:
-            conn.close()
+        ).distinct()
+        with engine.connect() as conn:
+            locations = [r.location for r in conn.execute(stmt).fetchall()]
 
         if not locations:
             return {"best_match": None, "confident": False, "candidates": []}
