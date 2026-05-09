@@ -588,23 +588,6 @@ def build_warehouse_filter(warehouse_id: Optional[int], table_alias: str = '') -
     return '', ()
 
 
-def build_scope_filter(tenant_id: int, warehouse_id: Optional[int] = None, table_alias: str = '') -> tuple:
-    """构建租户+仓库范围过滤SQL片段。返回 (sql_fragment, params_tuple)。
-    全局 admin (tenant_id=None) 不过滤租户。
-    """
-    prefix = f'{table_alias}.' if table_alias else ''
-    if tenant_id is None:
-        if warehouse_id is not None:
-            return f' AND {prefix}warehouse_id = ?', (warehouse_id,)
-        return '', ()
-    clauses = [f'{prefix}tenant_id = ?']
-    params = [tenant_id]
-    if warehouse_id is not None:
-        clauses.append(f'{prefix}warehouse_id = ?')
-        params.append(warehouse_id)
-    return ' AND ' + ' AND '.join(clauses), tuple(params)
-
-
 def build_scope_predicates(table, tenant_id, warehouse_id=None) -> list:
     """Return a list of SA Core boolean predicates that scope a query
     by tenant_id and (optionally) warehouse_id. Mirrors the semantics
@@ -2792,26 +2775,23 @@ def unified_search(
     """统一搜索端点"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     tenant_id = current_user.tenant_id
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        if entity_type == "material":
-            scope_filter, scope_params = build_scope_filter(tenant_id, wh_id)
-            return _search_materials(cursor, q, category, status, fuzzy, format, include_batches,
-                                     page, page_size, scope_filter, scope_params,
-                                     tenant_id=tenant_id, warehouse_id=wh_id)
-        elif entity_type == "contact":
-            # 联系方为租户级（无 wh 过滤）
-            scope_filter, scope_params = build_scope_filter(tenant_id, None)
-            return _search_contacts(cursor, q, contact_type, fuzzy, format, page, page_size,
-                                    scope_filter, scope_params, tenant_id=tenant_id)
-        elif entity_type == "operator":
-            # users 表无 warehouse_id 列，只按 tenant 过滤
-            scope_filter, scope_params = build_scope_filter(tenant_id, None)
-            return _search_operators(cursor, q, fuzzy, format, page, page_size,
-                                     scope_filter, scope_params, tenant_id=tenant_id)
-        else:
-            raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
+    # Phase 4: search helpers are SA Core internally; the legacy
+    # cursor / scope_filter / scope_params positional args are kept on the
+    # helper signatures for backwards compatibility but unused.
+    if entity_type == "material":
+        return _search_materials(None, q, category, status, fuzzy, format, include_batches,
+                                 page, page_size, '', (),
+                                 tenant_id=tenant_id, warehouse_id=wh_id)
+    elif entity_type == "contact":
+        # 联系方为租户级（无 wh 过滤）
+        return _search_contacts(None, q, contact_type, fuzzy, format, page, page_size,
+                                '', (), tenant_id=tenant_id)
+    elif entity_type == "operator":
+        # users 表无 warehouse_id 列，只按 tenant 过滤
+        return _search_operators(None, q, fuzzy, format, page, page_size,
+                                 '', (), tenant_id=tenant_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
 
 
 def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=(), tenant_id=None, warehouse_id=None):
@@ -4487,7 +4467,6 @@ async def preview_import_excel(
 ):
     """预览Excel导入内容，自动检测简化模式/批次模式"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
     def _error_resp(msg):
         return ExcelImportPreviewResponse(
             success=False, preview=[], new_skus=[], total_in=0, total_out=0, total_new=0, message=msg
@@ -5386,15 +5365,17 @@ async def add_inventory_record(
         # 否则同名 SKU 在其他租户/仓库的 location 会被一起改掉）
         if result.success and request.location:
             wh_id = require_warehouse_id(current_user, request.warehouse_id)
-            scope_filter, scope_params = build_scope_filter(
-                resolve_tenant_id_for_write(current_user, wh_id), wh_id
+            scope_preds = build_scope_predicates(
+                _t_materials,
+                resolve_tenant_id_for_write(current_user, wh_id),
+                wh_id,
             )
-            with get_db() as conn:
-                conn.execute(
-                    f'UPDATE materials SET location = ? WHERE name = ?{scope_filter}',
-                    (request.location, request.product_name) + scope_params
+            with get_engine().begin() as sa_conn:
+                sa_conn.execute(
+                    update(_t_materials)
+                    .where(and_(_t_materials.c.name == request.product_name, *scope_preds))
+                    .values(location=request.location)
                 )
-                conn.commit()
         return result
     elif request.type == 'out':
         return await stock_out(
@@ -5631,10 +5612,11 @@ async def create_mcp_connection(
             )
 
     # 获取创建的记录
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     status_info = mcp_manager.get_connection_status(conn_id)
     return MCPConnectionResponse(
@@ -5651,25 +5633,27 @@ async def update_mcp_connection(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """修改MCP连接配置"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="连接不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
+    if not row:
+        raise HTTPException(status_code=404, detail="连接不存在")
+    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
-        old_endpoint = row['mcp_endpoint']
-        key_hash = hash_api_key(row['api_key'])
+    old_endpoint = row['mcp_endpoint']
+    key_hash = hash_api_key(row['api_key'])
 
-        # Resolve warehouse access (uses sqlite conn helper) before opening SA txn
-        new_wh_id = None
-        new_tenant_id = None
-        if request.warehouse_id is not None:
-            new_wh_id = resolve_warehouse_id(current_user, request.warehouse_id)
-            check_warehouse_access(conn, current_user, new_wh_id)
-            new_tenant_id = resolve_tenant_id_for_write(current_user, new_wh_id)
+    # Resolve warehouse access (helper retains ``conn`` arg for signature
+    # compatibility but reads via SA Core internally).
+    new_wh_id = None
+    new_tenant_id = None
+    if request.warehouse_id is not None:
+        new_wh_id = resolve_warehouse_id(current_user, request.warehouse_id)
+        check_warehouse_access(None, current_user, new_wh_id)
+        new_tenant_id = resolve_tenant_id_for_write(current_user, new_wh_id)
 
     mcp_values = {}
     apikey_values = {}
@@ -5704,10 +5688,11 @@ async def update_mcp_connection(
                 .values(**mcp_values)
             )
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     if request.mcp_endpoint is not None and request.mcp_endpoint != old_endpoint:
         if (conn_id in mcp_manager.connections
@@ -5729,14 +5714,15 @@ async def delete_mcp_connection(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """删除MCP连接（先停止）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="连接不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
+    if not row:
+        raise HTTPException(status_code=404, detail="连接不存在")
+    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     # 先停止进程
     await mcp_manager.stop_connection(conn_id)
@@ -5759,14 +5745,15 @@ async def start_mcp_connection(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """启动MCP连接"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="连接不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
+    if not row:
+        raise HTTPException(status_code=404, detail="连接不存在")
+    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     success = await mcp_manager.start_connection(
         conn_id, row['mcp_endpoint'], row['api_key']
@@ -5784,10 +5771,11 @@ async def start_mcp_connection(
                 updated_at=datetime.now().isoformat(),
             )
         )
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     return MCPConnectionResponse(
         success=success,
@@ -5802,14 +5790,15 @@ async def stop_mcp_connection(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """停止MCP连接"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="连接不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
+    if not row:
+        raise HTTPException(status_code=404, detail="连接不存在")
+    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     await mcp_manager.stop_connection(conn_id)
 
@@ -5820,10 +5809,11 @@ async def stop_mcp_connection(
             .where(_t_mcp_connections.c.id == conn_id)
             .values(status='stopped', error_message=None, updated_at=datetime.now().isoformat())
         )
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     return MCPConnectionResponse(
         success=True,
@@ -5838,14 +5828,15 @@ async def restart_mcp_connection(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """重启MCP连接"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="连接不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
+    if not row:
+        raise HTTPException(status_code=404, detail="连接不存在")
+    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     success = await mcp_manager.restart_connection(
         conn_id, row['mcp_endpoint'], row['api_key']
@@ -5863,10 +5854,11 @@ async def restart_mcp_connection(
                 updated_at=datetime.now().isoformat(),
             )
         )
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     return MCPConnectionResponse(
         success=success,
@@ -5882,14 +5874,15 @@ async def get_mcp_connection_logs(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """获取MCP连接的最近日志"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, tenant_id FROM mcp_connections WHERE id = ?', (conn_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="连接不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_mcp_connections.c.id, _t_mcp_connections.c.tenant_id)
+            .where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="连接不存在")
+    if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     logs = mcp_manager.get_logs(conn_id, lines)
     return {"logs": logs}
@@ -5936,15 +5929,14 @@ async def set_system_mode(
 
     # 切换到外部ERP模式时，必须先有激活的Provider（按当前租户范围）
     if mode == 'external_erp':
-        with get_db() as conn:
-            cursor = conn.cursor()
-            tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id)
-            cursor.execute(
-                f"SELECT id FROM erp_providers WHERE is_active = 1{tenant_filter}",
-                tenant_params
-            )
-            if not cursor.fetchone():
-                raise HTTPException(status_code=400, detail="切换到外部ERP模式前，请先激活一个 Provider")
+        preds = [_t_erp_providers.c.is_active == 1]
+        preds.extend(build_scope_predicates(_t_erp_providers, current_user.tenant_id, None))
+        with get_engine().connect() as sa_conn:
+            row = sa_conn.execute(
+                select(_t_erp_providers.c.id).where(and_(*preds))
+            ).first()
+        if not row:
+            raise HTTPException(status_code=400, detail="切换到外部ERP模式前，请先激活一个 Provider")
 
     # Upsert system_mode — Phase 3e: SA Core
     with get_engine().begin() as sa_conn:
@@ -6227,10 +6219,11 @@ async def delete_erp_provider(
     """删除 Provider（激活状态下禁止删除）"""
     import shutil
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
@@ -6260,16 +6253,20 @@ async def test_erp_provider(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """运行 Provider 连通性测试（level=1 只读，level=2 写操作）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
     _ensure_provider_tenant(row, current_user)
 
-    config = _json.loads(row['config']) if row['config'] else {}
+    _cfg = row['config']
+    if isinstance(_cfg, (bytes, bytearray)):
+        _cfg = _cfg.decode('utf-8')
+    config = (_json.loads(_cfg) if _cfg else {}) if isinstance(_cfg, str) else (_cfg or {})
     custom_dir = _get_providers_custom_dir()
     filepath = os.path.join(custom_dir, row['filename'])
 
@@ -6318,17 +6315,21 @@ async def activate_erp_provider(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """激活指定 Provider（需先通过 Level 1 测试）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
     _ensure_provider_tenant(row, current_user)
 
     # 校验 Level 1 测试通过
-    test_results = _json.loads(row['test_results']) if row['test_results'] else None
+    _tr = row['test_results']
+    if isinstance(_tr, (bytes, bytearray)):
+        _tr = _tr.decode('utf-8')
+    test_results = (_json.loads(_tr) if _tr else None) if isinstance(_tr, str) else _tr
     l1 = test_results.get('level1', {}) if test_results else {}
     if not l1.get('all_passed'):
         raise HTTPException(status_code=400, detail="请先通过 Level 1 测试再激活")
@@ -6365,14 +6366,18 @@ async def deactivate_erp_provider(
     current_user: CurrentUser = Depends(require_auth('admin'))
 ):
     """停用指定 Provider"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, provider_name, tenant_id FROM erp_providers WHERE id = ?", (provider_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(
+                _t_erp_providers.c.id,
+                _t_erp_providers.c.provider_name,
+                _t_erp_providers.c.tenant_id,
+            ).where(_t_erp_providers.c.id == provider_id)
+        ).first()
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
+    if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="无权操作其他租户的 Provider")
 
     now_dt = datetime.now()
@@ -6383,7 +6388,7 @@ async def deactivate_erp_provider(
             .values(is_active=0, updated_at=now_dt)
         )
 
-    logger.info(f"停用 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
+    logger.info(f"停用 ERP Provider: {row.provider_name}，操作人: {current_user.display_name}")
     return {"success": True}
 
 
@@ -6395,16 +6400,20 @@ async def get_erp_provider_status(
     """实时检测 Provider 连通性（调用 get_today_statistics 作为健康探针）"""
     import time as _time
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM erp_providers WHERE id = ?", (provider_id,))
-        row = cursor.fetchone()
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
 
     if not row:
         raise HTTPException(status_code=404, detail="Provider 不存在")
     _ensure_provider_tenant(row, current_user)
 
-    config = _json.loads(row['config']) if row['config'] else {}
+    _cfg = row['config']
+    if isinstance(_cfg, (bytes, bytearray)):
+        _cfg = _cfg.decode('utf-8')
+    config = (_json.loads(_cfg) if _cfg else {}) if isinstance(_cfg, str) else (_cfg or {})
     custom_dir = _get_providers_custom_dir()
     filepath = os.path.join(custom_dir, row['filename'])
 
@@ -6719,14 +6728,17 @@ async def face_create_enrollment(
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.images_b64:
         raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片")
+    with get_engine().connect() as sa_conn:
+        s = sa_conn.execute(
+            select(_t_face_subjects.c.tenant_id).where(_t_face_subjects.c.id == payload.subject_id)
+        ).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="人员档案不存在")
+    if int(s.tenant_id) != int(tid):
+        raise HTTPException(status_code=403, detail="人员档案不属于该租户")
+    # TODO: migrate to SA Core in a future pass — orchestrator currently
+    # expects a sqlite-style ``conn`` for its internal writes.
     with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT tenant_id FROM face_subjects WHERE id = ?", (payload.subject_id,))
-        s = cur.fetchone()
-        if not s:
-            raise HTTPException(status_code=404, detail="人员档案不存在")
-        if int(s["tenant_id"]) != int(tid):
-            raise HTTPException(status_code=403, detail="人员档案不属于该租户")
         try:
             from backend.face.orchestrator import enroll_face as _enroll
             from backend.face.endpoint_client import FaceEndpointError
