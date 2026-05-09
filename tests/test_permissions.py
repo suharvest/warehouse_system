@@ -149,3 +149,81 @@ class TestContactsViaRequirePermission:
         resp = guest.get("/api/contacts")
         assert resp.status_code == 401
         assert resp.json()["error"] == "请先登录"
+
+
+# --------------------------- PR2: Users / API Keys / Warehouses ---------------------------
+
+
+class TestUsersViaRequirePermission:
+    """End-to-end: /api/users now goes through require_permission (USERS, ADMIN)."""
+
+    def test_admin_token_can_list_users(self, admin_client):
+        resp = admin_client.get("/api/users")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_view_token_cannot_list_users(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/users", headers={"X-API-Key": api_key})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_users_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/users")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "请先登录"
+
+
+class TestApiKeysViaRequirePermission:
+    """End-to-end: /api/api-keys now goes through require_permission (API_KEYS, ADMIN)."""
+
+    def test_admin_token_can_list_api_keys(self, admin_client):
+        resp = admin_client.get("/api/api-keys")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_view_token_cannot_list_api_keys(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/api-keys", headers={"X-API-Key": api_key})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_api_keys_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/api-keys")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "请先登录"
+
+
+class TestWarehousesViaRequirePermission:
+    """End-to-end: /api/warehouses now goes through require_permission."""
+
+    def test_view_token_can_list_warehouses(self, admin_client, client):
+        # READ → view tokens allowed
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/warehouses", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_view_token_cannot_create_warehouse(self, admin_client, client):
+        # POST = ADMIN, view should get 403
+        import uuid
+        api_key = _create_view_api_key(admin_client)
+        slug = f"wh-{uuid.uuid4().hex[:6]}"
+        resp = client.post(
+            "/api/warehouses",
+            json={"slug": slug, "name": "T", "address": ""},
+            headers={"X-API-Key": api_key},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_warehouses_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/warehouses")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "请先登录"
