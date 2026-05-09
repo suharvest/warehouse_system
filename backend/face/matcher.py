@@ -12,6 +12,10 @@ import logging
 from typing import List, Optional
 
 import numpy as np
+from sqlalchemy import select, and_
+
+from db import get_engine
+from metadata import face_enrollments, face_subjects
 
 from .models import Match
 
@@ -48,14 +52,23 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def _applies_to_warehouse(applies_to_raw: Optional[str], warehouse_id: Optional[int]) -> bool:
+def _applies_to_warehouse(applies_to_raw, warehouse_id: Optional[int]) -> bool:
     """An enrollment applies if applies_to_warehouse_ids is NULL/empty
-    (= all warehouses) or contains the requested warehouse_id."""
-    if not applies_to_raw:
+    (= all warehouses) or contains the requested warehouse_id.
+
+    Accepts list | str | None. SA returns JSON columns decoded as Python
+    lists; legacy sqlite3 path returned raw JSON strings.
+    """
+    if applies_to_raw is None or applies_to_raw == "":
         return True
-    try:
-        ids = json.loads(applies_to_raw)
-    except Exception:
+    if isinstance(applies_to_raw, str):
+        try:
+            ids = json.loads(applies_to_raw)
+        except Exception:
+            return True
+    elif isinstance(applies_to_raw, list):
+        ids = applies_to_raw
+    else:
         return True
     if not ids:
         return True
@@ -83,26 +96,37 @@ def topk_match(
     if q is None:
         return []
 
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT fe.id, fe.subject_id, fe.embedding, fe.applies_to_warehouse_ids
-        FROM face_enrollments fe
-        JOIN face_subjects fs ON fs.id = fe.subject_id
-        WHERE fe.tenant_id = ? AND fe.model_tag = ? AND fe.is_active = 1
-          AND fs.is_active = 1
-        """,
-        (tenant_id, model_tag),
+    # Phase 2b: read via SQLAlchemy Core. ``conn`` retained for signature
+    # compatibility but unused here. SA returns embedding as bytes.
+    stmt = select(
+        face_enrollments.c.id,
+        face_enrollments.c.subject_id,
+        face_enrollments.c.embedding,
+        face_enrollments.c.applies_to_warehouse_ids,
+    ).select_from(
+        face_enrollments.join(
+            face_subjects, face_subjects.c.id == face_enrollments.c.subject_id
+        )
+    ).where(
+        and_(
+            face_enrollments.c.tenant_id == tenant_id,
+            face_enrollments.c.model_tag == model_tag,
+            face_enrollments.c.is_active == 1,
+            face_subjects.c.is_active == 1,
+        )
     )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+
     scored: List[Match] = []
-    for row in cur.fetchall():
-        if not _applies_to_warehouse(row["applies_to_warehouse_ids"], warehouse_id):
+    for row in rows:
+        if not _applies_to_warehouse(row.applies_to_warehouse_ids, warehouse_id):
             continue
-        v = _bytes_to_vec(row["embedding"])
+        v = _bytes_to_vec(row.embedding)
         if v is None:
             continue
         score = _cosine(q, v)
-        scored.append(Match(enrollment_id=row["id"], subject_id=row["subject_id"], confidence=score))
+        scored.append(Match(enrollment_id=row.id, subject_id=row.subject_id, confidence=score))
 
     scored.sort(key=lambda m: m.confidence, reverse=True)
     return scored[:k]
