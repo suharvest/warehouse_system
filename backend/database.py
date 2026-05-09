@@ -5,6 +5,13 @@ import secrets
 from datetime import datetime, timedelta
 import random
 
+# R3: wire-format string enums. Support both ``backend.database`` (package)
+# and bare ``database`` (sys.path-tweaked) import styles used across tests.
+try:
+    from models import RecordType, RoleName  # type: ignore
+except ImportError:  # pragma: no cover
+    from backend.models import RecordType, RoleName  # type: ignore
+
 # 尝试导入bcrypt（生产环境使用）
 try:
     import bcrypt
@@ -835,10 +842,10 @@ def _migrate_reason_to_category(cursor):
         elif reason.startswith('Excel导入:') or reason.startswith('Excel导入: '):
             prefix = 'Excel导入: ' if reason.startswith('Excel导入: ') else 'Excel导入:'
             note = reason[len(prefix):].strip() or None
-            category = 'other_in' if rec_type == 'in' else 'other_out'
+            category = 'other_in' if rec_type == RecordType.IN.value else 'other_out'
         # 3. 无法匹配：归入"其他"，原文保留到 note
         else:
-            category = 'other_in' if rec_type == 'in' else 'other_out'
+            category = 'other_in' if rec_type == RecordType.IN.value else 'other_out'
             note = reason if reason else None
 
         cursor.execute(
@@ -895,7 +902,7 @@ def has_admin_user():
     with get_engine().connect() as conn:
         n = conn.execute(
             select(func.count()).select_from(_t_users).where(
-                (_t_users.c.role == 'admin') & (_t_users.c.is_disabled == 0)
+                (_t_users.c.role == RoleName.ADMIN.value) & (_t_users.c.is_disabled == 0)
             )
         ).scalar() or 0
     return n > 0
@@ -1070,7 +1077,7 @@ def generate_mock_data():
     operators = ['张三', '李四', '王五', '赵六', '系统']
 
     def _pick_reason(record_type):
-        pool = reasons_in if record_type == 'in' else reasons_out
+        pool = reasons_in if record_type == RecordType.IN.value else reasons_out
         category, notes = random.choice(pool)
         note = random.choice(notes)
         return category, note
@@ -1083,7 +1090,7 @@ def generate_mock_data():
 
         for _ in range(num_records):
             material_id = random.choice(material_ids)
-            record_type = random.choice(['in', 'out'])
+            record_type = random.choice([RecordType.IN.value, RecordType.OUT.value])
             quantity = random.randint(5, 30)
             operator = random.choice(operators)
             reason_category, reason_note = _pick_reason(record_type)
@@ -1104,7 +1111,7 @@ def generate_mock_data():
 
     for _ in range(num_today_records):
         material_id = random.choice(material_ids)
-        record_type = random.choice(['in', 'out'])
+        record_type = random.choice([RecordType.IN.value, RecordType.OUT.value])
         quantity = random.randint(5, 30)
         operator = random.choice(operators)
         reason_category, reason_note = _pick_reason(record_type)

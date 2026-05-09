@@ -2766,7 +2766,7 @@ def get_dashboard_stats(
         today_in = sa_conn.execute(
             select(_sa_func.sum(_t_inventory_records.c.quantity)).select_from(j)
             .where(and_(
-                _t_inventory_records.c.type == 'in',
+                _t_inventory_records.c.type == RecordType.IN.value,
                 _t_inventory_records.c.created_at >= today_start_s,
                 _t_materials.c.is_disabled == 0,
                 *r_scope,
@@ -2776,7 +2776,7 @@ def get_dashboard_stats(
         today_out = sa_conn.execute(
             select(_sa_func.sum(_t_inventory_records.c.quantity)).select_from(j)
             .where(and_(
-                _t_inventory_records.c.type == 'out',
+                _t_inventory_records.c.type == RecordType.OUT.value,
                 _t_inventory_records.c.created_at >= today_start_s,
                 _t_materials.c.is_disabled == 0,
                 *r_scope,
@@ -2804,7 +2804,7 @@ def get_dashboard_stats(
         yesterday_in = sa_conn.execute(
             select(_sa_func.sum(_t_inventory_records.c.quantity))
             .where(and_(
-                _t_inventory_records.c.type == 'in',
+                _t_inventory_records.c.type == RecordType.IN.value,
                 _t_inventory_records.c.created_at >= yesterday_start_s,
                 _t_inventory_records.c.created_at < today_start_s,
                 *r_scope,
@@ -2814,7 +2814,7 @@ def get_dashboard_stats(
         yesterday_out = sa_conn.execute(
             select(_sa_func.sum(_t_inventory_records.c.quantity))
             .where(and_(
-                _t_inventory_records.c.type == 'out',
+                _t_inventory_records.c.type == RecordType.OUT.value,
                 _t_inventory_records.c.created_at >= yesterday_start_s,
                 _t_inventory_records.c.created_at < today_start_s,
                 *r_scope,
@@ -2875,7 +2875,7 @@ def get_weekly_trend(
             dates.append(date.strftime('%m-%d'))
 
             in_preds = [
-                _t_inventory_records.c.type == 'in',
+                _t_inventory_records.c.type == RecordType.IN.value,
                 _t_inventory_records.c.created_at >= ds,
                 _t_inventory_records.c.created_at < de,
             ] + scope_preds
@@ -2885,7 +2885,7 @@ def get_weekly_trend(
             in_data.append(in_total)
 
             out_preds = [
-                _t_inventory_records.c.type == 'out',
+                _t_inventory_records.c.type == RecordType.OUT.value,
                 _t_inventory_records.c.created_at >= ds,
                 _t_inventory_records.c.created_at < de,
             ] + scope_preds
@@ -3540,12 +3540,12 @@ def get_product_stats(
                 .where(and_(*preds))
             ).scalar() or 0
 
-        today_in = _sum_records('in', today)
-        yesterday_in = _sum_records('in', yesterday)
-        today_out = _sum_records('out', today)
-        yesterday_out = _sum_records('out', yesterday)
-        total_in = _sum_records('in')
-        total_out = _sum_records('out')
+        today_in = _sum_records(RecordType.IN.value, today)
+        yesterday_in = _sum_records(RecordType.IN.value, yesterday)
+        today_out = _sum_records(RecordType.OUT.value, today)
+        yesterday_out = _sum_records(RecordType.OUT.value, yesterday)
+        total_in = _sum_records(RecordType.IN.value)
+        total_out = _sum_records(RecordType.OUT.value)
 
         in_change = ((today_in - yesterday_in) / yesterday_in * 100) if yesterday_in > 0 else 0
         out_change = ((today_out - yesterday_out) / yesterday_out * 100) if yesterday_out > 0 else 0
@@ -3653,7 +3653,7 @@ def get_product_trend(
                 select(_sa_func.coalesce(_sa_func.sum(_t_inventory_records.c.quantity), 0))
                 .where(and_(
                     _t_inventory_records.c.material_id == material_id,
-                    _t_inventory_records.c.type == 'in',
+                    _t_inventory_records.c.type == RecordType.IN.value,
                     _sa_func.date(_t_inventory_records.c.created_at) == day,
                     *r_scope,
                 ))
@@ -3664,7 +3664,7 @@ def get_product_trend(
                 select(_sa_func.coalesce(_sa_func.sum(_t_inventory_records.c.quantity), 0))
                 .where(and_(
                     _t_inventory_records.c.material_id == material_id,
-                    _t_inventory_records.c.type == 'out',
+                    _t_inventory_records.c.type == RecordType.OUT.value,
                     _sa_func.date(_t_inventory_records.c.created_at) == day,
                     *r_scope,
                 ))
@@ -3895,7 +3895,7 @@ def get_inventory_records_paginated(
             if isinstance(ca, datetime):
                 ca = ca.strftime('%Y-%m-%d %H:%M:%S')
 
-            if record_type_val == 'out':
+            if record_type_val == RecordType.OUT.value:
                 cj = _t_batch_consumptions.join(_t_batches, _t_batch_consumptions.c.batch_id == _t_batches.c.id)
                 consumptions = sa_conn.execute(
                     select(_t_batches.c.batch_no, _t_batch_consumptions.c.quantity)
@@ -4099,7 +4099,7 @@ async def stock_in(
 
         sa_conn.execute(
             insert(_t_inventory_records).values(
-                material_id=material_id, type='in', quantity=quantity,
+                material_id=material_id, type=RecordType.IN.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=request.contact_id, batch_id=batch_id,
@@ -4300,7 +4300,7 @@ async def stock_out(
 
             ins_rec = sa_conn.execute(
                 insert(_t_inventory_records).values(
-                    material_id=material_id, type='out', quantity=quantity,
+                    material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                     operator=operator, operator_user_id=operator_user_id,
                     reason_category=reason_category, reason_note=reason_note,
                     contact_id=stock_data.contact_id, warehouse_id=wh_id,
@@ -4422,7 +4422,7 @@ async def stock_out(
 
         ins_rec = sa_conn.execute(
             insert(_t_inventory_records).values(
-                material_id=material_id, type='out', quantity=quantity,
+                material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=stock_data.contact_id, warehouse_id=wh_id,
@@ -4877,10 +4877,10 @@ async def preview_import_excel(
                             current_qty = batch.quantity
                             difference = import_qty - current_qty
                             if difference > 0:
-                                operation = 'in'
+                                operation = RecordType.IN.value
                                 total_in += difference
                             elif difference < 0:
-                                operation = 'out'
+                                operation = RecordType.OUT.value
                                 total_out += abs(difference)
                             else:
                                 operation = 'none'
@@ -4899,7 +4899,7 @@ async def preview_import_excel(
                                 sku=sku, name=material.name, category=category, unit=unit,
                                 safe_stock=safe_stock, location=location,
                                 current_quantity=0, import_quantity=import_qty,
-                                difference=import_qty, operation='in',
+                                difference=import_qty, operation=RecordType.IN.value,
                                 batch_no=batch_no_val, is_batch_new=True,
                                 contact_name=contact_name, contact_id=contact_id,
                                 variant=variant_val or None,
@@ -4911,7 +4911,7 @@ async def preview_import_excel(
                             sku=sku, name=material.name, category=category, unit=unit,
                             safe_stock=safe_stock, location=location,
                             current_quantity=0, import_quantity=import_qty,
-                            difference=import_qty, operation='in',
+                            difference=import_qty, operation=RecordType.IN.value,
                             is_batch_new=True, contact_name=contact_name, contact_id=contact_id,
                             variant=variant_val or None,
                         ))
@@ -4946,7 +4946,7 @@ async def preview_import_excel(
                         sku=sku, name=mat_name, category=category, unit=unit,
                         safe_stock=safe_stock, location=location,
                         current_quantity=0, import_quantity=import_qty,
-                        difference=import_qty, operation='in',
+                        difference=import_qty, operation=RecordType.IN.value,
                         is_batch_new=True,
                         contact_name=contact_name, contact_id=contact_id,
                         variant=explicit_variant,
@@ -4955,10 +4955,10 @@ async def preview_import_excel(
                     current_qty = material.quantity
                     difference = import_qty - current_qty
                     if difference > 0:
-                        operation = 'in'
+                        operation = RecordType.IN.value
                         total_in += difference
                     elif difference < 0:
-                        operation = 'out'
+                        operation = RecordType.OUT.value
                         total_out += abs(difference)
                     else:
                         operation = 'none'
@@ -5157,7 +5157,7 @@ async def confirm_import_excel(
         def _create_record(material_id, rec_type, quantity, item_reason_category, reason_suffix, batch_id=None, contact_id=None):
             """创建出入库记录"""
             # reason_category 从每行 item 读取，reason_note 从全局备注 + 后缀拼接
-            category = item_reason_category or ('purchase' if rec_type == 'in' else 'sell')
+            category = item_reason_category or ('purchase' if rec_type == RecordType.IN.value else 'sell')
             note_parts = []
             if request.reason_note:
                 note_parts.append(request.reason_note)
@@ -5225,7 +5225,7 @@ async def confirm_import_excel(
                             update(_t_materials).where(_t_materials.c.id == material_id)
                             .values(quantity=_t_materials.c.quantity + item.import_quantity)
                         )
-                        _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
+                        _create_record(material_id, RecordType.IN.value, item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
                 elif item.is_batch_new:
@@ -5238,7 +5238,7 @@ async def confirm_import_excel(
                         update(_t_materials).where(_t_materials.c.id == material_id)
                         .values(quantity=_t_materials.c.quantity + item.import_quantity)
                     )
-                    _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新批次)', batch_id, contact_id)
+                    _create_record(material_id, RecordType.IN.value, item.import_quantity, item.reason_category, ' (新批次)', batch_id, contact_id)
                     in_count += 1
                     records_created += 1
                 else:
@@ -5265,7 +5265,7 @@ async def confirm_import_excel(
                         .values(quantity=_t_materials.c.quantity + diff)
                     )
 
-                    rec_type = 'in' if diff > 0 else 'out'
+                    rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
                     _create_record(material_id, rec_type, abs(diff), item.reason_category, '', batch.id, contact_id)
                     if diff > 0:
                         in_count += 1
@@ -5303,7 +5303,7 @@ async def confirm_import_excel(
                                 update(_t_materials).where(_t_materials.c.id == material_id)
                                 .values(quantity=item.import_quantity)
                             )
-                            rec_type = 'in' if diff > 0 else 'out'
+                            rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
                             if diff > 0:
                                 batch_id = _create_batch(material_id, abs(diff), item.location, contact_id, item.variant)
                             else:
@@ -5326,7 +5326,7 @@ async def confirm_import_excel(
                     material_id = ins_res.inserted_primary_key[0]
                     if item.import_quantity > 0:
                         batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
-                        _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
+                        _create_record(material_id, RecordType.IN.value, item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         records_created += 1
                     new_count += 1
                 else:
@@ -5355,16 +5355,16 @@ async def confirm_import_excel(
 
                     abs_diff = abs(item.difference)
 
-                    if item.operation == 'in':
+                    if item.operation == RecordType.IN.value:
                         batch_id = _create_batch(material_id, abs_diff, item.location, contact_id, item.variant)
                         sa_conn.execute(
                             update(_t_materials).where(_t_materials.c.id == material_id)
                             .values(quantity=current_qty + abs_diff)
                         )
-                        _create_record(material_id, 'in', abs_diff, item.reason_category, '', batch_id, contact_id)
+                        _create_record(material_id, RecordType.IN.value, abs_diff, item.reason_category, '', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
-                    elif item.operation == 'out':
+                    elif item.operation == RecordType.OUT.value:
                         if current_qty - abs_diff < 0:
                             # Roll back partial mutations from this batch import
                             # (preserves original sqlite get_db() semantics where
@@ -5395,7 +5395,7 @@ async def confirm_import_excel(
                         out_reason = item.reason_category or 'sell'
                         out_ins = sa_conn.execute(
                             insert(_t_inventory_records).values(
-                                material_id=material_id, type='out', quantity=abs_diff,
+                                material_id=material_id, type=RecordType.OUT.value, quantity=abs_diff,
                                 operator=operator, operator_user_id=operator_user_id,
                                 reason_category=out_reason, reason_note=request.reason_note,
                                 contact_id=contact_id,
@@ -5497,7 +5497,7 @@ def export_inventory_records(
 
         # 为出库记录获取批次消耗详情
         batch_details_map = {}
-        out_record_ids = [r.id for r in records if r.type == 'out']
+        out_record_ids = [r.id for r in records if r.type == RecordType.OUT.value]
         if out_record_ids:
             cons_stmt = (
                 select(
@@ -5529,9 +5529,9 @@ def export_inventory_records(
     for row_idx, record in enumerate(records, 2):
         # 批次信息：入库显示批次号，出库显示消耗详情
         batch_info = ''
-        if record.type == 'in' and record.batch_no:
+        if record.type == RecordType.IN.value and record.batch_no:
             batch_info = record.batch_no
-        elif record.type == 'out':
+        elif record.type == RecordType.OUT.value:
             batch_info = batch_details_map.get(record.id, '')
 
         created_at_str = (record.created_at.strftime('%Y-%m-%d %H:%M:%S')
@@ -5541,7 +5541,7 @@ def export_inventory_records(
         ws.cell(row=row_idx, column=2, value=record.variant or '')
         ws.cell(row=row_idx, column=3, value=record.sku)
         ws.cell(row=row_idx, column=4, value=record.category)
-        ws.cell(row=row_idx, column=5, value='入库' if record.type == 'in' else '出库')
+        ws.cell(row=row_idx, column=5, value='入库' if record.type == RecordType.IN.value else '出库')
         ws.cell(row=row_idx, column=6, value=record.quantity)
         ws.cell(row=row_idx, column=7, value=batch_info)
         ws.cell(row=row_idx, column=8, value=record.contact_name or '')
@@ -5579,7 +5579,7 @@ async def add_inventory_record(
     # 使用请求中的operator，如果为空则使用当前用户名
     operator = request.operator if request.operator else current_user.get_operator_name()
 
-    if request.type == 'in':
+    if request.type == RecordType.IN.value:
         result = await stock_in(
             StockOperationRequest(
                 product_name=request.product_name,
@@ -5611,7 +5611,7 @@ async def add_inventory_record(
                     .values(location=request.location)
                 )
         return result
-    elif request.type == 'out':
+    elif request.type == RecordType.OUT.value:
         return await stock_out(
             http_request,
             StockOperationRequest(
