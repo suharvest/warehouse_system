@@ -2142,6 +2142,12 @@ async def clear_database(
     if not request.confirm:
         raise HTTPException(status_code=400, detail="请确认清空操作")
 
+    if get_engine().dialect.name != 'sqlite':
+        raise HTTPException(
+            status_code=400,
+            detail="DB clear is only available on the sqlite-backed deployment",
+        )
+
     with get_db() as conn:
         cursor = conn.cursor()
 

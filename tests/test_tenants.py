@@ -8,6 +8,19 @@ import tempfile
 import sqlite3
 from io import BytesIO
 
+import pytest
+
+
+def _is_sqlite_backend() -> bool:
+    url = os.environ.get('DATABASE_URL', '')
+    return (not url) or url.startswith('sqlite')
+
+
+sqlite_only = pytest.mark.skipif(
+    not _is_sqlite_backend(),
+    reason="sqlite-only feature (db export/import/clear streams a literal .db file)",
+)
+
 
 def _as_global_admin(admin_client):
     from database import get_db_connection
@@ -106,6 +119,7 @@ def test_global_non_admin_user_is_rejected(admin_client, monkeypatch):
     assert "全局用户必须是管理员角色" in resp.text
 
 
+@sqlite_only
 def test_multi_tenant_migration_keeps_one_global_admin(monkeypatch):
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -185,6 +199,7 @@ def _login_as(app_instance, username, password="Admin123!"):
     return c
 
 
+@sqlite_only
 def test_tenant_database_export_is_scoped(admin_client, app_instance, monkeypatch):
     monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
     _as_global_admin(admin_client)
@@ -232,6 +247,7 @@ def test_tenant_database_export_is_scoped(admin_client, app_instance, monkeypatc
             pass
 
 
+@sqlite_only
 def test_tenant_database_clear_only_clears_current_tenant(admin_client, app_instance, monkeypatch):
     monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
     _as_global_admin(admin_client)
@@ -269,6 +285,7 @@ def test_tenant_database_clear_only_clears_current_tenant(admin_client, app_inst
     conn.close()
 
 
+@sqlite_only
 def test_tenant_database_import_forces_current_tenant(admin_client, app_instance, monkeypatch):
     monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
     _as_global_admin(admin_client)

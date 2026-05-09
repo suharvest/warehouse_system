@@ -22,6 +22,18 @@ import numpy as np
 import pytest
 
 
+# This module exercises the face orchestrator against a literal sqlite
+# tempfile (not the SA engine). Skip wholesale when the test session is
+# pinned to a non-sqlite DATABASE_URL — the orchestrator + fixture both
+# assume sqlite3 semantics (`?` placeholders, INSERT OR IGNORE, ...).
+_db_url = os.environ.get('DATABASE_URL', '')
+if _db_url and not _db_url.startswith('sqlite'):
+    pytest.skip(
+        "test_face.py is sqlite-only (orchestrator uses raw sqlite3 + sqlite-specific SQL)",
+        allow_module_level=True,
+    )
+
+
 # Make the backend package importable as `backend.face`
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:

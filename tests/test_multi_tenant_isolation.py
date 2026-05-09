@@ -121,7 +121,7 @@ def _seed_contact(tenant_id, name, *, is_supplier=True, is_customer=False):
     cur = conn.cursor()
     cur.execute('''
         INSERT INTO contacts (name, is_supplier, is_customer, tenant_id, warehouse_id, created_at)
-        VALUES (?, ?, ?, ?, NULL, datetime('now'))
+        VALUES (?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
     ''', (name, 1 if is_supplier else 0, 1 if is_customer else 0, tenant_id))
     cid = cur.lastrowid
     conn.commit()

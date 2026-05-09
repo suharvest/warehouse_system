@@ -183,16 +183,16 @@ def test_records_filter_by_contact_id(admin_client, default_warehouse_id):
     mid = _seed_material(name, sku, warehouse_id=default_warehouse_id,
                          tenant_id=1)
 
-    # Create two contacts
+    # Create two contacts (use CURRENT_TIMESTAMP for portability)
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO contacts (name, is_supplier, is_customer, tenant_id, "
-        " created_at) VALUES ('CA', 1, 0, 1, datetime('now'))")
+        " created_at) VALUES ('CA', 1, 0, 1, CURRENT_TIMESTAMP)")
     c1 = cur.lastrowid
     cur.execute(
         "INSERT INTO contacts (name, is_supplier, is_customer, tenant_id, "
-        " created_at) VALUES ('CB', 1, 0, 1, datetime('now'))")
+        " created_at) VALUES ('CB', 1, 0, 1, CURRENT_TIMESTAMP)")
     c2 = cur.lastrowid
     conn.commit()
     conn.close()
@@ -240,6 +240,22 @@ def test_records_filter_by_operator_user_id(admin_client,
     sku = f"OM-{uuid.uuid4().hex[:6]}"
     mid = _seed_material(name, sku, warehouse_id=default_warehouse_id,
                          tenant_id=1)
+
+    # Seed real users (FK constraint on operator_user_id is enforced by MySQL,
+    # silently ignored by sqlite). Use INSERT ... ON DUPLICATE-KEY-friendly
+    # pattern via a SELECT-then-INSERT helper.
+    from database import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    for uid, uname in ((999, 'op-999'), (1000, 'op-1000')):
+        cur.execute("SELECT 1 FROM users WHERE id = ?", (uid,))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO users (id, username, password_hash, role, tenant_id) "
+                "VALUES (?, ?, 'x', 'operate', 1)",
+                (uid, uname))
+    conn.commit()
+    conn.close()
 
     _seed_record(material_id=mid, type_='in', quantity=1,
                  warehouse_id=default_warehouse_id, tenant_id=1,

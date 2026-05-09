@@ -51,8 +51,10 @@ def material_with_legacy_batch(admin_client, sample_material):
         import datetime
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         batch_no = f"LEGACY-{sample_material['id']:04d}"
+        # Already verified count==0 above, so plain INSERT is portable
+        # across sqlite and MySQL (avoid sqlite-only `INSERT OR IGNORE`).
         cursor.execute('''
-            INSERT OR IGNORE INTO batches (batch_no, material_id, quantity, initial_quantity, location, created_at)
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, location, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (batch_no, sample_material['id'], sample_material['quantity'], sample_material['quantity'], 'A-01', now))
         conn.commit()
@@ -105,12 +107,10 @@ class TestSchemaMigration:
 
     def test_batches_table_has_location_column(self, admin_client):
         """batches table should have a location column after migration."""
-        from database import get_db_connection
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(batches)")
-        columns = {row['name'] for row in cursor.fetchall()}
-        conn.close()
+        from db import get_engine
+        from sqlalchemy import inspect
+        insp = inspect(get_engine())
+        columns = {c['name'] for c in insp.get_columns('batches')}
         assert 'location' in columns
 
     def test_legacy_batches_created_for_orphan_materials(self, admin_client, material_with_legacy_batch):
@@ -654,7 +654,7 @@ class TestBatchesWarehouseAccess:
         password = "OpPass123!"
         cursor.execute(
             '''INSERT INTO users (username, password_hash, role, display_name, created_at)
-               VALUES (?, ?, 'operate', ?, datetime('now'))''',
+               VALUES (?, ?, 'operate', ?, CURRENT_TIMESTAMP)''',
             (username, 'dummy_hash_for_test', username)
         )
         user_id = cursor.lastrowid
@@ -678,7 +678,7 @@ class TestBatchesWarehouseAccess:
         batch_no = f"BATCH-XWH-{uuid.uuid4().hex[:6]}"
         cursor.execute(
             '''INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, warehouse_id, created_at)
-               VALUES (?, ?, 50, 50, ?, datetime('now'))''',
+               VALUES (?, ?, 50, 50, ?, CURRENT_TIMESTAMP)''',
             (batch_no, mat_id, wh_b_id)
         )
         conn.commit()
@@ -716,6 +716,8 @@ class TestBatchesWarehouseAccess:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM user_warehouses WHERE user_id = ?', (user_id,))
+        # Delete sessions first to satisfy FK on MySQL (sqlite ignores FK by default)
+        cursor.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
         cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
         cursor.execute('DELETE FROM batches WHERE material_id = ?', (mat_id,))
         cursor.execute('DELETE FROM materials WHERE id = ?', (mat_id,))
