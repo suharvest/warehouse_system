@@ -227,3 +227,137 @@ class TestWarehousesViaRequirePermission:
         resp = guest.get("/api/warehouses")
         assert resp.status_code == 401
         assert resp.json()["error"] == "请先登录"
+
+
+# --------------------------- PR3: Tenants / Dashboard / Search / System / ERP / MCP / DB ---------------------------
+
+
+class TestTenantsViaRequirePermission:
+    """End-to-end: /api/tenants now goes through require_permission (TENANTS, ADMIN)."""
+
+    def test_view_token_cannot_list_tenants(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/tenants", headers={"X-API-Key": api_key})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_tenants_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/tenants")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "请先登录"
+
+
+class TestDashboardViaRequirePermission:
+    """End-to-end: /api/dashboard/* now goes through require_permission (DASHBOARD, READ)."""
+
+    def test_view_token_can_read_dashboard_stats(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/dashboard/stats", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+
+    def test_dashboard_stats_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/dashboard/stats")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "请先登录"
+
+    def test_dashboard_low_stock_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/dashboard/low-stock-alert")
+        assert resp.status_code == 401
+
+
+class TestSearchViaRequirePermission:
+    """End-to-end: /api/search now goes through require_permission (SEARCH, READ)."""
+
+    def test_view_token_can_search(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/search?q=", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+
+    def test_search_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/search?q=")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "请先登录"
+
+
+class TestSystemModeViaRequirePermission:
+    """End-to-end: /api/system/mode goes through require_permission (SYSTEM)."""
+
+    def test_view_token_can_read_mode(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/system/mode", headers={"X-API-Key": api_key})
+        assert resp.status_code == 200
+
+    def test_view_token_cannot_change_mode(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.put(
+            "/api/system/mode",
+            json={"mode": "self_owned"},
+            headers={"X-API-Key": api_key},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_system_mode_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/system/mode")
+        assert resp.status_code == 401
+
+
+class TestMcpViaRequirePermission:
+    """End-to-end: /api/mcp/connections goes through require_permission (MCP, ADMIN)."""
+
+    def test_view_token_cannot_list_mcp(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/mcp/connections", headers={"X-API-Key": api_key})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_mcp_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/mcp/connections")
+        assert resp.status_code == 401
+
+
+class TestErpViaRequirePermission:
+    """End-to-end: /api/erp/* goes through require_permission (ERP)."""
+
+    def test_view_token_cannot_list_erp_providers(self, admin_client, client):
+        # list_erp_providers preserves legacy admin level
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/erp/providers", headers={"X-API-Key": api_key})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_erp_providers_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/erp/providers")
+        assert resp.status_code == 401
+
+
+class TestDatabaseOpsViaRequirePermission:
+    """End-to-end: /api/database/* goes through require_permission (SYSTEM, ADMIN)."""
+
+    def test_view_token_cannot_export_db(self, admin_client, client):
+        api_key = _create_view_api_key(admin_client)
+        resp = client.get("/api/database/export", headers={"X-API-Key": api_key})
+        # 403 (perm denied) — preferred over the sqlite-only HTTP-400 guard which
+        # would only fire under MySQL after auth passes
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "权限不足"
+
+    def test_db_export_guest_gets_401(self, client):
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.get("/api/database/export")
+        assert resp.status_code == 401
