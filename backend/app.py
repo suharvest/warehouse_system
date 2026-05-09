@@ -2521,19 +2521,19 @@ async def get_contact(
     current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
 ):
     """获取单个联系方详情。Phase 2c: SA Core read."""
-    stmt = select(
-        _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
-        _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
-        _t_contacts.c.is_customer, _t_contacts.c.notes,
-        _t_contacts.c.is_disabled, _t_contacts.c.created_at, _t_contacts.c.tenant_id,
-    ).where(_t_contacts.c.id == contact_id)
     with get_engine().connect() as sa_conn:
-        row = sa_conn.execute(stmt).first()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="联系方不存在")
-    if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问该联系方")
+        row = load_or_404(
+            sa_conn, _t_contacts, contact_id,
+            columns=[
+                _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+                _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
+                _t_contacts.c.is_customer, _t_contacts.c.notes,
+                _t_contacts.c.is_disabled, _t_contacts.c.created_at, _t_contacts.c.tenant_id,
+            ],
+            not_found="联系方不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问该联系方",
+        )
 
     ca = row.created_at
     if isinstance(ca, datetime):
@@ -2623,13 +2623,13 @@ async def update_contact(
 ):
     """更新联系方（需要operate权限）"""
     with get_engine().begin() as sa_conn:
-        contact = sa_conn.execute(
-            select(_t_contacts.c.id, _t_contacts.c.tenant_id).where(_t_contacts.c.id == contact_id)
-        ).first()
-        if not contact:
-            raise HTTPException(status_code=404, detail="联系方不存在")
-        if current_user.tenant_id is not None and contact.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问该联系方")
+        contact = load_or_404(
+            sa_conn, _t_contacts, contact_id,
+            columns=[_t_contacts.c.id, _t_contacts.c.tenant_id],
+            not_found="联系方不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问该联系方",
+        )
 
         values = {}
         if request.name is not None:
@@ -2687,13 +2687,13 @@ async def delete_contact(
 ):
     """禁用联系方（需要operate权限）"""
     with get_engine().begin() as sa_conn:
-        contact = sa_conn.execute(
-            select(_t_contacts.c.id, _t_contacts.c.tenant_id).where(_t_contacts.c.id == contact_id)
-        ).first()
-        if not contact:
-            raise HTTPException(status_code=404, detail="联系方不存在")
-        if current_user.tenant_id is not None and contact.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问该联系方")
+        contact = load_or_404(
+            sa_conn, _t_contacts, contact_id,
+            columns=[_t_contacts.c.id, _t_contacts.c.tenant_id],
+            not_found="联系方不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问该联系方",
+        )
 
         sa_conn.execute(
             update(_t_contacts).where(_t_contacts.c.id == contact_id).values(is_disabled=1)
