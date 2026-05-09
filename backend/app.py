@@ -509,26 +509,6 @@ async def get_current_user(request: Request) -> CurrentUser:
     return CurrentUser(tenant_id=1)
 
 
-def require_auth(min_role: str = 'view'):
-    """
-    权限检查装饰器
-    - view: 只读访问
-    - operate: 入库/出库/导入/导出/管理联系方
-    - admin: 用户管理
-
-    访客始终拒绝（哪怕 min_role='view'）：默认访客角色为 'view' 会绕过
-    has_permission 检查，多租户模式下 tenant_id=None 还会让 build_scope_filter
-    退化为空，导致跨租户聚合泄露。所有走 require_auth 的端点都必须登录。
-    """
-    async def dependency(current_user: CurrentUser = Depends(get_current_user)):
-        if current_user.is_guest:
-            raise HTTPException(status_code=401, detail="请先登录")
-        if not current_user.has_permission(min_role):
-            raise HTTPException(status_code=403, detail="权限不足")
-        return current_user
-    return dependency
-
-
 def require_permission(resource: Resource, action: Action):
     """Dependency factory keyed by (resource, action).
 
@@ -562,14 +542,10 @@ def require_permission(resource: Resource, action: Action):
 
 
 def _route_has_guard(dep) -> bool:
-    """Recursively check a Dependant tree for require_auth or require_permission."""
+    """Recursively check a Dependant tree for a require_permission marker."""
     call = getattr(dep, "call", None)
-    if call is not None:
-        if getattr(call, "__perm_marker__", False):
-            return True
-        qual = getattr(call, "__qualname__", "")
-        if "require_auth" in qual:
-            return True
+    if call is not None and getattr(call, "__perm_marker__", False):
+        return True
     for sub in getattr(dep, "dependencies", []) or []:
         if _route_has_guard(sub):
             return True
@@ -608,10 +584,9 @@ def _audit_routes() -> None:
         func_name = getattr(getattr(route, "endpoint", None), "__name__", "?")
         unguarded.append(f"{methods} {path} ({func_name})")
     if unguarded:
-        import logging as _logging
-        _audit_logger = _logging.getLogger("permissions.audit")
-        _audit_logger.warning(
-            "Unguarded routes detected (will become hard error in a future release):\n  "
+        raise RuntimeError(
+            "Unguarded routes detected at startup — every non-exempt route "
+            "must use Depends(require_permission(Resource, Action)):\n  "
             + "\n  ".join(unguarded)
         )
 
