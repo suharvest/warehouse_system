@@ -923,18 +923,18 @@ async def update_warehouse(
 ):
     """更新仓库（仅管理员）"""
     with get_engine().begin() as sa_conn:
-        wh = sa_conn.execute(
-            select(
+        wh = load_or_404(
+            sa_conn, _t_warehouses, warehouse_id,
+            columns=[
                 _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
                 _t_warehouses.c.address, _t_warehouses.c.is_default,
                 _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
                 _t_warehouses.c.tenant_id,
-            ).where(_t_warehouses.c.id == warehouse_id)
-        ).first()
-        if not wh:
-            raise HTTPException(status_code=404, detail="仓库不存在")
-        if current_user.tenant_id is not None and wh.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权操作该仓库")
+            ],
+            not_found="仓库不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作该仓库",
+        )
 
         values = {}
         if request.name is not None:
@@ -976,15 +976,15 @@ async def delete_warehouse(
 ):
     """禁用仓库（软删除，仅管理员）"""
     with get_engine().begin() as sa_conn:
-        wh = sa_conn.execute(
-            select(
+        wh = load_or_404(
+            sa_conn, _t_warehouses, warehouse_id,
+            columns=[
                 _t_warehouses.c.id, _t_warehouses.c.is_default, _t_warehouses.c.tenant_id,
-            ).where(_t_warehouses.c.id == warehouse_id)
-        ).first()
-        if not wh:
-            raise HTTPException(status_code=404, detail="仓库不存在")
-        if current_user.tenant_id is not None and wh.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权操作该仓库")
+            ],
+            not_found="仓库不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作该仓库",
+        )
         if wh.is_default:
             raise HTTPException(status_code=400, detail="不能删除默认仓库")
 
@@ -1011,13 +1011,13 @@ async def get_user_warehouses(
     """获取用户授权的仓库列表 — Phase 2b: read via SQLAlchemy Core."""
     with get_engine().connect() as sa_conn:
         # 验证用户属于当前租户
-        target_user = sa_conn.execute(
-            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
-        ).first()
-        if not target_user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and target_user.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的用户")
+        target_user = load_or_404(
+            sa_conn, _t_users, user_id,
+            columns=[_t_users.c.id, _t_users.c.tenant_id],
+            not_found="用户不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的用户",
+        )
         stmt = select(
             _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
         ).select_from(
@@ -1039,13 +1039,13 @@ async def set_user_warehouses(
     """设置用户授权的仓库列表"""
     with get_engine().begin() as sa_conn:
         # 验证用户属于当前租户
-        target_user = sa_conn.execute(
-            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
-        ).first()
-        if not target_user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and target_user.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问其他租户的用户")
+        target_user = load_or_404(
+            sa_conn, _t_users, user_id,
+            columns=[_t_users.c.id, _t_users.c.tenant_id],
+            not_found="用户不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的用户",
+        )
 
         # 验证所有仓库ID存在
         for wh_id in request.warehouse_ids:
@@ -1585,13 +1585,13 @@ async def update_user(
         new_password_hash = hash_password(request.password)
 
     with get_engine().begin() as sa_conn:
-        user = sa_conn.execute(
-            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
-        ).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and user.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权操作其他租户的用户")
+        user = load_or_404(
+            sa_conn, _t_users, user_id,
+            columns=[_t_users.c.id, _t_users.c.tenant_id],
+            not_found="用户不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的用户",
+        )
 
         values = {}
 
@@ -1666,13 +1666,13 @@ async def delete_user(
         raise HTTPException(status_code=400, detail="不能禁用自己")
 
     with get_engine().begin() as sa_conn:
-        user = sa_conn.execute(
-            select(_t_users.c.id, _t_users.c.tenant_id).where(_t_users.c.id == user_id)
-        ).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        if current_user.tenant_id is not None and user.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权操作其他租户的用户")
+        user = load_or_404(
+            sa_conn, _t_users, user_id,
+            columns=[_t_users.c.id, _t_users.c.tenant_id],
+            not_found="用户不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的用户",
+        )
 
         sa_conn.execute(
             update(_t_users).where(_t_users.c.id == user_id).values(is_disabled=1)
@@ -1787,13 +1787,13 @@ async def delete_api_key(
 ):
     """删除API密钥（仅管理员）"""
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_api_keys.c.id, _t_api_keys.c.tenant_id).where(_t_api_keys.c.id == key_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="API密钥不存在")
-        if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权操作其他租户的API密钥")
+        row = load_or_404(
+            sa_conn, _t_api_keys, key_id,
+            columns=[_t_api_keys.c.id, _t_api_keys.c.tenant_id],
+            not_found="API密钥不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的API密钥",
+        )
 
         sa_conn.execute(delete(_t_api_keys).where(_t_api_keys.c.id == key_id))
 
@@ -1808,13 +1808,13 @@ async def toggle_api_key_status(
 ):
     """切换API密钥状态（仅管理员）"""
     with get_engine().begin() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_api_keys.c.id, _t_api_keys.c.tenant_id).where(_t_api_keys.c.id == key_id)
-        ).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="API密钥不存在")
-        if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权操作其他租户的API密钥")
+        row = load_or_404(
+            sa_conn, _t_api_keys, key_id,
+            columns=[_t_api_keys.c.id, _t_api_keys.c.tenant_id],
+            not_found="API密钥不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的API密钥",
+        )
 
         sa_conn.execute(
             update(_t_api_keys).where(_t_api_keys.c.id == key_id).values(
