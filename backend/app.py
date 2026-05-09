@@ -60,7 +60,7 @@ from models import (
     UserWarehouseAssignment,
 )
 from fuzzy_match import FuzzyMatcher
-from sqlalchemy import select, and_, or_, insert, update, delete
+from sqlalchemy import select, and_, or_, insert, update, delete, case
 from db import get_engine
 from metadata import (
     warehouses as _t_warehouses,
@@ -3763,98 +3763,121 @@ async def stock_in(
             message=f"入库失败：数量 {quantity} 无效"
         )
 
-    with get_db() as conn:
-        check_warehouse_access(conn, current_user, wh_id)
-        cursor = conn.cursor()
-        # 校验 contact_id 跨租户归属（防止恶意/前端误传）
-        ensure_contact_tenant(cursor, current_user, request.contact_id,
-                              resolve_tenant_id_for_write(current_user, wh_id))
-        wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
+    check_warehouse_access(None, current_user, wh_id)
+    # 校验 contact_id 跨租户归属（防止恶意/前端误传）
+    ensure_contact_tenant(None, current_user, request.contact_id,
+                          resolve_tenant_id_for_write(current_user, wh_id))
 
-        # 查询产品（先精确匹配，按仓库过滤；排除已禁用物料）
-        cursor.execute(f'SELECT id, unit FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}', (product_name,) + wh_params)
-        row = cursor.fetchone()
+    m_scope = build_scope_predicates(_t_materials, current_user.tenant_id, wh_id)
 
-        # 模糊匹配
-        if not row and request.fuzzy:
-            matcher = get_fuzzy_matcher()
-            result = matcher.resolve(product_name, entity_type="material",
-                                     tenant_id=current_user.tenant_id, warehouse_id=wh_id)
+    # 查询产品（先精确匹配，按仓库过滤；排除已禁用物料）
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_materials.c.id, _t_materials.c.unit).where(
+                and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+            )
+        ).first()
 
-            if result['confident'] and result['best_match']:
-                resolved_from = product_name
-                product_name = result['best_match']['name']
-                cursor.execute(f'SELECT id, unit FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}', (product_name,) + wh_params)
-                row = cursor.fetchone()
-            elif result['candidates']:
-                names = [c['name'] for c in result['candidates'][:5]]
-                return StockInResponse(
-                    success=False,
-                    error="ambiguous_name",
-                    message=f"无法确定产品 '{product_name}'，候选：{', '.join(names)}",
-                    candidates=result['candidates'],
-                )
+    # 模糊匹配
+    if not row and request.fuzzy:
+        matcher = get_fuzzy_matcher()
+        result = matcher.resolve(product_name, entity_type="material",
+                                 tenant_id=current_user.tenant_id, warehouse_id=wh_id)
 
-        if not row:
+        if result['confident'] and result['best_match']:
+            resolved_from = product_name
+            product_name = result['best_match']['name']
+            with get_engine().connect() as sa_conn:
+                row = sa_conn.execute(
+                    select(_t_materials.c.id, _t_materials.c.unit).where(
+                        and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+                    )
+                ).first()
+        elif result['candidates']:
+            names = [c['name'] for c in result['candidates'][:5]]
             return StockInResponse(
                 success=False,
-                error=f"产品不存在: {product_name}",
-                message=f"入库失败：未找到产品 '{product_name}'"
+                error="ambiguous_name",
+                message=f"无法确定产品 '{product_name}'，候选：{', '.join(names)}",
+                candidates=result['candidates'],
             )
 
-        material_id = row['id']
-        unit = row['unit']
+    if not row:
+        return StockInResponse(
+            success=False,
+            error=f"产品不存在: {product_name}",
+            message=f"入库失败：未找到产品 '{product_name}'"
+        )
 
+    material_id = row.id
+    unit = row.unit
+
+    record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+    batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id)
+    now_dt = datetime.now()
+
+    with get_engine().begin() as sa_conn:
         # 原子化更新
-        cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?', (quantity, material_id))
-        if cursor.rowcount == 0:
+        upd = sa_conn.execute(
+            update(_t_materials)
+                .where(_t_materials.c.id == material_id)
+                .values(quantity=_t_materials.c.quantity + quantity)
+        )
+        if upd.rowcount == 0:
             return StockInResponse(success=False, error="入库失败", message="入库操作未生效，请重试")
 
-        cursor.execute('SELECT quantity FROM materials WHERE id = ?', (material_id,))
-        new_quantity = cursor.fetchone()['quantity']
+        new_qty_row = sa_conn.execute(
+            select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
+        ).first()
+        new_quantity = new_qty_row.quantity
         old_quantity = new_quantity - quantity
 
-        batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id)
-        record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
-        cursor.execute('''
-            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, warehouse_id, tenant_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (batch_no, material_id, quantity, quantity, request.contact_id, request.location, request.variant, wh_id, record_tenant_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        batch_id = cursor.lastrowid
-
-        cursor.execute('''
-            INSERT INTO inventory_records (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, batch_id, warehouse_id, tenant_id, created_at)
-            VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (material_id, quantity, operator, operator_user_id, reason_category, reason_note, request.contact_id, batch_id, wh_id, record_tenant_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-
-        conn.commit()
-
-        # 写操作后清除缓存
-        get_fuzzy_matcher().invalidate_cache()
-
-        audit_log("STOCK_IN", current_user.id, current_user.username, {
-            "product": product_name,
-            "quantity": quantity,
-            "batch_no": batch_no,
-            "old_qty": old_quantity,
-            "new_qty": new_quantity,
-            "resolved_from": resolved_from,
-        })
-
-        return StockInResponse(
-            success=True,
-            operation="stock_in",
-            product=StockOperationProduct(
-                name=product_name,
-                old_quantity=old_quantity,
-                in_quantity=quantity,
-                new_quantity=new_quantity,
-                unit=unit
-            ),
-            batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity, variant=request.variant),
-            message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}",
-            resolved_from=resolved_from,
+        ins_batch = sa_conn.execute(
+            insert(_t_batches).values(
+                batch_no=batch_no, material_id=material_id, quantity=quantity,
+                initial_quantity=quantity, contact_id=request.contact_id,
+                location=request.location, variant=request.variant,
+                warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
+            )
         )
+        batch_id = ins_batch.inserted_primary_key[0]
+
+        sa_conn.execute(
+            insert(_t_inventory_records).values(
+                material_id=material_id, type='in', quantity=quantity,
+                operator=operator, operator_user_id=operator_user_id,
+                reason_category=reason_category, reason_note=reason_note,
+                contact_id=request.contact_id, batch_id=batch_id,
+                warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
+            )
+        )
+
+    # 写操作后清除缓存
+    get_fuzzy_matcher().invalidate_cache()
+
+    audit_log("STOCK_IN", current_user.id, current_user.username, {
+        "product": product_name,
+        "quantity": quantity,
+        "batch_no": batch_no,
+        "old_qty": old_quantity,
+        "new_qty": new_quantity,
+        "resolved_from": resolved_from,
+    })
+
+    return StockInResponse(
+        success=True,
+        operation="stock_in",
+        product=StockOperationProduct(
+            name=product_name,
+            old_quantity=old_quantity,
+            in_quantity=quantity,
+            new_quantity=new_quantity,
+            unit=unit
+        ),
+        batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity, variant=request.variant),
+        message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}",
+        resolved_from=resolved_from,
+    )
 
 
 @app.post("/api/materials/stock-out", response_model=StockOutResponse)
@@ -3879,290 +3902,197 @@ async def stock_out(
         return StockOutResponse(success=False, error="出库数量必须大于0",
                                 message=f"出库失败：数量 {quantity} 无效")
 
-    with get_db() as conn:
-        check_warehouse_access(conn, current_user, wh_id)
-        cursor = conn.cursor()
-        ensure_contact_tenant(cursor, current_user, stock_data.contact_id,
-                              resolve_tenant_id_for_write(current_user, wh_id))
-        wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
+    check_warehouse_access(None, current_user, wh_id)
+    ensure_contact_tenant(None, current_user, stock_data.contact_id,
+                          resolve_tenant_id_for_write(current_user, wh_id))
 
-        cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}',
-                       (product_name,) + wh_params)
-        row = cursor.fetchone()
+    m_scope = build_scope_predicates(_t_materials, current_user.tenant_id, wh_id)
+    b_scope = build_scope_predicates(_t_batches, current_user.tenant_id, wh_id)
 
-        if not row and stock_data.fuzzy:
-            matcher = get_fuzzy_matcher()
-            result = matcher.resolve(product_name, entity_type="material",
-                                     tenant_id=current_user.tenant_id, warehouse_id=wh_id)
-            if result['confident'] and result['best_match']:
-                resolved_from = product_name
-                best = result['best_match']
-                extra = best.get('extra') or {}
-                resolved_variant = extra.get('variant')
-                resolved_name = best['name']
-                if resolved_variant:
-                    resolved_name = resolved_name.replace(f" {resolved_variant}", "").strip()
-                product_name = resolved_name
-                cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}',
-                               (product_name,) + wh_params)
-                row = cursor.fetchone()
-            elif result['candidates']:
-                names = [c['name'] for c in result['candidates'][:5]]
-                return StockOutResponse(
-                    success=False, error="ambiguous_name",
-                    message=f"无法确定产品 '{product_name}'，候选：{', '.join(names)}",
-                    candidates=result['candidates'],
-                )
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_materials.c.id, _t_materials.c.unit, _t_materials.c.safe_stock).where(
+                and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+            )
+        ).first()
 
-        if not row:
-            return StockOutResponse(success=False,
-                                    error=f"产品不存在: {product_name}",
-                                    message=f"出库失败：未找到产品 '{product_name}'")
+    if not row and stock_data.fuzzy:
+        matcher = get_fuzzy_matcher()
+        result = matcher.resolve(product_name, entity_type="material",
+                                 tenant_id=current_user.tenant_id, warehouse_id=wh_id)
+        if result['confident'] and result['best_match']:
+            resolved_from = product_name
+            best = result['best_match']
+            extra = best.get('extra') or {}
+            resolved_variant = extra.get('variant')
+            resolved_name = best['name']
+            if resolved_variant:
+                resolved_name = resolved_name.replace(f" {resolved_variant}", "").strip()
+            product_name = resolved_name
+            with get_engine().connect() as sa_conn:
+                row = sa_conn.execute(
+                    select(_t_materials.c.id, _t_materials.c.unit, _t_materials.c.safe_stock).where(
+                        and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+                    )
+                ).first()
+        elif result['candidates']:
+            names = [c['name'] for c in result['candidates'][:5]]
+            return StockOutResponse(
+                success=False, error="ambiguous_name",
+                message=f"无法确定产品 '{product_name}'，候选：{', '.join(names)}",
+                candidates=result['candidates'],
+            )
 
-        material_id = row['id']
-        unit = row['unit']
-        safe_stock = row['safe_stock']
+    if not row:
+        return StockOutResponse(success=False,
+                                error=f"产品不存在: {product_name}",
+                                message=f"出库失败：未找到产品 '{product_name}'")
 
-        effective_variant = stock_data.variant or resolved_variant
-        effective_location = stock_data.location
+    material_id = row.id
+    unit = row.unit
+    safe_stock = row.safe_stock
 
-        if stock_data.location_fuzzy and effective_location:
-            loc_result = get_fuzzy_matcher().resolve_location_in_scope(
-                material_id, wh_id, effective_location)
-            if loc_result['confident'] and loc_result['best_match']:
-                effective_location = loc_result['best_match']['name']
-            elif loc_result['candidates']:
-                names = [c['name'] for c in loc_result['candidates'][:5]]
-                return StockOutResponse(
-                    success=False, error="location_ambiguous",
-                    message=f"库位 '{stock_data.location}' 在该产品下匹配多个：{', '.join(names)}",
-                    candidates=loc_result['candidates'],
-                )
-            else:
-                cursor.execute(
-                    """SELECT DISTINCT location FROM batches
-                       WHERE material_id = ? AND warehouse_id = ?
-                         AND is_exhausted = 0 AND quantity > 0
-                         AND location IS NOT NULL AND location != ''""",
-                    (material_id, wh_id))
-                avail = [r['location'] for r in cursor.fetchall()]
-                return StockOutResponse(
-                    success=False, error="location_not_found",
-                    message=f"该产品在此仓库下没有匹配 '{stock_data.location}' 的库位。"
-                            f"可用库位：{', '.join(avail) if avail else '（无）'}",
-                )
+    effective_variant = stock_data.variant or resolved_variant
+    effective_location = stock_data.location
 
-        # ─── 分支 A：指定批次精确扣减 ───
-        if stock_data.batch_no:
-            cursor.execute(
-                f"""SELECT id, batch_no, quantity, location, variant, material_id, warehouse_id
-                    FROM batches WHERE batch_no = ?{wh_filter}""",
-                (stock_data.batch_no,) + wh_params)
-            batch = cursor.fetchone()
-            if not batch or batch['material_id'] != material_id:
+    if stock_data.location_fuzzy and effective_location:
+        loc_result = get_fuzzy_matcher().resolve_location_in_scope(
+            material_id, wh_id, effective_location)
+        if loc_result['confident'] and loc_result['best_match']:
+            effective_location = loc_result['best_match']['name']
+        elif loc_result['candidates']:
+            names = [c['name'] for c in loc_result['candidates'][:5]]
+            return StockOutResponse(
+                success=False, error="location_ambiguous",
+                message=f"库位 '{stock_data.location}' 在该产品下匹配多个：{', '.join(names)}",
+                candidates=loc_result['candidates'],
+            )
+        else:
+            with get_engine().connect() as sa_conn:
+                avail_rows = sa_conn.execute(
+                    select(_t_batches.c.location).where(
+                        and_(
+                            _t_batches.c.material_id == material_id,
+                            _t_batches.c.warehouse_id == wh_id,
+                            _t_batches.c.is_exhausted == 0,
+                            _t_batches.c.quantity > 0,
+                            _t_batches.c.location.is_not(None),
+                            _t_batches.c.location != '',
+                        )
+                    ).distinct()
+                ).all()
+            avail = [r.location for r in avail_rows]
+            return StockOutResponse(
+                success=False, error="location_not_found",
+                message=f"该产品在此仓库下没有匹配 '{stock_data.location}' 的库位。"
+                        f"可用库位：{', '.join(avail) if avail else '（无）'}",
+            )
+
+    record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+    now_dt = datetime.now()
+
+    # ─── 分支 A：指定批次精确扣减 ───
+    if stock_data.batch_no:
+        with get_engine().begin() as sa_conn:
+            batch = sa_conn.execute(
+                select(
+                    _t_batches.c.id, _t_batches.c.batch_no, _t_batches.c.quantity,
+                    _t_batches.c.location, _t_batches.c.variant,
+                    _t_batches.c.material_id, _t_batches.c.warehouse_id,
+                ).where(and_(_t_batches.c.batch_no == stock_data.batch_no, *b_scope))
+            ).first()
+            if not batch or batch.material_id != material_id:
                 return StockOutResponse(
                     success=False, error="batch_not_found",
                     message=f"批次 '{stock_data.batch_no}' 不存在或不属于当前产品/仓库")
 
-            if effective_location and effective_location != (batch['location'] or ''):
+            if effective_location and effective_location != (batch.location or ''):
                 return StockOutResponse(
                     success=False, error="batch_field_mismatch",
-                    message=f"批次 {batch['batch_no']} 实际位于库位 "
-                            f"'{batch['location'] or '（未设置）'}'，与指定的 '{effective_location}' 不符")
-            if effective_variant and effective_variant != (batch['variant'] or ''):
+                    message=f"批次 {batch.batch_no} 实际位于库位 "
+                            f"'{batch.location or '（未设置）'}'，与指定的 '{effective_location}' 不符")
+            if effective_variant and effective_variant != (batch.variant or ''):
                 return StockOutResponse(
                     success=False, error="batch_field_mismatch",
-                    message=f"批次 {batch['batch_no']} 实际变体 "
-                            f"'{batch['variant']}'，与指定的 '{effective_variant}' 不符")
+                    message=f"批次 {batch.batch_no} 实际变体 "
+                            f"'{batch.variant}'，与指定的 '{effective_variant}' 不符")
 
-            if batch['quantity'] < quantity:
+            if batch.quantity < quantity:
                 return StockOutResponse(
                     success=False, error="batch_insufficient_stock",
-                    message=f"批次 {batch['batch_no']} 余量 {batch['quantity']} {unit}，"
+                    message=f"批次 {batch.batch_no} 余量 {batch.quantity} {unit}，"
                             f"不足以出库 {quantity} {unit}（不会自动补其它批次）")
 
-            cursor.execute(
-                "UPDATE materials SET quantity = quantity - ? WHERE id = ? AND quantity >= ?",
-                (quantity, material_id, quantity))
-            if cursor.rowcount == 0:
-                cursor.execute("SELECT quantity FROM materials WHERE id = ?", (material_id,))
-                current_qty = cursor.fetchone()['quantity']
+            mat_upd = sa_conn.execute(
+                update(_t_materials)
+                    .where(and_(_t_materials.c.id == material_id, _t_materials.c.quantity >= quantity))
+                    .values(quantity=_t_materials.c.quantity - quantity)
+            )
+            if mat_upd.rowcount == 0:
+                cur_row = sa_conn.execute(
+                    select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
+                ).first()
+                current_qty = cur_row.quantity if cur_row else 0
                 return StockOutResponse(
                     success=False, error="库存不足",
                     message=f"出库失败：{product_name} 库存 {current_qty} {unit}，"
                             f"不足以出库 {quantity} {unit}")
-            new_quantity = cursor.execute("SELECT quantity FROM materials WHERE id = ?",
-                                          (material_id,)).fetchone()['quantity']
+            new_qty_row = sa_conn.execute(
+                select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
+            ).first()
+            new_quantity = new_qty_row.quantity
             old_quantity = new_quantity + quantity
 
-            cursor.execute(
-                """INSERT INTO inventory_records
-                   (material_id, type, quantity, operator, operator_user_id,
-                    reason_category, reason_note, contact_id, warehouse_id, tenant_id, created_at)
-                   VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (material_id, quantity, operator, operator_user_id, reason_category,
-                 reason_note, stock_data.contact_id, wh_id,
-                 resolve_tenant_id_for_write(current_user, wh_id),
-                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            record_id = cursor.lastrowid
+            ins_rec = sa_conn.execute(
+                insert(_t_inventory_records).values(
+                    material_id=material_id, type='out', quantity=quantity,
+                    operator=operator, operator_user_id=operator_user_id,
+                    reason_category=reason_category, reason_note=reason_note,
+                    contact_id=stock_data.contact_id, warehouse_id=wh_id,
+                    tenant_id=record_tenant_id, created_at=now_dt,
+                )
+            )
+            record_id = ins_rec.inserted_primary_key[0]
 
             consume_qty = quantity
-            cursor.execute(
-                """UPDATE batches
-                   SET quantity = quantity - ?,
-                       is_exhausted = CASE WHEN quantity - ? <= 0 THEN 1 ELSE 0 END
-                   WHERE id = ? AND quantity >= ? AND is_exhausted = 0""",
-                (consume_qty, consume_qty, batch['id'], consume_qty),
+            batch_upd = sa_conn.execute(
+                update(_t_batches)
+                    .where(and_(
+                        _t_batches.c.id == batch.id,
+                        _t_batches.c.quantity >= consume_qty,
+                        _t_batches.c.is_exhausted == 0,
+                    ))
+                    .values(
+                        quantity=_t_batches.c.quantity - consume_qty,
+                        is_exhausted=case(
+                            (_t_batches.c.quantity - consume_qty <= 0, 1),
+                            else_=0,
+                        ),
+                    )
             )
-            if cursor.rowcount != 1:
-                conn.rollback()
-                return StockOutResponse(
-                    success=False, error="batch_race_conflict",
-                    message="批次并发冲突，请重试",
-                )
-            cursor.execute(
-                """INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
-                   VALUES (?, ?, ?, ?)""",
-                (record_id, batch['id'], consume_qty,
-                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            if batch_upd.rowcount != 1:
+                raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
 
-            remaining_qty = max(batch['quantity'] - consume_qty, 0)
+            sa_conn.execute(
+                insert(_t_batch_consumptions).values(
+                    record_id=record_id, batch_id=batch.id,
+                    quantity=consume_qty, created_at=now_dt,
+                )
+            )
+
+            remaining_qty = max(batch.quantity - consume_qty, 0)
             batch_consumptions = [BatchConsumption(
-                batch_no=batch['batch_no'], batch_id=batch['id'],
-                quantity=consume_qty, remaining=remaining_qty, variant=batch['variant'],
+                batch_no=batch.batch_no, batch_id=batch.id,
+                quantity=consume_qty, remaining=remaining_qty, variant=batch.variant,
             )]
-            conn.commit()
-            get_fuzzy_matcher().invalidate_cache()
 
-            audit_log("STOCK_OUT", current_user.id, current_user.username, {
-                "product": product_name, "quantity": quantity,
-                "old_qty": old_quantity, "new_qty": new_quantity,
-                "resolved_from": resolved_from,
-                "specified_batch": batch['batch_no'],
-            })
-
-            warning = ""
-            if safe_stock is not None and new_quantity < safe_stock:
-                if new_quantity < safe_stock * 0.5:
-                    warning = f"⚠️ 警告：库存告急！当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit} 的50%"
-                else:
-                    warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
-
-            return StockOutResponse(
-                success=True, operation="stock_out",
-                product=StockOperationProduct(
-                    name=product_name, old_quantity=old_quantity,
-                    out_quantity=quantity, new_quantity=new_quantity,
-                    unit=unit, safe_stock=safe_stock,
-                ),
-                batch_consumptions=batch_consumptions,
-                message=f"出库成功：{product_name} 从指定批次 {batch['batch_no']} "
-                        f"出库 {quantity} {unit}，库存 {old_quantity}→{new_quantity} {unit}",
-                warning=warning if warning else None,
-                resolved_from=resolved_from,
-            )
-
-        # ─── 分支 B：FIFO（支持 location / variant 过滤） ───
-        if effective_location or effective_variant:
-            precheck_sql = """SELECT COALESCE(SUM(quantity), 0) AS avail FROM batches
-                              WHERE material_id = ? AND warehouse_id = ?
-                                AND is_exhausted = 0 AND quantity > 0"""
-            precheck_params = [material_id, wh_id]
-            if effective_variant:
-                precheck_sql += ' AND variant = ?'
-                precheck_params.append(effective_variant)
-            if effective_location:
-                precheck_sql += ' AND location = ?'
-                precheck_params.append(effective_location)
-            cursor.execute(precheck_sql, precheck_params)
-            avail_qty = cursor.fetchone()['avail']
-            if avail_qty < quantity:
-                scope = []
-                if effective_location:
-                    scope.append(f"位置 '{effective_location}'")
-                if effective_variant:
-                    scope.append(f"变体 '{effective_variant}'")
-                return StockOutResponse(
-                    success=False, error="库存不足",
-                    message=f"出库失败：{product_name} 在 {'、'.join(scope)} "
-                            f"的可用库存为 {avail_qty} {unit}，需要出库 {quantity} {unit}")
-
-        cursor.execute(
-            "UPDATE materials SET quantity = quantity - ? WHERE id = ? AND quantity >= ?",
-            (quantity, material_id, quantity))
-        if cursor.rowcount == 0:
-            cursor.execute("SELECT quantity FROM materials WHERE id = ?", (material_id,))
-            current_qty = cursor.fetchone()['quantity']
-            return StockOutResponse(
-                success=False, error="库存不足",
-                message=f"出库失败：{product_name} 库存 {current_qty} {unit}，"
-                        f"不足以出库 {quantity} {unit}")
-        new_quantity = cursor.execute("SELECT quantity FROM materials WHERE id = ?",
-                                      (material_id,)).fetchone()['quantity']
-        old_quantity = new_quantity + quantity
-
-        cursor.execute(
-            """INSERT INTO inventory_records
-               (material_id, type, quantity, operator, operator_user_id,
-                reason_category, reason_note, contact_id, warehouse_id, tenant_id, created_at)
-               VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (material_id, quantity, operator, operator_user_id, reason_category,
-             reason_note, stock_data.contact_id, wh_id,
-             resolve_tenant_id_for_write(current_user, wh_id),
-             datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        record_id = cursor.lastrowid
-
-        batch_consumptions = []
-        remaining_to_consume = quantity
-        fifo_sql = """SELECT id, batch_no, quantity, variant, location FROM batches
-                      WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0"""
-        fifo_params = [material_id]
-        if effective_variant:
-            fifo_sql += ' AND variant = ?'
-            fifo_params.append(effective_variant)
-        if effective_location:
-            fifo_sql += ' AND location = ?'
-            fifo_params.append(effective_location)
-        fifo_sql += ' ORDER BY created_at ASC'
-        cursor.execute(fifo_sql, fifo_params)
-
-        for b in cursor.fetchall():
-            if remaining_to_consume <= 0:
-                break
-            consume_qty = min(b['quantity'], remaining_to_consume)
-            remaining_to_consume -= consume_qty
-            cursor.execute(
-                """UPDATE batches
-                   SET quantity = quantity - ?,
-                       is_exhausted = CASE WHEN quantity - ? <= 0 THEN 1 ELSE 0 END
-                   WHERE id = ? AND quantity >= ? AND is_exhausted = 0""",
-                (consume_qty, consume_qty, b['id'], consume_qty),
-            )
-            if cursor.rowcount != 1:
-                conn.rollback()
-                return StockOutResponse(
-                    success=False, error="batch_race_conflict",
-                    message="批次并发冲突，请重试",
-                )
-            cursor.execute(
-                """INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
-                   VALUES (?, ?, ?, ?)""",
-                (record_id, b['id'], consume_qty,
-                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            remaining_qty = max(b['quantity'] - consume_qty, 0)
-            batch_consumptions.append(BatchConsumption(
-                batch_no=b['batch_no'], batch_id=b['id'],
-                quantity=consume_qty, remaining=remaining_qty, variant=b['variant'],
-            ))
-
-        conn.commit()
         get_fuzzy_matcher().invalidate_cache()
 
         audit_log("STOCK_OUT", current_user.id, current_user.username, {
             "product": product_name, "quantity": quantity,
             "old_qty": old_quantity, "new_qty": new_quantity,
             "resolved_from": resolved_from,
-            "batches": [bc.batch_no for bc in batch_consumptions],
+            "specified_batch": batch.batch_no,
         })
 
         warning = ""
@@ -4172,11 +4102,6 @@ async def stock_out(
             else:
                 warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
 
-        batch_details = ""
-        if batch_consumptions:
-            details = [f"{bc.batch_no}×{bc.quantity}" for bc in batch_consumptions]
-            batch_details = f"（消耗批次: {', '.join(details)}）"
-
         return StockOutResponse(
             success=True, operation="stock_out",
             product=StockOperationProduct(
@@ -4184,12 +4109,163 @@ async def stock_out(
                 out_quantity=quantity, new_quantity=new_quantity,
                 unit=unit, safe_stock=safe_stock,
             ),
-            batch_consumptions=batch_consumptions if batch_consumptions else None,
-            message=f"出库成功：{product_name} 出库 {quantity} {unit}{batch_details}，"
-                    f"库存从 {old_quantity} 更新到 {new_quantity} {unit}",
+            batch_consumptions=batch_consumptions,
+            message=f"出库成功：{product_name} 从指定批次 {batch.batch_no} "
+                    f"出库 {quantity} {unit}，库存 {old_quantity}→{new_quantity} {unit}",
             warning=warning if warning else None,
             resolved_from=resolved_from,
         )
+
+    # ─── 分支 B：FIFO（支持 location / variant 过滤） ───
+    if effective_location or effective_variant:
+        precheck_preds = [
+            _t_batches.c.material_id == material_id,
+            _t_batches.c.warehouse_id == wh_id,
+            _t_batches.c.is_exhausted == 0,
+            _t_batches.c.quantity > 0,
+        ]
+        if effective_variant:
+            precheck_preds.append(_t_batches.c.variant == effective_variant)
+        if effective_location:
+            precheck_preds.append(_t_batches.c.location == effective_location)
+        with get_engine().connect() as sa_conn:
+            avail_qty = sa_conn.execute(
+                select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+                    .where(and_(*precheck_preds))
+            ).scalar() or 0
+        if avail_qty < quantity:
+            scope = []
+            if effective_location:
+                scope.append(f"位置 '{effective_location}'")
+            if effective_variant:
+                scope.append(f"变体 '{effective_variant}'")
+            return StockOutResponse(
+                success=False, error="库存不足",
+                message=f"出库失败：{product_name} 在 {'、'.join(scope)} "
+                        f"的可用库存为 {avail_qty} {unit}，需要出库 {quantity} {unit}")
+
+    with get_engine().begin() as sa_conn:
+        mat_upd = sa_conn.execute(
+            update(_t_materials)
+                .where(and_(_t_materials.c.id == material_id, _t_materials.c.quantity >= quantity))
+                .values(quantity=_t_materials.c.quantity - quantity)
+        )
+        if mat_upd.rowcount == 0:
+            cur_row = sa_conn.execute(
+                select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
+            ).first()
+            current_qty = cur_row.quantity if cur_row else 0
+            return StockOutResponse(
+                success=False, error="库存不足",
+                message=f"出库失败：{product_name} 库存 {current_qty} {unit}，"
+                        f"不足以出库 {quantity} {unit}")
+        new_qty_row = sa_conn.execute(
+            select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
+        ).first()
+        new_quantity = new_qty_row.quantity
+        old_quantity = new_quantity + quantity
+
+        ins_rec = sa_conn.execute(
+            insert(_t_inventory_records).values(
+                material_id=material_id, type='out', quantity=quantity,
+                operator=operator, operator_user_id=operator_user_id,
+                reason_category=reason_category, reason_note=reason_note,
+                contact_id=stock_data.contact_id, warehouse_id=wh_id,
+                tenant_id=record_tenant_id, created_at=now_dt,
+            )
+        )
+        record_id = ins_rec.inserted_primary_key[0]
+
+        batch_consumptions = []
+        remaining_to_consume = quantity
+        fifo_preds = [
+            _t_batches.c.material_id == material_id,
+            _t_batches.c.is_exhausted == 0,
+            _t_batches.c.quantity > 0,
+        ]
+        if effective_variant:
+            fifo_preds.append(_t_batches.c.variant == effective_variant)
+        if effective_location:
+            fifo_preds.append(_t_batches.c.location == effective_location)
+        fifo_stmt = (
+            select(
+                _t_batches.c.id, _t_batches.c.batch_no, _t_batches.c.quantity,
+                _t_batches.c.variant, _t_batches.c.location,
+            )
+            .where(and_(*fifo_preds))
+            .order_by(_t_batches.c.created_at.asc())
+            .with_for_update()
+        )
+        fifo_rows = sa_conn.execute(fifo_stmt).all()
+
+        for b in fifo_rows:
+            if remaining_to_consume <= 0:
+                break
+            consume_qty = min(b.quantity, remaining_to_consume)
+            remaining_to_consume -= consume_qty
+            batch_upd = sa_conn.execute(
+                update(_t_batches)
+                    .where(and_(
+                        _t_batches.c.id == b.id,
+                        _t_batches.c.quantity >= consume_qty,
+                        _t_batches.c.is_exhausted == 0,
+                    ))
+                    .values(
+                        quantity=_t_batches.c.quantity - consume_qty,
+                        is_exhausted=case(
+                            (_t_batches.c.quantity - consume_qty <= 0, 1),
+                            else_=0,
+                        ),
+                    )
+            )
+            if batch_upd.rowcount != 1:
+                raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
+            sa_conn.execute(
+                insert(_t_batch_consumptions).values(
+                    record_id=record_id, batch_id=b.id,
+                    quantity=consume_qty, created_at=now_dt,
+                )
+            )
+            remaining_qty = max(b.quantity - consume_qty, 0)
+            batch_consumptions.append(BatchConsumption(
+                batch_no=b.batch_no, batch_id=b.id,
+                quantity=consume_qty, remaining=remaining_qty, variant=b.variant,
+            ))
+
+    get_fuzzy_matcher().invalidate_cache()
+
+    audit_log("STOCK_OUT", current_user.id, current_user.username, {
+        "product": product_name, "quantity": quantity,
+        "old_qty": old_quantity, "new_qty": new_quantity,
+        "resolved_from": resolved_from,
+        "batches": [bc.batch_no for bc in batch_consumptions],
+    })
+
+    warning = ""
+    if safe_stock is not None and new_quantity < safe_stock:
+        if new_quantity < safe_stock * 0.5:
+            warning = f"⚠️ 警告：库存告急！当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit} 的50%"
+        else:
+            warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
+
+    batch_details = ""
+    if batch_consumptions:
+        details = [f"{bc.batch_no}×{bc.quantity}" for bc in batch_consumptions]
+        batch_details = f"（消耗批次: {', '.join(details)}）"
+
+    return StockOutResponse(
+        success=True, operation="stock_out",
+        product=StockOperationProduct(
+            name=product_name, old_quantity=old_quantity,
+            out_quantity=quantity, new_quantity=new_quantity,
+            unit=unit, safe_stock=safe_stock,
+        ),
+        batch_consumptions=batch_consumptions if batch_consumptions else None,
+        message=f"出库成功：{product_name} 出库 {quantity} {unit}{batch_details}，"
+                f"库存从 {old_quantity} 更新到 {new_quantity} {unit}",
+        warning=warning if warning else None,
+        resolved_from=resolved_from,
+    )
 
 
 # ============ Excel Import/Export APIs ============
