@@ -3352,7 +3352,7 @@ def get_product_records(
 
 
 @app.get("/api/reason-categories")
-def get_reason_categories():
+def get_reason_categories(current_user: CurrentUser = Depends(require_auth('view'))):
     """获取出入库原因分类列表"""
     return {
         "in": [{"key": k, "label": REASON_CATEGORY_LABELS[k]} for k in REASON_CATEGORIES["in"]],
@@ -5488,7 +5488,7 @@ def _get_providers_custom_dir() -> str:
 
 
 @app.get("/api/system/mode")
-async def get_system_mode(current_user: CurrentUser = Depends(get_current_user)):
+async def get_system_mode(current_user: CurrentUser = Depends(require_auth('view'))):
     """查询系统当前运行模式（self_owned / external_erp）及部署模式（single_tenant / multi_tenant）"""
     with get_db() as conn:
         cursor = conn.cursor()
@@ -5638,6 +5638,59 @@ def _ensure_provider_tenant(row, current_user: CurrentUser):
     """确认 provider 属于当前租户（全局 admin 例外）。失败抛 403。"""
     if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="无权操作其他租户的 Provider")
+
+
+@app.get("/api/erp/providers/active-for-mcp")
+async def get_active_provider_for_mcp(
+    current_user: CurrentUser = Depends(require_auth('view'))
+):
+    """返回当前租户激活的 ERP Provider 信息，供 MCP 引导使用。
+
+    多租户隔离：使用 build_scope_filter 按 current_user.tenant_id 过滤，
+    防止 MCP 通过裸 sqlite 拿到其他租户的 Provider（旧代码的跨租户泄露点）。
+
+    返回：
+        - 系统模式非 external_erp：{"mode": "self_owned", "provider": null}
+        - external_erp 但当前租户没有激活的 Provider：404
+        - 否则：{"mode": "external_erp", "provider": {id, provider_name, filename, config}}
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM system_settings WHERE key = 'system_mode'")
+        row = cursor.fetchone()
+        mode = row['value'] if row else 'self_owned'
+
+        if mode != 'external_erp':
+            return {"mode": "self_owned", "provider": None}
+
+        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id, table_alias='')
+        cursor.execute(
+            f"""
+            SELECT id, provider_name, filename, config
+            FROM erp_providers
+            WHERE is_active = 1{tenant_filter}
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            tenant_params,
+        )
+        provider_row = cursor.fetchone()
+
+    if not provider_row:
+        raise HTTPException(
+            status_code=404,
+            detail="当前租户没有激活的 ERP Provider"
+        )
+
+    return {
+        "mode": "external_erp",
+        "provider": {
+            "id": provider_row['id'],
+            "provider_name": provider_row['provider_name'],
+            "filename": provider_row['filename'],
+            "config": _json.loads(provider_row['config']) if provider_row['config'] else {},
+        },
+    }
 
 
 @app.get("/api/erp/providers/{provider_id}")
