@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from typing import List, Optional
 from io import BytesIO
 from functools import wraps
+from enum import Enum, IntEnum
 
 # 速率限制
 from slowapi import Limiter
@@ -285,6 +286,48 @@ ROLE_LEVELS = {
 }
 
 
+class Role(IntEnum):
+    """Numeric role levels. Higher = more privileged."""
+    VIEW = 1
+    OPERATE = 2
+    ADMIN = 3
+
+    @classmethod
+    def from_str(cls, s: str) -> "Role":
+        return {"view": cls.VIEW, "operate": cls.OPERATE, "admin": cls.ADMIN}[s.lower()]
+
+
+class Resource(str, Enum):
+    """Resource categories used by require_permission()."""
+    CONTACTS = "contacts"
+    USERS = "users"
+    MATERIALS = "materials"
+    INVENTORY = "inventory"
+    WAREHOUSES = "warehouses"
+    TENANTS = "tenants"
+    API_KEYS = "api_keys"
+    MCP = "mcp"
+    ERP = "erp"
+    FACE = "face"
+    SYSTEM = "system"
+    DASHBOARD = "dashboard"
+    SEARCH = "search"
+
+
+class Action(str, Enum):
+    """Actions that can be performed on a Resource."""
+    READ = "read"        # → Role.VIEW
+    WRITE = "write"      # → Role.OPERATE
+    ADMIN = "admin"      # → Role.ADMIN
+
+
+_ACTION_TO_ROLE: "dict[Action, Role]" = {
+    Action.READ: Role.VIEW,
+    Action.WRITE: Role.OPERATE,
+    Action.ADMIN: Role.ADMIN,
+}
+
+
 class CurrentUser:
     """当前用户信息"""
     def __init__(self, user_id: int = None, username: str = None,
@@ -483,6 +526,93 @@ def require_auth(min_role: str = 'view'):
             raise HTTPException(status_code=403, detail="权限不足")
         return current_user
     return dependency
+
+
+def require_permission(resource: Resource, action: Action):
+    """Dependency factory keyed by (resource, action).
+
+    Produces byte-for-byte identical 401/403 responses to ``require_auth``
+    (same Chinese error strings, same status codes), so existing tests
+    continue to pass when an endpoint is migrated.
+
+    The returned dependency is tagged with ``__perm_marker__`` so the
+    boot-time route audit can recognise routes that use the new machinery.
+    """
+    if action not in _ACTION_TO_ROLE:
+        raise ValueError(f"Unknown action: {action}")
+    min_role = _ACTION_TO_ROLE[action]
+
+    async def _dep(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        # Match require_auth() exactly: reject guests with 401 first.
+        if current_user.is_guest:
+            raise HTTPException(status_code=401, detail="请先登录")
+        try:
+            user_role = Role.from_str(current_user.role)
+        except (KeyError, AttributeError):
+            raise HTTPException(status_code=403, detail="权限不足")
+        if user_role < min_role:
+            raise HTTPException(status_code=403, detail="权限不足")
+        return current_user
+
+    _dep.__perm_marker__ = True
+    _dep.__resource__ = resource
+    _dep.__action__ = action
+    return _dep
+
+
+def _route_has_guard(dep) -> bool:
+    """Recursively check a Dependant tree for require_auth or require_permission."""
+    call = getattr(dep, "call", None)
+    if call is not None:
+        if getattr(call, "__perm_marker__", False):
+            return True
+        qual = getattr(call, "__qualname__", "")
+        if "require_auth" in qual:
+            return True
+    for sub in getattr(dep, "dependencies", []) or []:
+        if _route_has_guard(sub):
+            return True
+    return False
+
+
+def _audit_routes() -> None:
+    """Walk all FastAPI routes; warn for any route that has no auth guard.
+
+    Exempts auth bootstrap endpoints, docs, health checks, and the SPA
+    catch-all. Wrapped in ``try/except`` at the call-site so that audit
+    bugs never block startup.
+    """
+    exempt_prefixes = (
+        "/api/auth/setup",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/auth/status",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/health",
+    )
+    unguarded: List[str] = []
+    for route in app.routes:
+        if not hasattr(route, "dependant"):
+            continue
+        path = getattr(route, "path", "")
+        if any(path.startswith(p) for p in exempt_prefixes):
+            continue
+        if path == "/{path:path}":  # SPA catch-all
+            continue
+        if _route_has_guard(route.dependant):
+            continue
+        methods = ",".join(sorted(getattr(route, "methods", []) or []))
+        func_name = getattr(getattr(route, "endpoint", None), "__name__", "?")
+        unguarded.append(f"{methods} {path} ({func_name})")
+    if unguarded:
+        import logging as _logging
+        _audit_logger = _logging.getLogger("permissions.audit")
+        _audit_logger.warning(
+            "Unguarded routes detected (will become hard error in a future release):\n  "
+            + "\n  ".join(unguarded)
+        )
 
 
 # ============ 仓库上下文辅助 ============
@@ -2181,7 +2311,7 @@ async def list_contacts(
     contact_type: Optional[str] = Query(None, description="类型: supplier/customer/all"),
     include_disabled: bool = Query(False, description="是否包含禁用的联系方"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
-    current_user: CurrentUser = Depends(require_auth('view')),
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
 ):
     """获取联系方列表（分页）— 联系方为租户级，不按仓库过滤。Phase 2c: SA Core reads."""
     conds = []
@@ -2248,7 +2378,7 @@ async def list_contacts(
 
 @app.get("/api/contacts/suppliers", response_model=List[ContactListItem])
 async def list_suppliers(
-    current_user: CurrentUser = Depends(require_auth('view')),
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
 ):
     """获取供应商列表（用于下拉选择）— 联系方为租户级。Phase 2c: SA Core read."""
     conds = [_t_contacts.c.is_supplier == 1, _t_contacts.c.is_disabled == 0]
@@ -2273,7 +2403,7 @@ async def list_suppliers(
 
 @app.get("/api/contacts/customers", response_model=List[ContactListItem])
 async def list_customers(
-    current_user: CurrentUser = Depends(require_auth('view')),
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
 ):
     """获取客户列表（用于下拉选择）— 联系方为租户级。Phase 2c: SA Core read."""
     conds = [_t_contacts.c.is_customer == 1, _t_contacts.c.is_disabled == 0]
@@ -2325,7 +2455,7 @@ async def get_operators_for_filter(
 @app.get("/api/contacts/{contact_id}", response_model=ContactItem)
 async def get_contact(
     contact_id: int,
-    current_user: CurrentUser = Depends(require_auth('view')),
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
 ):
     """获取单个联系方详情。Phase 2c: SA Core read."""
     stmt = select(
@@ -2362,7 +2492,7 @@ async def get_contact(
 @app.post("/api/contacts", response_model=ContactItem)
 async def create_contact(
     request: CreateContactRequest,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.WRITE))
 ):
     """创建联系方（需要operate权限）"""
     if not request.is_supplier and not request.is_customer:
@@ -2426,7 +2556,7 @@ async def create_contact(
 async def update_contact(
     contact_id: int,
     request: UpdateContactRequest,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.WRITE))
 ):
     """更新联系方（需要operate权限）"""
     with get_engine().begin() as sa_conn:
@@ -2490,7 +2620,7 @@ async def update_contact(
 @app.delete("/api/contacts/{contact_id}")
 async def delete_contact(
     contact_id: int,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.WRITE))
 ):
     """禁用联系方（需要operate权限）"""
     with get_engine().begin() as sa_conn:
@@ -5430,6 +5560,13 @@ async def _run_migrations():
         "script_location", os.path.join(os.path.dirname(__file__), "alembic")
     )
     alembic_command.upgrade(cfg, "head")
+
+    # Boot-time route audit (warning-only). Bugs here must NEVER crash
+    # startup, so we swallow any exception and log it.
+    try:
+        _audit_routes()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_audit_routes() skipped: {e}")
 
     if INIT_MOCK_DATA:
         try:
