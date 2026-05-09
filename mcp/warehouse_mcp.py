@@ -58,6 +58,15 @@ def load_config():
     if os.environ.get("WAREHOUSE_PROVIDER"):
         config['provider'] = os.environ.get("WAREHOUSE_PROVIDER")
 
+    # 兼容旧版顶层 api_key 字段：归一化为 auth.api_key 结构，
+    # 让 _face_guard / BaseProvider.get_auth_headers 等统一逻辑都能拿到。
+    if config.get('api_key') and not config.get('auth'):
+        config['auth'] = {
+            'type': 'api_key',
+            'key': config['api_key'],
+            'header': 'X-API-Key',
+        }
+
     return config
 
 
@@ -69,64 +78,86 @@ from providers import load_provider  # noqa: E402
 
 
 def _load_provider_from_db_or_default(default_config: dict):
-    """从数据库读取系统模式，若为 external_erp 则加载激活的自定义 Provider。
+    """通过后端 API 读取系统模式 / 激活 Provider，按租户隔离加载。
 
-    任何异常（数据库不存在、文件缺失等）均回退到默认 Provider。
+    旧版直接打开 sqlite 用 `SELECT * FROM erp_providers WHERE is_active = 1 LIMIT 1`，
+    在多租户部署里会拿到其他租户的 Provider。改为调用
+    GET /api/erp/providers/active-for-mcp，由后端按 X-API-Key 推导出的 tenant_id
+    做 build_scope_filter 隔离，从根上消除跨租户泄露点。
+
+    任何异常（网络错误、4xx/5xx、文件缺失等）均回退到默认 Provider。
     """
-    import sqlite3 as _sqlite3
-    import json as _json
+    import requests as _requests
 
-    db_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
-        'backend',
-        os.environ.get('DATABASE_PATH', 'warehouse.db')
-    )
+    api_base = (default_config.get('api_base_url') or '').rstrip('/')
+    if not api_base:
+        logger.warning("未配置 api_base_url，使用默认 Provider")
+        return load_provider(default_config)
+
+    headers = {}
+    auth = default_config.get('auth') or {}
+    if auth.get('type') == 'api_key':
+        key = auth.get('key', '')
+        if key:
+            headers[auth.get('header', 'X-API-Key')] = key
+    elif auth.get('type') == 'bearer':
+        headers['Authorization'] = f"Bearer {auth.get('token', '')}"
 
     try:
-        if not os.path.exists(db_path):
-            raise FileNotFoundError(f"数据库文件不存在: {db_path}")
-
-        conn = _sqlite3.connect(db_path)
-        conn.row_factory = _sqlite3.Row
-        cursor = conn.cursor()
-
-        # 读取系统模式
-        cursor.execute("SELECT value FROM system_settings WHERE key = 'system_mode'")
-        row = cursor.fetchone()
-        mode = row['value'] if row else 'self_owned'
-
-        if mode != 'external_erp':
-            conn.close()
-            return load_provider(default_config)
-
-        # 查询激活的 Provider
-        cursor.execute("SELECT * FROM erp_providers WHERE is_active = 1 LIMIT 1")
-        provider_row = cursor.fetchone()
-        conn.close()
-
-        if not provider_row:
-            logger.warning("系统模式为 external_erp 但没有激活的 Provider，回退到默认 Provider")
-            return load_provider(default_config)
-
-        # 构造 Provider 配置
-        stored_config = _json.loads(provider_row['config']) if provider_row['config'] else {}
-        merged_config = {**default_config, **stored_config}
-        merged_config['provider'] = provider_row['provider_name']
-
-        # 从文件动态加载
-        custom_dir = os.path.join(os.path.dirname(__file__), 'providers', 'custom')
-        filepath = os.path.join(custom_dir, provider_row['filename'])
-
-        if not os.path.exists(filepath):
-            logger.warning(f"激活的 Provider 文件不存在: {filepath}，回退到默认 Provider")
-            return load_provider(default_config)
-
-        from providers.test_runner import load_provider_from_file
-        logger.info(f"使用外部 ERP Provider: {provider_row['provider_name']} ({provider_row['filename']})")
-        return load_provider_from_file(filepath, merged_config)
-
+        resp = _requests.get(
+            f"{api_base}/erp/providers/active-for-mcp",
+            headers=headers,
+            timeout=default_config.get('timeout', 10),
+        )
     except Exception as e:
-        logger.warning(f"从数据库加载 Provider 失败: {e}，回退到默认 Provider")
+        logger.warning(f"调用 active-for-mcp 失败: {e}，回退到默认 Provider")
+        return load_provider(default_config)
+
+    if resp.status_code == 404:
+        logger.warning("系统模式为 external_erp 但当前租户没有激活的 Provider，回退到默认 Provider")
+        return load_provider(default_config)
+
+    if resp.status_code >= 400:
+        logger.warning(
+            f"active-for-mcp 返回 {resp.status_code}: {resp.text[:200]}，回退到默认 Provider"
+        )
+        return load_provider(default_config)
+
+    try:
+        payload = resp.json()
+    except Exception as e:
+        logger.warning(f"解析 active-for-mcp 响应失败: {e}，回退到默认 Provider")
+        return load_provider(default_config)
+
+    mode = payload.get('mode', 'self_owned')
+    if mode != 'external_erp':
+        return load_provider(default_config)
+
+    provider_info = payload.get('provider') or {}
+    provider_name = provider_info.get('provider_name')
+    filename = provider_info.get('filename')
+    stored_config = provider_info.get('config') or {}
+
+    if not provider_name or not filename:
+        logger.warning("active-for-mcp 响应缺少 provider 信息，回退到默认 Provider")
+        return load_provider(default_config)
+
+    merged_config = {**default_config, **stored_config}
+    merged_config['provider'] = provider_name
+
+    custom_dir = os.path.join(os.path.dirname(__file__), 'providers', 'custom')
+    filepath = os.path.join(custom_dir, filename)
+
+    if not os.path.exists(filepath):
+        logger.warning(f"激活的 Provider 文件不存在: {filepath}，回退到默认 Provider")
+        return load_provider(default_config)
+
+    try:
+        from providers.test_runner import load_provider_from_file
+        logger.info(f"使用外部 ERP Provider: {provider_name} ({filename})")
+        return load_provider_from_file(filepath, merged_config)
+    except Exception as e:
+        logger.warning(f"动态加载 Provider 文件失败: {e}，回退到默认 Provider")
         return load_provider(default_config)
 
 
