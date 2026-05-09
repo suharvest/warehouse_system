@@ -312,6 +312,7 @@ class Resource(str, Enum):
     SYSTEM = "system"
     DASHBOARD = "dashboard"
     SEARCH = "search"
+    AUTH = "auth"
 
 
 class Action(str, Enum):
@@ -1351,7 +1352,7 @@ async def logout(response: Response, current_user: CurrentUser = Depends(get_cur
 
 
 @app.get("/api/auth/me", response_model=UserInfo)
-async def get_current_user_info(current_user: CurrentUser = Depends(require_auth('view'))):
+async def get_current_user_info(current_user: CurrentUser = Depends(require_permission(Resource.AUTH, Action.READ))):
     """获取当前用户信息"""
     if current_user.is_guest:
         raise HTTPException(status_code=401, detail="未登录")
@@ -2864,7 +2865,7 @@ def fuzzy_match_endpoint(
     top_k: int = Query(5, ge=1, le=50, description="返回前k个结果"),
     threshold: float = Query(50.0, ge=0, le=100, description="最低分数阈值"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.SEARCH, Action.READ))
 ):
     """模糊匹配搜索（按当前租户/仓库范围过滤候选）"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -3172,7 +3173,7 @@ def _search_operators(cursor, q, fuzzy, fmt, page, page_size, scope_filter='', s
 @app.get("/api/materials/all", response_model=List[MaterialItem])
 def get_all_materials(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取所有库存（兼容旧API）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -3234,7 +3235,7 @@ def get_materials_list(
     fuzzy: bool = Query(True, description="名称模糊匹配开关"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取物料列表（分页+筛选）— 一行一批次 — Phase 2d: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -3383,7 +3384,7 @@ def get_materials_list(
 @app.get("/api/materials/categories", response_model=List[str])
 def get_categories(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取所有物料分类 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -3399,7 +3400,7 @@ def get_categories(
 def get_product_stats(
     name: str = Query(..., description="产品名称"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取单个产品的统计数据 — Phase 2e: SA Core read."""
     if not name:
@@ -3472,7 +3473,7 @@ def get_product_stats(
 def get_material_batches(
     name: str = Query(..., description="产品名称"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取物料的活跃批次列表 — Phase 2f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -3523,7 +3524,7 @@ def get_material_batches(
 def get_product_trend(
     name: str = Query(..., description="产品名称"),
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取单个产品的近7天趋势"""
     if not name:
@@ -3582,7 +3583,7 @@ def get_product_records(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=10, le=100, description="每页条数"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取单个产品的出入库记录（分页）— Phase 2e: SA Core read."""
     if not name:
@@ -3646,7 +3647,7 @@ def get_product_records(
 
 
 @app.get("/api/reason-categories")
-def get_reason_categories(current_user: CurrentUser = Depends(require_auth('view'))):
+def get_reason_categories(current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.READ))):
     """获取出入库原因分类列表"""
     return {
         "in": [{"key": k, "label": REASON_CATEGORY_LABELS[k]} for k in REASON_CATEGORIES["in"]],
@@ -3672,7 +3673,7 @@ def get_inventory_records_paginated(
     sort_order: str = Query("desc", description="排序方向: asc/desc"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.READ))
 ):
     """获取所有进出库记录（分页+筛选）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -3901,7 +3902,7 @@ def get_inventory_records_paginated(
 @app.post("/api/materials/stock-in", response_model=StockInResponse)
 async def stock_in(
     request: StockOperationRequest,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.WRITE))
 ):
     """入库操作（需要operate权限）- 自动创建批次，支持模糊匹配"""
     product_name = request.product_name
@@ -4042,7 +4043,7 @@ async def stock_in(
 async def stock_out(
     request: Request,
     stock_data: StockOperationRequest,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.WRITE))
 ):
     """出库操作（需要operate权限）- FIFO批次消耗，支持模糊匹配、指定批次。"""
     product_name = stock_data.product_name
@@ -4433,7 +4434,7 @@ def export_materials_excel(
     category: Optional[str] = Query(None, description="分类"),
     status: Optional[str] = Query(None, description="状态(逗号分隔)"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """导出库存数据为Excel — 一行一批次，含批次号、位置、联系方 — Phase 3f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -4599,7 +4600,7 @@ async def preview_import_excel(
     request: Request,
     file: UploadFile = File(...),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.WRITE))
 ):
     """预览Excel导入内容，自动检测简化模式/批次模式"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -4941,7 +4942,7 @@ async def preview_import_excel(
 @app.post("/api/materials/import-excel/confirm", response_model=ExcelImportResponse)
 async def confirm_import_excel(
     request: ExcelImportConfirm,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.WRITE))
 ):
     """确认导入，执行变更单（需要operate权限）— 统一创建批次"""
     wh_id = require_warehouse_id(current_user, request.warehouse_id)
@@ -5347,7 +5348,7 @@ def export_inventory_records(
     product_name: Optional[str] = Query(None, description="产品名称"),
     record_type: Optional[str] = Query(None, description="记录类型(in/out)"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.READ))
 ):
     """导出出入库记录为Excel（支持筛选，含批次信息）— Phase 3f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -5475,7 +5476,7 @@ def export_inventory_records(
 async def add_inventory_record(
     http_request: Request,
     request: ManualRecordRequest,
-    current_user: CurrentUser = Depends(require_auth('operate'))
+    current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.WRITE))
 ):
     """手动新增出入库记录（需要operate权限）- 返回StockInResponse或StockOutResponse"""
     # 使用请求中的operator，如果为空则使用当前用户名
@@ -6538,7 +6539,7 @@ async def deactivate_erp_provider(
 @app.get("/api/erp/providers/{provider_id}/status")
 async def get_erp_provider_status(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """实时检测 Provider 连通性（调用 get_today_statistics 作为健康探针）"""
     import time as _time
@@ -6629,7 +6630,7 @@ def _face_resolve_tenant(current_user: 'CurrentUser', tenant_id: Optional[int]) 
 @app.get("/api/face/config")
 async def face_get_config(
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     # Phase 2f: SA Core read.
@@ -6663,7 +6664,7 @@ async def face_get_config(
 async def face_put_config(
     payload: FaceConfigPayload,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     if payload.mode is not None and payload.mode not in ("local", "hello", "jetson", "custom"):
@@ -6707,7 +6708,7 @@ async def face_put_config(
 @app.get("/api/face/rules")
 async def face_list_rules(
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     # Phase 2f: SA Core read.
@@ -6746,7 +6747,7 @@ async def face_list_rules(
 async def face_create_rule(
     payload: FaceRulePayload,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     allowed_value = payload.allowed_subject_ids if payload.allowed_subject_ids else None
@@ -6770,7 +6771,7 @@ async def face_update_rule(
     rule_id: int,
     payload: FaceRulePayload,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     allowed_value = payload.allowed_subject_ids if payload.allowed_subject_ids else None
@@ -6800,7 +6801,7 @@ async def face_update_rule(
 async def face_delete_rule(
     rule_id: int,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_engine().begin() as sa_conn:
@@ -6821,7 +6822,7 @@ async def face_delete_rule(
 async def face_list_enrollments(
     subject_id: Optional[int] = None,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     """List face enrollments. Big columns (embedding/source_image_b64) are stripped by default. — Phase 2f: SA Core read."""
     tid = _face_resolve_tenant(current_user, tenant_id)
@@ -6866,7 +6867,7 @@ async def face_list_enrollments(
 async def face_create_enrollment(
     payload: FaceEnrollmentPayload,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.images_b64:
@@ -6906,7 +6907,7 @@ async def face_create_enrollment(
 async def face_delete_enrollment(
     enrollment_id: int,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_engine().begin() as sa_conn:
@@ -6926,7 +6927,7 @@ async def face_delete_enrollment(
 @app.post("/api/face/test-connection")
 async def face_test_connection(
     payload: FaceTestConnectionPayload,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     try:
         from backend.face.endpoint_client import health as _health, FaceEndpointError
@@ -6948,7 +6949,7 @@ async def face_list_logs(
     page: int = 1,
     page_size: int = 50,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     if page < 1:
@@ -7031,7 +7032,7 @@ async def face_verify_mcp(
 async def face_list_subjects(
     tenant_id: Optional[int] = None,
     include_inactive: bool = False,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     # Phase 2f: SA Core read.
@@ -7077,7 +7078,7 @@ async def face_list_subjects(
 async def face_create_subject(
     payload: FaceSubjectPayload,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.name or not payload.name.strip():
@@ -7104,7 +7105,7 @@ async def face_update_subject(
     subject_id: int,
     payload: FaceSubjectPayload,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     if not payload.name or not payload.name.strip():
@@ -7133,7 +7134,7 @@ async def face_update_subject(
 async def face_delete_subject(
     subject_id: int,
     tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_auth("admin")),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
     with get_engine().begin() as sa_conn:
