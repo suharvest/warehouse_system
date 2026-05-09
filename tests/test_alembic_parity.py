@@ -83,6 +83,13 @@ def _build_alembic_schema(tmpdir: Path) -> dict[str, dict]:
 
 @pytest.fixture(scope="module")
 def schemas():
+    # `schemas` builds a sqlite-only comparison (init_database is a no-op on
+    # MySQL since alembic owns the schema there). Tests using this fixture
+    # auto-skip on non-sqlite DATABASE_URL via this guard. The independent
+    # MySQL DDL render test does NOT use this fixture and still runs.
+    db_url = os.environ.get('DATABASE_URL', '')
+    if db_url and not db_url.startswith('sqlite'):
+        pytest.skip("init_database parity is sqlite-only")
     if shutil.which("alembic") is None:
         pytest.skip("alembic CLI not on PATH")
     with tempfile.TemporaryDirectory() as td:
