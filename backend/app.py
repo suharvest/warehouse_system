@@ -690,6 +690,11 @@ async def delete_warehouse(
         if wh['is_default']:
             raise HTTPException(status_code=400, detail="不能删除默认仓库")
 
+        # 拒绝删除非空仓库（防止产生"幽灵库存"）
+        cursor.execute('SELECT COUNT(*) AS n FROM materials WHERE warehouse_id = ? AND is_disabled = 0', (warehouse_id,))
+        if cursor.fetchone()['n'] > 0:
+            raise HTTPException(status_code=400, detail="仓库内仍有物料，无法删除")
+
         cursor.execute('UPDATE warehouses SET is_disabled = 1 WHERE id = ?', (warehouse_id,))
         conn.commit()
         return {"success": True, "message": "仓库已禁用"}
@@ -3656,8 +3661,8 @@ async def stock_in(
                               resolve_tenant_id_for_write(current_user, wh_id))
         wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
 
-        # 查询产品（先精确匹配，按仓库过滤）
-        cursor.execute(f'SELECT id, unit FROM materials WHERE name = ?{wh_filter}', (product_name,) + wh_params)
+        # 查询产品（先精确匹配，按仓库过滤；排除已禁用物料）
+        cursor.execute(f'SELECT id, unit FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}', (product_name,) + wh_params)
         row = cursor.fetchone()
 
         # 模糊匹配
@@ -3669,7 +3674,7 @@ async def stock_in(
             if result['confident'] and result['best_match']:
                 resolved_from = product_name
                 product_name = result['best_match']['name']
-                cursor.execute(f'SELECT id, unit FROM materials WHERE name = ?{wh_filter}', (product_name,) + wh_params)
+                cursor.execute(f'SELECT id, unit FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}', (product_name,) + wh_params)
                 row = cursor.fetchone()
             elif result['candidates']:
                 names = [c['name'] for c in result['candidates'][:5]]
@@ -3771,7 +3776,7 @@ async def stock_out(
                               resolve_tenant_id_for_write(current_user, wh_id))
         wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
 
-        cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ?{wh_filter}',
+        cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}',
                        (product_name,) + wh_params)
         row = cursor.fetchone()
 
@@ -3788,7 +3793,7 @@ async def stock_out(
                 if resolved_variant:
                     resolved_name = resolved_name.replace(f" {resolved_variant}", "").strip()
                 product_name = resolved_name
-                cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ?{wh_filter}',
+                cursor.execute(f'SELECT id, unit, safe_stock FROM materials WHERE name = ? AND is_disabled = 0{wh_filter}',
                                (product_name,) + wh_params)
                 row = cursor.fetchone()
             elif result['candidates']:
