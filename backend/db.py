@@ -24,6 +24,7 @@ from sqlalchemy.pool import NullPool, QueuePool
 
 
 _engine: Engine | None = None
+_engine_url: str | None = None
 
 
 def _resolve_database_url() -> str:
@@ -73,11 +74,30 @@ def _build_engine(url: str) -> Engine:
 
 
 def get_engine() -> Engine:
-    """Return the process-wide engine, creating it lazily."""
-    global _engine
-    if _engine is None:
-        _engine = _build_engine(_resolve_database_url())
+    """Return the process-wide engine, creating it lazily.
+
+    Re-resolves DATABASE_URL on each call; if it has changed since the
+    cached engine was built (e.g. a test fixture swapped DATABASE_PATH),
+    the stale engine is disposed and a fresh one is built. This makes
+    the module safe to use in test suites that monkeypatch the env.
+    """
+    global _engine, _engine_url
+    url = _resolve_database_url()
+    if _engine is None or _engine_url != url:
+        if _engine is not None:
+            _engine.dispose()
+        _engine = _build_engine(url)
+        _engine_url = url
     return _engine
+
+
+def reset_engine() -> None:
+    """Force-dispose the cached engine. Useful for tests."""
+    global _engine, _engine_url
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _engine_url = None
 
 
 # Convenience alias so callers can ``from backend.db import engine``.
