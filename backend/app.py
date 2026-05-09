@@ -770,7 +770,7 @@ def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optiona
 @app.get("/api/warehouses", response_model=List[WarehouseItem])
 async def list_warehouses(
     include_disabled: bool = False,
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.READ))
 ):
     """获取仓库列表 — Phase 2b: read via SQLAlchemy Core."""
     conds = []
@@ -806,7 +806,7 @@ async def list_warehouses(
 @app.post("/api/warehouses", response_model=WarehouseItem)
 async def create_warehouse(
     request: CreateWarehouseRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN))
 ):
     """创建仓库（仅管理员）"""
     import re
@@ -856,7 +856,7 @@ async def create_warehouse(
 async def update_warehouse(
     warehouse_id: int,
     request: UpdateWarehouseRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN))
 ):
     """更新仓库（仅管理员）"""
     with get_engine().begin() as sa_conn:
@@ -909,7 +909,7 @@ async def update_warehouse(
 @app.delete("/api/warehouses/{warehouse_id}")
 async def delete_warehouse(
     warehouse_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN))
 ):
     """禁用仓库（软删除，仅管理员）"""
     with get_engine().begin() as sa_conn:
@@ -943,7 +943,7 @@ async def delete_warehouse(
 @app.get("/api/users/{user_id}/warehouses")
 async def get_user_warehouses(
     user_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
 ):
     """获取用户授权的仓库列表 — Phase 2b: read via SQLAlchemy Core."""
     with get_engine().connect() as sa_conn:
@@ -971,7 +971,7 @@ async def get_user_warehouses(
 async def set_user_warehouses(
     user_id: int,
     request: UserWarehouseAssignment,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
 ):
     """设置用户授权的仓库列表"""
     with get_engine().begin() as sa_conn:
@@ -1366,7 +1366,7 @@ async def get_current_user_info(current_user: CurrentUser = Depends(require_auth
 
 
 @app.get("/api/auth/warehouses")
-async def get_my_warehouses(current_user: CurrentUser = Depends(require_auth('view'))):
+async def get_my_warehouses(current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.READ))):
     """获取当前用户可访问的仓库列表（含 tenant 信息，便于全局 admin 分组展示）"""
     with get_db() as conn:
         warehouses = current_user.get_authorized_warehouses(conn)
@@ -1395,7 +1395,7 @@ async def get_my_warehouses(current_user: CurrentUser = Depends(require_auth('vi
 # ============ User Management APIs ============
 
 @app.get("/api/users", response_model=List[UserListItem])
-async def list_users(current_user: CurrentUser = Depends(require_auth('admin'))):
+async def list_users(current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))):
     """获取用户列表（仅管理员）。Phase 2c: SA Core reads."""
     deploy_mode_local = get_deploy_mode()
     user_stmt = select(
@@ -1439,7 +1439,7 @@ async def list_users(current_user: CurrentUser = Depends(require_auth('admin')))
 @app.post("/api/users", response_model=UserListItem)
 async def create_user(
     request: CreateUserRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
 ):
     """创建用户（仅管理员）"""
     if request.role not in ['admin', 'operate', 'view']:
@@ -1511,7 +1511,7 @@ async def create_user(
 async def update_user(
     user_id: int,
     request: UpdateUserRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
 ):
     """更新用户（仅管理员）"""
     # bcrypt outside transaction
@@ -1596,7 +1596,7 @@ async def update_user(
 @app.delete("/api/users/{user_id}")
 async def delete_user(
     user_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
 ):
     """禁用用户（仅管理员）"""
     if user_id == current_user.id:
@@ -1627,7 +1627,7 @@ async def delete_user(
 # ============ API Key Management APIs ============
 
 @app.get("/api/api-keys", response_model=List[ApiKeyListItem])
-async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'))):
+async def list_api_keys(current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))):
     """获取API密钥列表（仅管理员）— Phase 2f: SA Core read."""
     preds = [_t_api_keys.c.is_system == 0]
     preds.extend(build_scope_predicates(_t_api_keys, current_user.tenant_id, None))
@@ -1666,7 +1666,7 @@ async def list_api_keys(current_user: CurrentUser = Depends(require_auth('admin'
 @app.post("/api/api-keys", response_model=ApiKeyResponse)
 async def create_api_key(
     request: CreateApiKeyRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
 ):
     """创建API密钥（仅管理员）"""
     if request.role not in ['admin', 'operate', 'view']:
@@ -1720,7 +1720,7 @@ async def create_api_key(
 @app.delete("/api/api-keys/{key_id}")
 async def delete_api_key(
     key_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
 ):
     """删除API密钥（仅管理员）"""
     with get_engine().begin() as sa_conn:
@@ -1741,7 +1741,7 @@ async def delete_api_key(
 async def toggle_api_key_status(
     key_id: int,
     request: ApiKeyStatusRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
 ):
     """切换API密钥状态（仅管理员）"""
     with get_engine().begin() as sa_conn:
@@ -2428,7 +2428,7 @@ async def list_customers(
 
 @app.get("/api/operators", response_model=List[OperatorListItem])
 async def get_operators_for_filter(
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.READ))
 ):
     """获取操作员列表（用于筛选下拉）- 返回所有有操作权限的用户。Phase 2c: SA Core read."""
     conds = [
