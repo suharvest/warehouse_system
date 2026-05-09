@@ -801,6 +801,33 @@ def build_scope_predicates(table, tenant_id, warehouse_id=None) -> list:
     return preds
 
 
+def assert_row_in_scope(
+    row,
+    current_user: 'CurrentUser',
+    *,
+    forbidden: str = "无权访问该资源",
+    tenant_key: str = "tenant_id",
+):
+    """Row-ownership assertion companion to ``build_scope_predicates``.
+
+    For tenant-scoped users (current_user.tenant_id is not None) the row's
+    ``tenant_key`` value must match. Global admins (tenant_id is None) pass
+    through unconditionally — mirroring the list-predicate semantics.
+
+    Accepts either a SQLAlchemy ``Row`` (attribute access) or a mapping
+    (dict-style). Raises HTTPException(403) on mismatch.
+    """
+    if current_user.tenant_id is None:
+        return
+    # Resolve the row's tenant value via either attribute or mapping access.
+    try:
+        row_tenant = row[tenant_key]  # mapping / Row mapping access
+    except (KeyError, TypeError):
+        row_tenant = getattr(row, tenant_key, None)
+    if row_tenant != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail=forbidden)
+
+
 def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
     """Resolve the tenant that should own a write record.
 
@@ -836,9 +863,7 @@ async def list_warehouses(
     current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.READ))
 ):
     """获取仓库列表 — Phase 2b: read via SQLAlchemy Core."""
-    conds = []
-    if current_user.tenant_id is not None:
-        conds.append(_t_warehouses.c.tenant_id == current_user.tenant_id)
+    conds = list(build_scope_predicates(_t_warehouses, current_user.tenant_id, None))
     if not (include_disabled and current_user.role == 'admin'):
         conds.append(_t_warehouses.c.is_disabled == 0)
     stmt = select(
@@ -1466,8 +1491,10 @@ async def list_users(current_user: CurrentUser = Depends(require_permission(Reso
         _t_users.c.role, _t_users.c.is_disabled, _t_users.c.created_at,
         _t_users.c.tenant_id,
     )
-    if deploy_mode_local == 'multi_tenant' and current_user.tenant_id is not None:
-        user_stmt = user_stmt.where(_t_users.c.tenant_id == current_user.tenant_id)
+    if deploy_mode_local == 'multi_tenant':
+        scope_preds = build_scope_predicates(_t_users, current_user.tenant_id, None)
+        if scope_preds:
+            user_stmt = user_stmt.where(*scope_preds)
     user_stmt = user_stmt.order_by(_t_users.c.created_at.desc())
 
     with get_engine().connect() as sa_conn:
@@ -2377,9 +2404,7 @@ async def list_contacts(
     current_user: CurrentUser = Depends(require_permission(Resource.CONTACTS, Action.READ)),
 ):
     """获取联系方列表（分页）— 联系方为租户级，不按仓库过滤。Phase 2c: SA Core reads."""
-    conds = []
-    if current_user.tenant_id is not None:
-        conds.append(_t_contacts.c.tenant_id == current_user.tenant_id)
+    conds = list(build_scope_predicates(_t_contacts, current_user.tenant_id, None))
     if not include_disabled:
         conds.append(_t_contacts.c.is_disabled == 0)
     if name:
@@ -2445,8 +2470,7 @@ async def list_suppliers(
 ):
     """获取供应商列表（用于下拉选择）— 联系方为租户级。Phase 2c: SA Core read."""
     conds = [_t_contacts.c.is_supplier == 1, _t_contacts.c.is_disabled == 0]
-    if current_user.tenant_id is not None:
-        conds.append(_t_contacts.c.tenant_id == current_user.tenant_id)
+    conds.extend(build_scope_predicates(_t_contacts, current_user.tenant_id, None))
     stmt = select(
         _t_contacts.c.id, _t_contacts.c.name,
         _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
@@ -2470,8 +2494,7 @@ async def list_customers(
 ):
     """获取客户列表（用于下拉选择）— 联系方为租户级。Phase 2c: SA Core read."""
     conds = [_t_contacts.c.is_customer == 1, _t_contacts.c.is_disabled == 0]
-    if current_user.tenant_id is not None:
-        conds.append(_t_contacts.c.tenant_id == current_user.tenant_id)
+    conds.extend(build_scope_predicates(_t_contacts, current_user.tenant_id, None))
     stmt = select(
         _t_contacts.c.id, _t_contacts.c.name,
         _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
@@ -2498,8 +2521,7 @@ async def get_operators_for_filter(
         _t_users.c.is_disabled == 0,
         _t_users.c.role.in_(['operate', 'admin']),
     ]
-    if current_user.tenant_id is not None:
-        conds.append(_t_users.c.tenant_id == current_user.tenant_id)
+    conds.extend(build_scope_predicates(_t_users, current_user.tenant_id, None))
     stmt = select(
         _t_users.c.id, _t_users.c.username, _t_users.c.display_name,
     ).where(and_(*conds)).order_by(_t_users.c.display_name, _t_users.c.username)
@@ -6280,8 +6302,7 @@ async def upload_erp_provider(
 
 def _ensure_provider_tenant(row, current_user: CurrentUser):
     """确认 provider 属于当前租户（全局 admin 例外）。失败抛 403。"""
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权操作其他租户的 Provider")
+    assert_row_in_scope(row, current_user, forbidden="无权操作其他租户的 Provider")
 
 
 @app.get("/api/erp/providers/active-for-mcp")
