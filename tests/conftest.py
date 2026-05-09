@@ -20,7 +20,50 @@ sys.path.insert(0, backend_dir)
 
 @pytest.fixture(scope="session")
 def test_db():
-    """Create a temporary test database, isolated from production."""
+    """Create a temporary test database, isolated from production.
+
+    If ``DATABASE_URL`` is set (e.g. for MySQL portability tests), honour it
+    directly: assume the schema has already been created via
+    ``alembic upgrade head`` and skip the sqlite-specific
+    ``database.init_database()`` path. Per-test isolation is provided by the
+    ``_mysql_truncate`` fixture below.
+
+    Otherwise, fall back to the historical sqlite-temp-file behaviour.
+    """
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url and not database_url.startswith('sqlite'):
+        os.environ.setdefault('INIT_MOCK_DATA', '0')
+        os.environ.setdefault('ENABLE_AUDIT_LOG', '0')
+        # database.py is still hardcoded to sqlite3, but app.py routes go
+        # through SQLAlchemy + DATABASE_URL. We import database to expose
+        # constants/helpers but skip init_database (alembic owns the schema).
+        import database  # noqa: F401
+        importlib.reload(database)
+        # Seed minimal data the sqlite init_database() would have inserted:
+        # default tenant (id=1), default warehouse (id=1), system_mode setting.
+        from db import get_engine
+        from sqlalchemy import text
+        eng = get_engine()
+        with eng.begin() as conn:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+            conn.execute(text(
+                "INSERT IGNORE INTO tenants (id, slug, name) VALUES (1, 'default', '默认租户')"
+            ))
+            conn.execute(text(
+                "INSERT IGNORE INTO warehouses (id, slug, name, is_default) "
+                "VALUES (1, 'default', '默认仓库', 1)"
+            ))
+            try:
+                conn.execute(text(
+                    "INSERT IGNORE INTO settings (`key`, `value`) "
+                    "VALUES ('system_mode', 'self_owned')"
+                ))
+            except Exception:
+                pass
+            conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+        yield database_url
+        return
+
     fd, db_path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
 
@@ -39,6 +82,44 @@ def test_db():
     try:
         os.unlink(db_path)
     except OSError:
+        pass
+
+
+def _mysql_truncate_disabled(request):
+    """Per-test cleanup for MySQL: TRUNCATE all tables (preserving alembic_version).
+
+    Only active when DATABASE_URL points at a non-sqlite backend. Runs *after*
+    the test, ensuring the next test starts from a clean slate. The session-
+    level admin/setup will be re-created on demand by _admin_setup since
+    admin_client is function-scoped.
+    """
+    yield
+    database_url = os.environ.get('DATABASE_URL', '')
+    if not database_url or database_url.startswith('sqlite'):
+        return
+    try:
+        from db import get_engine
+        from sqlalchemy import text
+        eng = get_engine()
+        with eng.begin() as conn:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+            rows = conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name <> 'alembic_version'"
+            )).fetchall()
+            for (tbl,) in rows:
+                conn.execute(text(f"TRUNCATE TABLE `{tbl}`"))
+            # Re-seed minimal rows so session-scoped admin/warehouse fixtures
+            # remain valid across tests.
+            conn.execute(text(
+                "INSERT IGNORE INTO tenants (id, slug, name) VALUES (1, 'default', '默认租户')"
+            ))
+            conn.execute(text(
+                "INSERT IGNORE INTO warehouses (id, slug, name, is_default) "
+                "VALUES (1, 'default', '默认仓库', 1)"
+            ))
+            conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+    except Exception:
         pass
 
 
