@@ -407,13 +407,10 @@ class TestStockOutEdgeCases:
         msg = data.get('error', '') + data.get('message', '')
         assert "库存不足" in msg, f"unexpected error: {data}"
 
-    def test_stock_out_disabled_material_current_behavior(
+    def test_stock_out_rejects_disabled_material(
             self, admin_client, default_warehouse_id):
-        """Pin down: stock-out from a `is_disabled=1` material today.
-
-        The endpoint's SELECT does not filter is_disabled, so it likely
-        succeeds. Lock that fact down — if the migration changes this, the
-        test will fail and force a conscious decision.
+        """Disabled materials must not accept stock-out (regression for the
+        previous bug where the SELECT did not filter is_disabled).
         """
         from database import get_db_connection
         name = f"DisMat-{_uuid.uuid4().hex[:6]}"
@@ -426,7 +423,6 @@ class TestStockOutEdgeCases:
             "VALUES (?, ?, 'T', 50, 'pcs', 1, '', ?, 1)",
             (name, sku, default_warehouse_id))
         mid = cur.lastrowid
-        # Need a batch for FIFO consumption
         cur.execute(
             "INSERT INTO batches (batch_no, material_id, quantity, "
             "initial_quantity, warehouse_id, created_at) "
@@ -443,12 +439,16 @@ class TestStockOutEdgeCases:
         })
         assert resp.status_code == 200
         data = resp.json()
-        # Document current behavior: stock_out does NOT block disabled
-        # materials. If the migration changes this, this assertion flips.
-        assert data['success'] is True, (
-            f"Pinned-down current behavior changed: stock-out on disabled "
-            f"material no longer succeeds. Decide whether to update the test "
-            f"or fix the bug. Response: {data}"
+        assert data['success'] is False, (
+            f"Stock-out should reject disabled material; got: {data}"
+        )
+        # The disabled material must not be selected. Acceptable rejections:
+        # - 'not found' when no other materials exist
+        # - 'ambiguous_name' when fuzzy matcher offers other (enabled) candidates
+        # In either case, the disabled material itself must not appear in candidates.
+        candidate_names = [c.get('name') for c in (data.get('candidates') or [])]
+        assert name not in candidate_names, (
+            f"Disabled material leaked into fuzzy candidates: {data}"
         )
 
     def test_stock_out_cross_tenant_material_via_api_key(

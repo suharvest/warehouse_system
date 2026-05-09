@@ -130,14 +130,12 @@ def test_delete_warehouse_is_soft_delete(admin_client):
     assert wh['id'] not in ids
 
 
-def test_delete_warehouse_with_materials_current_behavior(admin_client):
-    """Pin down: warehouse delete (soft) succeeds even when the warehouse
-    contains materials. This is what the code currently does — log it so the
-    SA migration cannot accidentally change it.
+def test_delete_warehouse_with_materials_rejected(admin_client):
+    """Soft-deleting a warehouse that still contains active materials must
+    fail (regression for the previous bug that produced 'ghost inventory').
     """
     wh = _create_warehouse(admin_client)
 
-    # Seed a material into the warehouse
     from database import get_db_connection
     conn = get_db_connection()
     cur = conn.cursor()
@@ -151,11 +149,10 @@ def test_delete_warehouse_with_materials_current_behavior(admin_client):
     conn.close()
 
     resp = admin_client.delete(f"/api/warehouses/{wh['id']}")
-    # Current behavior: success (no FK protection on soft-delete).
-    assert resp.status_code == 200, (
-        f"Pinned-down behavior changed: warehouse delete with materials no "
-        f"longer succeeds. Decide if that's intentional. Response: {resp.text}"
+    assert resp.status_code == 400, (
+        f"Expected 400 (warehouse not empty), got {resp.status_code}: {resp.text}"
     )
+    assert "物料" in resp.text or "empty" in resp.text.lower()
 
 
 def test_cannot_delete_default_warehouse(admin_client, default_warehouse_id):
