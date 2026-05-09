@@ -1016,7 +1016,7 @@ async def set_user_warehouses(
 # ============ Tenant Management APIs ============
 
 @app.get("/api/tenants", response_model=List[TenantItem])
-async def list_tenants(current_user: CurrentUser = Depends(require_auth("admin"))):
+async def list_tenants(current_user: CurrentUser = Depends(require_permission(Resource.TENANTS, Action.ADMIN))):
     """获取租户列表（multi_tenant+admin）"""
     if get_deploy_mode() == "single_tenant":
         raise HTTPException(status_code=403, detail="单租户模式下不可用")
@@ -1045,7 +1045,7 @@ async def list_tenants(current_user: CurrentUser = Depends(require_auth("admin")
 @app.post("/api/tenants", response_model=TenantItem)
 async def create_tenant(
     request: CreateTenantRequest,
-    current_user: CurrentUser = Depends(require_auth("admin"))
+    current_user: CurrentUser = Depends(require_permission(Resource.TENANTS, Action.ADMIN))
 ):
     """创建租户（仅全局 admin）"""
     if get_deploy_mode() == "single_tenant":
@@ -1085,7 +1085,7 @@ async def create_tenant(
 async def update_tenant(
     tenant_id: int,
     request: UpdateTenantRequest,
-    current_user: CurrentUser = Depends(require_auth("admin"))
+    current_user: CurrentUser = Depends(require_permission(Resource.TENANTS, Action.ADMIN))
 ):
     """更新租户（仅全局 admin）"""
     if get_deploy_mode() == "single_tenant":
@@ -1135,7 +1135,7 @@ async def update_tenant(
 @app.delete("/api/tenants/{tenant_id}")
 async def delete_tenant(
     tenant_id: int,
-    current_user: CurrentUser = Depends(require_auth("admin"))
+    current_user: CurrentUser = Depends(require_permission(Resource.TENANTS, Action.ADMIN))
 ):
     """停用租户（软删除，仅全局 admin）"""
     if get_deploy_mode() == "single_tenant":
@@ -2047,7 +2047,7 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
 
 
 @app.get("/api/database/export")
-def export_database(current_user: CurrentUser = Depends(require_auth('admin'))):
+def export_database(current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))):
     """导出仓库数据为SQLite数据库文件（仅管理员）
 
     只导出仓库相关表：materials, inventory_records, batches, batch_consumptions, contacts
@@ -2130,7 +2130,7 @@ def export_database(current_user: CurrentUser = Depends(require_auth('admin'))):
 async def import_database(
     request: Request,
     file: UploadFile = File(...),
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))
 ):
     """导入仓库数据（仅管理员）
 
@@ -2262,7 +2262,7 @@ async def import_database(
 @app.post("/api/database/clear", response_model=DatabaseOperationResponse)
 async def clear_database(
     request: DatabaseClearRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))
 ):
     """清空仓库数据（仅管理员）
 
@@ -2645,7 +2645,7 @@ async def delete_contact(
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
 def get_dashboard_stats(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.DASHBOARD, Action.READ))
 ):
     """获取仪表盘统计数据（排除禁用物料）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2740,7 +2740,7 @@ def get_dashboard_stats(
 @app.get("/api/dashboard/category-distribution", response_model=List[CategoryItem])
 def get_category_distribution(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.DASHBOARD, Action.READ))
 ):
     """获取库存类型分布 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2757,7 +2757,7 @@ def get_category_distribution(
 @app.get("/api/dashboard/weekly-trend", response_model=WeeklyTrend)
 def get_weekly_trend(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.DASHBOARD, Action.READ))
 ):
     """获取近7天出入库趋势 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2802,7 +2802,7 @@ def get_weekly_trend(
 @app.get("/api/dashboard/top-stock", response_model=TopStock)
 def get_top_stock(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.DASHBOARD, Action.READ))
 ):
     """获取库存TOP10 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2821,7 +2821,7 @@ def get_top_stock(
 @app.get("/api/dashboard/low-stock-alert", response_model=List[LowStockItem])
 def get_low_stock_alert(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.DASHBOARD, Action.READ))
 ):
     """获取库存预警列表 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -2906,7 +2906,7 @@ def unified_search(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页条数"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.SEARCH, Action.READ))
 ):
     """统一搜索端点"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -5642,7 +5642,7 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
 @app.get("/api/mcp/connections")
 async def list_mcp_connections(
     warehouse_id: Optional[int] = Query(None),
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """列出所有MCP连接（含实时状态）— Phase 2f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
@@ -5691,7 +5691,7 @@ async def list_mcp_connections(
 @app.post("/api/mcp/connections", response_model=MCPConnectionResponse)
 async def create_mcp_connection(
     request: CreateMCPConnectionRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """创建MCP连接（自动创建关联的API Key）"""
     conn_id = str(uuid.uuid4())[:8]
@@ -5773,7 +5773,7 @@ async def create_mcp_connection(
 async def update_mcp_connection(
     conn_id: str,
     request: UpdateMCPConnectionRequest,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """修改MCP连接配置"""
     with get_engine().connect() as sa_conn:
@@ -5854,7 +5854,7 @@ async def update_mcp_connection(
 @app.delete("/api/mcp/connections/{conn_id}")
 async def delete_mcp_connection(
     conn_id: str,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """删除MCP连接（先停止）"""
     with get_engine().connect() as sa_conn:
@@ -5885,7 +5885,7 @@ async def delete_mcp_connection(
 @app.post("/api/mcp/connections/{conn_id}/start", response_model=MCPConnectionResponse)
 async def start_mcp_connection(
     conn_id: str,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """启动MCP连接"""
     with get_engine().connect() as sa_conn:
@@ -5930,7 +5930,7 @@ async def start_mcp_connection(
 @app.post("/api/mcp/connections/{conn_id}/stop", response_model=MCPConnectionResponse)
 async def stop_mcp_connection(
     conn_id: str,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """停止MCP连接"""
     with get_engine().connect() as sa_conn:
@@ -5968,7 +5968,7 @@ async def stop_mcp_connection(
 @app.post("/api/mcp/connections/{conn_id}/restart", response_model=MCPConnectionResponse)
 async def restart_mcp_connection(
     conn_id: str,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """重启MCP连接"""
     with get_engine().connect() as sa_conn:
@@ -6014,7 +6014,7 @@ async def restart_mcp_connection(
 async def get_mcp_connection_logs(
     conn_id: str,
     lines: int = Query(default=50, ge=1, le=200),
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
 ):
     """获取MCP连接的最近日志"""
     with get_engine().connect() as sa_conn:
@@ -6049,7 +6049,7 @@ def _get_providers_custom_dir() -> str:
 
 
 @app.get("/api/system/mode")
-async def get_system_mode(current_user: CurrentUser = Depends(require_auth('view'))):
+async def get_system_mode(current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.READ))):
     """查询系统当前运行模式（self_owned / external_erp）及部署模式（single_tenant / multi_tenant）— Phase 2f: SA Core read."""
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(
@@ -6062,7 +6062,7 @@ async def get_system_mode(current_user: CurrentUser = Depends(require_auth('view
 @app.put("/api/system/mode")
 async def set_system_mode(
     request: Request,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))
 ):
     """切换系统运行模式"""
     body = await request.json()
@@ -6098,7 +6098,7 @@ async def set_system_mode(
 
 
 @app.get("/api/erp/providers")
-async def list_erp_providers(current_user: CurrentUser = Depends(require_auth('admin'))):
+async def list_erp_providers(current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))):
     """列出所有 ERP Provider — Phase 2f: SA Core read."""
     preds = list(build_scope_predicates(_t_erp_providers, current_user.tenant_id, None))
     stmt = select(
@@ -6145,7 +6145,7 @@ async def list_erp_providers(current_user: CurrentUser = Depends(require_auth('a
 @app.post("/api/erp/providers")
 async def upload_erp_provider(
     file: UploadFile = File(...),
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """上传自定义 Provider .py 文件"""
     import tempfile
@@ -6229,7 +6229,7 @@ def _ensure_provider_tenant(row, current_user: CurrentUser):
 
 @app.get("/api/erp/providers/active-for-mcp")
 async def get_active_provider_for_mcp(
-    current_user: CurrentUser = Depends(require_auth('view'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.READ))
 ):
     """返回当前租户激活的 ERP Provider 信息，供 MCP 引导使用。
 
@@ -6290,7 +6290,7 @@ async def get_active_provider_for_mcp(
 @app.get("/api/erp/providers/{provider_id}")
 async def get_erp_provider(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """获取单个 Provider 详情 — Phase 2f: SA Core read."""
     with get_engine().connect() as sa_conn:
@@ -6324,7 +6324,7 @@ async def get_erp_provider(
 async def update_erp_provider(
     provider_id: int,
     request: Request,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """更新 Provider 的名称和配置"""
     body = await request.json()
@@ -6357,7 +6357,7 @@ async def update_erp_provider(
 @app.delete("/api/erp/providers/{provider_id}")
 async def delete_erp_provider(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """删除 Provider（激活状态下禁止删除）"""
     import shutil
@@ -6393,7 +6393,7 @@ async def delete_erp_provider(
 async def test_erp_provider(
     provider_id: int,
     level: int = Query(1, ge=1, le=2),
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """运行 Provider 连通性测试（level=1 只读，level=2 写操作）"""
     with get_engine().connect() as sa_conn:
@@ -6455,7 +6455,7 @@ async def test_erp_provider(
 @app.post("/api/erp/providers/{provider_id}/activate")
 async def activate_erp_provider(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """激活指定 Provider（需先通过 Level 1 测试）"""
     with get_engine().connect() as sa_conn:
@@ -6506,7 +6506,7 @@ async def activate_erp_provider(
 @app.post("/api/erp/providers/{provider_id}/deactivate")
 async def deactivate_erp_provider(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_auth('admin'))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
 ):
     """停用指定 Provider"""
     with get_engine().connect() as sa_conn:
