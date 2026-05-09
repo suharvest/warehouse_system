@@ -1,0 +1,9 @@
+{
+  "json": {
+    "error": "必须选择供应商或客户至少一项"
+  },
+  "json_keys": [
+    "error"
+  ],
+  "status": 400
+}

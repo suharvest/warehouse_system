@@ -1,0 +1,11 @@
+{
+  "json": {
+    "message": "仓库已禁用",
+    "success": true
+  },
+  "json_keys": [
+    "message",
+    "success"
+  ],
+  "status": 200
+}

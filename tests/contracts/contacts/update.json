@@ -1,0 +1,27 @@
+{
+  "json": {
+    "address": "<str>",
+    "created_at": "<ts>",
+    "email": "<str>",
+    "id": "<int>",
+    "is_customer": false,
+    "is_disabled": false,
+    "is_supplier": true,
+    "name": "<str>",
+    "notes": "<str>",
+    "phone": "<str>"
+  },
+  "json_keys": [
+    "address",
+    "created_at",
+    "email",
+    "id",
+    "is_customer",
+    "is_disabled",
+    "is_supplier",
+    "name",
+    "notes",
+    "phone"
+  ],
+  "status": 200
+}

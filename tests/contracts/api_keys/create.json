@@ -1,0 +1,19 @@
+{
+  "json": {
+    "created_at": "<ts>",
+    "id": "<int>",
+    "key": "<str>",
+    "last_used_at": null,
+    "name": "<str>",
+    "role": "operate"
+  },
+  "json_keys": [
+    "created_at",
+    "id",
+    "key",
+    "last_used_at",
+    "name",
+    "role"
+  ],
+  "status": 200
+}

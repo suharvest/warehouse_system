@@ -1,0 +1,11 @@
+{
+  "json": {
+    "message": "用户已禁用",
+    "success": true
+  },
+  "json_keys": [
+    "message",
+    "success"
+  ],
+  "status": 200
+}

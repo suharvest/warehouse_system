@@ -1,0 +1,17 @@
+{
+  "json": [
+    {
+      "address": null,
+      "created_at": "<ts>",
+      "id": "<int>",
+      "is_default": true,
+      "is_disabled": false,
+      "name": "<str>",
+      "slug": "<str>",
+      "tenant_id": "<int>",
+      "tenant_name": "默认租户"
+    }
+  ],
+  "json_keys": null,
+  "status": 200
+}
