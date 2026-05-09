@@ -6998,10 +6998,8 @@ class FaceVerifyMcpPayload(BaseModel):
 @app.post("/api/face/verify-mcp")
 async def face_verify_mcp(
     payload: FaceVerifyMcpPayload,
-    current_user: 'CurrentUser' = Depends(get_current_user),
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
 ):
-    if current_user.is_guest or current_user.id is None:
-        raise HTTPException(status_code=401, detail="未认证")
     # tenant_id must be concrete; global admin without tenant has no rules to evaluate
     if current_user.tenant_id is None:
         return {"status": "skipped", "failure_reason": "no_tenant_context",
