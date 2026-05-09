@@ -5840,14 +5840,13 @@ async def update_mcp_connection(
 ):
     """修改MCP连接配置"""
     with get_engine().connect() as sa_conn:
-        _r = sa_conn.execute(
-            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
-        ).first()
-    row = dict(_r._mapping) if _r else None
-    if not row:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+        _r = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+    row = dict(_r._mapping)
 
     old_endpoint = row['mcp_endpoint']
     key_hash = hash_api_key(row['api_key'])
@@ -5921,14 +5920,13 @@ async def delete_mcp_connection(
 ):
     """删除MCP连接（先停止）"""
     with get_engine().connect() as sa_conn:
-        _r = sa_conn.execute(
-            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
-        ).first()
-    row = dict(_r._mapping) if _r else None
-    if not row:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+        _r = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+    row = dict(_r._mapping)
 
     # 先停止进程
     await mcp_manager.stop_connection(conn_id)
@@ -5952,14 +5950,13 @@ async def start_mcp_connection(
 ):
     """启动MCP连接"""
     with get_engine().connect() as sa_conn:
-        _r = sa_conn.execute(
-            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
-        ).first()
-    row = dict(_r._mapping) if _r else None
-    if not row:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+        _r = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+    row = dict(_r._mapping)
 
     success = await mcp_manager.start_connection(
         conn_id, row['mcp_endpoint'], row['api_key']
@@ -5997,14 +5994,13 @@ async def stop_mcp_connection(
 ):
     """停止MCP连接"""
     with get_engine().connect() as sa_conn:
-        _r = sa_conn.execute(
-            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
-        ).first()
-    row = dict(_r._mapping) if _r else None
-    if not row:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+        _r = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+    row = dict(_r._mapping)
 
     await mcp_manager.stop_connection(conn_id)
 
@@ -6035,14 +6031,13 @@ async def restart_mcp_connection(
 ):
     """重启MCP连接"""
     with get_engine().connect() as sa_conn:
-        _r = sa_conn.execute(
-            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
-        ).first()
-    row = dict(_r._mapping) if _r else None
-    if not row:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+        _r = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+    row = dict(_r._mapping)
 
     success = await mcp_manager.restart_connection(
         conn_id, row['mcp_endpoint'], row['api_key']
@@ -6081,14 +6076,13 @@ async def get_mcp_connection_logs(
 ):
     """获取MCP连接的最近日志"""
     with get_engine().connect() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_mcp_connections.c.id, _t_mcp_connections.c.tenant_id)
-            .where(_t_mcp_connections.c.id == conn_id)
-        ).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
+        row = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            columns=[_t_mcp_connections.c.id, _t_mcp_connections.c.tenant_id],
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
 
     logs = mcp_manager.get_logs(conn_id, lines)
     return {"logs": logs}
