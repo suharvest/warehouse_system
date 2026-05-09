@@ -68,7 +68,9 @@ from metadata import (
     users as _t_users,
     sessions as _t_sessions,
     tenants as _t_tenants,
+    contacts as _t_contacts,
 )
+from sqlalchemy import func as _sa_func
 import math
 import uuid
 
@@ -470,16 +472,15 @@ def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] 
     - 否则返回 None（全局视图）
     """
     if warehouse_id is not None:
-        # 校验用户是否有权访问该仓库（非全局 admin）
+        # 校验用户是否有权访问该仓库（非全局 admin）— Phase 2c: SA Core read.
         if current_user.tenant_id is not None:
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT tenant_id FROM warehouses WHERE id = ?', (warehouse_id,))
-                wh = cursor.fetchone()
-                if not wh:
-                    raise HTTPException(status_code=404, detail='仓库不存在')
-                if wh['tenant_id'] != current_user.tenant_id:
-                    raise HTTPException(status_code=403, detail='无权访问该仓库')
+            stmt = select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == warehouse_id)
+            with get_engine().connect() as sa_conn:
+                wh = sa_conn.execute(stmt).first()
+            if not wh:
+                raise HTTPException(status_code=404, detail='仓库不存在')
+            if wh.tenant_id != current_user.tenant_id:
+                raise HTTPException(status_code=403, detail='无权访问该仓库')
         return warehouse_id
     if current_user.warehouse_id is not None:
         return current_user.warehouse_id
@@ -487,25 +488,32 @@ def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] 
 
 
 def infer_single_writable_warehouse_id(current_user: CurrentUser) -> Optional[int]:
-    """写操作未指定仓库时，若当前用户只有一个可写仓库则自动使用它。"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if current_user.tenant_id is None:
-            return None
-        if current_user.role == 'admin':
-            cursor.execute(
-                'SELECT id FROM warehouses WHERE tenant_id = ? AND is_disabled = 0',
-                (current_user.tenant_id,)
+    """写操作未指定仓库时，若当前用户只有一个可写仓库则自动使用它。
+
+    Phase 2c: SA Core read.
+    """
+    if current_user.tenant_id is None:
+        return None
+    if current_user.role == 'admin':
+        stmt = select(_t_warehouses.c.id).where(
+            and_(
+                _t_warehouses.c.tenant_id == current_user.tenant_id,
+                _t_warehouses.c.is_disabled == 0,
             )
-        else:
-            cursor.execute('''
-                SELECT w.id
-                FROM user_warehouses uw
-                JOIN warehouses w ON uw.warehouse_id = w.id
-                WHERE uw.user_id = ? AND w.tenant_id = ? AND w.is_disabled = 0
-            ''', (current_user.id, current_user.tenant_id))
-        rows = cursor.fetchall()
-        return rows[0]['id'] if len(rows) == 1 else None
+        )
+    else:
+        stmt = select(_t_warehouses.c.id).select_from(
+            _t_user_warehouses.join(_t_warehouses, _t_user_warehouses.c.warehouse_id == _t_warehouses.c.id)
+        ).where(
+            and_(
+                _t_user_warehouses.c.user_id == current_user.id,
+                _t_warehouses.c.tenant_id == current_user.tenant_id,
+                _t_warehouses.c.is_disabled == 0,
+            )
+        )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return rows[0].id if len(rows) == 1 else None
 
 
 def ensure_contact_tenant(cursor, current_user: CurrentUser, contact_id: Optional[int],
@@ -518,14 +526,16 @@ def ensure_contact_tenant(cursor, current_user: CurrentUser, contact_id: Optiona
     """
     if contact_id is None:
         return
-    cursor.execute('SELECT tenant_id FROM contacts WHERE id = ?', (contact_id,))
-    row = cursor.fetchone()
+    # Phase 2c: SA Core read. ``cursor`` retained for signature compatibility but unused.
+    stmt = select(_t_contacts.c.tenant_id).where(_t_contacts.c.id == contact_id)
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(stmt).first()
     if not row:
         raise HTTPException(status_code=400, detail=f"联系方 {contact_id} 不存在")
     expected_tenant = current_user.tenant_id if current_user.tenant_id is not None else target_tenant_id
     if expected_tenant is None:
         raise HTTPException(status_code=400, detail="无法确定联系方所属租户")
-    if row['tenant_id'] != expected_tenant:
+    if row.tenant_id != expected_tenant:
         raise HTTPException(status_code=403, detail=f"联系方 {contact_id} 不属于当前租户")
 
 
@@ -587,16 +597,16 @@ def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optiona
             status_code=400,
             detail="全局管理员写操作必须指定 warehouse_id（无法推导目标租户）"
         )
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT tenant_id FROM warehouses WHERE id = ?', (warehouse_id,))
-        row = cursor.fetchone()
-        if not row or row['tenant_id'] is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"warehouse_id={warehouse_id} 无效或未关联租户"
-            )
-        return row['tenant_id']
+    # Phase 2c: SA Core read.
+    stmt = select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == warehouse_id)
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(stmt).first()
+    if not row or row.tenant_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"warehouse_id={warehouse_id} 无效或未关联租户"
+        )
+    return row.tenant_id
 
 
 # ============ 仓库管理 API ============
@@ -1174,43 +1184,44 @@ async def get_my_warehouses(current_user: CurrentUser = Depends(require_auth('vi
 
 @app.get("/api/users", response_model=List[UserListItem])
 async def list_users(current_user: CurrentUser = Depends(require_auth('admin'))):
-    """获取用户列表（仅管理员）"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        deploy_mode_local = get_deploy_mode()
-        if deploy_mode_local == 'multi_tenant' and current_user.tenant_id is not None:
-            cursor.execute('''
-                SELECT id, username, display_name, role, is_disabled, created_at, tenant_id
-                FROM users WHERE tenant_id = ? ORDER BY created_at DESC
-            ''', (current_user.tenant_id,))
-        else:
-            cursor.execute('''
-                SELECT id, username, display_name, role, is_disabled, created_at, tenant_id
-                FROM users ORDER BY created_at DESC
-            ''')
-        users = cursor.fetchall()
+    """获取用户列表（仅管理员）。Phase 2c: SA Core reads."""
+    deploy_mode_local = get_deploy_mode()
+    user_stmt = select(
+        _t_users.c.id, _t_users.c.username, _t_users.c.display_name,
+        _t_users.c.role, _t_users.c.is_disabled, _t_users.c.created_at,
+        _t_users.c.tenant_id,
+    )
+    if deploy_mode_local == 'multi_tenant' and current_user.tenant_id is not None:
+        user_stmt = user_stmt.where(_t_users.c.tenant_id == current_user.tenant_id)
+    user_stmt = user_stmt.order_by(_t_users.c.created_at.desc())
 
+    with get_engine().connect() as sa_conn:
+        users_rows = sa_conn.execute(user_stmt).fetchall()
         result = []
-        for row in users:
-            # 获取用户授权的仓库
-            cursor.execute('''
-                SELECT w.id, w.name FROM user_warehouses uw
-                JOIN warehouses w ON uw.warehouse_id = w.id
-                WHERE uw.user_id = ?
-            ''', (row['id'],))
-            wh_rows = cursor.fetchall()
+        for row in users_rows:
+            wh_stmt = select(
+                _t_warehouses.c.id, _t_warehouses.c.name,
+            ).select_from(
+                _t_user_warehouses.join(
+                    _t_warehouses, _t_user_warehouses.c.warehouse_id == _t_warehouses.c.id
+                )
+            ).where(_t_user_warehouses.c.user_id == row.id)
+            wh_rows = sa_conn.execute(wh_stmt).fetchall()
+            ca = row.created_at
+            if isinstance(ca, datetime):
+                ca = ca.strftime('%Y-%m-%d %H:%M:%S')
             result.append(UserListItem(
-                id=row['id'],
-                username=row['username'],
-                display_name=row['display_name'],
-                role=row['role'],
-                is_disabled=bool(row['is_disabled']),
-                created_at=row['created_at'],
-                tenant_id=row['tenant_id'] if 'tenant_id' in row.keys() else None,
-                warehouse_ids=[r['id'] for r in wh_rows],
-                warehouse_names=[r['name'] for r in wh_rows]
+                id=row.id,
+                username=row.username,
+                display_name=row.display_name,
+                role=row.role,
+                is_disabled=bool(row.is_disabled),
+                created_at=ca,
+                tenant_id=row.tenant_id,
+                warehouse_ids=[r.id for r in wh_rows],
+                warehouse_names=[r.name for r in wh_rows],
             ))
-        return result
+    return result
 
 
 @app.post("/api/users", response_model=UserListItem)
@@ -2034,148 +2045,143 @@ async def list_contacts(
     format: Optional[str] = Query(None, description="brief时精简返回"),
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取联系方列表（分页）— 联系方为租户级，不按仓库过滤"""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    """获取联系方列表（分页）— 联系方为租户级，不按仓库过滤。Phase 2c: SA Core reads."""
+    conds = []
+    if current_user.tenant_id is not None:
+        conds.append(_t_contacts.c.tenant_id == current_user.tenant_id)
+    if not include_disabled:
+        conds.append(_t_contacts.c.is_disabled == 0)
+    if name:
+        conds.append(_t_contacts.c.name.like(f'%{name}%'))
+    if contact_type == 'supplier':
+        conds.append(_t_contacts.c.is_supplier == 1)
+    elif contact_type == 'customer':
+        conds.append(_t_contacts.c.is_customer == 1)
 
-        scope_filter, scope_params = build_scope_filter(current_user.tenant_id, None, '')
-        base_query = f'''
-            SELECT id, name, address, phone, email, is_supplier, is_customer,
-                   notes, is_disabled, created_at
-            FROM contacts
-            WHERE 1=1{scope_filter}
-        '''
-        count_query = f'SELECT COUNT(*) as total FROM contacts WHERE 1=1{scope_filter}'
-        params = list(scope_params)
+    where_clause = and_(*conds) if conds else None
+    count_stmt = select(_sa_func.count()).select_from(_t_contacts)
+    list_stmt = select(
+        _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+        _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
+        _t_contacts.c.is_customer, _t_contacts.c.notes,
+        _t_contacts.c.is_disabled, _t_contacts.c.created_at,
+    )
+    if where_clause is not None:
+        count_stmt = count_stmt.where(where_clause)
+        list_stmt = list_stmt.where(where_clause)
+    offset = (page - 1) * page_size
+    list_stmt = list_stmt.order_by(_t_contacts.c.name.asc()).limit(page_size).offset(offset)
 
-        if not include_disabled:
-            base_query += ' AND is_disabled = 0'
-            count_query += ' AND is_disabled = 0'
+    with get_engine().connect() as sa_conn:
+        total = sa_conn.execute(count_stmt).scalar() or 0
+        rows = sa_conn.execute(list_stmt).fetchall()
 
-        if name:
-            base_query += ' AND name LIKE ?'
-            count_query += ' AND name LIKE ?'
-            params.append(f'%{name}%')
+    if format == "brief":
+        items = [{"id": row.id, "name": row.name} for row in rows]
+    else:
+        items = []
+        for row in rows:
+            ca = row.created_at
+            if isinstance(ca, datetime):
+                ca = ca.strftime('%Y-%m-%d %H:%M:%S')
+            items.append(ContactItem(
+                id=row.id,
+                name=row.name,
+                address=row.address,
+                phone=row.phone,
+                email=row.email,
+                is_supplier=bool(row.is_supplier),
+                is_customer=bool(row.is_customer),
+                notes=row.notes,
+                is_disabled=bool(row.is_disabled),
+                created_at=ca,
+            ))
 
-        if contact_type == 'supplier':
-            base_query += ' AND is_supplier = 1'
-            count_query += ' AND is_supplier = 1'
-        elif contact_type == 'customer':
-            base_query += ' AND is_customer = 1'
-            count_query += ' AND is_customer = 1'
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
 
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()['total']
-
-        base_query += ' ORDER BY name ASC LIMIT ? OFFSET ?'
-        offset = (page - 1) * page_size
-        params.extend([page_size, offset])
-
-        cursor.execute(base_query, params)
-        rows = cursor.fetchall()
-
-        if format == "brief":
-            items = [{"id": row['id'], "name": row['name']} for row in rows]
-        else:
-            items = [
-                ContactItem(
-                    id=row['id'],
-                    name=row['name'],
-                    address=row['address'],
-                    phone=row['phone'],
-                    email=row['email'],
-                    is_supplier=bool(row['is_supplier']),
-                    is_customer=bool(row['is_customer']),
-                    notes=row['notes'],
-                    is_disabled=bool(row['is_disabled']),
-                    created_at=row['created_at']
-                )
-                for row in rows
-            ]
-
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
-
-        return {
-            "items": items,
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-        }
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
 
 
 @app.get("/api/contacts/suppliers", response_model=List[ContactListItem])
 async def list_suppliers(
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取供应商列表（用于下拉选择）— 联系方为租户级"""
-    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, None, '')
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f'''
-            SELECT id, name, is_supplier, is_customer
-            FROM contacts
-            WHERE is_supplier = 1 AND is_disabled = 0{scope_filter}
-            ORDER BY name ASC
-        ''', scope_params)
-        return [
-            ContactListItem(
-                id=row['id'],
-                name=row['name'],
-                is_supplier=bool(row['is_supplier']),
-                is_customer=bool(row['is_customer'])
-            )
-            for row in cursor.fetchall()
-        ]
+    """获取供应商列表（用于下拉选择）— 联系方为租户级。Phase 2c: SA Core read."""
+    conds = [_t_contacts.c.is_supplier == 1, _t_contacts.c.is_disabled == 0]
+    if current_user.tenant_id is not None:
+        conds.append(_t_contacts.c.tenant_id == current_user.tenant_id)
+    stmt = select(
+        _t_contacts.c.id, _t_contacts.c.name,
+        _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
+    ).where(and_(*conds)).order_by(_t_contacts.c.name.asc())
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [
+        ContactListItem(
+            id=row.id,
+            name=row.name,
+            is_supplier=bool(row.is_supplier),
+            is_customer=bool(row.is_customer),
+        )
+        for row in rows
+    ]
 
 
 @app.get("/api/contacts/customers", response_model=List[ContactListItem])
 async def list_customers(
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取客户列表（用于下拉选择）— 联系方为租户级"""
-    scope_filter, scope_params = build_scope_filter(current_user.tenant_id, None, '')
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f'''
-            SELECT id, name, is_supplier, is_customer
-            FROM contacts
-            WHERE is_customer = 1 AND is_disabled = 0{scope_filter}
-            ORDER BY name ASC
-        ''', scope_params)
-        return [
-            ContactListItem(
-                id=row['id'],
-                name=row['name'],
-                is_supplier=bool(row['is_supplier']),
-                is_customer=bool(row['is_customer'])
-            )
-            for row in cursor.fetchall()
-        ]
+    """获取客户列表（用于下拉选择）— 联系方为租户级。Phase 2c: SA Core read."""
+    conds = [_t_contacts.c.is_customer == 1, _t_contacts.c.is_disabled == 0]
+    if current_user.tenant_id is not None:
+        conds.append(_t_contacts.c.tenant_id == current_user.tenant_id)
+    stmt = select(
+        _t_contacts.c.id, _t_contacts.c.name,
+        _t_contacts.c.is_supplier, _t_contacts.c.is_customer,
+    ).where(and_(*conds)).order_by(_t_contacts.c.name.asc())
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [
+        ContactListItem(
+            id=row.id,
+            name=row.name,
+            is_supplier=bool(row.is_supplier),
+            is_customer=bool(row.is_customer),
+        )
+        for row in rows
+    ]
 
 
 @app.get("/api/operators", response_model=List[OperatorListItem])
 async def get_operators_for_filter(
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """获取操作员列表（用于筛选下拉）- 返回所有有操作权限的用户"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        tenant_filter, tenant_params = build_scope_filter(current_user.tenant_id)
-        cursor.execute(f'''
-            SELECT id as user_id, username, display_name
-            FROM users
-            WHERE is_disabled = 0 AND role IN ('operate', 'admin'){tenant_filter}
-            ORDER BY display_name, username
-        ''', tenant_params)
-        return [
-            OperatorListItem(
-                user_id=row['user_id'],
-                username=row['username'],
-                display_name=row['display_name']
-            )
-            for row in cursor.fetchall()
-        ]
+    """获取操作员列表（用于筛选下拉）- 返回所有有操作权限的用户。Phase 2c: SA Core read."""
+    conds = [
+        _t_users.c.is_disabled == 0,
+        _t_users.c.role.in_(['operate', 'admin']),
+    ]
+    if current_user.tenant_id is not None:
+        conds.append(_t_users.c.tenant_id == current_user.tenant_id)
+    stmt = select(
+        _t_users.c.id, _t_users.c.username, _t_users.c.display_name,
+    ).where(and_(*conds)).order_by(_t_users.c.display_name, _t_users.c.username)
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [
+        OperatorListItem(
+            user_id=row.id,
+            username=row.username,
+            display_name=row.display_name,
+        )
+        for row in rows
+    ]
 
 
 @app.get("/api/contacts/{contact_id}", response_model=ContactItem)
@@ -2183,33 +2189,36 @@ async def get_contact(
     contact_id: int,
     current_user: CurrentUser = Depends(require_auth('view')),
 ):
-    """获取单个联系方详情"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, name, address, phone, email, is_supplier, is_customer,
-                   notes, is_disabled, created_at, tenant_id
-            FROM contacts WHERE id = ?
-        ''', (contact_id,))
-        row = cursor.fetchone()
+    """获取单个联系方详情。Phase 2c: SA Core read."""
+    stmt = select(
+        _t_contacts.c.id, _t_contacts.c.name, _t_contacts.c.address,
+        _t_contacts.c.phone, _t_contacts.c.email, _t_contacts.c.is_supplier,
+        _t_contacts.c.is_customer, _t_contacts.c.notes,
+        _t_contacts.c.is_disabled, _t_contacts.c.created_at, _t_contacts.c.tenant_id,
+    ).where(_t_contacts.c.id == contact_id)
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(stmt).first()
 
-        if not row:
-            raise HTTPException(status_code=404, detail="联系方不存在")
-        if current_user.tenant_id is not None and row['tenant_id'] != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权访问该联系方")
+    if not row:
+        raise HTTPException(status_code=404, detail="联系方不存在")
+    if current_user.tenant_id is not None and row.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权访问该联系方")
 
-        return ContactItem(
-            id=row['id'],
-            name=row['name'],
-            address=row['address'],
-            phone=row['phone'],
-            email=row['email'],
-            is_supplier=bool(row['is_supplier']),
-            is_customer=bool(row['is_customer']),
-            notes=row['notes'],
-            is_disabled=bool(row['is_disabled']),
-            created_at=row['created_at']
-        )
+    ca = row.created_at
+    if isinstance(ca, datetime):
+        ca = ca.strftime('%Y-%m-%d %H:%M:%S')
+    return ContactItem(
+        id=row.id,
+        name=row.name,
+        address=row.address,
+        phone=row.phone,
+        email=row.email,
+        is_supplier=bool(row.is_supplier),
+        is_customer=bool(row.is_customer),
+        notes=row.notes,
+        is_disabled=bool(row.is_disabled),
+        created_at=ca,
+    )
 
 
 @app.post("/api/contacts", response_model=ContactItem)
