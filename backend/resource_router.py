@@ -1,0 +1,330 @@
+"""
+ResourceRouter — small CRUD-route factory for resource families.
+
+R2, phase 1: contacts uses this. Future phases (warehouses, users, api-keys,
+mcp, erp, face) will follow.
+
+Design goals
+------------
+- Additive. Does not change URL paths, HTTP methods, status codes, response
+  shapes, or permission dependencies. Contract tests in
+  ``tests/test_resource_router_contract.py`` lock the wire format.
+- Hook-driven, not magic. Resource-specific logic (validation, side effects,
+  tenant resolution, fuzzy_matcher invalidation) is wired in via callables;
+  the factory contributes only the boilerplate (route registration, common
+  ``load_or_404`` lookup, transaction scope).
+- Minimal surface. Only the hooks contacts needs are present; future
+  migrations may add more, but YAGNI.
+
+Hook contract (all optional unless marked required)
+---------------------------------------------------
+* ``list_handler``  — REQUIRED if a list endpoint is wanted; receives the
+  raw FastAPI dependencies and returns the response. Contacts has filters
+  + pagination shape, so it supplies its own.
+* ``to_out``       — REQUIRED. Converts a fetched SA Row into the Pydantic
+  response model used by GET / UPDATE.
+* ``before_create``, ``before_update``, ``before_delete`` — receive
+  ``(sa_conn, current_user, request)`` (and ``row`` for update/delete).
+  May raise HTTPException; may return a dict of values that override /
+  augment the auto-derived insert/update payload.
+* ``values_for_create`` — REQUIRED for CREATE. Given
+  ``(sa_conn, current_user, request)`` returns a ``dict`` of column =>
+  value to insert. Tenant resolution lives here (contacts needs the
+  global-admin-must-pass-tenant_id dance).
+* ``values_for_update`` — REQUIRED for UPDATE. Given the validated
+  request returns a ``dict`` of column => value to update. Empty dict
+  is allowed (no-op update).
+* ``after_commit`` — receives ``(operation, sa_conn, current_user,
+  row_id)`` AFTER a successful CREATE / UPDATE / DELETE commit (still
+  inside the ``begin()`` block, so anything you do here is part of the
+  same transaction). Used for fuzzy_matcher invalidation.
+* ``delete_response`` — dict returned from DELETE. Defaults to
+  ``{"success": True}`` but resources can pass a custom message.
+
+Notes on shape parity
+---------------------
+The factory does NOT decide what GET / UPDATE return. It calls ``to_out``
+and returns whatever that produces (typically a Pydantic model). Same for
+LIST: it just calls your ``list_handler``. This keeps response shapes
+locked to the existing handlers.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Type
+
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import Table, insert, select, update as sa_update
+
+
+# Imported lazily inside register() so we don't create a hard cycle with
+# backend/app.py (which imports this module). The functions are stable.
+
+
+def _load_helpers():
+    # Local import avoids circular import at module load time.
+    from app import load_or_404, get_engine  # type: ignore
+    return load_or_404, get_engine
+
+
+@dataclass
+class ResourceRouter:
+    """Factory for CRUD routes on a single SA Core table.
+
+    Parameters
+    ----------
+    app : FastAPI
+        The application to register routes on.
+    prefix : str
+        URL prefix without trailing slash, e.g. ``"/api/contacts"``.
+    table : sqlalchemy.Table
+        The SA Core table the resource maps to.
+    response_model : Type[BaseModel]
+        Pydantic model for GET / UPDATE responses.
+    create_model : Type[BaseModel]
+        Pydantic body model for POST.
+    update_model : Type[BaseModel]
+        Pydantic body model for PUT.
+    permission_read, permission_write : Depends
+        FastAPI ``Depends(...)`` objects for read / write gates. The
+        caller passes these so the factory does NOT bypass
+        ``require_permission``.
+    not_found_detail, forbidden_detail : str
+        Detail strings forwarded to ``load_or_404`` (and re-used by
+        UPDATE / DELETE). Wire format is preserved by the existing
+        ``HTTPException`` handler at ``backend/app.py:271``.
+    to_out : callable(row) -> BaseModel | dict
+        Maps an SA Row to the response payload.
+    values_for_create : callable(sa_conn, current_user, request) -> dict
+    values_for_update : callable(sa_conn, current_user, request, row) -> dict
+    list_handler : callable | None
+        Full FastAPI handler for ``GET /<prefix>``. Receives the raw
+        request dependencies; returns the response object. None disables
+        the LIST route.
+    get_columns : list[Column] | None
+        Columns to select on GET. None selects all columns (``select(table)``).
+    update_select_columns : list[Column] | None
+        Columns to re-select after UPDATE so we can return a fresh row.
+        None selects all columns.
+    before_create, before_update, before_delete, after_commit, delete_response :
+        See module docstring.
+    """
+
+    app: FastAPI
+    prefix: str
+    table: Table
+    response_model: Type[BaseModel]
+    create_model: Type[BaseModel]
+    update_model: Type[BaseModel]
+    permission_read: Any
+    permission_write: Any
+    not_found_detail: str
+    forbidden_detail: str
+
+    to_out: Callable[[Any], Any]
+    values_for_create: Callable[..., Dict[str, Any]]
+    values_for_update: Callable[..., Dict[str, Any]]
+
+    list_handler: Optional[Callable[..., Any]] = None
+    get_columns: Optional[List[Any]] = None
+    update_select_columns: Optional[List[Any]] = None
+    id_path_name: str = "item_id"
+
+    before_create: Optional[Callable[..., None]] = None
+    before_update: Optional[Callable[..., None]] = None
+    before_delete: Optional[Callable[..., None]] = None
+    after_commit: Optional[Callable[..., None]] = None
+    delete_response: Dict[str, Any] = field(
+        default_factory=lambda: {"success": True}
+    )
+
+    def register(self) -> None:
+        """Wire all configured routes onto ``self.app``."""
+        load_or_404, get_engine = _load_helpers()
+
+        prefix = self.prefix
+
+        # --- LIST -----------------------------------------------------------
+        if self.list_handler is not None:
+            self.app.get(prefix)(self.list_handler)
+
+        # --- GET / POST / PUT / DELETE -------------------------------------
+        self._register_get(get_engine, load_or_404)
+        self._register_post(get_engine)
+        self._register_put(get_engine, load_or_404)
+        self._register_delete(get_engine, load_or_404)
+
+    # ------------------------------------------------------------------
+    # Per-verb registration. We build closures with explicit signatures so
+    # FastAPI's dependency-injection (``Depends``) and path-parameter
+    # binding work without inspecting **kwargs.
+    # ------------------------------------------------------------------
+
+    def _register_get(self, get_engine, load_or_404):
+        prefix = self.prefix
+        table = self.table
+        permission_read = self.permission_read
+        get_columns = self.get_columns
+        not_found = self.not_found_detail
+        forbidden = self.forbidden_detail
+        to_out = self.to_out
+
+        @self.app.get(
+            f"{prefix}/{{item_id}}",
+            response_model=self.response_model,
+        )
+        async def get_item(item_id: int, current_user=Depends(permission_read)):
+            with get_engine().connect() as sa_conn:
+                row = load_or_404(
+                    sa_conn,
+                    table,
+                    item_id,
+                    columns=get_columns,
+                    not_found=not_found,
+                    tenant_id=current_user.tenant_id,
+                    forbidden=forbidden,
+                )
+            return to_out(row)
+
+        get_item.__name__ = f"{table.name}_get"
+        return get_item
+
+    def _register_post(self, get_engine):
+        prefix = self.prefix
+        table = self.table
+        permission_write = self.permission_write
+        create_model = self.create_model
+        before_create = self.before_create
+        values_for_create = self.values_for_create
+        after_commit = self.after_commit
+        update_select_columns = self.update_select_columns
+        to_out = self.to_out
+
+        @self.app.post(prefix, response_model=self.response_model)
+        async def create_item(
+            request: create_model,  # type: ignore[valid-type]
+            current_user=Depends(permission_write),
+        ):
+            with get_engine().begin() as sa_conn:
+                if before_create is not None:
+                    before_create(sa_conn, current_user, request)
+                values = values_for_create(sa_conn, current_user, request)
+                result = sa_conn.execute(insert(table).values(**values))
+                new_id = result.inserted_primary_key[0]
+                if after_commit is not None:
+                    after_commit("create", sa_conn, current_user, new_id)
+
+                # Re-select to return the canonical row (matches existing
+                # contacts.create behaviour, which returns inserted values
+                # plus DB-side defaults like is_disabled=False).
+                cols = update_select_columns
+                stmt = (
+                    select(*cols).where(table.c.id == new_id)
+                    if cols is not None
+                    else select(table).where(table.c.id == new_id)
+                )
+                fresh = sa_conn.execute(stmt).first()
+            return to_out(fresh)
+
+        create_item.__name__ = f"{table.name}_create"
+        return create_item
+
+    def _register_put(self, get_engine, load_or_404):
+        prefix = self.prefix
+        table = self.table
+        permission_write = self.permission_write
+        update_model = self.update_model
+        before_update = self.before_update
+        values_for_update = self.values_for_update
+        after_commit = self.after_commit
+        get_columns = self.get_columns
+        update_select_columns = self.update_select_columns
+        not_found = self.not_found_detail
+        forbidden = self.forbidden_detail
+        to_out = self.to_out
+
+        @self.app.put(
+            f"{prefix}/{{item_id}}",
+            response_model=self.response_model,
+        )
+        async def update_item(
+            item_id: int,
+            request: update_model,  # type: ignore[valid-type]
+            current_user=Depends(permission_write),
+        ):
+            with get_engine().begin() as sa_conn:
+                row = load_or_404(
+                    sa_conn,
+                    table,
+                    item_id,
+                    columns=[table.c.id, table.c.tenant_id],
+                    not_found=not_found,
+                    tenant_id=current_user.tenant_id,
+                    forbidden=forbidden,
+                )
+                if before_update is not None:
+                    before_update(sa_conn, current_user, request, row)
+                values = values_for_update(sa_conn, current_user, request, row)
+                if values:
+                    sa_conn.execute(
+                        sa_update(table).where(table.c.id == item_id).values(**values)
+                    )
+                    if after_commit is not None:
+                        after_commit("update", sa_conn, current_user, item_id)
+
+                cols = update_select_columns
+                stmt = (
+                    select(*cols).where(table.c.id == item_id)
+                    if cols is not None
+                    else select(table).where(table.c.id == item_id)
+                )
+                fresh = sa_conn.execute(stmt).first()
+            return to_out(fresh)
+
+        update_item.__name__ = f"{table.name}_update"
+        return update_item
+
+    def _register_delete(self, get_engine, load_or_404):
+        prefix = self.prefix
+        table = self.table
+        permission_write = self.permission_write
+        before_delete = self.before_delete
+        after_commit = self.after_commit
+        not_found = self.not_found_detail
+        forbidden = self.forbidden_detail
+        delete_response = self.delete_response
+
+        @self.app.delete(f"{prefix}/{{item_id}}")
+        async def delete_item(
+            item_id: int,
+            current_user=Depends(permission_write),
+        ):
+            with get_engine().begin() as sa_conn:
+                row = load_or_404(
+                    sa_conn,
+                    table,
+                    item_id,
+                    columns=[table.c.id, table.c.tenant_id],
+                    not_found=not_found,
+                    tenant_id=current_user.tenant_id,
+                    forbidden=forbidden,
+                )
+                if before_delete is not None:
+                    before_delete(sa_conn, current_user, row)
+                else:
+                    # Default: soft-disable via ``is_disabled``. Resources
+                    # without that column MUST supply a before_delete that
+                    # performs whatever delete semantic they want (hard
+                    # delete, cascade, etc.).
+                    sa_conn.execute(
+                        sa_update(table)
+                        .where(table.c.id == item_id)
+                        .values(is_disabled=1)
+                    )
+                if after_commit is not None:
+                    after_commit("delete", sa_conn, current_user, item_id)
+            return delete_response
+
+        delete_item.__name__ = f"{table.name}_delete"
+        return delete_item
