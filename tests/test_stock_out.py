@@ -426,7 +426,7 @@ class TestStockOutEdgeCases:
         cur.execute(
             "INSERT INTO batches (batch_no, material_id, quantity, "
             "initial_quantity, warehouse_id, created_at) "
-            "VALUES (?, ?, 50, 50, ?, datetime('now'))",
+            "VALUES (?, ?, 50, 50, ?, CURRENT_TIMESTAMP)",
             (f"B-{sku}", mid, default_warehouse_id))
         conn.commit()
         conn.close()
@@ -493,7 +493,7 @@ class TestStockOutEdgeCases:
             cur.execute(
                 "INSERT INTO batches (batch_no, material_id, quantity, "
                 "initial_quantity, warehouse_id, tenant_id, created_at) "
-                "VALUES (?, ?, 50, 50, ?, ?, datetime('now'))",
+                "VALUES (?, ?, 50, 50, ?, ?, CURRENT_TIMESTAMP)",
                 (f"BB-{suffix}", mid_b, wh_b, t_b))
             conn.commit()
             conn.close()

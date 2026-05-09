@@ -304,12 +304,12 @@ def test_cross_tenant_api_key_cannot_see_other_tenant_records(
     cur.execute(
         "INSERT INTO inventory_records (material_id, type, quantity, operator,"
         " reason_category, warehouse_id, tenant_id, created_at) "
-        "VALUES (?, 'in', 1, 'sys', 'purchase', ?, ?, datetime('now'))",
+        "VALUES (?, 'in', 1, 'sys', 'purchase', ?, ?, CURRENT_TIMESTAMP)",
         (mat_a, wh_a, tenant_a))
     cur.execute(
         "INSERT INTO inventory_records (material_id, type, quantity, operator,"
         " reason_category, warehouse_id, tenant_id, created_at) "
-        "VALUES (?, 'in', 1, 'sys', 'purchase', ?, ?, datetime('now'))",
+        "VALUES (?, 'in', 1, 'sys', 'purchase', ?, ?, CURRENT_TIMESTAMP)",
         (mat_b, wh_b, tenant_b))
     conn.commit()
     conn.close()

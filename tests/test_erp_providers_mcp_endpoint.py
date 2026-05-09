@@ -98,12 +98,12 @@ def _set_system_mode(mode):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE system_settings SET value = ? WHERE key = 'system_mode'",
+        "UPDATE system_settings SET value = ? WHERE `key` = 'system_mode'",
         (mode,),
     )
     if cur.rowcount == 0:
         cur.execute(
-            "INSERT INTO system_settings (key, value) VALUES ('system_mode', ?)",
+            "INSERT INTO system_settings (`key`, value) VALUES ('system_mode', ?)",
             (mode,),
         )
     conn.commit()
@@ -136,7 +136,7 @@ def _reset_state(test_db):
             cur.execute("UPDATE users SET tenant_id = 1 WHERE username = 'admin'")
             cur.execute("DELETE FROM erp_providers")
             cur.execute(
-                "UPDATE system_settings SET value = 'self_owned' WHERE key = 'system_mode'"
+                "UPDATE system_settings SET value = 'self_owned' WHERE `key` = 'system_mode'"
             )
             conn.commit()
             conn.close()
