@@ -4295,50 +4295,38 @@ def export_materials_excel(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """导出库存数据为Excel — 一行一批次，含批次号、位置、联系方"""
+    """导出库存数据为Excel — 一行一批次，含批次号、位置、联系方 — Phase 3f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
 
-        # 基础查询
-        query = f'''
-            SELECT id, name, sku, category, quantity, unit, safe_stock, location, is_disabled
-            FROM materials
-            WHERE 1=1{wh_filter}
-        '''
-        params = list(wh_params)
+    # 解析状态筛选
+    status_filter = status.split(',') if status else None
 
-        # 解析状态筛选
-        status_filter = status.split(',') if status else None
+    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    if not status_filter or 'disabled' not in status_filter:
+        preds.append(_t_materials.c.is_disabled == 0)
+    if name:
+        like = f'%{name}%'
+        preds.append(or_(_t_materials.c.name.like(like), _t_materials.c.sku.like(like)))
+    if category:
+        preds.append(_t_materials.c.category == category)
 
-        # 如果没有指定状态筛选，或者状态筛选中不包含disabled，则只查询未禁用的
-        if not status_filter or 'disabled' not in status_filter:
-            query += ' AND is_disabled = 0'
+    mat_stmt = select(
+        _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
+        _t_materials.c.category, _t_materials.c.quantity, _t_materials.c.unit,
+        _t_materials.c.safe_stock, _t_materials.c.location, _t_materials.c.is_disabled,
+    ).order_by(_t_materials.c.name.asc())
+    if preds:
+        mat_stmt = mat_stmt.where(and_(*preds))
 
-        # 名称/SKU搜索
-        if name:
-            query += ' AND (name LIKE ? OR sku LIKE ?)'
-            params.extend([f'%{name}%', f'%{name}%'])
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(mat_stmt).fetchall()
 
-        # 分类筛选
-        if category:
-            query += ' AND category = ?'
-            params.append(category)
-
-        query += ' ORDER BY name ASC'
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-    # 构建导出行（一行一批次）
-    export_rows = []
-    with get_db() as conn:
-        cursor = conn.cursor()
+        # 构建导出行（一行一批次）
+        export_rows = []
         for row in rows:
-            quantity = row['quantity']
-            safe_stock = row['safe_stock']
-            is_disabled = bool(row['is_disabled'])
+            quantity = row.quantity
+            safe_stock = row.safe_stock
+            is_disabled = bool(row.is_disabled)
 
             # 计算状态
             if is_disabled:
@@ -4358,32 +4346,40 @@ def export_materials_excel(
                 continue
 
             material_base = {
-                'name': row['name'],
-                'sku': row['sku'],
-                'category': row['category'],
-                'unit': row['unit'],
-                'safe_stock': row['safe_stock'],
+                'name': row.name,
+                'sku': row.sku,
+                'category': row.category,
+                'unit': row.unit,
+                'safe_stock': row.safe_stock,
             }
 
             # 查询活跃批次
-            cursor.execute('''
-                SELECT b.batch_no, b.quantity, b.location, b.variant, c.name as contact_name
-                FROM batches b
-                LEFT JOIN contacts c ON b.contact_id = c.id
-                WHERE b.material_id = ? AND b.is_exhausted = 0
-                ORDER BY b.created_at ASC
-            ''', (row['id'],))
-            batches = cursor.fetchall()
+            batch_stmt = (
+                select(
+                    _t_batches.c.batch_no, _t_batches.c.quantity,
+                    _t_batches.c.location, _t_batches.c.variant,
+                    _t_contacts.c.name.label('contact_name'),
+                )
+                .select_from(
+                    _t_batches.outerjoin(_t_contacts, _t_batches.c.contact_id == _t_contacts.c.id)
+                )
+                .where(and_(
+                    _t_batches.c.material_id == row.id,
+                    _t_batches.c.is_exhausted == 0,
+                ))
+                .order_by(_t_batches.c.created_at.asc())
+            )
+            batches = sa_conn.execute(batch_stmt).fetchall()
 
             if batches:
                 for batch in batches:
                     export_rows.append({
                         **material_base,
-                        'batch_no': batch['batch_no'],
-                        'quantity': batch['quantity'],
-                        'location': batch['location'] or '',
-                        'contact_name': batch['contact_name'] or '',
-                        'variant': batch['variant'] or '',
+                        'batch_no': batch.batch_no,
+                        'quantity': batch.quantity,
+                        'location': batch.location or '',
+                        'contact_name': batch.contact_name or '',
+                        'variant': batch.variant or '',
                     })
             else:
                 # 无活跃批次（库存为0的物料）
@@ -4391,7 +4387,7 @@ def export_materials_excel(
                     **material_base,
                     'batch_no': '',
                     'quantity': 0,
-                    'location': row['location'] or '',
+                    'location': row.location or '',
                     'contact_name': '',
                     'variant': '',
                 })
@@ -4564,24 +4560,25 @@ async def preview_import_excel(
     duplicate_rows = 0
     seen_import_rows = set()
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    with get_engine().connect() as sa_conn:
 
         # 联系方为租户级（不绑定仓库），用 tenant 单独构造 scope
         contact_tenant_id = resolve_tenant_id_for_write(current_user, wh_id) if wh_id is not None else current_user.tenant_id
-        contact_scope_filter, contact_scope_params = build_scope_filter(contact_tenant_id, None)
+        contact_preds_base = list(build_scope_predicates(_t_contacts, contact_tenant_id, None))
+        mat_scope_preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
 
         # 联系方解析辅助
         def resolve_contact(name):
             if not name:
                 return None, None
-            cursor.execute(
-                f'SELECT id FROM contacts WHERE name = ? AND is_disabled = 0{contact_scope_filter}',
-                (name,) + contact_scope_params
-            )
-            r = cursor.fetchone()
+            stmt = select(_t_contacts.c.id).where(and_(
+                _t_contacts.c.name == name,
+                _t_contacts.c.is_disabled == 0,
+                *contact_preds_base,
+            ))
+            r = sa_conn.execute(stmt).first()
             if r:
-                return r['id'], name
+                return r.id, name
             new_contacts_set.add(name)
             return None, name
 
@@ -4623,19 +4620,24 @@ async def preview_import_excel(
             seen_import_rows.add(row_key)
 
             # 查询物料（按仓库过滤）
-            cursor.execute(f'SELECT id, name, quantity FROM materials WHERE sku = ?{wh_filter}', (sku,) + wh_params)
-            material = cursor.fetchone()
+            material = sa_conn.execute(
+                select(_t_materials.c.id, _t_materials.c.name, _t_materials.c.quantity)
+                .where(and_(_t_materials.c.sku == sku, *mat_scope_preds))
+            ).first()
 
             if is_batch_mode:
                 # === 批次模式：每行 = 一个批次 ===
                 if material:
-                    material_id = material['id']
+                    material_id = material.id
                     if batch_no_val:
                         # 查找已有批次
-                        cursor.execute('SELECT id, quantity FROM batches WHERE batch_no = ? AND material_id = ?', (batch_no_val, material_id))
-                        batch = cursor.fetchone()
+                        batch = sa_conn.execute(
+                            select(_t_batches.c.id, _t_batches.c.quantity)
+                            .where(and_(_t_batches.c.batch_no == batch_no_val,
+                                        _t_batches.c.material_id == material_id))
+                        ).first()
                         if batch:
-                            current_qty = batch['quantity']
+                            current_qty = batch.quantity
                             difference = import_qty - current_qty
                             if difference > 0:
                                 operation = 'in'
@@ -4646,7 +4648,7 @@ async def preview_import_excel(
                             else:
                                 operation = 'none'
                             preview_items.append(ImportPreviewItem(
-                                sku=sku, name=material['name'], category=category, unit=unit,
+                                sku=sku, name=material.name, category=category, unit=unit,
                                 safe_stock=safe_stock, location=location,
                                 current_quantity=current_qty, import_quantity=import_qty,
                                 difference=difference, operation=operation,
@@ -4657,7 +4659,7 @@ async def preview_import_excel(
                             # 批次号不存在，视为新批次导入
                             total_in += import_qty
                             preview_items.append(ImportPreviewItem(
-                                sku=sku, name=material['name'], category=category, unit=unit,
+                                sku=sku, name=material.name, category=category, unit=unit,
                                 safe_stock=safe_stock, location=location,
                                 current_quantity=0, import_quantity=import_qty,
                                 difference=import_qty, operation='in',
@@ -4669,7 +4671,7 @@ async def preview_import_excel(
                         # 新批次（无批次号）
                         total_in += import_qty
                         preview_items.append(ImportPreviewItem(
-                            sku=sku, name=material['name'], category=category, unit=unit,
+                            sku=sku, name=material.name, category=category, unit=unit,
                             safe_stock=safe_stock, location=location,
                             current_quantity=0, import_quantity=import_qty,
                             difference=import_qty, operation='in',
@@ -4701,7 +4703,7 @@ async def preview_import_excel(
 
                 if sku_is_duplicate:
                     # 重复的 SKU 行：作为新批次入库
-                    mat_name = material['name'] if material else name
+                    mat_name = material.name if material else name
                     total_in += import_qty
                     preview_items.append(ImportPreviewItem(
                         sku=sku, name=mat_name, category=category, unit=unit,
@@ -4713,7 +4715,7 @@ async def preview_import_excel(
                         variant=explicit_variant,
                     ))
                 elif material:
-                    current_qty = material['quantity']
+                    current_qty = material.quantity
                     difference = import_qty - current_qty
                     if difference > 0:
                         operation = 'in'
@@ -4724,7 +4726,7 @@ async def preview_import_excel(
                     else:
                         operation = 'none'
                     preview_items.append(ImportPreviewItem(
-                        sku=sku, name=material['name'], category=category, unit=unit,
+                        sku=sku, name=material.name, category=category, unit=unit,
                         safe_stock=safe_stock, location=location,
                         current_quantity=current_qty, import_quantity=import_qty,
                         difference=difference, operation=operation,
@@ -4761,15 +4763,18 @@ async def preview_import_excel(
 
         # 查找缺失的SKU（系统中有但导入文件中没有的，且未被禁用的）
         import_skus = {item.sku for item in preview_items}
-        cursor.execute(f'SELECT sku, name, category, quantity FROM materials WHERE is_disabled = 0{wh_filter}', wh_params)
-        all_system_skus = cursor.fetchall()
+        all_sys_stmt = select(
+            _t_materials.c.sku, _t_materials.c.name,
+            _t_materials.c.category, _t_materials.c.quantity,
+        ).where(and_(_t_materials.c.is_disabled == 0, *mat_scope_preds))
+        all_system_skus = sa_conn.execute(all_sys_stmt).fetchall()
 
         missing_skus = []
         for row in all_system_skus:
-            if row['sku'] not in import_skus:
+            if row.sku not in import_skus:
                 missing_skus.append(MissingSkuItem(
-                    sku=row['sku'], name=row['name'],
-                    category=row['category'] or '未分类', current_quantity=row['quantity']
+                    sku=row.sku, name=row.name,
+                    category=row.category or '未分类', current_quantity=row.quantity
                 ))
 
         total_missing = len(missing_skus)
@@ -4808,51 +4813,62 @@ async def confirm_import_excel(
     warnings = []
     operator_user_id = current_user.id
     operator = request.operator if request.operator else current_user.get_operator_name()
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now_dt = datetime.now()
 
-    with get_db() as conn:
-        check_warehouse_access(conn, current_user, wh_id)
-        cursor = conn.cursor()
+    # check_warehouse_access ignores its conn parameter (Phase 2b SA Core).
+    check_warehouse_access(None, current_user, wh_id)
 
-        # 校验所有显式传入的 contact_id 都属于本租户（防止跨租户写入引用）
-        target_tenant_for_contacts = resolve_tenant_id_for_write(current_user, wh_id)
-        seen_contact_ids = {item.contact_id for item in request.changes if item.contact_id}
-        for cid in seen_contact_ids:
-            ensure_contact_tenant(cursor, current_user, cid, target_tenant_for_contacts)
+    # 校验所有显式传入的 contact_id 都属于本租户（防止跨租户写入引用）— uses its own SA read.
+    target_tenant_for_contacts = resolve_tenant_id_for_write(current_user, wh_id)
+    seen_contact_ids = {item.contact_id for item in request.changes if item.contact_id}
+    for cid in seen_contact_ids:
+        ensure_contact_tenant(None, current_user, cid, target_tenant_for_contacts)
 
+    with get_engine().begin() as sa_conn:
         # 收集导入文件中的所有SKU
         import_skus = set(item.sku for item in request.changes)
 
         # 将不在导入文件中的SKU标记为禁用（需显式确认，仅限当前仓库）
-        wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id)
+        mat_scope_preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
         if import_skus:
-            placeholders = ','.join(['?' for _ in import_skus])
             if request.confirm_disable_missing_skus:
-                cursor.execute(f'UPDATE materials SET is_disabled = 1 WHERE sku NOT IN ({placeholders}){wh_filter}', list(import_skus) + list(wh_params))
+                sa_conn.execute(
+                    update(_t_materials)
+                    .where(and_(_t_materials.c.sku.notin_(list(import_skus)), *mat_scope_preds))
+                    .values(is_disabled=1)
+                )
             else:
                 warnings.append("已跳过禁用导入文件之外的SKU，如需禁用请勾选确认选项后重试。")
-            cursor.execute(f'UPDATE materials SET is_disabled = 0 WHERE sku IN ({placeholders}){wh_filter}', list(import_skus) + list(wh_params))
+            sa_conn.execute(
+                update(_t_materials)
+                .where(and_(_t_materials.c.sku.in_(list(import_skus)), *mat_scope_preds))
+                .values(is_disabled=0)
+            )
 
         # 前置：创建新联系方（联系方为租户级，不绑定仓库）
         contact_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
-        contact_scope_filter, contact_scope_params = build_scope_filter(contact_tenant_id, None)
+        contact_scope_preds = list(build_scope_predicates(_t_contacts, contact_tenant_id, None))
         contact_name_to_id = {}
         for item in request.changes:
             if item.contact_name and not item.contact_id:
                 if item.contact_name not in contact_name_to_id:
-                    cursor.execute(
-                        f'SELECT id FROM contacts WHERE name = ? AND is_disabled = 0{contact_scope_filter}',
-                        (item.contact_name,) + contact_scope_params
-                    )
-                    existing = cursor.fetchone()
+                    existing = sa_conn.execute(
+                        select(_t_contacts.c.id).where(and_(
+                            _t_contacts.c.name == item.contact_name,
+                            _t_contacts.c.is_disabled == 0,
+                            *contact_scope_preds,
+                        ))
+                    ).first()
                     if existing:
-                        contact_name_to_id[item.contact_name] = existing['id']
+                        contact_name_to_id[item.contact_name] = existing.id
                     else:
-                        cursor.execute(
-                            'INSERT INTO contacts (name, is_supplier, warehouse_id, tenant_id, created_at) VALUES (?, 1, NULL, ?, ?)',
-                            (item.contact_name, contact_tenant_id, now)
+                        ins_res = sa_conn.execute(
+                            insert(_t_contacts).values(
+                                name=item.contact_name, is_supplier=1, warehouse_id=None,
+                                tenant_id=contact_tenant_id, created_at=now_dt,
+                            )
                         )
-                        contact_name_to_id[item.contact_name] = cursor.lastrowid
+                        contact_name_to_id[item.contact_name] = ins_res.inserted_primary_key[0]
 
         def _get_contact_id(item):
             if item.contact_id:
@@ -4863,14 +4879,43 @@ async def confirm_import_excel(
 
         wh_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
 
+        # In-session batch_no allocator. generate_batch_no(material_id) without a
+        # cursor only sees committed rows, so consecutive calls inside one txn
+        # would collide. Track allocated numbers in-memory and bump the suffix
+        # until unique.
+        today_prefix = datetime.now().strftime('%Y%m%d')
+        allocated_batch_nos = set()
+
+        def _alloc_batch_no(material_id):
+            candidate = generate_batch_no(material_id)
+            if candidate not in allocated_batch_nos:
+                allocated_batch_nos.add(candidate)
+                return candidate
+            # Bump suffix until unique within this session.
+            try:
+                last_seq = int(candidate.split('-')[-1])
+            except (ValueError, IndexError):
+                last_seq = 0
+            seq = last_seq + 1
+            while True:
+                candidate = f'{today_prefix}-{seq:03d}'
+                if candidate not in allocated_batch_nos:
+                    allocated_batch_nos.add(candidate)
+                    return candidate
+                seq += 1
+
         def _create_batch(material_id, quantity, location, contact_id, variant=None, batch_no=None):
             """创建新批次并返回 batch_id"""
-            batch_no = batch_no or generate_batch_no(material_id, cursor=cursor)
-            cursor.execute('''
-                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, contact_id, location, variant, warehouse_id, tenant_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (batch_no, material_id, quantity, quantity, contact_id, location, variant, wh_id, wh_tenant_id, now))
-            return cursor.lastrowid
+            bn = batch_no or _alloc_batch_no(material_id)
+            ins_res = sa_conn.execute(
+                insert(_t_batches).values(
+                    batch_no=bn, material_id=material_id, quantity=quantity,
+                    initial_quantity=quantity, contact_id=contact_id,
+                    location=location, variant=variant,
+                    warehouse_id=wh_id, tenant_id=wh_tenant_id, created_at=now_dt,
+                )
+            )
+            return ins_res.inserted_primary_key[0]
 
         def _create_record(material_id, rec_type, quantity, item_reason_category, reason_suffix, batch_id=None, contact_id=None):
             """创建出入库记录"""
@@ -4882,12 +4927,22 @@ async def confirm_import_excel(
             if reason_suffix:
                 note_parts.append(reason_suffix.strip(' ()（）'))
             note = '; '.join(note_parts) if note_parts else None
-            cursor.execute('''
-                INSERT INTO inventory_records
-                (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, batch_id, warehouse_id, tenant_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (material_id, rec_type, quantity, operator, operator_user_id,
-                  category, note, contact_id, batch_id, wh_id, wh_tenant_id, now))
+            ins_res = sa_conn.execute(
+                insert(_t_inventory_records).values(
+                    material_id=material_id, type=rec_type, quantity=quantity,
+                    operator=operator, operator_user_id=operator_user_id,
+                    reason_category=category, reason_note=note,
+                    contact_id=contact_id, batch_id=batch_id,
+                    warehouse_id=wh_id, tenant_id=wh_tenant_id, created_at=now_dt,
+                )
+            )
+            return ins_res.inserted_primary_key[0]
+
+        def _lookup_material_id(sku):
+            row = sa_conn.execute(
+                select(_t_materials.c.id).where(and_(_t_materials.c.sku == sku, *mat_scope_preds))
+            ).first()
+            return row.id if row else None
 
         if request.is_batch_mode:
             # === 批次模式 ===
@@ -4895,11 +4950,14 @@ async def confirm_import_excel(
                 if item.operation == 'none':
                     # 无变动，仅更新 batch location
                     if item.batch_no and item.location:
-                        cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
-                        mat = cursor.fetchone()
-                        if mat:
-                            cursor.execute('UPDATE batches SET location = ? WHERE batch_no = ? AND material_id = ?',
-                                           (item.location, item.batch_no, mat['id']))
+                        mid = _lookup_material_id(item.sku)
+                        if mid is not None:
+                            sa_conn.execute(
+                                update(_t_batches)
+                                .where(and_(_t_batches.c.batch_no == item.batch_no,
+                                            _t_batches.c.material_id == mid))
+                                .values(location=item.location)
+                            )
                     continue
 
                 contact_id = _get_contact_id(item)
@@ -4908,59 +4966,70 @@ async def confirm_import_excel(
                     # 新SKU + 新批次
                     if not request.confirm_new_skus:
                         continue
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id, tenant_id, created_at)
-                        VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
-                    ''', (item.name, item.sku, item.category or '未分类', item.unit or '个',
-                          item.safe_stock, item.location or '', wh_id, wh_tenant_id, now))
-                    if cursor.rowcount == 0:
-                        cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
-                        material_id = cursor.fetchone()['id']
-                    else:
-                        material_id = cursor.lastrowid
+                    existing_id = _lookup_material_id(item.sku)
+                    if existing_id is None:
+                        ins_res = sa_conn.execute(
+                            insert(_t_materials).values(
+                                name=item.name, sku=item.sku,
+                                category=item.category or '未分类', quantity=0,
+                                unit=item.unit or '个', safe_stock=item.safe_stock,
+                                location=item.location or '',
+                                warehouse_id=wh_id, tenant_id=wh_tenant_id, created_at=now_dt,
+                            )
+                        )
+                        material_id = ins_res.inserted_primary_key[0]
                         new_count += 1
+                    else:
+                        material_id = existing_id
 
                     if item.import_quantity > 0:
                         batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant)
-                        cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
-                                       (item.import_quantity, material_id))
+                        sa_conn.execute(
+                            update(_t_materials).where(_t_materials.c.id == material_id)
+                            .values(quantity=_t_materials.c.quantity + item.import_quantity)
+                        )
                         _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
                 elif item.is_batch_new:
                     # 已有SKU，新批次
-                    cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
-                    mat = cursor.fetchone()
-                    if not mat:
+                    material_id = _lookup_material_id(item.sku)
+                    if material_id is None:
                         continue
-                    material_id = mat['id']
                     batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant, item.batch_no)
-                    cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
-                                   (item.import_quantity, material_id))
+                    sa_conn.execute(
+                        update(_t_materials).where(_t_materials.c.id == material_id)
+                        .values(quantity=_t_materials.c.quantity + item.import_quantity)
+                    )
                     _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新批次)', batch_id, contact_id)
                     in_count += 1
                     records_created += 1
                 else:
                     # 已有批次有变动
-                    cursor.execute(f'SELECT id FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
-                    mat = cursor.fetchone()
-                    if not mat:
+                    material_id = _lookup_material_id(item.sku)
+                    if material_id is None:
                         continue
-                    material_id = mat['id']
-                    cursor.execute('SELECT id, quantity FROM batches WHERE batch_no = ? AND material_id = ?',
-                                   (item.batch_no, material_id))
-                    batch = cursor.fetchone()
+                    batch = sa_conn.execute(
+                        select(_t_batches.c.id, _t_batches.c.quantity)
+                        .where(and_(_t_batches.c.batch_no == item.batch_no,
+                                    _t_batches.c.material_id == material_id))
+                    ).first()
                     if not batch:
                         continue
 
                     diff = item.difference
-                    cursor.execute('UPDATE batches SET quantity = ?, location = ?, variant = ? WHERE id = ?',
-                                   (item.import_quantity, item.location or '', item.variant, batch['id']))
-                    cursor.execute('UPDATE materials SET quantity = quantity + ? WHERE id = ?',
-                                   (diff, material_id))
+                    sa_conn.execute(
+                        update(_t_batches).where(_t_batches.c.id == batch.id)
+                        .values(quantity=item.import_quantity,
+                                location=item.location or '', variant=item.variant)
+                    )
+                    sa_conn.execute(
+                        update(_t_materials).where(_t_materials.c.id == material_id)
+                        .values(quantity=_t_materials.c.quantity + diff)
+                    )
 
                     rec_type = 'in' if diff > 0 else 'out'
-                    _create_record(material_id, rec_type, abs(diff), item.reason_category, '', batch['id'], contact_id)
+                    _create_record(material_id, rec_type, abs(diff), item.reason_category, '', batch.id, contact_id)
                     if diff > 0:
                         in_count += 1
                     else:
@@ -4969,7 +5038,11 @@ async def confirm_import_excel(
 
                 # 更新 materials.location 为最新
                 if item.location:
-                    cursor.execute(f'UPDATE materials SET location = ? WHERE sku = ?{wh_filter}', (item.location, item.sku) + wh_params)
+                    sa_conn.execute(
+                        update(_t_materials)
+                        .where(and_(_t_materials.c.sku == item.sku, *mat_scope_preds))
+                        .values(location=item.location)
+                    )
         else:
             # === 简化模式（统一创建批次）===
             for item in request.changes:
@@ -4979,20 +5052,20 @@ async def confirm_import_excel(
                     if not request.confirm_new_skus:
                         continue
 
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id, tenant_id, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (item.name, item.sku, item.category or '未分类', item.import_quantity,
-                          item.unit or '个', item.safe_stock, item.location or '', wh_id, wh_tenant_id, now))
+                    existing = sa_conn.execute(
+                        select(_t_materials.c.id, _t_materials.c.quantity)
+                        .where(and_(_t_materials.c.sku == item.sku, *mat_scope_preds))
+                    ).first()
 
-                    if cursor.rowcount == 0:
+                    if existing is not None:
                         # SKU已存在，按已有物料处理
-                        cursor.execute(f'SELECT id, quantity FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
-                        existing = cursor.fetchone()
-                        if existing and item.import_quantity != existing['quantity']:
-                            material_id = existing['id']
-                            diff = item.import_quantity - existing['quantity']
-                            cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?', (item.import_quantity, material_id))
+                        if item.import_quantity != existing.quantity:
+                            material_id = existing.id
+                            diff = item.import_quantity - existing.quantity
+                            sa_conn.execute(
+                                update(_t_materials).where(_t_materials.c.id == material_id)
+                                .values(quantity=item.import_quantity)
+                            )
                             rec_type = 'in' if diff > 0 else 'out'
                             if diff > 0:
                                 batch_id = _create_batch(material_id, abs(diff), item.location, contact_id, item.variant)
@@ -5003,26 +5076,42 @@ async def confirm_import_excel(
                         new_count += 1
                         continue
 
-                    material_id = cursor.lastrowid
+                    ins_res = sa_conn.execute(
+                        insert(_t_materials).values(
+                            name=item.name, sku=item.sku,
+                            category=item.category or '未分类',
+                            quantity=item.import_quantity,
+                            unit=item.unit or '个', safe_stock=item.safe_stock,
+                            location=item.location or '',
+                            warehouse_id=wh_id, tenant_id=wh_tenant_id, created_at=now_dt,
+                        )
+                    )
+                    material_id = ins_res.inserted_primary_key[0]
                     if item.import_quantity > 0:
                         batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id)
                         _create_record(material_id, 'in', item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         records_created += 1
                     new_count += 1
                 else:
-                    cursor.execute(f'SELECT id, quantity FROM materials WHERE sku = ?{wh_filter}', (item.sku,) + wh_params)
-                    material = cursor.fetchone()
+                    material = sa_conn.execute(
+                        select(_t_materials.c.id, _t_materials.c.quantity)
+                        .where(and_(_t_materials.c.sku == item.sku, *mat_scope_preds))
+                    ).first()
                     if not material:
                         continue
 
-                    material_id = material['id']
-                    current_qty = material['quantity']
+                    material_id = material.id
+                    current_qty = material.quantity
 
                     # 更新基本信息（含 variant 提取后可能变更的物料名称）
-                    cursor.execute('''
-                        UPDATE materials SET name = ?, safe_stock = ?, category = ?, unit = ?, location = ? WHERE id = ?
-                    ''', (item.name, item.safe_stock,
-                          item.category or '未分类', item.unit or '个', item.location or '', material_id))
+                    sa_conn.execute(
+                        update(_t_materials).where(_t_materials.c.id == material_id)
+                        .values(
+                            name=item.name, safe_stock=item.safe_stock,
+                            category=item.category or '未分类',
+                            unit=item.unit or '个', location=item.location or '',
+                        )
+                    )
 
                     if item.operation == 'none':
                         continue
@@ -5031,13 +5120,20 @@ async def confirm_import_excel(
 
                     if item.operation == 'in':
                         batch_id = _create_batch(material_id, abs_diff, item.location, contact_id, item.variant)
-                        cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
-                                       (current_qty + abs_diff, material_id))
+                        sa_conn.execute(
+                            update(_t_materials).where(_t_materials.c.id == material_id)
+                            .values(quantity=current_qty + abs_diff)
+                        )
                         _create_record(material_id, 'in', abs_diff, item.reason_category, '', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
                     elif item.operation == 'out':
                         if current_qty - abs_diff < 0:
+                            # Roll back partial mutations from this batch import
+                            # (preserves original sqlite get_db() semantics where
+                            # an early return without conn.commit() discarded
+                            # all in-progress writes).
+                            sa_conn.rollback()
                             return ExcelImportResponse(
                                 success=False, in_count=in_count, out_count=out_count,
                                 new_count=new_count, records_created=records_created,
@@ -5045,42 +5141,54 @@ async def confirm_import_excel(
                             )
                         # FIFO 消耗批次
                         remaining = abs_diff
-                        cursor.execute('''
-                            SELECT id, quantity FROM batches
-                            WHERE material_id = ? AND is_exhausted = 0 AND quantity > 0
-                            ORDER BY created_at ASC
-                        ''', (material_id,))
-                        available_batches = cursor.fetchall()
+                        available_batches = sa_conn.execute(
+                            select(_t_batches.c.id, _t_batches.c.quantity)
+                            .where(and_(
+                                _t_batches.c.material_id == material_id,
+                                _t_batches.c.is_exhausted == 0,
+                                _t_batches.c.quantity > 0,
+                            ))
+                            .order_by(_t_batches.c.created_at.asc())
+                        ).fetchall()
 
-                        cursor.execute('UPDATE materials SET quantity = ? WHERE id = ?',
-                                       (current_qty - abs_diff, material_id))
+                        sa_conn.execute(
+                            update(_t_materials).where(_t_materials.c.id == material_id)
+                            .values(quantity=current_qty - abs_diff)
+                        )
                         out_reason = item.reason_category or 'sell'
-                        cursor.execute('''
-                            INSERT INTO inventory_records
-                            (material_id, type, quantity, operator, operator_user_id, reason_category, reason_note, contact_id, warehouse_id, tenant_id, created_at)
-                            VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (material_id, abs_diff, operator, operator_user_id,
-                              out_reason, request.reason_note, contact_id, wh_id, wh_tenant_id, now))
-                        record_id = cursor.lastrowid
+                        out_ins = sa_conn.execute(
+                            insert(_t_inventory_records).values(
+                                material_id=material_id, type='out', quantity=abs_diff,
+                                operator=operator, operator_user_id=operator_user_id,
+                                reason_category=out_reason, reason_note=request.reason_note,
+                                contact_id=contact_id,
+                                warehouse_id=wh_id, tenant_id=wh_tenant_id, created_at=now_dt,
+                            )
+                        )
+                        record_id = out_ins.inserted_primary_key[0]
 
                         for batch in available_batches:
                             if remaining <= 0:
                                 break
-                            consume = min(batch['quantity'], remaining)
-                            new_batch_qty = batch['quantity'] - consume
+                            consume = min(batch.quantity, remaining)
+                            new_batch_qty = batch.quantity - consume
                             remaining -= consume
-                            cursor.execute('UPDATE batches SET quantity = ?, is_exhausted = ? WHERE id = ?',
-                                           (new_batch_qty, 1 if new_batch_qty == 0 else 0, batch['id']))
-                            cursor.execute('''
-                                INSERT INTO batch_consumptions (record_id, batch_id, quantity, created_at)
-                                VALUES (?, ?, ?, ?)
-                            ''', (record_id, batch['id'], consume, now))
+                            sa_conn.execute(
+                                update(_t_batches).where(_t_batches.c.id == batch.id)
+                                .values(quantity=new_batch_qty,
+                                        is_exhausted=1 if new_batch_qty == 0 else 0)
+                            )
+                            sa_conn.execute(
+                                insert(_t_batch_consumptions).values(
+                                    record_id=record_id, batch_id=batch.id,
+                                    quantity=consume, created_at=now_dt,
+                                )
+                            )
 
                         out_count += 1
                         records_created += 1
 
-        conn.commit()
-        get_fuzzy_matcher().invalidate_cache()
+    get_fuzzy_matcher().invalidate_cache()
 
     warning_text = f" {' '.join(warnings)}" if warnings else ""
     return ExcelImportResponse(
@@ -5102,60 +5210,76 @@ def export_inventory_records(
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_auth('view'))
 ):
-    """导出出入库记录为Excel（支持筛选，含批次信息）"""
+    """导出出入库记录为Excel（支持筛选，含批次信息）— Phase 3f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    wh_filter, wh_params = build_scope_filter(current_user.tenant_id, wh_id, 'r')
-    with get_db() as conn:
-        cursor = conn.cursor()
 
-        query = '''
-            SELECT r.id, m.name, m.sku, m.category, r.type, r.quantity, r.operator, r.operator_user_id,
-                   r.reason_category, r.reason_note, r.created_at,
-                   c.name as contact_name, r.batch_id, b.batch_no, b.variant,
-                   u.display_name as operator_display_name, u.username as operator_username
-            FROM inventory_records r
-            JOIN materials m ON r.material_id = m.id
-            LEFT JOIN contacts c ON r.contact_id = c.id
-            LEFT JOIN batches b ON r.batch_id = b.id
-            LEFT JOIN users u ON r.operator_user_id = u.id
-            WHERE 1=1{wh_filter}
-        '''
-        query = query.format(wh_filter=wh_filter)
-        params = list(wh_params)
+    preds = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    if start_date:
+        preds.append(_sa_func.date(_t_inventory_records.c.created_at) >= start_date)
+    if end_date:
+        preds.append(_sa_func.date(_t_inventory_records.c.created_at) <= end_date)
+    if product_name:
+        preds.append(_t_materials.c.name.like(f'%{product_name}%'))
+    if record_type and record_type != 'all':
+        preds.append(_t_inventory_records.c.type == record_type)
 
-        if start_date:
-            query += ' AND DATE(r.created_at) >= ?'
-            params.append(start_date)
-        if end_date:
-            query += ' AND DATE(r.created_at) <= ?'
-            params.append(end_date)
-        if product_name:
-            query += ' AND m.name LIKE ?'
-            params.append(f'%{product_name}%')
-        if record_type and record_type != 'all':
-            query += ' AND r.type = ?'
-            params.append(record_type)
+    rec_stmt = (
+        select(
+            _t_inventory_records.c.id,
+            _t_materials.c.name,
+            _t_materials.c.sku,
+            _t_materials.c.category,
+            _t_inventory_records.c.type,
+            _t_inventory_records.c.quantity,
+            _t_inventory_records.c.operator,
+            _t_inventory_records.c.operator_user_id,
+            _t_inventory_records.c.reason_category,
+            _t_inventory_records.c.reason_note,
+            _t_inventory_records.c.created_at,
+            _t_contacts.c.name.label('contact_name'),
+            _t_inventory_records.c.batch_id,
+            _t_batches.c.batch_no,
+            _t_batches.c.variant,
+            _t_users.c.display_name.label('operator_display_name'),
+            _t_users.c.username.label('operator_username'),
+        )
+        .select_from(
+            _t_inventory_records
+                .join(_t_materials, _t_inventory_records.c.material_id == _t_materials.c.id)
+                .outerjoin(_t_contacts, _t_inventory_records.c.contact_id == _t_contacts.c.id)
+                .outerjoin(_t_batches, _t_inventory_records.c.batch_id == _t_batches.c.id)
+                .outerjoin(_t_users, _t_inventory_records.c.operator_user_id == _t_users.c.id)
+        )
+        .order_by(_t_inventory_records.c.created_at.desc())
+    )
+    if preds:
+        rec_stmt = rec_stmt.where(and_(*preds))
 
-        query += ' ORDER BY r.created_at DESC'
-        cursor.execute(query, params)
-        records = cursor.fetchall()
+    with get_engine().connect() as sa_conn:
+        records = sa_conn.execute(rec_stmt).fetchall()
 
         # 为出库记录获取批次消耗详情
         batch_details_map = {}
-        for record in records:
-            if record['type'] == 'out':
-                record_id = record['id']
-                cursor.execute('''
-                    SELECT b.batch_no, bc.quantity
-                    FROM batch_consumptions bc
-                    JOIN batches b ON bc.batch_id = b.id
-                    WHERE bc.record_id = ?
-                    ORDER BY b.created_at ASC
-                ''', (record_id,))
-                consumptions = cursor.fetchall()
-                if consumptions:
-                    details = [f"{c['batch_no']}×{c['quantity']}" for c in consumptions]
-                    batch_details_map[record_id] = ', '.join(details)
+        out_record_ids = [r.id for r in records if r.type == 'out']
+        if out_record_ids:
+            cons_stmt = (
+                select(
+                    _t_batch_consumptions.c.record_id,
+                    _t_batches.c.batch_no,
+                    _t_batch_consumptions.c.quantity,
+                    _t_batches.c.created_at,
+                )
+                .select_from(
+                    _t_batch_consumptions.join(_t_batches, _t_batch_consumptions.c.batch_id == _t_batches.c.id)
+                )
+                .where(_t_batch_consumptions.c.record_id.in_(out_record_ids))
+                .order_by(_t_batch_consumptions.c.record_id, _t_batches.c.created_at.asc())
+            )
+            for cons in sa_conn.execute(cons_stmt).fetchall():
+                batch_details_map.setdefault(cons.record_id, []).append(
+                    f"{cons.batch_no}×{cons.quantity}"
+                )
+            batch_details_map = {k: ', '.join(v) for k, v in batch_details_map.items()}
 
     wb = Workbook()
     ws = wb.active
@@ -5168,25 +5292,28 @@ def export_inventory_records(
     for row_idx, record in enumerate(records, 2):
         # 批次信息：入库显示批次号，出库显示消耗详情
         batch_info = ''
-        if record['type'] == 'in' and record['batch_no']:
-            batch_info = record['batch_no']
-        elif record['type'] == 'out':
-            batch_info = batch_details_map.get(record['id'], '')
+        if record.type == 'in' and record.batch_no:
+            batch_info = record.batch_no
+        elif record.type == 'out':
+            batch_info = batch_details_map.get(record.id, '')
 
-        ws.cell(row=row_idx, column=1, value=record['name'])
-        ws.cell(row=row_idx, column=2, value=record['variant'] or '')
-        ws.cell(row=row_idx, column=3, value=record['sku'])
-        ws.cell(row=row_idx, column=4, value=record['category'])
-        ws.cell(row=row_idx, column=5, value='入库' if record['type'] == 'in' else '出库')
-        ws.cell(row=row_idx, column=6, value=record['quantity'])
+        created_at_str = (record.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                          if isinstance(record.created_at, datetime) else record.created_at)
+
+        ws.cell(row=row_idx, column=1, value=record.name)
+        ws.cell(row=row_idx, column=2, value=record.variant or '')
+        ws.cell(row=row_idx, column=3, value=record.sku)
+        ws.cell(row=row_idx, column=4, value=record.category)
+        ws.cell(row=row_idx, column=5, value='入库' if record.type == 'in' else '出库')
+        ws.cell(row=row_idx, column=6, value=record.quantity)
         ws.cell(row=row_idx, column=7, value=batch_info)
-        ws.cell(row=row_idx, column=8, value=record['contact_name'] or '')
+        ws.cell(row=row_idx, column=8, value=record.contact_name or '')
         # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段
-        operator_name = record['operator_display_name'] or record['operator_username'] or record['operator']
+        operator_name = record.operator_display_name or record.operator_username or record.operator
         ws.cell(row=row_idx, column=9, value=operator_name)
-        ws.cell(row=row_idx, column=10, value=REASON_CATEGORY_LABELS.get(record['reason_category'], record['reason_category'] or ''))
-        ws.cell(row=row_idx, column=11, value=record['reason_note'] or '')
-        ws.cell(row=row_idx, column=12, value=record['created_at'])
+        ws.cell(row=row_idx, column=10, value=REASON_CATEGORY_LABELS.get(record.reason_category, record.reason_category or ''))
+        ws.cell(row=row_idx, column=11, value=record.reason_note or '')
+        ws.cell(row=row_idx, column=12, value=created_at_str)
 
     # 设置列宽
     column_widths = [22, 10, 18, 14, 12, 10, 28, 16, 14, 14, 24, 22]
