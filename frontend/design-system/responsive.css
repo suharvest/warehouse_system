@@ -672,4 +672,210 @@
   }
 }
 
+/* =====================================================================
+   Mobile filter drawer (≤ 640px) — bottom-sheet replacement for inline
+   filter bars. Desktop (>640px) hides the trigger and keeps the original
+   inline `.filter-bar` layout untouched.
+   ===================================================================== */
+
+/* Desktop default: trigger bar is hidden, drawer chrome is hidden */
+.filter-trigger-bar { display: none; }
+.filter-bar > .filter-drawer-header { display: none; }
+.filter-drawer-backdrop { display: none; }
+
+@media (max-width: 640px) {
+  /* Hide inline filter bar by default; show only when opened as drawer */
+  .filter-bar:not(.is-drawer-open) {
+    display: none !important;
+  }
+
+  /* Trigger bar: a thin row above the table with the filter button */
+  .filter-trigger-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    margin: 0 0 12px 0;
+    padding: 0;
+  }
+
+  .filter-trigger-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 16px;
+    background: var(--color-card-bg, #ffffff);
+    border: 1px solid var(--color-border, #d9d9d9);
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--color-text-primary, #262626);
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    line-height: 1;
+    min-height: 38px;
+  }
+
+  .filter-trigger-btn:active {
+    transform: scale(0.98);
+  }
+
+  .filter-trigger-btn.has-filters {
+    background: var(--color-primary, #8cc63f);
+    color: #fff;
+    border-color: var(--color-primary, #8cc63f);
+  }
+
+  .filter-trigger-btn .filter-trigger-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: rgba(0,0,0,0.08);
+    color: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  .filter-trigger-btn.has-filters .filter-trigger-badge {
+    background: rgba(255,255,255,0.25);
+    color: #fff;
+  }
+
+  /* Backdrop */
+  .filter-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0);
+    z-index: 9998;
+    pointer-events: none;
+    transition: background 0.2s ease;
+  }
+  .filter-drawer-backdrop.show {
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: auto;
+  }
+
+  /* Drawer-mode filter bar — bottom sheet, 2-column grid */
+  .filter-bar.is-drawer-open {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    align-content: start;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    max-height: 85vh;
+    margin: 0;
+    padding: 0 16px 16px;
+    background: var(--color-card-bg, #ffffff);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -8px 24px rgba(0,0,0,0.18);
+    z-index: 9999;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    animation: filterDrawerSlideUp 0.22s ease-out;
+  }
+
+  @keyframes filterDrawerSlideUp {
+    from { transform: translateY(100%); }
+    to   { transform: translateY(0); }
+  }
+
+  /* Drawer header — spans both columns, sticky at top */
+  .filter-bar.is-drawer-open > .filter-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    grid-column: 1 / -1;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin: 0 -16px 4px;
+    padding: 18px 16px 12px;
+    background: var(--color-card-bg, #ffffff);
+    border-bottom: 1px solid var(--color-border, #f0f0f0);
+  }
+
+  /* Drag-handle pill */
+  .filter-bar.is-drawer-open > .filter-drawer-header::before {
+    content: '';
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--color-border, #d9d9d9);
+  }
+
+  .filter-drawer-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--color-text-primary, #262626);
+  }
+
+  .filter-drawer-close {
+    background: transparent;
+    border: none;
+    font-size: 26px;
+    line-height: 1;
+    color: var(--color-text-secondary, #8c8c8c);
+    cursor: pointer;
+    padding: 4px 8px;
+  }
+
+  /* Each filter group fills its 50% column; full-width override available */
+  .filter-bar.is-drawer-open > .filter-group {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .filter-bar.is-drawer-open > .filter-group input,
+  .filter-bar.is-drawer-open > .filter-group select,
+  .filter-bar.is-drawer-open > .filter-group .dropdown-multiselect {
+    width: 100%;
+    min-width: 0 !important;
+  }
+
+  /* Actions footer — spans both columns, sticky at bottom */
+  .filter-bar.is-drawer-open > .filter-actions {
+    grid-column: 1 / -1;
+    position: sticky;
+    bottom: 0;
+    margin: 8px -16px 0;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0));
+    background: var(--color-card-bg, #ffffff);
+    border-top: 1px solid var(--color-border, #f0f0f0);
+    display: flex;
+    gap: 10px;
+    z-index: 2;
+  }
+
+  .filter-bar.is-drawer-open > .filter-actions .filter-btn {
+    flex: 1;
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  /* Lock body scroll while drawer open */
+  body.filter-drawer-open {
+    overflow: hidden;
+  }
+
+  /* Multi-select dropdown menu inside drawer: cap height to keep usable */
+  .filter-bar.is-drawer-open .dropdown-multiselect .dropdown-menu {
+    max-height: 240px;
+  }
+}
+
 } /* end @layer utilities */

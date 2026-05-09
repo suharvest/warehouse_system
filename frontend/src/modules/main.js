@@ -9,6 +9,7 @@ import {
 
 // UI 模块
 import { initDropdownListeners, initSearchableSelect, setProductSelectorValue, clearProductSelector, clearRecordProductSelector, toggleDropdown, toggleDropdownItem } from './ui/dropdown.js';
+import { initFilterDrawers, refreshFilterDrawerI18n } from './ui/filter-drawer.js';
 import { switchTab, initFromHash, startAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules, renderWarehouseSwitcher, toggleWarehouseSwitcher, selectWarehouse } from './ui/tabs.js';
 
 // 功能模块
@@ -232,6 +233,7 @@ function onLanguageChange() {
     document.title = t('pageTitle');
     populateProductSelector();
     populateCategorySelect();
+    refreshFilterDrawerI18n();
 
     // 重新渲染当前Tab
     switch (getCurrentTab()) {
@@ -544,6 +546,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // 初始化下拉组件监听
     initDropdownListeners();
+
+    // 初始化移动端筛选抽屉（≤640px 生效，桌面端不变）
+    initFilterDrawers();
 
     // 注入租户管理弹窗 HTML
     const tenantModalsContainer = document.createElement('div');
