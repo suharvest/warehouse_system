@@ -235,9 +235,13 @@ def audit_log(action: str, user_id: int = None, username: str = None, details: d
 # ============================================
 # 初始化数据库
 # ============================================
-init_database()
-if INIT_MOCK_DATA:
-    generate_mock_data()
+# NOTE (Phase 3g cleanup): schema management has moved to Alembic. The
+# ``init_database()`` function is intentionally kept (sqlite-only DDL helper)
+# because tests/conftest.py and a couple of legacy fixtures still call it
+# directly. It is no longer invoked at FastAPI startup — see the
+# ``_run_migrations`` startup hook below, which calls ``alembic upgrade head``
+# and works on both SQLite and MySQL. ``generate_mock_data()`` was likewise
+# moved into the startup hook so it runs *after* the schema exists.
 
 
 # 数据库连接上下文管理器
@@ -1935,10 +1939,20 @@ def export_database(current_user: CurrentUser = Depends(require_auth('admin'))):
 
     只导出仓库相关表：materials, inventory_records, batches, batch_consumptions, contacts
     不导出用户相关表：users, sessions, api_keys
+
+    NOTE: This endpoint is sqlite-only by design — it streams a literal
+    ``.db`` file built from ``sqlite_master`` DDL. On non-sqlite deployments
+    (e.g. MySQL) it returns 400.
     """
     import tempfile
     import sqlite3
     import shutil
+
+    if get_engine().dialect.name != 'sqlite':
+        raise HTTPException(
+            status_code=400,
+            detail="DB export is only available on the sqlite-backed deployment",
+        )
 
     # 获取当前数据库路径
     db_path = os.environ.get('DATABASE_PATH', 'warehouse.db')
@@ -2010,9 +2024,19 @@ async def import_database(
     从上传的SQLite数据库文件中导入仓库相关表的数据。
     会清空现有仓库数据后再导入。
     不影响用户相关表：users, sessions, api_keys
+
+    NOTE: This endpoint is sqlite-only by design — it operates on a literal
+    ``.db`` upload using ``sqlite_master``. On non-sqlite deployments it
+    returns 400.
     """
     import tempfile
     import sqlite3
+
+    if get_engine().dialect.name != 'sqlite':
+        raise HTTPException(
+            status_code=400,
+            detail="DB import is only available on the sqlite-backed deployment",
+        )
 
     # 读取上传的文件
     contents = await file.read()
@@ -5401,6 +5425,30 @@ async def add_inventory_record(
 
 # 全局 MCP 进程管理器实例
 mcp_manager = MCPProcessManager()
+
+
+@app.on_event("startup")
+async def _run_migrations():
+    """Run Alembic migrations on startup. Idempotent.
+
+    Replaces the legacy module-level ``init_database()`` call so that the
+    deployment works on both SQLite (dev/local) and MySQL (production).
+    Also seeds mock data after the schema is in place when INIT_MOCK_DATA is
+    enabled.
+    """
+    from alembic.config import Config as AlembicConfig
+    from alembic import command as alembic_command
+    cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "alembic.ini"))
+    cfg.set_main_option(
+        "script_location", os.path.join(os.path.dirname(__file__), "alembic")
+    )
+    alembic_command.upgrade(cfg, "head")
+
+    if INIT_MOCK_DATA:
+        try:
+            generate_mock_data()
+        except Exception as e:
+            logger.warning(f"generate_mock_data() skipped: {e}")
 
 
 @app.on_event("startup")
