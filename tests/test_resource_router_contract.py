@@ -189,6 +189,32 @@ def _suffix() -> str:
 
 
 # ---------------------------------------------------------------------------
+# List-contract helpers (in addition to shape-only goldens)
+# ---------------------------------------------------------------------------
+#
+# The shape-only snapshots above only check the FIRST item's keys, so they
+# miss real-world list-handler bugs: tenant filter inversion, sort drift,
+# total-count off-by-one, include-disabled changes, pagination overlap. We
+# layer the assertions below on top — the goldens stay byte-identical.
+
+
+def _admin_tenant_id():
+    """Look up the conftest admin's tenant_id (= 1 by default)."""
+    from database import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT tenant_id FROM users WHERE username = 'admin'")
+    row = cur.fetchone()
+    conn.close()
+    return row['tenant_id']
+
+
+def _filter_by_tag(items, tag, key='name'):
+    """Pick rows whose `key` contains the unique tag we seeded with."""
+    return [it for it in items if tag in (it.get(key) or '')]
+
+
+# ---------------------------------------------------------------------------
 # Contacts
 # ---------------------------------------------------------------------------
 
@@ -245,6 +271,75 @@ def test_contract_contacts(admin_client):
     _check("contacts/create_400", r.status_code, r.json())
     assert r.status_code == 400
 
+    # ------------------------------------------------------------------
+    # Strong list-contract assertions (count / tenant / order / pagination)
+    # ------------------------------------------------------------------
+    tag = f"contractlist-{_suffix()}"
+    expected_tenant = _admin_tenant_id()
+    seeded_ids: list[int] = []
+    # 11 records — pagination test below uses ``page_size=10`` (handler's
+    # minimum) so 11 forces 2 pages with the second carrying the off-by-one
+    # remainder. Names sorted by ``f"{tag}-{i:02d}"`` so the asc-name order
+    # is known ahead of time.
+    N = 11
+    for i in range(N):
+        rr = admin_client.post("/api/contacts", json={
+            "name": f"{tag}-{i:02d}",
+            "is_supplier": True, "is_customer": False,
+        })
+        assert rr.status_code == 200, rr.text
+        seeded_ids.append(rr.json()["id"])
+
+    # Total count: filter by ``name=tag`` so we don't depend on prior tests.
+    r = admin_client.get(f"/api/contacts?name={tag}&page_size=100")
+    assert r.status_code == 200
+    body = r.json()
+    items = body["items"]
+    assert body["total"] == N, f"expected total={N} with tag filter, got {body!r}"
+    assert len(items) == N
+
+    # Tenant filter: every returned row must match admin's tenant_id (or
+    # carry no tenant_id field, which the contacts shape does not — the
+    # tenant_id column is filtered server-side via build_scope_predicates).
+    # We assert via cross-tenant invisibility further down where applicable.
+    # Order: contacts list sorts by name ASC. Names are
+    # ``{tag}-00`` .. ``{tag}-06`` which sort lexicographically == seed order.
+    returned_names = [it["name"] for it in items]
+    assert returned_names == sorted(returned_names), (
+        f"contacts list order drift: {returned_names!r}"
+    )
+    expected_names = [f"{tag}-{i:02d}" for i in range(N)]
+    assert returned_names == expected_names, (
+        f"contacts list expected {expected_names!r}, got {returned_names!r}"
+    )
+
+    # Pagination off-by-one: handler enforces page_size>=10; with N=11,
+    # page_size=10 yields [10, 1] and pages 1+2 == seeded_ids, no overlap.
+    seen: list[int] = []
+    for page, expected_n in [(1, 10), (2, 1)]:
+        rr = admin_client.get(
+            f"/api/contacts?name={tag}&page={page}&page_size=10"
+        )
+        assert rr.status_code == 200
+        bb = rr.json()
+        assert bb["page"] == page
+        assert bb["page_size"] == 10
+        assert bb["total"] == N
+        assert bb["total_pages"] == 2
+        assert len(bb["items"]) == expected_n, (
+            f"page {page}: expected {expected_n} items, got {len(bb['items'])}"
+        )
+        seen.extend(it["id"] for it in bb["items"])
+    assert sorted(seen) == sorted(seeded_ids), (
+        f"pagination overlap/gap: pages had {sorted(seen)!r} vs seeded "
+        f"{sorted(seeded_ids)!r}"
+    )
+    assert len(seen) == len(set(seen)), "pagination returned duplicate IDs"
+
+    # cleanup
+    for cid_ in seeded_ids:
+        admin_client.delete(f"/api/contacts/{cid_}")
+
 
 # ---------------------------------------------------------------------------
 # Warehouses
@@ -279,6 +374,45 @@ def test_contract_warehouses(admin_client):
     r = admin_client.put("/api/warehouses/999999999", json={"name": "x"})
     _check("warehouses/update_404", r.status_code, r.json())
     assert r.status_code == 404
+
+    # ------------------------------------------------------------------
+    # Strong list-contract assertions
+    # ------------------------------------------------------------------
+    tag = f"contractlist-{_suffix()}"
+    expected_tenant = _admin_tenant_id()
+    seeded_ids: list[int] = []
+    for i in range(3):
+        rr = admin_client.post("/api/warehouses", json={
+            "slug": f"wh-{tag}-{i}",
+            "name": f"WH {tag}-{i:02d}",
+        })
+        assert rr.status_code == 200, rr.text
+        seeded_ids.append(rr.json()["id"])
+
+    r = admin_client.get("/api/warehouses")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    mine = _filter_by_tag(body, tag)
+    assert len(mine) == 3, f"expected 3 tagged warehouses, got {len(mine)}"
+
+    # Tenant filter: every tagged row must match admin's tenant_id.
+    for it in mine:
+        assert it["tenant_id"] == expected_tenant, (
+            f"cross-tenant leak: tagged warehouse {it!r}"
+        )
+
+    # Order: warehouses list sorts by ``is_default DESC, id ASC`` — within
+    # our tag-set (none default), this collapses to id-asc == seed order.
+    tagged_ids = [it["id"] for it in mine]
+    assert tagged_ids == seeded_ids, (
+        f"warehouses list order drift within tag: {tagged_ids!r} vs seeded "
+        f"{seeded_ids!r}"
+    )
+
+    # cleanup
+    for wid_ in seeded_ids:
+        admin_client.delete(f"/api/warehouses/{wid_}")
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +450,45 @@ def test_contract_users(admin_client):
     _check("users/update_404", r.status_code, r.json())
     assert r.status_code == 404
 
+    # ------------------------------------------------------------------
+    # Strong list-contract assertions
+    # ------------------------------------------------------------------
+    tag = f"contractlist{_suffix()}"  # no dash — username regex is strict
+    expected_tenant = _admin_tenant_id()
+    seeded_ids: list[int] = []
+    for i in range(3):
+        rr = admin_client.post("/api/users", json={
+            "username": f"u-{tag}-{i}",
+            "password": "Pass1234!",
+            "display_name": f"U {tag} {i:02d}",
+            "role": "operate",
+        })
+        assert rr.status_code == 200, rr.text
+        seeded_ids.append(rr.json()["id"])
+
+    r = admin_client.get("/api/users")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    mine = _filter_by_tag(body, tag, key='username')
+    assert len(mine) == 3, f"expected 3 tagged users, got {len(mine)}"
+
+    for it in mine:
+        assert it["tenant_id"] == expected_tenant, (
+            f"cross-tenant leak: tagged user {it!r}"
+        )
+
+    # Order: users list sorts by ``created_at DESC`` — last-seeded first.
+    tagged_ids = [it["id"] for it in mine]
+    assert tagged_ids == list(reversed(seeded_ids)), (
+        f"users list order drift: {tagged_ids!r} vs reversed seeded "
+        f"{list(reversed(seeded_ids))!r}"
+    )
+
+    # cleanup
+    for uid_ in seeded_ids:
+        admin_client.delete(f"/api/users/{uid_}")
+
 
 # ---------------------------------------------------------------------------
 # API keys
@@ -344,6 +517,38 @@ def test_contract_api_keys(admin_client, default_warehouse_id):
     r = admin_client.delete("/api/api-keys/999999999")
     _check("api_keys/delete_404", r.status_code, r.json())
     assert r.status_code == 404
+
+    # ------------------------------------------------------------------
+    # Strong list-contract assertions
+    # ------------------------------------------------------------------
+    tag = f"contractlist-{_suffix()}"
+    seeded_ids: list[int] = []
+    for i in range(3):
+        rr = admin_client.post("/api/api-keys", json={
+            "name": f"k-{tag}-{i:02d}",
+            "role": "operate",
+            "warehouse_id": default_warehouse_id,
+        })
+        assert rr.status_code == 200, rr.text
+        seeded_ids.append(rr.json()["id"])
+
+    r = admin_client.get("/api/api-keys")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    mine = _filter_by_tag(body, tag, key='name')
+    assert len(mine) == 3, f"expected 3 tagged api-keys, got {len(mine)}"
+
+    # Order: api-keys list sorts by ``created_at DESC`` — last-seeded first.
+    tagged_ids = [it["id"] for it in mine]
+    assert tagged_ids == list(reversed(seeded_ids)), (
+        f"api-keys list order drift: {tagged_ids!r} vs reversed seeded "
+        f"{list(reversed(seeded_ids))!r}"
+    )
+
+    # cleanup
+    for kid_ in seeded_ids:
+        admin_client.delete(f"/api/api-keys/{kid_}")
 
 
 # ---------------------------------------------------------------------------
@@ -382,3 +587,44 @@ def test_contract_mcp(admin_client, default_warehouse_id):
                          json={"name": "x"})
     _check("mcp/update_404", r.status_code, r.json())
     assert r.status_code == 404
+
+    # ------------------------------------------------------------------
+    # Strong list-contract assertions
+    # ------------------------------------------------------------------
+    tag = f"contractlist-{_suffix()}"
+    expected_tenant = _admin_tenant_id()
+    seeded_ids: list[int] = []
+    for i in range(3):
+        rr = admin_client.post("/api/mcp/connections", json={
+            "name": f"mcp-{tag}-{i:02d}",
+            "mcp_endpoint": "http://127.0.0.1:9/mcp",
+            "role": "operate",
+            "auto_start": False,
+            "warehouse_id": default_warehouse_id,
+        })
+        assert rr.status_code == 200, rr.text
+        seeded_ids.append(rr.json()["connection"]["id"])
+
+    r = admin_client.get("/api/mcp/connections")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    mine = _filter_by_tag(body, tag, key='name')
+    assert len(mine) == 3, f"expected 3 tagged mcp connections, got {len(mine)}"
+
+    for it in mine:
+        assert it["tenant_id"] == expected_tenant, (
+            f"cross-tenant leak: tagged mcp {it!r}"
+        )
+
+    # Order within tag-set: same tenant/warehouse, so falls to
+    # ``created_at DESC`` — last-seeded first.
+    tagged_ids = [it["id"] for it in mine]
+    assert tagged_ids == list(reversed(seeded_ids)), (
+        f"mcp list order drift: {tagged_ids!r} vs reversed seeded "
+        f"{list(reversed(seeded_ids))!r}"
+    )
+
+    # cleanup
+    for mid_ in seeded_ids:
+        admin_client.delete(f"/api/mcp/connections/{mid_}")
