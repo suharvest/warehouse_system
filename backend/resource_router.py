@@ -1,7 +1,19 @@
 """
 ResourceRouter — small CRUD-route factory for resource families.
 
-Currently migrated: contacts, warehouses, users, api-keys.
+Currently migrated: contacts, warehouses, users, api-keys, ERP providers
+(GET/PUT/DELETE only — POST is multipart upload, hand-rolled).
+
+Intentionally hand-rolled (factory cost > savings):
+  * MCP connections — async lifecycle (start/stop/restart) interleaved
+    with create/update/delete; response wrapper ``MCPConnectionResponse``
+    differs from the row shape; cascading api_keys cleanup on DELETE.
+    Goldens still in place at ``tests/contracts/mcp/``.
+  * ERP POST  — multipart file upload (``UploadFile = File(...)``).
+  * Face rules / subjects / enrollments — tenant resolved via *query
+    parameter* (``_face_resolve_tenant``), which the factory's hook
+    contract does not surface to per-verb closures. Goldens at
+    ``tests/contracts/face_*/``.
 
 Design goals
 ------------
@@ -154,6 +166,12 @@ class ResourceRouter:
     # later GET/UPDATE responses do NOT include — e.g. api-keys returns the
     # plaintext key once on create only.
     to_out_create: Optional[Callable[..., Any]] = None
+    # Optional override for the UPDATE response shape.
+    # Signature: ``(row, *, request, item_id, sa_conn, current_user) -> Any``.
+    # Falls back to ``to_out(row)`` when None. Used for resources whose
+    # PUT response is a status envelope (``{"success": True}``) instead of
+    # the refreshed row — e.g. ERP providers and face/rules.
+    to_out_update: Optional[Callable[..., Any]] = None
     # Hard-delete switch — when True, DELETE issues a SQL ``DELETE`` instead
     # of the default ``UPDATE ... SET is_disabled=1`` soft-delete. Resources
     # without ``is_disabled`` (or where hard-delete is the historical wire
@@ -286,6 +304,7 @@ class ResourceRouter:
         to_out = self.to_out
 
         load_columns = self.load_columns
+        to_out_update = self.to_out_update
 
         async def update_item(item_id: int, request=None, current_user=Depends(permission_write)):
             with get_engine().begin() as sa_conn:
@@ -316,14 +335,22 @@ class ResourceRouter:
                     else select(table).where(table.c.id == item_id)
                 )
                 fresh = sa_conn.execute(stmt).first()
+            if to_out_update is not None:
+                return to_out_update(
+                    fresh, request=request, item_id=item_id,
+                    sa_conn=sa_conn, current_user=current_user,
+                )
             return to_out(fresh)
 
         update_item.__annotations__["request"] = update_model
         update_item.__name__ = f"{table.name}_update"
-        self.app.put(
-            f"{prefix}/{{item_id}}",
-            response_model=self.response_model,
-        )(update_item)
+        # When ``to_out_update`` is set the wire shape is no longer the
+        # response_model — drop it so FastAPI doesn't try to validate the
+        # status envelope against the resource Pydantic class.
+        put_kwargs: Dict[str, Any] = {}
+        if to_out_update is None:
+            put_kwargs["response_model"] = self.response_model
+        self.app.put(f"{prefix}/{{item_id}}", **put_kwargs)(update_item)
         return update_item
 
     def _register_delete(self, get_engine, load_or_404):
