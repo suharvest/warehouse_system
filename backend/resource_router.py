@@ -1,8 +1,7 @@
 """
 ResourceRouter — small CRUD-route factory for resource families.
 
-R2, phase 1: contacts uses this. Future phases (warehouses, users, api-keys,
-mcp, erp, face) will follow.
+Currently migrated: contacts, warehouses, users, api-keys.
 
 Design goals
 ------------
