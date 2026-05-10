@@ -5243,7 +5243,19 @@ async def confirm_import_excel(
                     )
 
                     rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
-                    _create_record(material_id, rec_type, abs(diff), item.reason_category, '', batch.id, contact_id)
+                    new_record_id = _create_record(
+                        material_id, rec_type, abs(diff), item.reason_category,
+                        '', batch.id, contact_id,
+                    )
+                    if diff < 0:
+                        # Pair the OUT inventory_record with a batch_consumptions
+                        # row so per-batch SUM matches materials.quantity.
+                        sa_conn.execute(
+                            insert(_t_batch_consumptions).values(
+                                record_id=new_record_id, batch_id=batch.id,
+                                quantity=abs(diff), created_at=now_dt,
+                            )
+                        )
                     if diff > 0:
                         in_count += 1
                     else:
