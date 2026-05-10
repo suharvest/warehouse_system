@@ -125,7 +125,10 @@ class ResourceRouter:
     app: FastAPI
     prefix: str
     table: Table
-    response_model: Type[BaseModel]
+    # ``None`` skips ``response_model=`` on the FastAPI route declarations,
+    # used by resources whose GET payload is a dict-of-Any (e.g. ERP
+    # providers) rather than a Pydantic model.
+    response_model: Optional[Type[BaseModel]]
     create_model: Type[BaseModel]
     update_model: Type[BaseModel]
     permission_read: Any
@@ -222,10 +225,11 @@ class ResourceRouter:
         forbidden = self.forbidden_detail
         to_out = self.to_out
 
-        @self.app.get(
-            f"{prefix}/{{item_id}}",
-            response_model=self.response_model,
-        )
+        get_kwargs: Dict[str, Any] = {}
+        if self.response_model is not None:
+            get_kwargs["response_model"] = self.response_model
+
+        @self.app.get(f"{prefix}/{{item_id}}", **get_kwargs)
         async def get_item(item_id: int, current_user=Depends(permission_read)):
             with get_engine().connect() as sa_conn:
                 row = load_or_404(
@@ -286,7 +290,10 @@ class ResourceRouter:
         # real Pydantic class, not a ForwardRef of a closure-local name.
         create_item.__annotations__["request"] = create_model
         create_item.__name__ = f"{table.name}_create"
-        self.app.post(prefix, response_model=self.response_model)(create_item)
+        post_kwargs: Dict[str, Any] = {}
+        if self.response_model is not None:
+            post_kwargs["response_model"] = self.response_model
+        self.app.post(prefix, **post_kwargs)(create_item)
         return create_item
 
     def _register_put(self, get_engine, load_or_404):
@@ -348,7 +355,7 @@ class ResourceRouter:
         # response_model — drop it so FastAPI doesn't try to validate the
         # status envelope against the resource Pydantic class.
         put_kwargs: Dict[str, Any] = {}
-        if to_out_update is None:
+        if to_out_update is None and self.response_model is not None:
             put_kwargs["response_model"] = self.response_model
         self.app.put(f"{prefix}/{{item_id}}", **put_kwargs)(update_item)
         return update_item

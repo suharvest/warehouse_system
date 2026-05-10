@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from datetime import datetime, timedelta
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import Any, List, Optional
+from pydantic import BaseModel, Field
 from io import BytesIO
 from functools import wraps
 from enum import Enum, IntEnum
@@ -6332,30 +6333,48 @@ async def get_active_provider_for_mcp(
     }
 
 
-@app.get("/api/erp/providers/{provider_id}")
-async def get_erp_provider(
-    provider_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
-):
-    """获取单个 Provider 详情 — Phase 2f: SA Core read."""
-    with get_engine().connect() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
-        ).first()
+# ---- ERP Providers GET / PUT / DELETE migrated to ResourceRouter (R2 phase 3) ----
+# LIST stays as ``list_erp_providers`` (custom shape ``{"providers": [...]}``
+# with per-row JSON/datetime decoding) and POST stays hand-rolled (multipart
+# UploadFile). Side-routes /test, /activate, /deactivate, /status remain.
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Provider 不存在")
-    p = dict(row._mapping)
-    _ensure_provider_tenant(p, current_user)
 
+class _UpdateERPProviderRequest(BaseModel):
+    """PUT /api/erp/providers/{id} body. Original handler reads raw
+    ``request.json()`` — to preserve wire shape we accept both keys
+    individually and treat missing/null with the original semantics
+    (``body.get('config', {})`` -> default empty dict; explicit ``None`` -> no
+    update).
+    """
+    name: Optional[str] = None
+    # ``Any`` because the existing PUT writes whatever JSON shape the client
+    # sends back into the column; restricting to ``Dict[str, Any]`` would be
+    # a forbidden wire-shape narrowing.
+    config: Any = Field(default_factory=dict)
+
+
+def _erp_decode_config(p: dict) -> Any:
     cfg = p.get('config')
     if isinstance(cfg, (bytes, bytearray)):
         cfg = cfg.decode('utf-8')
-    p['config'] = (_json.loads(cfg) if cfg else {}) if isinstance(cfg, str) else (cfg if cfg else {})
+    if isinstance(cfg, str):
+        return _json.loads(cfg) if cfg else {}
+    return cfg if cfg else {}
+
+
+def _erp_decode_test_results(p: dict) -> Any:
     tr = p.get('test_results')
     if isinstance(tr, (bytes, bytearray)):
         tr = tr.decode('utf-8')
-    p['test_results'] = (_json.loads(tr) if tr else None) if isinstance(tr, str) else (tr if tr else None)
+    if isinstance(tr, str):
+        return _json.loads(tr) if tr else None
+    return tr if tr else None
+
+
+def _erp_to_out(row) -> dict:
+    p = dict(row._mapping)
+    p['config'] = _erp_decode_config(p)
+    p['test_results'] = _erp_decode_test_results(p)
     if isinstance(p.get('created_at'), datetime):
         p['created_at'] = p['created_at'].strftime('%Y-%m-%d %H:%M:%S')
     if isinstance(p.get('updated_at'), datetime):
@@ -6365,73 +6384,74 @@ async def get_erp_provider(
     return p
 
 
-@app.put("/api/erp/providers/{provider_id}")
-async def update_erp_provider(
-    provider_id: int,
-    request: Request,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
-):
-    """更新 Provider 的名称和配置"""
-    body = await request.json()
-    name = body.get('name')
-    config = body.get('config', {})
-
-    with get_engine().begin() as sa_conn:
-        existing = load_or_404(
-            sa_conn, _t_erp_providers, provider_id,
-            columns=[_t_erp_providers.c.id, _t_erp_providers.c.tenant_id],
-            not_found="Provider 不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权操作其他租户的 Provider",
-        )
-
-        values = {'updated_at': datetime.now()}
-        if name is not None:
-            values['name'] = name
-        if config is not None:
-            values['config'] = config
-        sa_conn.execute(
-            update(_t_erp_providers)
-            .where(_t_erp_providers.c.id == provider_id)
-            .values(**values)
-        )
-
-    return {"success": True}
+def _erp_values_for_update(sa_conn, current_user, request: _UpdateERPProviderRequest, row) -> dict:
+    values: dict = {'updated_at': datetime.now()}
+    if request.name is not None:
+        values['name'] = request.name
+    # Preserve original ``if config is not None`` semantics — explicit null
+    # leaves the column untouched; missing -> default {} writes empty dict.
+    if request.config is not None:
+        values['config'] = request.config
+    return values
 
 
-@app.delete("/api/erp/providers/{provider_id}")
-async def delete_erp_provider(
-    provider_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
-):
-    """删除 Provider（激活状态下禁止删除）"""
-    import shutil
-
-    with get_engine().connect() as sa_conn:
-        _r = sa_conn.execute(
-            select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
-        ).first()
-    row = dict(_r._mapping) if _r else None
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Provider 不存在")
-    _ensure_provider_tenant(row, current_user)
-
-    if row['is_active']:
+def _erp_before_delete(sa_conn, current_user, row):
+    # ``row`` here is loaded with [id, tenant_id, is_active, filename,
+    # provider_name] (see ``load_columns`` below).
+    if row.is_active:
         raise HTTPException(status_code=400, detail="请先停用 Provider 再删除")
-
-    # 删除文件
+    # File unlink (best-effort) before SQL delete — same order as the
+    # original hand-rolled handler.
     custom_dir = _get_providers_custom_dir()
-    filepath = os.path.join(custom_dir, row['filename'])
+    filepath = os.path.join(custom_dir, row.filename)
     if os.path.exists(filepath):
         os.unlink(filepath)
+    # Hard-delete the DB row.
+    sa_conn.execute(delete(_t_erp_providers).where(_t_erp_providers.c.id == row.id))
+    logger.info(f"删除 ERP Provider: {row.provider_name}，操作人: {current_user.display_name}")
 
-    # 删除数据库记录
-    with get_engine().begin() as sa_conn:
-        sa_conn.execute(delete(_t_erp_providers).where(_t_erp_providers.c.id == provider_id))
 
-    logger.info(f"删除 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
+def _erp_to_out_update(row, *, request, item_id, sa_conn, current_user) -> dict:
     return {"success": True}
+
+
+def _erp_values_for_create_unused(sa_conn, current_user, request) -> dict:  # noqa
+    # POST is hand-rolled (multipart). Hook left as required-signature stub.
+    return {}
+
+
+from resource_router import ResourceRouter as _ResourceRouterERP  # noqa: E402
+
+_erp_router = _ResourceRouterERP(
+    app=app,
+    prefix="/api/erp/providers",
+    table=_t_erp_providers,
+    response_model=None,  # GET returns dict-of-Any (config/test_results)
+    create_model=_UpdateERPProviderRequest,  # placeholder — POST disabled
+    update_model=_UpdateERPProviderRequest,
+    permission_read=require_permission(Resource.ERP, Action.ADMIN),
+    permission_write=require_permission(Resource.ERP, Action.ADMIN),
+    not_found_detail="Provider 不存在",
+    forbidden_detail="无权操作其他租户的 Provider",
+    to_out=_erp_to_out,
+    values_for_create=_erp_values_for_create_unused,
+    values_for_update=_erp_values_for_update,
+    to_out_update=_erp_to_out_update,
+    before_delete=_erp_before_delete,
+    list_handler=None,
+    enable_post=False,  # multipart upload — hand-rolled
+    # DELETE wire shape: ``{"success": True}`` (no message). Default already
+    # matches.
+    # Load extra columns for the DELETE precondition (is_active / filename /
+    # provider_name) so before_delete can read them atomically with the scope
+    # check rather than re-querying.
+    load_columns=[
+        _t_erp_providers.c.id, _t_erp_providers.c.tenant_id,
+        _t_erp_providers.c.is_active, _t_erp_providers.c.filename,
+        _t_erp_providers.c.provider_name,
+    ],
+)
+_erp_router.register()
 
 
 @app.post("/api/erp/providers/{provider_id}/test")
