@@ -969,31 +969,23 @@ def _warehouse_values_for_create(sa_conn, current_user, request: CreateWarehouse
 
 
 def _warehouse_values_for_update(sa_conn, current_user, request: UpdateWarehouseRequest, row) -> dict:
-    # Reload full row for is_default check (load_or_404 above only fetches id+tenant_id).
-    full = sa_conn.execute(
-        select(_t_warehouses.c.id, _t_warehouses.c.is_default).where(
-            _t_warehouses.c.id == row.id
-        )
-    ).first()
+    # ``row`` carries ``is_default`` because the registration sets
+    # ``load_columns`` to include it — atomic with the scope check.
     values: dict = {}
     if request.name is not None:
         values['name'] = request.name
     if request.address is not None:
         values['address'] = request.address
     if request.is_disabled is not None:
-        if full.is_default and request.is_disabled:
+        if row.is_default and request.is_disabled:
             raise HTTPException(status_code=400, detail="不能禁用默认仓库")
         values['is_disabled'] = 1 if request.is_disabled else 0
     return values
 
 
 def _warehouse_before_delete(sa_conn, current_user, row):
-    full = sa_conn.execute(
-        select(_t_warehouses.c.id, _t_warehouses.c.is_default).where(
-            _t_warehouses.c.id == row.id
-        )
-    ).first()
-    if full.is_default:
+    # ``row.is_default`` available via load_columns — atomic with scope check.
+    if row.is_default:
         raise HTTPException(status_code=400, detail="不能删除默认仓库")
     n = sa_conn.execute(
         select(_sa_func.count()).select_from(_t_materials).where(
@@ -1028,6 +1020,11 @@ _wh_router = _ResourceRouterWH(
     list_handler=None,
     get_columns=_WAREHOUSE_OUT_COLUMNS,
     update_select_columns=_WAREHOUSE_OUT_COLUMNS,
+    # Load id+tenant_id+is_default atomically so before_delete /
+    # values_for_update can read is_default without a second SELECT.
+    load_columns=[
+        _t_warehouses.c.id, _t_warehouses.c.tenant_id, _t_warehouses.c.is_default,
+    ],
     enable_get=False,
     delete_response={"success": True, "message": "仓库已禁用"},
 )

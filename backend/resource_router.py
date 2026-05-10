@@ -129,6 +129,16 @@ class ResourceRouter:
     list_handler: Optional[Callable[..., Any]] = None
     get_columns: Optional[List[Any]] = None
     update_select_columns: Optional[List[Any]] = None
+    # Columns used by ``load_or_404`` inside the PUT and DELETE handlers
+    # before the resource-specific ``before_update`` / ``before_delete`` /
+    # ``values_for_update`` hooks run. Defaults to ``[table.c.id,
+    # table.c.tenant_id]`` (the minimum needed for the scoped-row check).
+    # Resources whose hooks need additional columns (e.g. warehouses' hooks
+    # read ``is_default`` to forbid disabling/deleting the default warehouse)
+    # override this so the row is loaded atomically with its scope check —
+    # avoiding a second SELECT vs. a row that may have been mutated in
+    # between.
+    load_columns: Optional[List[Any]] = None
     id_path_name: str = "item_id"
 
     before_create: Optional[Callable[..., None]] = None
@@ -276,13 +286,16 @@ class ResourceRouter:
         forbidden = self.forbidden_detail
         to_out = self.to_out
 
+        load_columns = self.load_columns
+
         async def update_item(item_id: int, request=None, current_user=Depends(permission_write)):
             with get_engine().begin() as sa_conn:
                 row = load_or_404(
                     sa_conn,
                     table,
                     item_id,
-                    columns=[table.c.id, table.c.tenant_id],
+                    columns=load_columns if load_columns is not None
+                            else [table.c.id, table.c.tenant_id],
                     not_found=not_found,
                     tenant_id=current_user.tenant_id,
                     forbidden=forbidden,
@@ -324,6 +337,7 @@ class ResourceRouter:
         forbidden = self.forbidden_detail
         delete_response = self.delete_response
         hard_delete = self.hard_delete
+        load_columns = self.load_columns
 
         @self.app.delete(f"{prefix}/{{item_id}}")
         async def delete_item(
@@ -335,7 +349,8 @@ class ResourceRouter:
                     sa_conn,
                     table,
                     item_id,
-                    columns=[table.c.id, table.c.tenant_id],
+                    columns=load_columns if load_columns is not None
+                            else [table.c.id, table.c.tenant_id],
                     not_found=not_found,
                     tenant_id=current_user.tenant_id,
                     forbidden=forbidden,
