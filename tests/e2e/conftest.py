@@ -226,6 +226,25 @@ with ReuseAddrServer(("127.0.0.1", PORT), ProxyHandler) as httpd:
         os.unlink(wrapper_path)
         pytest.fail("Frontend proxy server failed to start")
 
+    # Seed default tenant (id=1) — alembic migrations don't seed default data,
+    # but setup_admin and most tenant-scoped inserts require tenants(id=1) FK.
+    # Mirrors backend.database.init_database()'s seed:
+    #   INSERT OR IGNORE INTO tenants (slug, name) VALUES ('default', '默认租户')
+    import sqlite3
+    seed_conn = sqlite3.connect(db_path)
+    try:
+        seed_conn.execute(
+            "INSERT OR IGNORE INTO tenants (id, slug, name, is_active) "
+            "VALUES (1, 'default', '默认租户', 1)"
+        )
+        seed_conn.execute(
+            "INSERT OR IGNORE INTO warehouses (id, slug, name, is_default) "
+            "VALUES (1, 'default', '默认仓库', 1)"
+        )
+        seed_conn.commit()
+    finally:
+        seed_conn.close()
+
     yield frontend_url
 
     # Cleanup
