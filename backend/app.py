@@ -906,14 +906,8 @@ async def list_warehouses(
 
 # ---- warehouses CREATE/UPDATE/DELETE migrated to ResourceRouter (R2 phase 2) ----
 # LIST stays as ``list_warehouses`` above (uses tenant join + scope predicates).
-# GET is not part of the public API for warehouses so we do not register one;
-# instead we set ``list_handler=None`` and the factory's GET item endpoint
-# /api/warehouses/{warehouse_id} is added — historically there was no such
-# endpoint, but adding one is additive (same shape as create/update).
-#
-# To match the previous behaviour exactly (no GET-by-id was previously
-# registered), we explicitly skip the GET registration by overriding
-# the factory after construction.
+# GET-by-id was never part of the public API for warehouses, so we suppress
+# the factory's GET registration via ``enable_get=False``.
 
 _WAREHOUSE_OUT_COLUMNS = [
     _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
@@ -1034,11 +1028,9 @@ _wh_router = _ResourceRouterWH(
     list_handler=None,
     get_columns=_WAREHOUSE_OUT_COLUMNS,
     update_select_columns=_WAREHOUSE_OUT_COLUMNS,
+    enable_get=False,
     delete_response={"success": True, "message": "仓库已禁用"},
 )
-# Original handlers exposed POST/PUT/DELETE only — no GET item route.
-# Skip GET registration by monkey-patching out _register_get for this router.
-_wh_router._register_get = lambda *a, **kw: None  # type: ignore[assignment]
 _wh_router.register()
 
 
@@ -1706,10 +1698,9 @@ _user_router = _ResourceRouterUser(
     list_handler=None,
     get_columns=_USER_OUT_COLUMNS,
     update_select_columns=_USER_OUT_COLUMNS,
+    enable_get=False,
     delete_response={"success": True, "message": "用户已禁用"},
 )
-# Original handlers exposed POST/PUT/DELETE only — no GET item route.
-_user_router._register_get = lambda *a, **kw: None  # type: ignore[assignment]
 _user_router.register()
 
 
