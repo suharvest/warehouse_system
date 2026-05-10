@@ -5090,6 +5090,7 @@ async def confirm_import_excel(
             return None
 
         wh_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+        batch_scope_preds = list(build_scope_predicates(_t_batches, wh_tenant_id, wh_id))
 
         # In-session batch_no allocator. generate_batch_no(material_id) without a
         # cursor only sees committed rows, so consecutive calls inside one txn
@@ -5224,7 +5225,8 @@ async def confirm_import_excel(
                     batch = sa_conn.execute(
                         select(_t_batches.c.id, _t_batches.c.quantity)
                         .where(and_(_t_batches.c.batch_no == item.batch_no,
-                                    _t_batches.c.material_id == material_id))
+                                    _t_batches.c.material_id == material_id,
+                                    *batch_scope_preds))
                     ).first()
                     if not batch:
                         continue
@@ -5359,6 +5361,7 @@ async def confirm_import_excel(
                                 _t_batches.c.material_id == material_id,
                                 _t_batches.c.is_exhausted == 0,
                                 _t_batches.c.quantity > 0,
+                                *batch_scope_preds,
                             ))
                             .order_by(_t_batches.c.created_at.asc())
                         ).fetchall()
