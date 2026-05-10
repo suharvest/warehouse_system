@@ -4448,6 +4448,16 @@ async def stock_out(
                 quantity=consume_qty, remaining=remaining_qty, variant=b.variant,
             ))
 
+        if remaining_to_consume > 0:
+            # FIFO did not cover the requested quantity (e.g. batch table
+            # under-counts vs materials.quantity, or scope filtered too
+            # aggressively). Raise inside the txn so the materials decrement
+            # and inventory_records insert above are rolled back.
+            raise HTTPException(
+                status_code=409,
+                detail=f"出库失败：{product_name} 可用批次不足，仍缺 {remaining_to_consume} {unit}，请检查批次/库位/变体筛选条件",
+            )
+
     # R5: FIFO stock-out only affects material partition
     get_fuzzy_matcher().invalidate_cache(
         entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
