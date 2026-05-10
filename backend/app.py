@@ -1752,78 +1752,118 @@ async def list_api_keys(current_user: CurrentUser = Depends(require_permission(R
     ]
 
 
-@app.post("/api/api-keys", response_model=ApiKeyResponse)
-async def create_api_key(
-    request: CreateApiKeyRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
-):
-    """创建API密钥（仅管理员）"""
+# ---- api-keys CREATE / DELETE migrated to ResourceRouter (R2 phase 2) ----
+# LIST stays as ``list_api_keys`` above (it joins warehouses for
+# warehouse_name and filters out is_system rows). There is no GET-by-id
+# or PUT route on /api/api-keys/{id}; toggling status lives at
+# /api/api-keys/{id}/status (handler ``toggle_api_key_status`` below).
+#
+# CREATE returns the plaintext key one-time via ``to_out_create`` —
+# subsequent reads only ever see the prefix / hash.
+
+# Per-request stash for "the plaintext key we just generated". Because
+# values_for_create generates the key and to_out_create needs it back,
+# and the factory's hook contract doesn't pass the request between them
+# directly, we thread it through ``request._plaintext_api_key``. Pydantic
+# v2 BaseModel allows arbitrary attribute set via ``object.__setattr__``.
+
+def _apikey_before_create(sa_conn, current_user, request: CreateApiKeyRequest):
     if request.role not in _VALID_ROLE_VALUES:
         raise HTTPException(status_code=400, detail="无效的角色")
 
-    # secrets/sha256 are CPU-bound; outside the transaction
-    api_key = generate_api_key()
-    key_hash = hash_api_key(api_key)
-    created_at_dt = datetime.now()
-    created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    with get_engine().begin() as sa_conn:
-        wh_id = request.warehouse_id
-        if wh_id is not None:
-            wh_id = resolve_warehouse_id(current_user, wh_id)
+def _apikey_values_for_create(sa_conn, current_user, request: CreateApiKeyRequest) -> dict:
+    api_key_plain = generate_api_key()
+    key_hash = hash_api_key(api_key_plain)
+    # Stash plaintext on the request so to_out_create can retrieve it.
+    object.__setattr__(request, "_plaintext_api_key", api_key_plain)
 
-        # 全局 admin 必须指定 wh，否则会生成 tenant_id=NULL 的跨租户 key（数据安全风险）
-        if current_user.tenant_id is None and wh_id is None:
-            raise HTTPException(
-                status_code=400,
-                detail="全局管理员创建 API Key 必须指定 warehouse_id（无法推导目标租户）"
-            )
-        # 租户用户：tenant_id 跟随自身；全局 admin：从 wh 推导
-        if current_user.tenant_id is not None:
-            key_tenant_id = current_user.tenant_id
-        else:
-            key_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+    wh_id = request.warehouse_id
+    if wh_id is not None:
+        wh_id = resolve_warehouse_id(current_user, wh_id)
 
-        result = sa_conn.execute(
-            insert(_t_api_keys).values(
-                key_hash=key_hash,
-                name=request.name,
-                role=request.role,
-                user_id=current_user.id,
-                tenant_id=key_tenant_id,
-                warehouse_id=wh_id,
-                created_at=created_at_dt,
-            )
+    if current_user.tenant_id is None and wh_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="全局管理员创建 API Key 必须指定 warehouse_id（无法推导目标租户）"
         )
-        key_id = result.inserted_primary_key[0]
+    if current_user.tenant_id is not None:
+        key_tenant_id = current_user.tenant_id
+    else:
+        key_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
 
-        return ApiKeyResponse(
-            id=key_id,
-            name=request.name,
-            role=request.role,
-            key=api_key,  # 只在创建时返回完整密钥
-            created_at=created_at
-        )
+    return {
+        "key_hash": key_hash,
+        "name": request.name,
+        "role": request.role,
+        "user_id": current_user.id,
+        "tenant_id": key_tenant_id,
+        "warehouse_id": wh_id,
+        "created_at": datetime.now(),
+    }
 
 
-@app.delete("/api/api-keys/{key_id}")
-async def delete_api_key(
-    key_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
-):
-    """删除API密钥（仅管理员）"""
-    with get_engine().begin() as sa_conn:
-        row = load_or_404(
-            sa_conn, _t_api_keys, key_id,
-            columns=[_t_api_keys.c.id, _t_api_keys.c.tenant_id],
-            not_found="API密钥不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权操作其他租户的API密钥",
-        )
+def _apikey_to_out_create(row, *, request, sa_conn, current_user) -> ApiKeyResponse:
+    plaintext = getattr(request, "_plaintext_api_key", None)
+    ca = row.created_at
+    if isinstance(ca, datetime):
+        ca = ca.strftime('%Y-%m-%d %H:%M:%S')
+    return ApiKeyResponse(
+        id=row.id,
+        name=row.name,
+        role=row.role,
+        key=plaintext,
+        created_at=ca,
+        # last_used_at is None on a freshly created key — included so the
+        # factory's response_model serialises the same shape as the
+        # existing handler (Pydantic emits the field with default None).
+        last_used_at=None,
+    )
 
-        sa_conn.execute(delete(_t_api_keys).where(_t_api_keys.c.id == key_id))
 
-        return {"success": True, "message": "API密钥已删除"}
+def _apikey_to_out(row) -> ApiKeyResponse:
+    # GET-by-id is not exposed; this is only here to satisfy the factory
+    # signature requirement. PUT is also disabled. If either is ever
+    # re-enabled, this will return the read-only shape (no plaintext).
+    ca = row.created_at
+    if isinstance(ca, datetime):
+        ca = ca.strftime('%Y-%m-%d %H:%M:%S')
+    return ApiKeyResponse(
+        id=row.id, name=row.name, role=row.role, key=None,
+        created_at=ca, last_used_at=None,
+    )
+
+
+def _apikey_values_for_update(sa_conn, current_user, request, row) -> dict:
+    # Unreachable — PUT is disabled. Kept to satisfy required-hook contract.
+    return {}
+
+
+from resource_router import ResourceRouter as _ResourceRouterAK  # noqa: E402
+
+_apikey_router = _ResourceRouterAK(
+    app=app,
+    prefix="/api/api-keys",
+    table=_t_api_keys,
+    response_model=ApiKeyResponse,
+    create_model=CreateApiKeyRequest,
+    update_model=CreateApiKeyRequest,  # placeholder, PUT disabled
+    permission_read=require_permission(Resource.API_KEYS, Action.ADMIN),
+    permission_write=require_permission(Resource.API_KEYS, Action.ADMIN),
+    not_found_detail="API密钥不存在",
+    forbidden_detail="无权操作其他租户的API密钥",
+    to_out=_apikey_to_out,
+    to_out_create=_apikey_to_out_create,
+    values_for_create=_apikey_values_for_create,
+    values_for_update=_apikey_values_for_update,
+    before_create=_apikey_before_create,
+    list_handler=None,
+    enable_get=False,
+    enable_put=False,
+    hard_delete=True,
+    delete_response={"success": True, "message": "API密钥已删除"},
+)
+_apikey_router.register()
 
 
 @app.put("/api/api-keys/{key_id}/status")
