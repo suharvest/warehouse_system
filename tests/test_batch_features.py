@@ -53,10 +53,18 @@ def material_with_legacy_batch(admin_client, sample_material):
         batch_no = f"LEGACY-{sample_material['id']:04d}"
         # Already verified count==0 above, so plain INSERT is portable
         # across sqlite and MySQL (avoid sqlite-only `INSERT OR IGNORE`).
+        # Look up the material's tenant_id/warehouse_id so the LEGACY batch
+        # carries the same scope. Bug C fix added scope predicates to the
+        # Excel FIFO query, so an orphan-scoped batch would be filtered out.
+        cursor.execute('SELECT tenant_id, warehouse_id FROM materials WHERE id = ?',
+                       (sample_material['id'],))
+        scope = cursor.fetchone()
         cursor.execute('''
-            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, location, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (batch_no, sample_material['id'], sample_material['quantity'], sample_material['quantity'], 'A-01', now))
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, location, created_at, tenant_id, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (batch_no, sample_material['id'], sample_material['quantity'],
+              sample_material['quantity'], 'A-01', now,
+              scope['tenant_id'], scope['warehouse_id']))
         conn.commit()
     conn.close()
     return sample_material
