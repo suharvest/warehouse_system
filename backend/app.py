@@ -904,141 +904,142 @@ async def list_warehouses(
     ) for r in rows]
 
 
-@app.post("/api/warehouses", response_model=WarehouseItem)
-async def create_warehouse(
-    request: CreateWarehouseRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN))
-):
-    """创建仓库（仅管理员）"""
-    import re
-    if not re.match(r'^[a-z0-9][a-z0-9\-]*$', request.slug):
-        raise HTTPException(status_code=400, detail="仓库标识只能包含小写字母、数字和连字符，且不能以连字符开头")
+# ---- warehouses CREATE/UPDATE/DELETE migrated to ResourceRouter (R2 phase 2) ----
+# LIST stays as ``list_warehouses`` above (uses tenant join + scope predicates).
+# GET is not part of the public API for warehouses so we do not register one;
+# instead we set ``list_handler=None`` and the factory's GET item endpoint
+# /api/warehouses/{warehouse_id} is added — historically there was no such
+# endpoint, but adding one is additive (same shape as create/update).
+#
+# To match the previous behaviour exactly (no GET-by-id was previously
+# registered), we explicitly skip the GET registration by overriding
+# the factory after construction.
 
-    with get_engine().begin() as sa_conn:
-        existing = sa_conn.execute(
-            select(_t_warehouses.c.id).where(_t_warehouses.c.slug == request.slug)
+_WAREHOUSE_OUT_COLUMNS = [
+    _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
+    _t_warehouses.c.address, _t_warehouses.c.is_default,
+    _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
+    _t_warehouses.c.tenant_id,
+]
+
+
+def _warehouse_to_out(row) -> WarehouseItem:
+    ca = row.created_at
+    if isinstance(ca, datetime):
+        ca = ca.strftime('%Y-%m-%d %H:%M:%S')
+    return WarehouseItem(
+        id=row.id, slug=row.slug, name=row.name,
+        address=row.address, is_default=bool(row.is_default),
+        is_disabled=bool(row.is_disabled),
+        created_at=ca,
+        tenant_id=row.tenant_id,
+    )
+
+
+def _warehouse_before_create(sa_conn, current_user, request: CreateWarehouseRequest):
+    import re as _re
+    if not _re.match(r'^[a-z0-9][a-z0-9\-]*$', request.slug):
+        raise HTTPException(
+            status_code=400,
+            detail="仓库标识只能包含小写字母、数字和连字符，且不能以连字符开头"
+        )
+    existing = sa_conn.execute(
+        select(_t_warehouses.c.id).where(_t_warehouses.c.slug == request.slug)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="仓库标识已存在")
+
+
+def _warehouse_values_for_create(sa_conn, current_user, request: CreateWarehouseRequest) -> dict:
+    if current_user.tenant_id is None:
+        wh_tenant_id = request.tenant_id or 1
+        tenant_row = sa_conn.execute(
+            select(_t_tenants.c.id).where(
+                and_(_t_tenants.c.id == wh_tenant_id, _t_tenants.c.is_active == 1)
+            )
         ).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="仓库标识已存在")
+        if not tenant_row:
+            raise HTTPException(status_code=400, detail="租户不存在或已停用")
+    else:
+        if request.tenant_id is not None and request.tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="无权在其他租户下创建仓库")
+        wh_tenant_id = current_user.tenant_id
 
-        created_at_dt = datetime.now()
-        created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
-        if current_user.tenant_id is None:
-            wh_tenant_id = request.tenant_id or 1
-            tenant_row = sa_conn.execute(
-                select(_t_tenants.c.id).where(
-                    and_(_t_tenants.c.id == wh_tenant_id, _t_tenants.c.is_active == 1)
-                )
-            ).first()
-            if not tenant_row:
-                raise HTTPException(status_code=400, detail="租户不存在或已停用")
-        else:
-            if request.tenant_id is not None and request.tenant_id != current_user.tenant_id:
-                raise HTTPException(status_code=403, detail="无权在其他租户下创建仓库")
-            wh_tenant_id = current_user.tenant_id
+    return {
+        "slug": request.slug,
+        "name": request.name,
+        "address": request.address,
+        "tenant_id": wh_tenant_id,
+        "created_at": datetime.now(),
+    }
 
-        result = sa_conn.execute(
-            insert(_t_warehouses).values(
-                slug=request.slug, name=request.name,
-                address=request.address, tenant_id=wh_tenant_id,
-                created_at=created_at_dt,
-            )
+
+def _warehouse_values_for_update(sa_conn, current_user, request: UpdateWarehouseRequest, row) -> dict:
+    # Reload full row for is_default check (load_or_404 above only fetches id+tenant_id).
+    full = sa_conn.execute(
+        select(_t_warehouses.c.id, _t_warehouses.c.is_default).where(
+            _t_warehouses.c.id == row.id
         )
-        wh_id = result.inserted_primary_key[0]
+    ).first()
+    values: dict = {}
+    if request.name is not None:
+        values['name'] = request.name
+    if request.address is not None:
+        values['address'] = request.address
+    if request.is_disabled is not None:
+        if full.is_default and request.is_disabled:
+            raise HTTPException(status_code=400, detail="不能禁用默认仓库")
+        values['is_disabled'] = 1 if request.is_disabled else 0
+    return values
 
-        return WarehouseItem(
-            id=wh_id, slug=request.slug, name=request.name,
-            address=request.address, is_default=False, is_disabled=False,
-            created_at=created_at, tenant_id=wh_tenant_id
+
+def _warehouse_before_delete(sa_conn, current_user, row):
+    full = sa_conn.execute(
+        select(_t_warehouses.c.id, _t_warehouses.c.is_default).where(
+            _t_warehouses.c.id == row.id
         )
-
-
-@app.put("/api/warehouses/{warehouse_id}", response_model=WarehouseItem)
-async def update_warehouse(
-    warehouse_id: int,
-    request: UpdateWarehouseRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN))
-):
-    """更新仓库（仅管理员）"""
-    with get_engine().begin() as sa_conn:
-        wh = load_or_404(
-            sa_conn, _t_warehouses, warehouse_id,
-            columns=[
-                _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
-                _t_warehouses.c.address, _t_warehouses.c.is_default,
-                _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
-                _t_warehouses.c.tenant_id,
-            ],
-            not_found="仓库不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权操作该仓库",
+    ).first()
+    if full.is_default:
+        raise HTTPException(status_code=400, detail="不能删除默认仓库")
+    n = sa_conn.execute(
+        select(_sa_func.count()).select_from(_t_materials).where(
+            and_(_t_materials.c.warehouse_id == row.id, _t_materials.c.is_disabled == 0)
         )
-
-        values = {}
-        if request.name is not None:
-            values['name'] = request.name
-        if request.address is not None:
-            values['address'] = request.address
-        if request.is_disabled is not None:
-            if wh.is_default and request.is_disabled:
-                raise HTTPException(status_code=400, detail="不能禁用默认仓库")
-            values['is_disabled'] = 1 if request.is_disabled else 0
-
-        if values:
-            sa_conn.execute(
-                update(_t_warehouses).where(_t_warehouses.c.id == warehouse_id).values(**values)
-            )
-
-        wh2 = sa_conn.execute(
-            select(
-                _t_warehouses.c.id, _t_warehouses.c.slug, _t_warehouses.c.name,
-                _t_warehouses.c.address, _t_warehouses.c.is_default,
-                _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
-                _t_warehouses.c.tenant_id,
-            ).where(_t_warehouses.c.id == warehouse_id)
-        ).first()
-        return WarehouseItem(
-            id=wh2.id, slug=wh2.slug, name=wh2.name,
-            address=wh2.address, is_default=bool(wh2.is_default),
-            is_disabled=bool(wh2.is_disabled),
-            created_at=(wh2.created_at.strftime('%Y-%m-%d %H:%M:%S')
-                        if isinstance(wh2.created_at, datetime) else wh2.created_at),
-            tenant_id=wh2.tenant_id,
-        )
+    ).scalar()
+    if n and n > 0:
+        raise HTTPException(status_code=400, detail="仓库内仍有物料，无法删除")
+    sa_conn.execute(
+        update(_t_warehouses).where(_t_warehouses.c.id == row.id).values(is_disabled=1)
+    )
 
 
-@app.delete("/api/warehouses/{warehouse_id}")
-async def delete_warehouse(
-    warehouse_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN))
-):
-    """禁用仓库（软删除，仅管理员）"""
-    with get_engine().begin() as sa_conn:
-        wh = load_or_404(
-            sa_conn, _t_warehouses, warehouse_id,
-            columns=[
-                _t_warehouses.c.id, _t_warehouses.c.is_default, _t_warehouses.c.tenant_id,
-            ],
-            not_found="仓库不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权操作该仓库",
-        )
-        if wh.is_default:
-            raise HTTPException(status_code=400, detail="不能删除默认仓库")
+from resource_router import ResourceRouter as _ResourceRouterWH  # noqa: E402
 
-        # 拒绝删除非空仓库（防止产生"幽灵库存"）
-        n = sa_conn.execute(
-            select(_sa_func.count()).select_from(_t_materials).where(
-                and_(_t_materials.c.warehouse_id == warehouse_id, _t_materials.c.is_disabled == 0)
-            )
-        ).scalar()
-        if n and n > 0:
-            raise HTTPException(status_code=400, detail="仓库内仍有物料，无法删除")
-
-        sa_conn.execute(
-            update(_t_warehouses).where(_t_warehouses.c.id == warehouse_id).values(is_disabled=1)
-        )
-        return {"success": True, "message": "仓库已禁用"}
+_wh_router = _ResourceRouterWH(
+    app=app,
+    prefix="/api/warehouses",
+    table=_t_warehouses,
+    response_model=WarehouseItem,
+    create_model=CreateWarehouseRequest,
+    update_model=UpdateWarehouseRequest,
+    permission_read=require_permission(Resource.WAREHOUSES, Action.READ),
+    permission_write=require_permission(Resource.WAREHOUSES, Action.ADMIN),
+    not_found_detail="仓库不存在",
+    forbidden_detail="无权操作该仓库",
+    to_out=_warehouse_to_out,
+    values_for_create=_warehouse_values_for_create,
+    values_for_update=_warehouse_values_for_update,
+    before_create=_warehouse_before_create,
+    before_delete=_warehouse_before_delete,
+    list_handler=None,
+    get_columns=_WAREHOUSE_OUT_COLUMNS,
+    update_select_columns=_WAREHOUSE_OUT_COLUMNS,
+    delete_response={"success": True, "message": "仓库已禁用"},
+)
+# Original handlers exposed POST/PUT/DELETE only — no GET item route.
+# Skip GET registration by monkey-patching out _register_get for this router.
+_wh_router._register_get = lambda *a, **kw: None  # type: ignore[assignment]
+_wh_router.register()
 
 
 @app.get("/api/users/{user_id}/warehouses")
