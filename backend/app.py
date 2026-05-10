@@ -5157,6 +5157,42 @@ async def confirm_import_excel(
             ).first()
             return row.id if row else None
 
+        def _fifo_consume(material_id, quantity, record_id):
+            """Consume `quantity` from the oldest batches of `material_id` and
+            write batch_consumptions rows linked to `record_id`. Returns the
+            unfilled remainder (0 on success). Caller decides how to react to
+            a non-zero remainder (rollback / error response / raise).
+            """
+            remaining = quantity
+            avail = sa_conn.execute(
+                select(_t_batches.c.id, _t_batches.c.quantity)
+                .where(and_(
+                    _t_batches.c.material_id == material_id,
+                    _t_batches.c.is_exhausted == 0,
+                    _t_batches.c.quantity > 0,
+                    *batch_scope_preds,
+                ))
+                .order_by(_t_batches.c.created_at.asc())
+            ).fetchall()
+            for batch in avail:
+                if remaining <= 0:
+                    break
+                consume = min(batch.quantity, remaining)
+                new_batch_qty = batch.quantity - consume
+                remaining -= consume
+                sa_conn.execute(
+                    update(_t_batches).where(_t_batches.c.id == batch.id)
+                    .values(quantity=new_batch_qty,
+                            is_exhausted=1 if new_batch_qty == 0 else 0)
+                )
+                sa_conn.execute(
+                    insert(_t_batch_consumptions).values(
+                        record_id=record_id, batch_id=batch.id,
+                        quantity=consume, created_at=now_dt,
+                    )
+                )
+            return remaining
+
         if request.is_batch_mode:
             # === 批次模式 ===
             for item in request.changes:
@@ -5295,9 +5331,28 @@ async def confirm_import_excel(
                             rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
                             if diff > 0:
                                 batch_id = _create_batch(material_id, abs(diff), item.location, contact_id, item.variant)
+                                _create_record(material_id, rec_type, abs(diff), item.reason_category, ' (SKU已存在，调整库存)', batch_id, contact_id)
                             else:
-                                batch_id = None
-                            _create_record(material_id, rec_type, abs(diff), item.reason_category, ' (SKU已存在，调整库存)', batch_id, contact_id)
+                                # Negative diff: route through FIFO so per-batch
+                                # totals stay consistent with materials.quantity
+                                # instead of writing a phantom OUT with no
+                                # batch_consumptions linkage.
+                                new_record_id = _create_record(
+                                    material_id, rec_type, abs(diff),
+                                    item.reason_category,
+                                    ' (SKU已存在，调整库存)', None, contact_id,
+                                )
+                                remaining = _fifo_consume(material_id, abs(diff), new_record_id)
+                                if remaining > 0:
+                                    sa_conn.rollback()
+                                    return ExcelImportResponse(
+                                        success=False, in_count=in_count, out_count=out_count,
+                                        new_count=new_count, records_created=records_created,
+                                        message=(
+                                            f"出库失败：SKU {item.sku} 在可用批次中仅消耗到 "
+                                            f"{abs(diff) - remaining}，仍缺 {remaining}，已终止导入。"
+                                        ),
+                                    )
                             records_created += 1
                         new_count += 1
                         continue
@@ -5365,19 +5420,6 @@ async def confirm_import_excel(
                                 new_count=new_count, records_created=records_created,
                                 message=f"出库失败：SKU {item.sku} 出库 {abs_diff} 超过当前库存 {current_qty}，已终止导入。"
                             )
-                        # FIFO 消耗批次
-                        remaining = abs_diff
-                        available_batches = sa_conn.execute(
-                            select(_t_batches.c.id, _t_batches.c.quantity)
-                            .where(and_(
-                                _t_batches.c.material_id == material_id,
-                                _t_batches.c.is_exhausted == 0,
-                                _t_batches.c.quantity > 0,
-                                *batch_scope_preds,
-                            ))
-                            .order_by(_t_batches.c.created_at.asc())
-                        ).fetchall()
-
                         sa_conn.execute(
                             update(_t_materials).where(_t_materials.c.id == material_id)
                             .values(quantity=current_qty - abs_diff)
@@ -5394,22 +5436,19 @@ async def confirm_import_excel(
                         )
                         record_id = out_ins.inserted_primary_key[0]
 
-                        for batch in available_batches:
-                            if remaining <= 0:
-                                break
-                            consume = min(batch.quantity, remaining)
-                            new_batch_qty = batch.quantity - consume
-                            remaining -= consume
-                            sa_conn.execute(
-                                update(_t_batches).where(_t_batches.c.id == batch.id)
-                                .values(quantity=new_batch_qty,
-                                        is_exhausted=1 if new_batch_qty == 0 else 0)
-                            )
-                            sa_conn.execute(
-                                insert(_t_batch_consumptions).values(
-                                    record_id=record_id, batch_id=batch.id,
-                                    quantity=consume, created_at=now_dt,
-                                )
+                        remaining = _fifo_consume(material_id, abs_diff, record_id)
+                        if remaining > 0:
+                            # Materials.quantity says we have stock but no batch
+                            # rows back it (e.g. orphan adjustments). Roll back
+                            # the partial txn rather than commit a phantom OUT.
+                            sa_conn.rollback()
+                            return ExcelImportResponse(
+                                success=False, in_count=in_count, out_count=out_count,
+                                new_count=new_count, records_created=records_created,
+                                message=(
+                                    f"出库失败：SKU {item.sku} 在可用批次中仅消耗到 "
+                                    f"{abs_diff - remaining}，仍缺 {remaining}，已终止导入。"
+                                ),
                             )
 
                         out_count += 1
