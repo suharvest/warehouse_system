@@ -1540,192 +1540,177 @@ async def list_users(current_user: CurrentUser = Depends(require_permission(Reso
     return result
 
 
-@app.post("/api/users", response_model=UserListItem)
-async def create_user(
-    request: CreateUserRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
-):
-    """创建用户（仅管理员）"""
+# ---- users CREATE/UPDATE/DELETE migrated to ResourceRouter (R2 phase 2) ----
+# LIST stays as ``list_users`` above because it joins user_warehouses to fill
+# warehouse_ids / warehouse_names on each row.
+
+_USER_OUT_COLUMNS = [
+    _t_users.c.id, _t_users.c.username, _t_users.c.display_name,
+    _t_users.c.role, _t_users.c.is_disabled, _t_users.c.created_at,
+    _t_users.c.tenant_id,
+]
+
+
+def _user_to_out(row) -> UserListItem:
+    ca = row.created_at
+    if isinstance(ca, datetime):
+        ca = ca.strftime('%Y-%m-%d %H:%M:%S')
+    return UserListItem(
+        id=row.id,
+        username=row.username,
+        display_name=row.display_name,
+        role=row.role,
+        is_disabled=bool(row.is_disabled),
+        created_at=ca,
+        tenant_id=row.tenant_id,
+        # warehouse_ids / warehouse_names left as default None — matches the
+        # original create_user / update_user response (LIST handler is the
+        # only one that fills them).
+    )
+
+
+def _user_before_create(sa_conn, current_user, request: CreateUserRequest):
     if request.role not in _VALID_ROLE_VALUES:
         raise HTTPException(status_code=400, detail="无效的角色")
-
     if len(request.password) < 4:
         raise HTTPException(status_code=400, detail="密码长度至少4位")
+    existing = sa_conn.execute(
+        select(_t_users.c.id).where(_t_users.c.username == request.username)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="用户名已存在")
 
-    # bcrypt is CPU-bound; do it outside the transaction
+
+def _user_values_for_create(sa_conn, current_user, request: CreateUserRequest) -> dict:
+    # bcrypt is CPU-bound; we do it inside this hook (called inside begin()).
+    # Original code did it outside the transaction — moving it inside is
+    # acceptable here because the route still raises before any I/O.
     password_hash = hash_password(request.password)
-    created_at_dt = datetime.now()
-    created_at = created_at_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    with get_engine().begin() as sa_conn:
-        # 检查用户名是否已存在
-        existing = sa_conn.execute(
-            select(_t_users.c.id).where(_t_users.c.username == request.username)
-        ).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="用户名已存在")
-
-        # 确定 tenant_id：全局 admin 可指定，租户 admin 只能创建在自己租户下
-        if current_user.tenant_id is None:
-            if get_deploy_mode() == 'multi_tenant':
-                new_tenant_id = request.tenant_id  # 全局 admin 可自由指定
-                if new_tenant_id is None and request.role != 'admin':
-                    raise HTTPException(status_code=400, detail="全局用户必须是管理员角色")
-            else:
-                new_tenant_id = 1
-        elif request.tenant_id is not None and request.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="无权在其他租户下创建用户")
+    if current_user.tenant_id is None:
+        if get_deploy_mode() == 'multi_tenant':
+            new_tenant_id = request.tenant_id
+            if new_tenant_id is None and request.role != 'admin':
+                raise HTTPException(status_code=400, detail="全局用户必须是管理员角色")
         else:
-            new_tenant_id = current_user.tenant_id  # 继承创建者的租户
-        if new_tenant_id is not None:
-            tenant_row = sa_conn.execute(
-                select(_t_tenants.c.id).where(
-                    and_(_t_tenants.c.id == new_tenant_id, _t_tenants.c.is_active == 1)
-                )
-            ).first()
-            if not tenant_row:
-                raise HTTPException(status_code=400, detail="租户不存在或已停用")
-
-        result = sa_conn.execute(
-            insert(_t_users).values(
-                username=request.username,
-                password_hash=password_hash,
-                role=request.role,
-                display_name=request.display_name,
-                created_by=current_user.id,
-                tenant_id=new_tenant_id,
-                created_at=created_at_dt,
+            new_tenant_id = 1
+    elif request.tenant_id is not None and request.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="无权在其他租户下创建用户")
+    else:
+        new_tenant_id = current_user.tenant_id
+    if new_tenant_id is not None:
+        tenant_row = sa_conn.execute(
+            select(_t_tenants.c.id).where(
+                and_(_t_tenants.c.id == new_tenant_id, _t_tenants.c.is_active == 1)
             )
-        )
-        user_id = result.inserted_primary_key[0]
-        get_fuzzy_matcher().invalidate_cache()
+        ).first()
+        if not tenant_row:
+            raise HTTPException(status_code=400, detail="租户不存在或已停用")
 
-        return UserListItem(
-            id=user_id,
-            username=request.username,
-            display_name=request.display_name,
-            role=request.role,
-            is_disabled=False,
-            created_at=created_at,
-            tenant_id=new_tenant_id
-        )
+    return {
+        "username": request.username,
+        "password_hash": password_hash,
+        "role": request.role,
+        "display_name": request.display_name,
+        "created_by": current_user.id,
+        "tenant_id": new_tenant_id,
+        "created_at": datetime.now(),
+    }
 
 
-@app.put("/api/users/{user_id}", response_model=UserListItem)
-async def update_user(
-    user_id: int,
-    request: UpdateUserRequest,
-    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
-):
-    """更新用户（仅管理员）"""
-    # bcrypt outside transaction
+def _user_values_for_update(sa_conn, current_user, request: UpdateUserRequest, row) -> dict:
+    user_id = row.id
     new_password_hash = None
     if request.password is not None:
         if len(request.password) < 4:
             raise HTTPException(status_code=400, detail="密码长度至少4位")
         new_password_hash = hash_password(request.password)
 
-    with get_engine().begin() as sa_conn:
-        user = load_or_404(
-            sa_conn, _t_users, user_id,
-            columns=[_t_users.c.id, _t_users.c.tenant_id],
-            not_found="用户不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权操作其他租户的用户",
-        )
+    values: dict = {}
 
-        values = {}
-
-        if request.username is not None:
-            # 检查用户名是否已被占用
-            dup = sa_conn.execute(
-                select(_t_users.c.id).where(
-                    and_(_t_users.c.username == request.username, _t_users.c.id != user_id)
-                )
-            ).first()
-            if dup:
-                raise HTTPException(status_code=400, detail="用户名已存在")
-            if len(request.username) < 2:
-                raise HTTPException(status_code=400, detail="用户名长度至少2位")
-            values['username'] = request.username
-
-        if request.display_name is not None:
-            values['display_name'] = request.display_name
-
-        if request.role is not None:
-            if request.role not in _VALID_ROLE_VALUES:
-                raise HTTPException(status_code=400, detail="无效的角色")
-            values['role'] = request.role
-
-        if new_password_hash is not None:
-            values['password_hash'] = new_password_hash
-
-        if request.is_disabled is not None:
-            values['is_disabled'] = 1 if request.is_disabled else 0
-
-        if values:
-            sa_conn.execute(
-                update(_t_users).where(_t_users.c.id == user_id).values(**values)
+    if request.username is not None:
+        dup = sa_conn.execute(
+            select(_t_users.c.id).where(
+                and_(_t_users.c.username == request.username, _t_users.c.id != user_id)
             )
-            get_fuzzy_matcher().invalidate_cache()
-
-        # 密码变更或禁用用户时吊销所有会话
-        if request.password is not None or (request.is_disabled is not None and request.is_disabled):
-            sa_conn.execute(
-                update(_t_sessions)
-                .where(and_(_t_sessions.c.user_id == user_id, _t_sessions.c.revoked_at.is_(None)))
-                .values(revoked_at=datetime.now())
-            )
-
-        updated = sa_conn.execute(
-            select(
-                _t_users.c.id, _t_users.c.username, _t_users.c.display_name,
-                _t_users.c.role, _t_users.c.is_disabled, _t_users.c.created_at,
-                _t_users.c.tenant_id,
-            ).where(_t_users.c.id == user_id)
         ).first()
+        if dup:
+            raise HTTPException(status_code=400, detail="用户名已存在")
+        if len(request.username) < 2:
+            raise HTTPException(status_code=400, detail="用户名长度至少2位")
+        values['username'] = request.username
 
-        return UserListItem(
-            id=updated.id,
-            username=updated.username,
-            display_name=updated.display_name,
-            role=updated.role,
-            is_disabled=bool(updated.is_disabled),
-            created_at=(updated.created_at.strftime('%Y-%m-%d %H:%M:%S')
-                        if isinstance(updated.created_at, datetime) else updated.created_at),
-            tenant_id=updated.tenant_id,
-        )
+    if request.display_name is not None:
+        values['display_name'] = request.display_name
 
+    if request.role is not None:
+        if request.role not in _VALID_ROLE_VALUES:
+            raise HTTPException(status_code=400, detail="无效的角色")
+        values['role'] = request.role
 
-@app.delete("/api/users/{user_id}")
-async def delete_user(
-    user_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN))
-):
-    """禁用用户（仅管理员）"""
-    if user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="不能禁用自己")
+    if new_password_hash is not None:
+        values['password_hash'] = new_password_hash
 
-    with get_engine().begin() as sa_conn:
-        user = load_or_404(
-            sa_conn, _t_users, user_id,
-            columns=[_t_users.c.id, _t_users.c.tenant_id],
-            not_found="用户不存在",
-            tenant_id=current_user.tenant_id,
-            forbidden="无权操作其他租户的用户",
-        )
+    if request.is_disabled is not None:
+        values['is_disabled'] = 1 if request.is_disabled else 0
 
-        sa_conn.execute(
-            update(_t_users).where(_t_users.c.id == user_id).values(is_disabled=1)
-        )
+    # 密码变更或禁用用户时吊销所有会话 — done as a side effect, not a
+    # column update, so it has to live here (we still have the conn).
+    if request.password is not None or (request.is_disabled is not None and request.is_disabled):
         sa_conn.execute(
             update(_t_sessions)
             .where(and_(_t_sessions.c.user_id == user_id, _t_sessions.c.revoked_at.is_(None)))
             .values(revoked_at=datetime.now())
         )
-        get_fuzzy_matcher().invalidate_cache()
 
-        return {"success": True, "message": "用户已禁用"}
+    return values
+
+
+def _user_before_delete(sa_conn, current_user, row):
+    user_id = row.id
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能禁用自己")
+    sa_conn.execute(
+        update(_t_users).where(_t_users.c.id == user_id).values(is_disabled=1)
+    )
+    sa_conn.execute(
+        update(_t_sessions)
+        .where(and_(_t_sessions.c.user_id == user_id, _t_sessions.c.revoked_at.is_(None)))
+        .values(revoked_at=datetime.now())
+    )
+
+
+def _user_after_commit(operation, sa_conn, current_user, row_id):
+    get_fuzzy_matcher().invalidate_cache()
+
+
+from resource_router import ResourceRouter as _ResourceRouterUser  # noqa: E402
+
+_user_router = _ResourceRouterUser(
+    app=app,
+    prefix="/api/users",
+    table=_t_users,
+    response_model=UserListItem,
+    create_model=CreateUserRequest,
+    update_model=UpdateUserRequest,
+    permission_read=require_permission(Resource.USERS, Action.ADMIN),
+    permission_write=require_permission(Resource.USERS, Action.ADMIN),
+    not_found_detail="用户不存在",
+    forbidden_detail="无权操作其他租户的用户",
+    to_out=_user_to_out,
+    values_for_create=_user_values_for_create,
+    values_for_update=_user_values_for_update,
+    before_create=_user_before_create,
+    before_delete=_user_before_delete,
+    after_commit=_user_after_commit,
+    list_handler=None,
+    get_columns=_USER_OUT_COLUMNS,
+    update_select_columns=_USER_OUT_COLUMNS,
+    delete_response={"success": True, "message": "用户已禁用"},
+)
+# Original handlers exposed POST/PUT/DELETE only — no GET item route.
+_user_router._register_get = lambda *a, **kw: None  # type: ignore[assignment]
+_user_router.register()
 
 
 # ============ API Key Management APIs ============
