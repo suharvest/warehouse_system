@@ -138,6 +138,27 @@ class ResourceRouter:
     delete_response: Dict[str, Any] = field(
         default_factory=lambda: {"success": True}
     )
+    # Optional override for the CREATE response shape.
+    # Signature: ``(row, *, request, sa_conn, current_user) -> Any``.
+    # Falls back to ``to_out(row)`` when None. Used for resources whose
+    # POST response carries one-shot payload (plaintext secrets, etc.) that
+    # later GET/UPDATE responses do NOT include — e.g. api-keys returns the
+    # plaintext key once on create only.
+    to_out_create: Optional[Callable[..., Any]] = None
+    # Hard-delete switch — when True, DELETE issues a SQL ``DELETE`` instead
+    # of the default ``UPDATE ... SET is_disabled=1`` soft-delete. Resources
+    # without ``is_disabled`` (or where hard-delete is the historical wire
+    # behaviour) need this. Ignored if ``before_delete`` is supplied (the
+    # caller is expected to perform whatever delete semantic they want).
+    hard_delete: bool = False
+    # Per-verb toggles. Useful when the existing public API does not expose
+    # one of GET/POST/PUT/DELETE on the prefix (e.g. api-keys never had a
+    # GET-by-id or PUT route — only POST + DELETE + a side-route
+    # /{id}/status). Defaults preserve the prior contacts behaviour.
+    enable_get: bool = True
+    enable_post: bool = True
+    enable_put: bool = True
+    enable_delete: bool = True
 
     def register(self) -> None:
         """Wire all configured routes onto ``self.app``."""
@@ -150,10 +171,14 @@ class ResourceRouter:
             self.app.get(prefix)(self.list_handler)
 
         # --- GET / POST / PUT / DELETE -------------------------------------
-        self._register_get(get_engine, load_or_404)
-        self._register_post(get_engine)
-        self._register_put(get_engine, load_or_404)
-        self._register_delete(get_engine, load_or_404)
+        if self.enable_get:
+            self._register_get(get_engine, load_or_404)
+        if self.enable_post:
+            self._register_post(get_engine)
+        if self.enable_put:
+            self._register_put(get_engine, load_or_404)
+        if self.enable_delete:
+            self._register_delete(get_engine, load_or_404)
 
     # ------------------------------------------------------------------
     # Per-verb registration. We build closures with explicit signatures so
@@ -200,6 +225,8 @@ class ResourceRouter:
         after_commit = self.after_commit
         update_select_columns = self.update_select_columns
         to_out = self.to_out
+        to_out_create = self.to_out_create
+        response_model = self.response_model
 
         async def create_item(request, current_user=Depends(permission_write)):
             with get_engine().begin() as sa_conn:
@@ -221,6 +248,11 @@ class ResourceRouter:
                     else select(table).where(table.c.id == new_id)
                 )
                 fresh = sa_conn.execute(stmt).first()
+            if to_out_create is not None:
+                return to_out_create(
+                    fresh, request=request,
+                    sa_conn=sa_conn, current_user=current_user,
+                )
             return to_out(fresh)
 
         # Set the body-param annotation programmatically so FastAPI sees a
@@ -291,6 +323,7 @@ class ResourceRouter:
         not_found = self.not_found_detail
         forbidden = self.forbidden_detail
         delete_response = self.delete_response
+        hard_delete = self.hard_delete
 
         @self.app.delete(f"{prefix}/{{item_id}}")
         async def delete_item(
@@ -309,6 +342,11 @@ class ResourceRouter:
                 )
                 if before_delete is not None:
                     before_delete(sa_conn, current_user, row)
+                elif hard_delete:
+                    # Hard delete — used by resources whose historical
+                    # wire behaviour was a SQL DELETE (api-keys).
+                    from sqlalchemy import delete as sa_delete
+                    sa_conn.execute(sa_delete(table).where(table.c.id == item_id))
                 else:
                     # Default: soft-disable via ``is_disabled``. Resources
                     # without that column MUST supply a before_delete that
