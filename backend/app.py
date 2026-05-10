@@ -1671,7 +1671,8 @@ def _user_before_delete(sa_conn, current_user, row):
 
 
 def _user_after_commit(operation, sa_conn, current_user, row_id):
-    get_fuzzy_matcher().invalidate_cache()
+    # R5: only operator partition is affected by user writes
+    get_fuzzy_matcher().invalidate_cache(entity_type="operator")
 
 
 from resource_router import ResourceRouter as _ResourceRouterUser  # noqa: E402
@@ -2665,8 +2666,8 @@ def _contact_values_for_update(sa_conn, current_user, request: UpdateContactRequ
 
 
 def _contact_after_commit(operation, sa_conn, current_user, row_id):
-    # Fuzzy match index pulls from contacts; any mutation invalidates it.
-    get_fuzzy_matcher().invalidate_cache()
+    # R5: only contact partition is affected
+    get_fuzzy_matcher().invalidate_cache(entity_type="contact")
 
 
 from resource_router import ResourceRouter as _ResourceRouter  # noqa: E402
@@ -4062,8 +4063,10 @@ async def stock_in(
             )
         )
 
-    # 写操作后清除缓存
-    get_fuzzy_matcher().invalidate_cache()
+    # R5: stock-in only affects material partition (name+variant entries)
+    get_fuzzy_matcher().invalidate_cache(
+        entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
+    )
 
     audit_log("STOCK_IN", current_user.id, current_user.username, {
         "product": product_name,
@@ -4296,7 +4299,10 @@ async def stock_out(
                 quantity=consume_qty, remaining=remaining_qty, variant=batch.variant,
             )]
 
-        get_fuzzy_matcher().invalidate_cache()
+        # R5: stock-out only affects material partition's variant index
+        get_fuzzy_matcher().invalidate_cache(
+            entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
+        )
 
         audit_log("STOCK_OUT", current_user.id, current_user.username, {
             "product": product_name, "quantity": quantity,
@@ -4442,7 +4448,10 @@ async def stock_out(
                 quantity=consume_qty, remaining=remaining_qty, variant=b.variant,
             ))
 
-    get_fuzzy_matcher().invalidate_cache()
+    # R5: FIFO stock-out only affects material partition
+    get_fuzzy_matcher().invalidate_cache(
+        entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
+    )
 
     audit_log("STOCK_OUT", current_user.id, current_user.username, {
         "product": product_name, "quantity": quantity,
@@ -5380,7 +5389,8 @@ async def confirm_import_excel(
                         out_count += 1
                         records_created += 1
 
-    get_fuzzy_matcher().invalidate_cache()
+    # R5: import only writes to materials/batches → material partition only
+    get_fuzzy_matcher().invalidate_cache(entity_type="material")
 
     warning_text = f" {' '.join(warnings)}" if warnings else ""
     return ExcelImportResponse(
