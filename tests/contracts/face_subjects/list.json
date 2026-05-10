@@ -1,0 +1,18 @@
+{
+  "json": [
+    {
+      "created_at": "<any>",
+      "created_by": "<any>",
+      "employee_id": "<any>",
+      "enrollment_count": "<any>",
+      "id": "<any>",
+      "is_active": "<any>",
+      "name": "<any>",
+      "note": "<any>",
+      "tenant_id": "<any>",
+      "updated_at": "<any>"
+    }
+  ],
+  "json_keys": null,
+  "status": 200
+}
