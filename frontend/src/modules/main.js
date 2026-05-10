@@ -138,7 +138,7 @@ function populateCategorySelect() {
         select.innerHTML = '';
         select.appendChild(firstOption);
 
-        allCategories.forEach(cat => {
+        getAllCategories().forEach(cat => {
             const option = document.createElement('option');
             option.value = cat;
             option.textContent = cat;
