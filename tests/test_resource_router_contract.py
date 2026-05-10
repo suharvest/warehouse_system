@@ -628,3 +628,124 @@ def test_contract_mcp(admin_client, default_warehouse_id):
     # cleanup
     for mid_ in seeded_ids:
         admin_client.delete(f"/api/mcp/connections/{mid_}")
+
+
+# ---------------------------------------------------------------------------
+# Face — rules
+# ---------------------------------------------------------------------------
+
+def test_contract_face_rules(admin_client, default_warehouse_id):
+    s = _suffix()
+
+    r = admin_client.post("/api/face/rules", json={
+        "warehouse_id": default_warehouse_id,
+        "operation": f"op-{s}",
+        "require_face": True,
+        "allowed_subject_ids": None,
+        "min_confidence_override": None,
+    })
+    _check("face_rules/create", r.status_code, r.json())
+    assert r.status_code == 200
+    rid = r.json()["id"]
+
+    r = admin_client.get("/api/face/rules")
+    _check("face_rules/list", r.status_code, r.json(), shape_only=True)
+    assert r.status_code == 200
+
+    r = admin_client.put(f"/api/face/rules/{rid}", json={
+        "warehouse_id": default_warehouse_id,
+        "operation": f"op-{s}",
+        "require_face": False,
+        "allowed_subject_ids": None,
+        "min_confidence_override": 0.8,
+    })
+    _check("face_rules/update", r.status_code, r.json())
+    assert r.status_code == 200
+
+    r = admin_client.delete(f"/api/face/rules/{rid}")
+    _check("face_rules/delete", r.status_code, r.json())
+    assert r.status_code == 200
+
+    r = admin_client.put("/api/face/rules/999999999", json={
+        "operation": "x", "require_face": False,
+    })
+    _check("face_rules/update_404", r.status_code, r.json())
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Face — subjects
+# ---------------------------------------------------------------------------
+
+def test_contract_face_subjects(admin_client):
+    s = _suffix()
+
+    r = admin_client.post("/api/face/subjects", json={
+        "name": f"Subject {s}",
+        "employee_id": f"E{s}",
+        "note": "n",
+        "is_active": True,
+    })
+    _check("face_subjects/create", r.status_code, r.json())
+    assert r.status_code == 200
+    sid = r.json()["id"]
+
+    r = admin_client.get("/api/face/subjects")
+    _check("face_subjects/list", r.status_code, r.json(), shape_only=True)
+    assert r.status_code == 200
+
+    r = admin_client.put(f"/api/face/subjects/{sid}", json={
+        "name": f"Subject {s} v2",
+        "employee_id": f"E{s}",
+        "note": "n",
+        "is_active": True,
+    })
+    _check("face_subjects/update", r.status_code, r.json())
+    assert r.status_code == 200
+
+    r = admin_client.delete(f"/api/face/subjects/{sid}")
+    _check("face_subjects/delete", r.status_code, r.json())
+    assert r.status_code == 200
+
+    r = admin_client.put("/api/face/subjects/999999999", json={
+        "name": "x", "is_active": True,
+    })
+    _check("face_subjects/update_404", r.status_code, r.json())
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Face — enrollments (DELETE only — POST has async orchestrator + images)
+# ---------------------------------------------------------------------------
+
+def test_contract_face_enrollments_delete(admin_client):
+    # 404 path is enough to lock DELETE wire shape; POST is hand-rolled
+    # and exercised by tests/test_face.py.
+    r = admin_client.delete("/api/face/enrollments/999999999")
+    _check("face_enrollments/delete_404", r.status_code, r.json())
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# ERP providers — GET / PUT / DELETE only (POST is multipart upload)
+# ---------------------------------------------------------------------------
+
+def test_contract_erp_providers(admin_client):
+    # 404 paths lock the wire shape without needing to seed via multipart upload.
+    r = admin_client.get("/api/erp/providers")
+    _check("erp_providers/list", r.status_code, r.json(), shape_only=True)
+    assert r.status_code == 200
+
+    r = admin_client.get("/api/erp/providers/999999999")
+    _check("erp_providers/get_404", r.status_code, r.json())
+    assert r.status_code == 404
+
+    r = admin_client.put("/api/erp/providers/999999999", json={
+        "name": "x", "config": {},
+    })
+    _check("erp_providers/update_404", r.status_code, r.json())
+    assert r.status_code == 404
+
+    r = admin_client.delete("/api/erp/providers/999999999")
+    _check("erp_providers/delete_404", r.status_code, r.json())
+    assert r.status_code == 404

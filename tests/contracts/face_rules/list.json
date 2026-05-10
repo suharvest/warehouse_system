@@ -1,0 +1,15 @@
+{
+  "json": [
+    {
+      "allowed_subject_ids": [],
+      "id": "<any>",
+      "min_confidence_override": "<any>",
+      "operation": "<any>",
+      "require_face": "<any>",
+      "tenant_id": "<any>",
+      "warehouse_id": "<any>"
+    }
+  ],
+  "json_keys": null,
+  "status": 200
+}
