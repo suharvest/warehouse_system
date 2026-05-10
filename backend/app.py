@@ -4336,9 +4336,9 @@ async def stock_out(
     if effective_location or effective_variant:
         precheck_preds = [
             _t_batches.c.material_id == material_id,
-            _t_batches.c.warehouse_id == wh_id,
             _t_batches.c.is_exhausted == 0,
             _t_batches.c.quantity > 0,
+            *b_scope,
         ]
         if effective_variant:
             precheck_preds.append(_t_batches.c.variant == effective_variant)
@@ -4398,6 +4398,7 @@ async def stock_out(
             _t_batches.c.material_id == material_id,
             _t_batches.c.is_exhausted == 0,
             _t_batches.c.quantity > 0,
+            *b_scope,
         ]
         if effective_variant:
             fifo_preds.append(_t_batches.c.variant == effective_variant)
