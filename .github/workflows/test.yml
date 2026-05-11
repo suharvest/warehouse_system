@@ -28,6 +28,69 @@ jobs:
       - name: Run backend tests
         run: uv run pytest tests/ -v --ignore=tests/e2e -x
 
+  # Same suite as backend-tests but against real MySQL. Catches dialect-specific
+  # issues that SQLite hides — VARCHAR length overflow (cf. commit 8fb10bf),
+  # utf8mb4 collation, transaction semantics, etc.
+  #
+  # NOT yet blocking: the existing tests/conftest.py `_mysql_truncate` fixture
+  # is disabled (renamed to _mysql_truncate_disabled) because session-scoped
+  # admin fixtures conflict with per-test TRUNCATE. Until that's refactored,
+  # ~110 tests fail when run together against MySQL (each passes in isolation).
+  # Surfacing the failures via this job is intentional — it'll catch new
+  # dialect bugs even while the legacy isolation gap is still open.
+  backend-tests-mysql:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: .
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci_pwd
+          MYSQL_DATABASE: warehouse_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -pci_pwd"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=15
+    env:
+      DATABASE_URL: "mysql+pymysql://root:ci_pwd@127.0.0.1:3306/warehouse_ci?charset=utf8mb4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --extra test
+
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -pci_pwd --silent 2>/dev/null; then
+              echo "MySQL is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not come up in time"; exit 1
+
+      - name: Apply alembic migrations
+        working-directory: backend
+        run: uv run alembic upgrade head
+
+      # No -x: we want the full failure list each run while test isolation is
+      # still being sorted out. Drop -v if log volume becomes an issue.
+      - name: Run backend tests against MySQL
+        run: uv run pytest tests/ --ignore=tests/e2e -v
+
   e2e-tests:
     runs-on: ubuntu-latest
     defaults:
