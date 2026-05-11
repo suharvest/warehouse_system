@@ -64,7 +64,7 @@ from models import (
     RoleName, RecordType,
 )
 from fuzzy_match import FuzzyMatcher
-from sqlalchemy import select, and_, or_, insert, update, delete, case
+from sqlalchemy import select, and_, or_, insert, update, delete, case, text
 from db import get_engine
 from metadata import (
     warehouses as _t_warehouses,
@@ -590,6 +590,37 @@ def _route_has_guard(dep) -> bool:
     return False
 
 
+def _validate_deploy_mode_invariants() -> None:
+    """启动时校验 DEPLOY_MODE 与 DB 状态自洽，否则拒绝启动。
+
+    single_tenant 不变式：
+      - 至多一个 active 租户（id=1）
+      - 不存在 global admin（users.tenant_id IS NULL AND role='admin'）
+    违反任何一条都说明部署元信息与数据不一致，继续启动会让 UI 各处判断分裂。
+    """
+    if get_deploy_mode() != 'single_tenant':
+        return
+    with get_engine().connect() as sa_conn:
+        extra_tenants = sa_conn.execute(
+            text("SELECT COUNT(*) FROM tenants WHERE is_active = 1 AND id != 1")
+        ).scalar()
+        if extra_tenants and extra_tenants > 0:
+            raise RuntimeError(
+                f'Refusing to start: DEPLOY_MODE=single_tenant but {extra_tenants} extra active '
+                f'tenant(s) exist. Switch to multi_tenant or consolidate tenants.'
+            )
+        global_admins = sa_conn.execute(
+            text("SELECT COUNT(*) FROM users WHERE role = 'admin' AND tenant_id IS NULL")
+        ).scalar()
+        if global_admins and global_admins > 0:
+            raise RuntimeError(
+                f'Refusing to start: DEPLOY_MODE=single_tenant but {global_admins} global admin '
+                f'user(s) exist (users.tenant_id IS NULL). Either set DEPLOY_MODE=multi_tenant, '
+                f'or bind them to a tenant: '
+                f'UPDATE users SET tenant_id=1 WHERE role="admin" AND tenant_id IS NULL.'
+            )
+
+
 def _audit_routes() -> None:
     """Walk all FastAPI routes; warn for any route that has no auth guard.
 
@@ -602,6 +633,7 @@ def _audit_routes() -> None:
         "/api/auth/login",
         "/api/auth/logout",
         "/api/auth/status",
+        "/api/system/mode",  # 部署元信息（single/multi tenant），前端在登录前就要据此渲染 UI
         "/docs",
         "/openapi.json",
         "/redoc",
@@ -5713,6 +5745,10 @@ async def _run_migrations():
     )
     alembic_command.upgrade(cfg, "head")
 
+    # DEPLOY_MODE 不变式校验 — 启动阶段就把不一致状态拦掉，避免运行时 UI/业务半对半错。
+    # 故意让异常向上抛：违反不变式应阻止启动，不该被吞掉。
+    _validate_deploy_mode_invariants()
+
     # Boot-time route audit (warning-only). Bugs here must NEVER crash
     # startup, so we swallow any exception and log it.
     try:
@@ -6195,8 +6231,13 @@ def _get_providers_custom_dir() -> str:
 
 
 @app.get("/api/system/mode")
-async def get_system_mode(current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.READ))):
-    """查询系统当前运行模式（self_owned / external_erp）及部署模式（single_tenant / multi_tenant）— Phase 2f: SA Core read."""
+async def get_system_mode():
+    """查询系统当前运行模式（self_owned / external_erp）及部署模式（single_tenant / multi_tenant）。
+
+    无需登录：deploy_mode 是部署元信息，前端需要它在登录前就能决定 UI 形态（多租户/单租户），
+    要求登录会让首屏一直走 single_tenant 默认值，触发模式判断分裂。system_mode 同理（self_owned
+    vs external_erp 只决定 UI 走向，不暴露任何业务数据）。
+    """
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(
             select(_t_system_settings.c.value).where(_t_system_settings.c.key == 'system_mode')

@@ -818,6 +818,16 @@ def init_database():
                 'Cannot start in single_tenant mode: multiple active tenants exist. '
                 'Switch to multi_tenant or consolidate tenants.'
             )
+        # single_tenant 模式不允许存在全局 admin（tenant_id IS NULL）。该状态下"全局"概念不成立，
+        # 留它会让 UI 各处判断分裂（一会儿 [全局管理] 一会儿租户内 admin）。要么切到 multi_tenant，
+        # 要么把这些 admin 显式绑到租户。
+        cursor.execute("SELECT COUNT(*) as cnt FROM users WHERE role = 'admin' AND tenant_id IS NULL")
+        if cursor.fetchone()['cnt'] > 0:
+            raise RuntimeError(
+                'Cannot start in single_tenant mode: global admin (users.tenant_id IS NULL) exists. '
+                'Either set DEPLOY_MODE=multi_tenant, or bind the admin to a tenant '
+                '(UPDATE users SET tenant_id=1 WHERE role="admin" AND tenant_id IS NULL).'
+            )
 
     conn.commit()
     conn.close()
