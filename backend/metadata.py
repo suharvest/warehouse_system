@@ -319,7 +319,9 @@ mcp_connections = Table(
     # SQLite 视 String 与 Text 等价（都是 TEXT），无影响；MySQL 上 String(255) 会触发
     # "Data too long" 报错（实测 Seeed watcher endpoint 含 ES256 JWT 时约 400+ 字符）。
     Column("mcp_endpoint", Text, nullable=False),
-    Column("api_key", String(255), nullable=False),
+    # api_key 与 mcp_endpoint 同源：第三方 MCP server 颁发的 API key / bearer token 常为长 JWT，
+    # MySQL VARCHAR(255) 会触发 1406 Data too long。改 Text 兜底。未参与索引/等值查询。
+    Column("api_key", Text, nullable=False),
     Column("role", String(32), nullable=False, server_default="operate"),
     Column("auto_start", Boolean, nullable=False, server_default="1"),
     Column("status", String(32), server_default="stopped"),
@@ -351,8 +353,10 @@ tenant_face_config = Table(
     ),
     Column("enabled", Boolean, nullable=False, server_default="0"),
     Column("mode", String(16)),
-    Column("endpoint", String(255)),
-    Column("auth_token", String(255)),
+    # 同 mcp_endpoint：人脸服务 URL 常带 JWT/token query 参数，auth_token 直接是 JWT。
+    # 用 Text 避免 VARCHAR(255) 在 MySQL 上撑爆。两列都不被索引/等值查询。
+    Column("endpoint", Text),
+    Column("auth_token", Text),
     Column("embedding_model_tag", String(64)),
     Column("min_confidence", Float, nullable=False, server_default="0.65"),
     Column("created_at", String(32), server_default=func.current_timestamp()),
