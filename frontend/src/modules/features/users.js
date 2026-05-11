@@ -1,7 +1,7 @@
 // ============ 用户管理模块 ============
 import { t } from '../../../i18n.js';
 import { usersApi, authApi } from '../api.js';
-import { getCurrentUser } from '../state.js';
+import { getCurrentUser, getDeployMode } from '../state.js';
 
 // 回调函数引用
 let checkAuthStatusFn = null;
@@ -219,7 +219,7 @@ export async function loadTenantInfo() {
     const container = document.getElementById('tenant-info-content');
     if (!container) return;
 
-    const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
+    const dm = getDeployMode();
     const user = getCurrentUser();
     if (dm !== 'multi_tenant' || !user?.tenant_id) {
         container.innerHTML = '';

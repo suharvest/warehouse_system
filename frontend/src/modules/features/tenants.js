@@ -1,7 +1,6 @@
 // ============ 租户管理模块 ============
 import { t } from '../../../i18n.js';
-import { getDeployMode, getCurrentUser } from '../state.js';
-import { setDeployMode } from '../state.js';
+import { getDeployMode, setDeployMode, getCurrentUser } from '../state.js';
 import { showToast, showModalSuccessState } from '../ui-components.js';
 import { warehousesApi, usersApi } from '../api.js';
 import { switchTab } from '../ui/tabs.js';
@@ -40,20 +39,26 @@ function getErrorMessage(error, fallbackKey, fallbackText) {
 }
 
 // ============ 部署模式 ============
+// 唯一的 deploy_mode 来源：调 /api/system/mode（无需登录），结果写入 state.js 的 deployMode（
+// 同时 setDeployMode 会顺手缓存到 localStorage 作为下次启动的 fallback）。所有 UI 读 deploy_mode
+// 一律通过 getDeployMode()，不要再直接读 localStorage。
 export async function fetchDeployMode() {
     try {
-        const response = await fetch(`${API_BASE}/system/mode`, { credentials: 'include' });
+        const response = await fetch(`${API_BASE}/system/mode`);
         if (response.ok) {
             const data = await response.json();
-            const mode = data.deploy_mode || data.mode || 'single_tenant';
+            const mode = data.deploy_mode || 'single_tenant';
             setDeployMode(mode);
-            localStorage.setItem('deploy_mode', mode);
             return mode;
         }
+        console.warn('获取部署模式失败: HTTP', response.status);
     } catch (error) {
         console.error('获取部署模式失败:', error);
     }
-    return 'single_tenant';
+    // 网络/后端不可用时回退到 localStorage 缓存或默认值；setDeployMode 内部保证模块变量与 localStorage 同步
+    const cached = localStorage.getItem('deploy_mode') || 'single_tenant';
+    setDeployMode(cached);
+    return cached;
 }
 
 // ============ 租户 CRUD ============

@@ -1,7 +1,7 @@
 // ============ 仓库管理模块 ============
 import { t } from '../../../i18n.js';
 import { warehousesApi } from '../api.js';
-import { getCurrentUser } from '../state.js';
+import { getCurrentUser, getDeployMode } from '../state.js';
 
 // 刷新仓库切换器的回调
 let refreshSwitcherFn = null;
@@ -40,7 +40,7 @@ function renderWarehousesTable(warehouses) {
 
     const user = getCurrentUser();
     const isGlobalAdmin = user && !user.tenant_id;
-    const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
+    const dm = getDeployMode();
     const groupByTenant = isGlobalAdmin && dm === 'multi_tenant';
 
     // 表头：分组模式下不再单独显示"所属租户"列（已在分组表头行展示）
@@ -180,7 +180,7 @@ async function setupWarehouseTenantSelect() {
     const user = getCurrentUser();
     const group = document.getElementById('warehouse-tenant-group');
     const select = document.getElementById('warehouse-tenant');
-    const deployMode = localStorage.getItem('deploy_mode') || 'single_tenant';
+    const deployMode = getDeployMode();
     if (!group || !select) return;
     if (!user || user.tenant_id || deployMode !== 'multi_tenant') {
         hideWarehouseTenantSelect();
@@ -242,7 +242,7 @@ export async function handleSaveWarehouse() {
         } else {
             const tenantSelect = document.getElementById('warehouse-tenant');
             const user = getCurrentUser();
-            const deployMode = localStorage.getItem('deploy_mode') || 'single_tenant';
+            const deployMode = getDeployMode();
             const payload = { slug, name, address: address || null };
             if (user && !user.tenant_id && deployMode === 'multi_tenant') {
                 const tenantId = parseInt(tenantSelect?.value, 10);
