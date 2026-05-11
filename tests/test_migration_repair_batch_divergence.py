@@ -48,6 +48,12 @@ def db_engine():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     url = f"sqlite:///{path}"
+    # Preserve any caller-supplied DATABASE_URL (e.g. MySQL CI runs) so
+    # that subsequent tests still see the original engine. Restoring on
+    # teardown matters: simply popping the var lets ``db.get_engine``
+    # fall back to ``DATABASE_PATH``, which other fixtures may have left
+    # pointing at a stale value.
+    _prev_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = url
 
     cfg = Config(str(BACKEND_DIR / "alembic.ini"))
@@ -65,7 +71,10 @@ def db_engine():
         os.unlink(path)
     except OSError:
         pass
-    os.environ.pop("DATABASE_URL", None)
+    if _prev_url is None:
+        os.environ.pop("DATABASE_URL", None)
+    else:
+        os.environ["DATABASE_URL"] = _prev_url
 
 
 def _seed_min_refs(conn):

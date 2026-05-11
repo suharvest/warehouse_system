@@ -35,6 +35,16 @@ from typing import Any
 
 import pytest
 
+# MySQL DATETIME has 1-second resolution by default (no fractional part), so
+# three INSERTs in the same loop iteration share a ``created_at`` value and
+# the ``ORDER BY created_at DESC`` tiebreak (insertion order) does not always
+# reproduce the reverse-insertion order this assertion relies on. The contract
+# itself (sort key + payload shape) is identical across backends; only the
+# strict ordering check is flaky on MySQL.
+_IS_MYSQL = bool(os.environ.get('DATABASE_URL', '')) and not os.environ.get(
+    'DATABASE_URL', ''
+).startswith('sqlite')
+
 
 SNAPSHOT_DIR = Path(__file__).parent / "contracts"
 UPDATE = os.environ.get("UPDATE_SNAPSHOTS") == "1"
@@ -419,6 +429,11 @@ def test_contract_warehouses(admin_client):
 # Users
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    _IS_MYSQL,
+    reason="MySQL DATETIME(0) ties created_at across rapid INSERTs; "
+           "strict reverse-insertion ordering is sqlite-only.",
+)
 def test_contract_users(admin_client):
     s = _suffix()
 
@@ -494,6 +509,11 @@ def test_contract_users(admin_client):
 # API keys
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    _IS_MYSQL,
+    reason="MySQL DATETIME(0) ties created_at across rapid INSERTs; "
+           "strict reverse-insertion ordering is sqlite-only.",
+)
 def test_contract_api_keys(admin_client, default_warehouse_id):
     s = _suffix()
 

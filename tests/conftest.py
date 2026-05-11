@@ -91,44 +91,6 @@ def test_db():
         pass
 
 
-def _mysql_truncate_disabled(request):
-    """Per-test cleanup for MySQL: TRUNCATE all tables (preserving alembic_version).
-
-    Only active when DATABASE_URL points at a non-sqlite backend. Runs *after*
-    the test, ensuring the next test starts from a clean slate. The session-
-    level admin/setup will be re-created on demand by _admin_setup since
-    admin_client is function-scoped.
-    """
-    yield
-    database_url = os.environ.get('DATABASE_URL', '')
-    if not database_url or database_url.startswith('sqlite'):
-        return
-    try:
-        from db import get_engine
-        from sqlalchemy import text
-        eng = get_engine()
-        with eng.begin() as conn:
-            conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-            rows = conn.execute(text(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = DATABASE() AND table_name <> 'alembic_version'"
-            )).fetchall()
-            for (tbl,) in rows:
-                conn.execute(text(f"TRUNCATE TABLE `{tbl}`"))
-            # Re-seed minimal rows so session-scoped admin/warehouse fixtures
-            # remain valid across tests.
-            conn.execute(text(
-                "INSERT IGNORE INTO tenants (id, slug, name) VALUES (1, 'default', '默认租户')"
-            ))
-            conn.execute(text(
-                "INSERT IGNORE INTO warehouses (id, slug, name, is_default) "
-                "VALUES (1, 'default', '默认仓库', 1)"
-            ))
-            conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
-    except Exception:
-        pass
-
-
 @pytest.fixture(scope="session")
 def app_instance(test_db):
     """Reload and return the FastAPI app instance."""
@@ -150,14 +112,105 @@ def client(app_instance):
 
 @pytest.fixture(scope="session")
 def _admin_setup(client):
-    """One-time admin user setup (session-scoped)."""
+    """One-time admin user setup (session-scoped).
+
+    On MySQL, also snapshot the admin user row so the per-test truncate
+    fixture can re-insert it after wiping all tables. This keeps the
+    session-scoped setup semantically valid: the *same* admin (same id,
+    same password hash) is restored after each test, so the cached
+    credentials returned here continue to authenticate.
+    """
     resp = client.post("/api/auth/setup", json={
         "username": "admin",
         "password": "Admin123!",
         "display_name": "Test Admin"
     })
     assert resp.status_code == 200, f"Setup failed: {resp.text}"
-    return {"username": "admin", "password": "Admin123!"}
+
+    creds = {"username": "admin", "password": "Admin123!"}
+
+    database_url = os.environ.get('DATABASE_URL', '')
+    if database_url and not database_url.startswith('sqlite'):
+        from db import get_engine
+        from sqlalchemy import text
+        eng = get_engine()
+        with eng.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, username, password_hash, role, display_name, "
+                "is_disabled, created_at, created_by, tenant_id "
+                "FROM users WHERE username = :u"
+            ), {"u": "admin"}).mappings().first()
+        assert row is not None, "admin row missing after /api/auth/setup"
+        creds["_admin_row"] = dict(row)
+    return creds
+
+
+@pytest.fixture(autouse=True)
+def _mysql_truncate(request):
+    """Per-test cleanup for MySQL: TRUNCATE all tables, then re-seed the
+    minimal rows that session-scoped fixtures depend on (default tenant,
+    default warehouse, system_mode setting, and the admin user captured
+    in ``_admin_setup``).
+
+    No-op on sqlite (function-scoped DB recreate isn't needed there — the
+    sqlite test DB is a fresh temp file per session and tests are
+    historically order-tolerant enough that the sqlite path stays green
+    without per-test truncation).
+    """
+    yield
+
+    database_url = os.environ.get('DATABASE_URL', '')
+    if not database_url or database_url.startswith('sqlite'):
+        return
+
+    # Only run cleanup if the session-scoped admin setup has actually run
+    # (otherwise we'd wipe state that the next test's _admin_setup depends
+    # on having just created). Look up the cached fixture value, if any.
+    admin_row = None
+    try:
+        cached = request.session._fixturemanager._arg2fixturedefs.get('_admin_setup')
+        if cached:
+            for fd in cached:
+                cv = fd.cached_result
+                if cv and cv[0] and isinstance(cv[0], dict):
+                    admin_row = cv[0].get('_admin_row')
+                    break
+    except Exception:
+        admin_row = None
+
+    from db import get_engine
+    from sqlalchemy import text
+    eng = get_engine()
+    with eng.begin() as conn:
+        conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+        rows = conn.execute(text(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name <> 'alembic_version'"
+        )).fetchall()
+        for (tbl,) in rows:
+            conn.execute(text(f"TRUNCATE TABLE `{tbl}`"))
+
+        # Re-seed the rows the session-scoped fixtures expect to exist.
+        conn.execute(text(
+            "INSERT INTO tenants (id, slug, name) VALUES (1, 'default', '默认租户')"
+        ))
+        conn.execute(text(
+            "INSERT INTO warehouses (id, slug, name, is_default) "
+            "VALUES (1, 'default', '默认仓库', 1)"
+        ))
+        conn.execute(text(
+            "INSERT INTO system_settings (`key`, `value`) "
+            "VALUES ('system_mode', 'self_owned')"
+        ))
+        if admin_row is not None:
+            conn.execute(text(
+                "INSERT INTO users "
+                "(id, username, password_hash, role, display_name, "
+                " is_disabled, created_at, created_by, tenant_id) "
+                "VALUES (:id, :username, :password_hash, :role, :display_name, "
+                ":is_disabled, :created_at, :created_by, :tenant_id)"
+            ), admin_row)
+        conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
 
 @pytest.fixture()
