@@ -50,7 +50,9 @@ REASON_MIGRATION_MAP = {
 # 环境变量配置
 # ============================================
 # 数据库路径
-DATABASE_PATH = os.environ.get('DATABASE_PATH', 'warehouse.db')
+# 默认锚定到项目根（backend/ 的上一级），避免因启动时 cwd 不同而出现重复的 warehouse.db
+_DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'warehouse.db')
+DATABASE_PATH = os.environ.get('DATABASE_PATH', _DEFAULT_DB_PATH)
 # 是否启用bcrypt密码哈希（默认true，需要bcrypt可用）
 BCRYPT_ENABLED = os.environ.get('BCRYPT_ENABLED', 'true').lower() == 'true' and BCRYPT_AVAILABLE
 # 是否启用SQLite生产优化（WAL模式、外键约束等）
