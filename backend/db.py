@@ -32,7 +32,9 @@ def _resolve_database_url() -> str:
     if url:
         return url
     # Match backend.database.DATABASE_PATH default.
-    db_path = os.environ.get("DATABASE_PATH", "warehouse.db")
+    # 默认锚定到项目根（backend/ 的上一级），与 backend.database 保持一致，避免因 cwd 不同产生重复 DB。
+    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "warehouse.db")
+    db_path = os.environ.get("DATABASE_PATH", default_path)
     return f"sqlite:///{db_path}"
 
 
