@@ -147,7 +147,8 @@ materials = Table(
     Column("quantity", Integer, server_default="0"),
     Column("unit", String(16), server_default="个"),
     Column("safe_stock", Integer, nullable=True),
-    Column("location", String(255)),
+    # 用户实际会塞备注（"二号架顶层 / 备件区 / 注意防潮"），255 容易吃满。
+    Column("location", String(512)),
     Column("is_disabled", Boolean, nullable=False, server_default="0"),
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     _ts_col(),
@@ -199,7 +200,8 @@ batches = Table(
     Column("is_exhausted", Boolean, nullable=False, server_default="0"),
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     _ts_col(),
-    Column("location", String(255)),
+    # 与 materials.location 对齐：实际会被用户当成备注塞。
+    Column("location", String(512)),
     Column("variant", String(191)),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Index("idx_batches_warehouse", "warehouse_id"),
@@ -219,7 +221,7 @@ inventory_records = Table(
     Column("type", String(8), nullable=False),
     Column("quantity", Integer, nullable=False),
     Column("operator", String(64), server_default="系统"),
-    Column("reason", String(255)),
+    # 旧的 reason 自由文本列已被 reason_category + reason_note 取代，迁移 1826e23835b6 之后无人写入。
     Column("reason_category", String(32)),
     Column("reason_note", Text),
     _ts_col(),
