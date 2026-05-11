@@ -315,7 +315,10 @@ mcp_connections = Table(
     metadata,
     Column("id", String(64), primary_key=True),
     Column("name", String(255), nullable=False),
-    Column("mcp_endpoint", String(255), nullable=False),
+    # 真实场景里 mcp_endpoint 常带 JWT/access-token query 参数（500-2000 字符），用 Text 兜底。
+    # SQLite 视 String 与 Text 等价（都是 TEXT），无影响；MySQL 上 String(255) 会触发
+    # "Data too long" 报错（实测 Seeed watcher endpoint 含 ES256 JWT 时约 400+ 字符）。
+    Column("mcp_endpoint", Text, nullable=False),
     Column("api_key", String(255), nullable=False),
     Column("role", String(32), nullable=False, server_default="operate"),
     Column("auto_start", Boolean, nullable=False, server_default="1"),
