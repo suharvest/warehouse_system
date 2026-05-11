@@ -220,6 +220,30 @@ class DynamicCORSMiddleware(BaseHTTPMiddleware):
 # 使用自定义 CORS 中间件替代 FastAPI 的 CORSMiddleware
 app.add_middleware(DynamicCORSMiddleware)
 
+# Request 日志中间件 — 绕过 uvicorn.access 被吞的问题，每个请求都强制打一行
+if os.environ.get('REQUEST_LOG', '1') != '0':
+    import time as _time
+    _req_logger = logging.getLogger('warehouse.request')
+
+    @app.middleware("http")
+    async def _log_requests(request, call_next):
+        _t0 = _time.perf_counter()
+        try:
+            response = await call_next(request)
+            _dt = (_time.perf_counter() - _t0) * 1000
+            _req_logger.info(
+                "%s %s -> %d  %.1fms  client=%s",
+                request.method, request.url.path, response.status_code,
+                _dt, request.client.host if request.client else '-'
+            )
+            return response
+        except Exception:
+            _dt = (_time.perf_counter() - _t0) * 1000
+            _req_logger.exception(
+                "%s %s -> EXC  %.1fms", request.method, request.url.path, _dt
+            )
+            raise
+
 # ============================================
 # 审计日志函数
 # ============================================

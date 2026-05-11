@@ -89,17 +89,23 @@ echo ""
 lsof -ti:2124 | xargs kill -9 2>/dev/null
 sleep 1
 
+# 日志目录
+LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
+BACKEND_LOG="$LOG_DIR/backend.log"
+VITE_LOG="$LOG_DIR/vite.log"
+
 # 启动后端（同时 serve 前端静态文件）
-echo "启动后端服务 (端口 2124)..."
-uv run python run_backend.py &
+echo "启动后端服务 (端口 2124)... 日志: $BACKEND_LOG"
+PYTHONUNBUFFERED=1 uv run python -u run_backend.py 2>&1 | tee "$BACKEND_LOG" &
 BACKEND_PID=$!
 
 sleep 2
 
 if [ "$USE_VITE" = true ]; then
     # Vite 开发模式：前端走 Vite（热更新），API 走后端
-    echo "启动 Vite 开发服务器 (端口 2125, 热更新)..."
-    cd frontend && npm run dev &
+    echo "启动 Vite 开发服务器 (端口 2125, 热更新)... 日志: $VITE_LOG"
+    cd frontend && npm run dev 2>&1 | tee "../$VITE_LOG" &
     VITE_PID=$!
     cd ..
     sleep 2
@@ -126,6 +132,12 @@ echo ""
 echo "MCP 智能体可在 Web 界面「智能体配置」中管理"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
+echo ""
+echo "实时日志已同时输出到当前终端和 $BACKEND_LOG"
+if [ "$USE_VITE" = true ]; then
+    echo "Vite 日志: $VITE_LOG"
+fi
+echo "另开终端可用：tail -f $BACKEND_LOG"
 echo ""
 
 wait

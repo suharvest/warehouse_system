@@ -26,7 +26,9 @@ from backend.metadata import target_metadata  # noqa: E402
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False — 否则会把 app 启动期已创建的 logger
+    # (warehouse / uvicorn / uvicorn.access 等) 全部 disable，导致后续无日志输出
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 
 def _resolve_url() -> str:
