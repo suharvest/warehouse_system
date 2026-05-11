@@ -2,6 +2,8 @@
 import { t } from '../../../i18n.js';
 import { warehousesApi } from '../api.js';
 import { getCurrentUser, getDeployMode } from '../state.js';
+import { showToast } from '../ui-components.js';
+import { switchTab } from '../ui/tabs.js';
 
 // 刷新仓库切换器的回调
 let refreshSwitcherFn = null;
@@ -144,6 +146,25 @@ export function toggleWarehouseGroup(el) {
 
 // ============ 添加仓库 ============
 export async function showAddWarehouseModal(tenantId = null) {
+    // multi_tenant + 全局 admin + 没指定 tenantId 时，先看有没有租户。0 个的话弹这个 modal 也没用
+    // （租户下拉必空、用户点提交也提交不了），直接引导去建租户。
+    const user = getCurrentUser();
+    if (!tenantId && user && !user.tenant_id && getDeployMode() === 'multi_tenant') {
+        try {
+            const resp = await fetch('/api/tenants', { credentials: 'include' });
+            if (resp.ok) {
+                const tenants = (await resp.json()).filter(t => t.is_active !== false);
+                if (tenants.length === 0) {
+                    showToast(tt('noTenantHint', '请先创建租户，再添加仓库'), 'info', 3500);
+                    switchTab('tenants');
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('检查租户列表失败:', e);
+        }
+    }
+
     pendingTenantId = tenantId ? parseInt(tenantId, 10) : null;
     document.getElementById('warehouse-edit-id').value = '';
     document.getElementById('warehouse-name').value = '';
