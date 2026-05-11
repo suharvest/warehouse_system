@@ -74,12 +74,7 @@ function setupModuleCallbacks() {
         onAuthChange: () => {},
         switchTab,
         refreshCurrentTab,
-        onLoginSuccess: async () => {
-            // /api/system/mode 需登录才返回，启动时若未登录会拿不到，登录成功后必须重新拉一次，
-            // 否则 localStorage.deploy_mode 还是初始 single_tenant，多租户相关 UI（租户管理 tab、仓库分组等）不会显示。
-            await fetchDeployMode();
-            await loadWarehouses();
-        }
+        onLoginSuccess: loadWarehouses
     });
 
     // 设置看板回调

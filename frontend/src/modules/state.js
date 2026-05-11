@@ -116,7 +116,10 @@ export function setContactsTotalPages(total) { contactsTotalPages = total; }
 
 // 租户状态
 export let currentTenant = null;
-export let deployMode = 'single_tenant';
+// deployMode 是部署元信息（single_tenant / multi_tenant），由 fetchDeployMode() 从 /api/system/mode
+// 拉取并通过 setDeployMode 写入。模块加载时先用 localStorage 缓存（上次会话的值）作为占位，
+// 避免在 fetchDeployMode 完成前 UI 用错误的默认值闪一下；fetch 完成后会覆盖为权威值。
+export let deployMode = localStorage.getItem('deploy_mode') || 'single_tenant';
 export const getDeployMode = () => deployMode;
 export function setCurrentTenant(tenant) { currentTenant = tenant; }
 export function setDeployMode(mode) { deployMode = mode; localStorage.setItem('deploy_mode', mode); }

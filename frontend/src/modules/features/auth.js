@@ -4,7 +4,7 @@ import { authApi, setSessionExpiredHandler } from '../api.js';
 import {
     getCurrentUser, setCurrentUser,
     getIsSystemInitialized, setIsSystemInitialized,
-    getCurrentTab
+    getCurrentTab, getDeployMode
 } from '../state.js';
 
 // 标记是否已显示过期提示（避免重复弹窗）
@@ -94,8 +94,8 @@ export async function updateUserDisplay() {
     const user = getCurrentUser();
     if (user) {
         let tenantPrefix = '';
-        const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
-        
+        const dm = getDeployMode();
+
         if (dm === 'multi_tenant') {
             if (!user.tenant_id) {
                 tenantPrefix = `[${t('globalAdmin') || '全局管理'}] `;
@@ -162,7 +162,7 @@ export function updatePermissionUI() {
 
     // 显示/隐藏租户管理TAB（admin + multi_tenant）
     const tenantsNav = document.getElementById('nav-tenants');
-    const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
+    const dm = getDeployMode();
     if (tenantsNav) {
         // 租户管理仅在 multi_tenant 模式下对全局 admin 可见
         tenantsNav.style.display = (role === 'admin' && dm === 'multi_tenant' && !currentUser?.tenant_id) ? 'flex' : 'none';
