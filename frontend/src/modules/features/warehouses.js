@@ -41,18 +41,13 @@ function renderWarehousesTable(warehouses) {
     const user = getCurrentUser();
     const isGlobalAdmin = user && !user.tenant_id;
     const dm = localStorage.getItem('deploy_mode') || 'single_tenant';
-    const showTenant = isGlobalAdmin && dm === 'multi_tenant';
+    const groupByTenant = isGlobalAdmin && dm === 'multi_tenant';
 
-    // 更新表头
+    // 表头：分组模式下不再单独显示"所属租户"列（已在分组表头行展示）
     const thead = table.querySelector('thead tr');
     if (thead) {
         const hasTenantCol = thead.innerHTML.includes('data-i18n="tenant"') || thead.innerHTML.includes('所属租户');
-        if (showTenant && !hasTenantCol) {
-            const th = document.createElement('th');
-            th.setAttribute('data-i18n', 'tenant');
-            th.textContent = t('tenant') || '所属租户';
-            thead.insertBefore(th, thead.children[1]); // 插在名称后面
-        } else if (!showTenant && hasTenantCol) {
+        if (hasTenantCol) {
             const cols = thead.querySelectorAll('th');
             for (let i = 0; i < cols.length; i++) {
                 if (cols[i].getAttribute('data-i18n') === 'tenant' || cols[i].textContent === (t('tenant') || '所属租户')) {
@@ -62,16 +57,16 @@ function renderWarehousesTable(warehouses) {
             }
         }
     }
+    const colCount = thead ? thead.children.length : 6;
 
     if (!Array.isArray(warehouses) || warehouses.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="${showTenant ? 7 : 6}" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
         return;
     }
 
-    tbody.innerHTML = warehouses.map(wh => `
-        <tr>
+    const renderWarehouseRow = (wh, hidden) => `
+        <tr class="warehouse-row warehouse-row-t${wh.tenant_id || 0}"${hidden ? ' style="display:none;"' : ''}>
             <td>${escapeHtml(wh.name)}</td>
-            ${showTenant ? `<td>${escapeHtml(wh.tenant_name || '-')}</td>` : ''}
             <td><code>${escapeHtml(wh.slug)}</code></td>
             <td>${escapeHtml(wh.address || '-')}</td>
             <td>${wh.is_default ? '★' : '-'}</td>
@@ -94,7 +89,57 @@ function renderWarehousesTable(warehouses) {
                 ` : ''}
             </td>
         </tr>
-    `).join('');
+    `;
+
+    if (!groupByTenant) {
+        tbody.innerHTML = warehouses.map(wh => renderWarehouseRow(wh, false)).join('');
+        return;
+    }
+
+    // 按租户分组
+    const groups = new Map(); // tenant_id -> { name, list }
+    for (const wh of warehouses) {
+        const tid = wh.tenant_id || 0;
+        if (!groups.has(tid)) {
+            groups.set(tid, { tenantId: tid, tenantName: wh.tenant_name || '-', list: [] });
+        }
+        groups.get(tid).list.push(wh);
+    }
+
+    const addBtnLabel = t('addWarehouse') || '添加仓库';
+    const html = [];
+    for (const { tenantId, tenantName, list } of groups.values()) {
+        html.push(`
+            <tr class="expandable-row warehouse-group-header" data-action="toggleWarehouseGroup" data-tenant-id="${tenantId}">
+                <td colspan="${colCount - 1}">
+                    <svg class="expand-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                    <strong>${escapeHtml(tenantName)}</strong>
+                    <span class="badge" style="margin-left:8px;">${list.length}</span>
+                </td>
+                <td style="text-align:right;">
+                    <button class="action-btn-small" data-action="showAddWarehouseModal" data-tenant-id="${tenantId}">
+                        + ${addBtnLabel}
+                    </button>
+                </td>
+            </tr>
+        `);
+        for (const wh of list) {
+            html.push(renderWarehouseRow(wh, true));
+        }
+    }
+    tbody.innerHTML = html.join('');
+}
+
+// 展开/折叠某个租户分组下的仓库行
+export function toggleWarehouseGroup(el) {
+    if (!el) return;
+    const tenantId = el.dataset.tenantId;
+    const rows = document.querySelectorAll(`.warehouse-row-t${tenantId}`);
+    const willExpand = !el.classList.contains('expanded');
+    rows.forEach(r => { r.style.display = willExpand ? '' : 'none'; });
+    el.classList.toggle('expanded', willExpand);
 }
 
 // ============ 添加仓库 ============
