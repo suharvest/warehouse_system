@@ -32,15 +32,13 @@ jobs:
   # issues that SQLite hides — VARCHAR length overflow (cf. commit 8fb10bf),
   # utf8mb4 collation, transaction semantics, etc.
   #
-  # NOT yet blocking: the existing tests/conftest.py `_mysql_truncate` fixture
-  # is disabled (renamed to _mysql_truncate_disabled) because session-scoped
-  # admin fixtures conflict with per-test TRUNCATE. Until that's refactored,
-  # ~110 tests fail when run together against MySQL (each passes in isolation).
-  # Surfacing the failures via this job is intentional — it'll catch new
-  # dialect bugs even while the legacy isolation gap is still open.
+  # Per-test isolation: tests/conftest.py `_mysql_truncate` is an autouse
+  # function-scoped fixture that TRUNCATEs every table after each test and
+  # re-seeds the rows session-scoped fixtures depend on (default tenant +
+  # warehouse + system_mode + snapshotted admin user). This keeps the
+  # session-scoped `_admin_setup` valid across the full suite.
   backend-tests-mysql:
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: .
