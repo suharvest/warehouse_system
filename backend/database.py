@@ -380,7 +380,6 @@ def init_database():
             type TEXT NOT NULL,
             quantity INTEGER NOT NULL,
             operator TEXT DEFAULT '系统',
-            reason TEXT,
             reason_category TEXT,
             reason_note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -765,18 +764,8 @@ def init_database():
     # 联系方为租户级（不绑定仓库）：清空所有 contacts.warehouse_id
     cursor.execute('UPDATE contacts SET warehouse_id = NULL WHERE warehouse_id IS NOT NULL')
 
-    # 检查并添加 reason_category / reason_note 字段到 inventory_records
-    need_reason_backfill = False
-    try:
-        cursor.execute('SELECT reason_category FROM inventory_records LIMIT 1')
-    except sqlite3.OperationalError:
-        cursor.execute('ALTER TABLE inventory_records ADD COLUMN reason_category TEXT')
-        cursor.execute('ALTER TABLE inventory_records ADD COLUMN reason_note TEXT')
-        need_reason_backfill = True
-
-    # 首次升级时回填历史数据
-    if need_reason_backfill:
-        _migrate_reason_to_category(cursor)
+    # reason_category / reason_note 由 alembic initial schema 创建，旧的 reason 列已在
+    # 迁移 c5d6e7f8a9b0 中删除。此处的 SQLite-only 兜底逻辑已无意义。
 
     # ============================================
     # 多仓库迁移：回填 warehouse_id 到默认仓库
@@ -831,39 +820,6 @@ def init_database():
 
     conn.commit()
     conn.close()
-
-
-def _migrate_reason_to_category(cursor):
-    """将旧 reason 文本回填到 reason_category + reason_note（一次性迁移）"""
-    cursor.execute(
-        'SELECT id, type, reason FROM inventory_records WHERE reason_category IS NULL'
-    )
-    rows = cursor.fetchall()
-    if not rows:
-        return
-
-    for row in rows:
-        rec_id, rec_type, reason = row['id'], row['type'], row['reason'] or ''
-        category = None
-        note = None
-
-        # 1. 精确匹配
-        if reason in REASON_MIGRATION_MAP:
-            category = REASON_MIGRATION_MAP[reason]
-        # 2. Excel导入前缀
-        elif reason.startswith('Excel导入:') or reason.startswith('Excel导入: '):
-            prefix = 'Excel导入: ' if reason.startswith('Excel导入: ') else 'Excel导入:'
-            note = reason[len(prefix):].strip() or None
-            category = 'other_in' if rec_type == RecordType.IN.value else 'other_out'
-        # 3. 无法匹配：归入"其他"，原文保留到 note
-        else:
-            category = 'other_in' if rec_type == RecordType.IN.value else 'other_out'
-            note = reason if reason else None
-
-        cursor.execute(
-            'UPDATE inventory_records SET reason_category = ?, reason_note = ? WHERE id = ?',
-            (category, note, rec_id)
-        )
 
 
 def generate_batch_no(material_id: int, cursor=None) -> str:

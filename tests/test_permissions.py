@@ -288,7 +288,8 @@ class TestSearchViaRequirePermission:
 
 
 class TestSystemModeViaRequirePermission:
-    """End-to-end: /api/system/mode goes through require_permission (SYSTEM)."""
+    """GET /api/system/mode is intentionally public (deployment metadata; the
+    frontend needs it before login). PUT still goes through require_permission."""
 
     def test_view_token_can_read_mode(self, admin_client, client):
         api_key = _create_view_api_key(admin_client)
@@ -305,10 +306,21 @@ class TestSystemModeViaRequirePermission:
         assert resp.status_code == 403
         assert resp.json()["error"] == "权限不足"
 
-    def test_system_mode_guest_gets_401(self, client):
+    def test_system_mode_get_is_public(self, client):
+        """GET is unauthenticated by design (see commit 02ce38b)."""
         from fastapi.testclient import TestClient
         guest = TestClient(client.app)
         resp = guest.get("/api/system/mode")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "deploy_mode" in body
+        assert "mode" in body
+
+    def test_system_mode_put_still_requires_auth(self, client):
+        """PUT remains guarded — only GET was opened up."""
+        from fastapi.testclient import TestClient
+        guest = TestClient(client.app)
+        resp = guest.put("/api/system/mode", json={"mode": "self_owned"})
         assert resp.status_code == 401
 
 
