@@ -510,35 +510,9 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE batches ADD COLUMN variant TEXT')
 
-    # 历史数据清洗：为无批次覆盖的库存创建 LEGACY 批次
-    # 比较 materials.quantity 与 SUM(active batch qty)，差值部分补 LEGACY 批次
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('''
-        SELECT m.id, m.quantity, m.location,
-               COALESCE(SUM(CASE WHEN b.is_exhausted = 0 THEN b.quantity ELSE 0 END), 0) as batch_total
-        FROM materials m
-        LEFT JOIN batches b ON b.material_id = m.id
-        WHERE m.quantity > 0
-        GROUP BY m.id
-        HAVING m.quantity > batch_total
-    ''')
-    orphans = cursor.fetchall()
-    for m in orphans:
-        gap = m['quantity'] - m['batch_total']
-        if gap <= 0:
-            continue
-        batch_no = f"LEGACY-{m['id']:04d}"
-        cursor.execute('''
-            INSERT OR IGNORE INTO batches
-            (batch_no, material_id, quantity, initial_quantity, location, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (batch_no, m['id'], gap, gap, m['location'], now))
-        # 如果 LEGACY 批次已存在但数量不对，更新它
-        if cursor.rowcount == 0:
-            cursor.execute('''
-                UPDATE batches SET quantity = quantity + ?, initial_quantity = initial_quantity + ?
-                WHERE batch_no = ? AND material_id = ?
-            ''', (gap, gap, batch_no, m['id']))
+    # 注：历史上这里会从 materials.quantity 反向倒灌生成 LEGACY 批次。
+    # 单一真相源后（batches.quantity 为权威，参见 get_material_quantity()），
+    # 这种倒灌不再合理，已移除。历史数据修正走 Alembic 数据迁移。
 
     # 回填：将 materials.location 填入已有的无 location 批次
     cursor.execute('''
@@ -820,6 +794,52 @@ def init_database():
 
     conn.commit()
     conn.close()
+
+
+def get_material_quantity(material_id: int) -> int:
+    """单一真相源：从 batches 聚合得到 material 的当前库存量。
+
+    返回 SUM(quantity) WHERE material_id=:mid AND is_exhausted=0（active 批次）。
+    不读 materials.quantity（该字段视为派生缓存，仅供历史兼容）。
+    """
+    from sqlalchemy import select, func as _sa_func, and_ as _and
+    from db import get_engine
+    from metadata import batches as _t_batches
+    with get_engine().connect() as conn:
+        stmt = select(
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0)
+        ).where(_and(
+            _t_batches.c.material_id == material_id,
+            _t_batches.c.is_exhausted == 0,
+        ))
+        return int(conn.execute(stmt).scalar() or 0)
+
+
+def get_materials_quantity_map(material_ids):
+    """批量版本：一次性返回 {material_id: sum_active_batch_qty}。
+
+    传入 list/iterable，未出现的 material_id 不会在返回 dict 中（调用方负责
+    回退为 0）。空列表返回空 dict。
+    """
+    ids = list(material_ids) if material_ids is not None else []
+    if not ids:
+        return {}
+    from sqlalchemy import select, func as _sa_func, and_ as _and
+    from db import get_engine
+    from metadata import batches as _t_batches
+    with get_engine().connect() as conn:
+        stmt = (
+            select(
+                _t_batches.c.material_id,
+                _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label("qty"),
+            )
+            .where(_and(
+                _t_batches.c.material_id.in_(ids),
+                _t_batches.c.is_exhausted == 0,
+            ))
+            .group_by(_t_batches.c.material_id)
+        )
+        return {int(r.material_id): int(r.qty or 0) for r in conn.execute(stmt).fetchall()}
 
 
 def generate_batch_no(material_id: int, cursor=None) -> str:

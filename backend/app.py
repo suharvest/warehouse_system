@@ -2766,10 +2766,23 @@ def get_dashboard_stats(
     today_start_s = today_start.strftime('%Y-%m-%d %H:%M:%S')
     yesterday_start_s = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
 
+    # 单一真相源：active batches 聚合
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+
     with get_engine().connect() as sa_conn:
-        # 库存总量（排除禁用）
+        # 库存总量（排除禁用） — 用 active batches 聚合
+        j_total = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
         total_stock = sa_conn.execute(
-            select(_sa_func.sum(_t_materials.c.quantity))
+            select(_sa_func.coalesce(_sa_func.sum(batch_sum.c.qty), 0))
+            .select_from(j_total)
             .where(and_(_t_materials.c.is_disabled == 0, *m_scope))
         ).scalar() or 0
 
@@ -2795,12 +2808,13 @@ def get_dashboard_stats(
             ))
         ).scalar() or 0
 
-        # 库存预警
+        # 库存预警 — 比较 active batches sum 与 safe_stock
+        j_low = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
         low_stock_count = sa_conn.execute(
-            select(_sa_func.count()).select_from(_t_materials)
+            select(_sa_func.count()).select_from(j_low)
             .where(and_(
                 _t_materials.c.safe_stock.is_not(None),
-                _t_materials.c.quantity < _t_materials.c.safe_stock,
+                _sa_func.coalesce(batch_sum.c.qty, 0) < _t_materials.c.safe_stock,
                 _t_materials.c.is_disabled == 0,
                 *m_scope,
             ))
@@ -2855,8 +2869,24 @@ def get_category_distribution(
     """获取库存类型分布 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
-    total_col = _sa_func.sum(_t_materials.c.quantity).label('total')
-    stmt = select(_t_materials.c.category, total_col).group_by(_t_materials.c.category).order_by(total_col.desc())
+    # 单一真相源：active batches 聚合
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+    j_cat = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
+    total_col = _sa_func.sum(_sa_func.coalesce(batch_sum.c.qty, 0)).label('total')
+    stmt = (
+        select(_t_materials.c.category, total_col)
+        .select_from(j_cat)
+        .group_by(_t_materials.c.category)
+        .order_by(total_col.desc())
+    )
     if preds:
         stmt = stmt.where(and_(*preds))
     with get_engine().connect() as sa_conn:
@@ -2917,13 +2947,29 @@ def get_top_stock(
     """获取库存TOP10 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
-    stmt = select(_t_materials.c.name, _t_materials.c.quantity, _t_materials.c.category).order_by(_t_materials.c.quantity.desc()).limit(10)
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+    j_top = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
+    qty_col = _sa_func.coalesce(batch_sum.c.qty, 0).label('qty')
+    stmt = (
+        select(_t_materials.c.name, qty_col, _t_materials.c.category)
+        .select_from(j_top)
+        .order_by(qty_col.desc())
+        .limit(10)
+    )
     if preds:
         stmt = stmt.where(and_(*preds))
     with get_engine().connect() as sa_conn:
         rows = sa_conn.execute(stmt).fetchall()
         names = [row.name for row in rows]
-        quantities = [row.quantity for row in rows]
+        quantities = [int(row.qty or 0) for row in rows]
         categories = [row.category for row in rows]
         return TopStock(names=names, quantities=quantities, categories=categories)
 
@@ -2935,19 +2981,31 @@ def get_low_stock_alert(
 ):
     """获取库存预警列表 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+    qty_col = _sa_func.coalesce(batch_sum.c.qty, 0)
     preds = [
         _t_materials.c.safe_stock.is_not(None),
-        _t_materials.c.quantity < _t_materials.c.safe_stock,
+        qty_col < _t_materials.c.safe_stock,
         _t_materials.c.is_disabled == 0,
     ]
     preds.extend(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    j_lsa = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
     stmt = (
         select(
             _t_materials.c.name, _t_materials.c.sku, _t_materials.c.category,
-            _t_materials.c.quantity, _t_materials.c.safe_stock, _t_materials.c.location,
+            qty_col.label('quantity'), _t_materials.c.safe_stock, _t_materials.c.location,
         )
+        .select_from(j_lsa)
         .where(and_(*preds))
-        .order_by((_t_materials.c.quantity - _t_materials.c.safe_stock).asc())
+        .order_by((qty_col - _t_materials.c.safe_stock).asc())
         .limit(20)
     )
     with get_engine().connect() as sa_conn:
@@ -2956,10 +3014,10 @@ def get_low_stock_alert(
                 name=row.name,
                 sku=row.sku,
                 category=row.category,
-                quantity=row.quantity,
+                quantity=int(row.quantity or 0),
                 safe_stock=row.safe_stock,
                 location=row.location,
-                shortage=row.safe_stock - row.quantity
+                shortage=row.safe_stock - int(row.quantity or 0)
             )
             for row in sa_conn.execute(stmt).fetchall()
         ]
@@ -3062,12 +3120,24 @@ def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, 
     if category:
         preds.append(_t_materials.c.category == category)
 
+    # 单一真相源：active batches 聚合作为 quantity
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+    qty_col = _sa_func.coalesce(batch_sum.c.qty, 0).label('quantity')
     cols = [
         _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
-        _t_materials.c.category, _t_materials.c.quantity, _t_materials.c.unit,
+        _t_materials.c.category, qty_col, _t_materials.c.unit,
         _t_materials.c.safe_stock, _t_materials.c.location, _t_materials.c.is_disabled,
     ]
-    base_stmt = select(*cols).where(and_(*preds)).order_by(_t_materials.c.name.asc())
+    j_mat = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
+    base_stmt = select(*cols).select_from(j_mat).where(and_(*preds)).order_by(_t_materials.c.name.asc())
 
     status_filter = status.split(',') if status else None
 
@@ -3288,17 +3358,28 @@ def get_all_materials(
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     preds = [_t_materials.c.is_disabled == 0]
     preds.extend(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+    j_all = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
+    qty_col = _sa_func.coalesce(batch_sum.c.qty, 0).label('quantity')
     stmt = select(
         _t_materials.c.name, _t_materials.c.sku, _t_materials.c.category,
-        _t_materials.c.quantity, _t_materials.c.unit, _t_materials.c.safe_stock,
+        qty_col, _t_materials.c.unit, _t_materials.c.safe_stock,
         _t_materials.c.location, _t_materials.c.is_disabled,
-    ).where(and_(*preds)).order_by(_t_materials.c.name.asc())
+    ).select_from(j_all).where(and_(*preds)).order_by(_t_materials.c.name.asc())
     with get_engine().connect() as sa_conn:
         rows = sa_conn.execute(stmt).fetchall()
 
         result = []
         for row in rows:
-            quantity = row.quantity
+            quantity = int(row.quantity or 0)
             safe_stock = row.safe_stock
 
             # 判断状态
@@ -3381,8 +3462,19 @@ def get_materials_list(
         preds.append(or_(_t_batches.c.location.like(loc_like), _t_materials.c.location.like(loc_like)))
 
     # 查询：一行一批次（LEFT JOIN batches）
+    # 单一真相源：total_quantity 用 active batches 聚合
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
     join_expr = (
         _t_materials
+        .outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
         .outerjoin(
             _t_batches,
             and_(_t_batches.c.material_id == _t_materials.c.id, _t_batches.c.is_exhausted == 0),
@@ -3397,7 +3489,7 @@ def get_materials_list(
             _t_materials.c.name,
             _t_materials.c.sku,
             _t_materials.c.category,
-            _t_materials.c.quantity.label('total_quantity'),
+            _sa_func.coalesce(batch_sum.c.qty, 0).label('total_quantity'),
             _t_materials.c.unit,
             _t_materials.c.safe_stock,
             _t_materials.c.location.label('material_location'),
@@ -3456,7 +3548,8 @@ def get_materials_list(
         is_disabled = bool(row.is_disabled)
         status_text_map = {'normal': '正常', 'warning': '偏低', 'danger': '告急', 'disabled': '禁用'}
 
-        batch_qty = row.batch_quantity if row.batch_quantity is not None else row.total_quantity
+        # 无批次时返回 0（不再 fallback 到 materials.quantity 派生值）
+        batch_qty = row.batch_quantity if row.batch_quantity is not None else 0
         batch_loc = row.batch_location if row.batch_location else (row.material_location or '')
 
         if format == "brief":
@@ -3525,6 +3618,7 @@ def get_product_stats(
         # 查询产品基本信息（支持 name 或 SKU）
         m_stmt = select(
             _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
+            # 注：保留 quantity 列只为兼容（过渡期 cache），库存以下方 batches 聚合为准
             _t_materials.c.quantity, _t_materials.c.unit,
             _t_materials.c.safe_stock, _t_materials.c.location,
         ).where(and_(
@@ -3536,7 +3630,15 @@ def get_product_stats(
             raise HTTPException(status_code=404, detail="产品不存在")
 
         material_id = product.id
-        current_stock = product.quantity
+        # 单一真相源：从 active batches 聚合得到当前库存（不读 materials.quantity）。
+        # 这是 watcher 的入口，必须与 /api/materials/list 在有批次时的聚合行为一致。
+        current_stock = int(sa_conn.execute(
+            select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+            .where(and_(
+                _t_batches.c.material_id == material_id,
+                _t_batches.c.is_exhausted == 0,
+            ))
+        ).scalar() or 0)
         unit = product.unit
         safe_stock = product.safe_stock
 
@@ -3817,6 +3919,17 @@ def get_inventory_records_paginated(
             _t_inventory_records.c.reason_category.like(rl),
         ))
 
+    # 单一真相源：active batches 聚合，避免 N+1 与 materials.quantity 脏值
+    batch_sum = (
+        select(
+            _t_batches.c.material_id.label('material_id'),
+            _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+        )
+        .where(_t_batches.c.is_exhausted == 0)
+        .group_by(_t_batches.c.material_id)
+        .subquery()
+    )
+
     # 主查询 join
     j = (
         _t_inventory_records
@@ -3825,6 +3938,7 @@ def get_inventory_records_paginated(
         .outerjoin(_t_batches, _t_inventory_records.c.batch_id == _t_batches.c.id)
         .outerjoin(_t_users, _t_inventory_records.c.operator_user_id == _t_users.c.id)
         .outerjoin(_t_warehouses, _t_inventory_records.c.warehouse_id == _t_warehouses.c.id)
+        .outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
     )
 
     sort_column_map = {
@@ -3847,7 +3961,7 @@ def get_inventory_records_paginated(
         _t_inventory_records.c.reason_category,
         _t_inventory_records.c.reason_note,
         _t_inventory_records.c.created_at,
-        _t_materials.c.quantity.label('current_quantity'),
+        _sa_func.coalesce(batch_sum.c.qty, 0).label('current_quantity'),
         _t_materials.c.safe_stock,
         _t_materials.c.is_disabled,
         _t_inventory_records.c.contact_id,
@@ -3968,9 +4082,13 @@ def get_inventory_records_paginated(
             if record_type:
                 count_preds.append(_t_inventory_records.c.type == record_type)
 
+            stat_join = count_join.outerjoin(
+                batch_sum, batch_sum.c.material_id == _t_materials.c.id
+            )
             stat_stmt = select(
-                _t_materials.c.quantity, _t_materials.c.safe_stock, _t_materials.c.is_disabled
-            ).select_from(count_join)
+                _sa_func.coalesce(batch_sum.c.qty, 0).label('quantity'),
+                _t_materials.c.safe_stock, _t_materials.c.is_disabled
+            ).select_from(stat_join)
             if count_preds:
                 stat_stmt = stat_stmt.where(and_(*count_preds))
             all_rows = sa_conn.execute(stat_stmt).fetchall()
@@ -4084,20 +4202,15 @@ async def stock_in(
     now_dt = datetime.now()
 
     with get_engine().begin() as sa_conn:
-        # 原子化更新
-        upd = sa_conn.execute(
-            update(_t_materials)
-                .where(_t_materials.c.id == material_id)
-                .values(quantity=_t_materials.c.quantity + quantity)
-        )
-        if upd.rowcount == 0:
-            return StockInResponse(success=False, error="入库失败", message="入库操作未生效，请重试")
-
-        new_qty_row = sa_conn.execute(
-            select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
-        ).first()
-        new_quantity = new_qty_row.quantity
-        old_quantity = new_quantity - quantity
+        # 单一真相源：从 active batches 聚合读取入库前库存（不再写 materials.quantity）。
+        old_quantity = int(sa_conn.execute(
+            select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+            .where(and_(
+                _t_batches.c.material_id == material_id,
+                _t_batches.c.is_exhausted == 0,
+            ))
+        ).scalar() or 0)
+        new_quantity = old_quantity + quantity
 
         ins_batch = sa_conn.execute(
             insert(_t_batches).values(
@@ -4292,25 +4405,15 @@ async def stock_out(
                     message=f"批次 {batch.batch_no} 余量 {batch.quantity} {unit}，"
                             f"不足以出库 {quantity} {unit}（不会自动补其它批次）")
 
-            mat_upd = sa_conn.execute(
-                update(_t_materials)
-                    .where(and_(_t_materials.c.id == material_id, _t_materials.c.quantity >= quantity))
-                    .values(quantity=_t_materials.c.quantity - quantity)
-            )
-            if mat_upd.rowcount == 0:
-                cur_row = sa_conn.execute(
-                    select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
-                ).first()
-                current_qty = cur_row.quantity if cur_row else 0
-                return StockOutResponse(
-                    success=False, error="库存不足",
-                    message=f"出库失败：{product_name} 库存 {current_qty} {unit}，"
-                            f"不足以出库 {quantity} {unit}")
-            new_qty_row = sa_conn.execute(
-                select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
-            ).first()
-            new_quantity = new_qty_row.quantity
-            old_quantity = new_quantity + quantity
+            # 单一真相源：从 active batches 聚合读取出库前库存（不再写 materials.quantity）。
+            old_quantity = int(sa_conn.execute(
+                select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+                .where(and_(
+                    _t_batches.c.material_id == material_id,
+                    _t_batches.c.is_exhausted == 0,
+                ))
+            ).scalar() or 0)
+            new_quantity = old_quantity - quantity
 
             ins_rec = sa_conn.execute(
                 insert(_t_inventory_records).values(
@@ -4389,53 +4492,44 @@ async def stock_out(
         )
 
     # ─── 分支 B：FIFO（支持 location / variant 过滤） ───
-    if effective_location or effective_variant:
-        precheck_preds = [
-            _t_batches.c.material_id == material_id,
-            _t_batches.c.is_exhausted == 0,
-            _t_batches.c.quantity > 0,
-            *b_scope,
-        ]
-        if effective_variant:
-            precheck_preds.append(_t_batches.c.variant == effective_variant)
+    # 单一真相源：无条件前置 active batches 聚合校验，库存不足直接 409，不进事务。
+    precheck_preds = [
+        _t_batches.c.material_id == material_id,
+        _t_batches.c.is_exhausted == 0,
+        _t_batches.c.quantity > 0,
+        *b_scope,
+    ]
+    if effective_variant:
+        precheck_preds.append(_t_batches.c.variant == effective_variant)
+    if effective_location:
+        precheck_preds.append(_t_batches.c.location == effective_location)
+    with get_engine().connect() as sa_conn:
+        avail_qty = int(sa_conn.execute(
+            select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+                .where(and_(*precheck_preds))
+        ).scalar() or 0)
+    if avail_qty < quantity:
+        scope = []
         if effective_location:
-            precheck_preds.append(_t_batches.c.location == effective_location)
-        with get_engine().connect() as sa_conn:
-            avail_qty = sa_conn.execute(
-                select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
-                    .where(and_(*precheck_preds))
-            ).scalar() or 0
-        if avail_qty < quantity:
-            scope = []
-            if effective_location:
-                scope.append(f"位置 '{effective_location}'")
-            if effective_variant:
-                scope.append(f"变体 '{effective_variant}'")
-            return StockOutResponse(
-                success=False, error="库存不足",
-                message=f"出库失败：{product_name} 在 {'、'.join(scope)} "
-                        f"的可用库存为 {avail_qty} {unit}，需要出库 {quantity} {unit}")
+            scope.append(f"位置 '{effective_location}'")
+        if effective_variant:
+            scope.append(f"变体 '{effective_variant}'")
+        scope_msg = f"在 {'、'.join(scope)}" if scope else ""
+        return StockOutResponse(
+            success=False, error="库存不足",
+            message=f"出库失败：{product_name}{scope_msg} "
+                    f"的可用库存为 {avail_qty} {unit}，需要出库 {quantity} {unit}")
 
     with get_engine().begin() as sa_conn:
-        mat_upd = sa_conn.execute(
-            update(_t_materials)
-                .where(and_(_t_materials.c.id == material_id, _t_materials.c.quantity >= quantity))
-                .values(quantity=_t_materials.c.quantity - quantity)
-        )
-        if mat_upd.rowcount == 0:
-            cur_row = sa_conn.execute(
-                select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
-            ).first()
-            current_qty = cur_row.quantity if cur_row else 0
-            return StockOutResponse(
-                success=False, error="库存不足",
-                message=f"出库失败：{product_name} 库存 {current_qty} {unit}，"
-                        f"不足以出库 {quantity} {unit}")
-        new_qty_row = sa_conn.execute(
-            select(_t_materials.c.quantity).where(_t_materials.c.id == material_id)
-        ).first()
-        new_quantity = new_qty_row.quantity
-        old_quantity = new_quantity + quantity
+        # old_quantity 取 material 总库存（不带 location/variant 过滤），与历史响应语义保持一致
+        old_quantity = int(sa_conn.execute(
+            select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+            .where(and_(
+                _t_batches.c.material_id == material_id,
+                _t_batches.c.is_exhausted == 0,
+            ))
+        ).scalar() or 0)
+        new_quantity = old_quantity - quantity
 
         ins_rec = sa_conn.execute(
             insert(_t_inventory_records).values(
@@ -4581,7 +4675,17 @@ def export_materials_excel(
 
     mat_stmt = select(
         _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
-        _t_materials.c.category, _t_materials.c.quantity, _t_materials.c.unit,
+        _t_materials.c.category,
+        _sa_func.coalesce(
+            select(_sa_func.sum(_t_batches.c.quantity))
+            .where(and_(
+                _t_batches.c.material_id == _t_materials.c.id,
+                _t_batches.c.is_exhausted == 0,
+            ))
+            .scalar_subquery(),
+            0,
+        ).label('quantity'),
+        _t_materials.c.unit,
         _t_materials.c.safe_stock, _t_materials.c.location, _t_materials.c.is_disabled,
     ).order_by(_t_materials.c.name.asc())
     if preds:
@@ -4593,7 +4697,7 @@ def export_materials_excel(
         # 构建导出行（一行一批次）
         export_rows = []
         for row in rows:
-            quantity = row.quantity
+            quantity = int(row.quantity or 0)
             safe_stock = row.safe_stock
             is_disabled = bool(row.is_disabled)
 
@@ -4887,9 +4991,21 @@ async def preview_import_excel(
                 continue
             seen_import_rows.add(row_key)
 
-            # 查询物料（按仓库过滤）
+            # 查询物料（按仓库过滤）— 单一真相源：quantity 来自 active batches sum
             material = sa_conn.execute(
-                select(_t_materials.c.id, _t_materials.c.name, _t_materials.c.quantity)
+                select(
+                    _t_materials.c.id,
+                    _t_materials.c.name,
+                    _sa_func.coalesce(
+                        select(_sa_func.sum(_t_batches.c.quantity))
+                        .where(and_(
+                            _t_batches.c.material_id == _t_materials.c.id,
+                            _t_batches.c.is_exhausted == 0,
+                        ))
+                        .scalar_subquery(),
+                        0,
+                    ).label('quantity'),
+                )
                 .where(and_(_t_materials.c.sku == sku, *mat_scope_preds))
             ).first()
 
@@ -5030,11 +5146,28 @@ async def preview_import_excel(
                     preview_items[item_idx].name = common_name
 
         # 查找缺失的SKU（系统中有但导入文件中没有的，且未被禁用的）
+        # 单一真相源：current_quantity 取 active batches sum
         import_skus = {item.sku for item in preview_items}
-        all_sys_stmt = select(
-            _t_materials.c.sku, _t_materials.c.name,
-            _t_materials.c.category, _t_materials.c.quantity,
-        ).where(and_(_t_materials.c.is_disabled == 0, *mat_scope_preds))
+        _batch_sum_sub = (
+            select(
+                _t_batches.c.material_id.label('material_id'),
+                _sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0).label('qty'),
+            )
+            .where(_t_batches.c.is_exhausted == 0)
+            .group_by(_t_batches.c.material_id)
+            .subquery()
+        )
+        all_sys_stmt = (
+            select(
+                _t_materials.c.sku, _t_materials.c.name,
+                _t_materials.c.category,
+                _sa_func.coalesce(_batch_sum_sub.c.qty, 0).label('quantity'),
+            )
+            .select_from(
+                _t_materials.outerjoin(_batch_sum_sub, _batch_sum_sub.c.material_id == _t_materials.c.id)
+            )
+            .where(and_(_t_materials.c.is_disabled == 0, *mat_scope_preds))
+        )
         all_system_skus = sa_conn.execute(all_sys_stmt).fetchall()
 
         missing_skus = []
@@ -5229,6 +5362,7 @@ async def confirm_import_excel(
                     *batch_scope_preds,
                 ))
                 .order_by(_t_batches.c.created_at.asc())
+                .with_for_update()
             ).fetchall()
             for batch in avail:
                 if remaining <= 0:
@@ -5236,11 +5370,19 @@ async def confirm_import_excel(
                 consume = min(batch.quantity, remaining)
                 new_batch_qty = batch.quantity - consume
                 remaining -= consume
-                sa_conn.execute(
-                    update(_t_batches).where(_t_batches.c.id == batch.id)
+                # 并发门控：rowcount=0 表示批次已被其它事务改动，回滚整个事务
+                upd_res = sa_conn.execute(
+                    update(_t_batches)
+                    .where(and_(
+                        _t_batches.c.id == batch.id,
+                        _t_batches.c.quantity >= consume,
+                        _t_batches.c.is_exhausted == 0,
+                    ))
                     .values(quantity=new_batch_qty,
                             is_exhausted=1 if new_batch_qty == 0 else 0)
                 )
+                if upd_res.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
                 sa_conn.execute(
                     insert(_t_batch_consumptions).values(
                         record_id=record_id, batch_id=batch.id,
@@ -5289,10 +5431,7 @@ async def confirm_import_excel(
 
                     if item.import_quantity > 0:
                         batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant)
-                        sa_conn.execute(
-                            update(_t_materials).where(_t_materials.c.id == material_id)
-                            .values(quantity=_t_materials.c.quantity + item.import_quantity)
-                        )
+                        # 单一真相源：不再写 materials.quantity，库存由 batches 派生。
                         _create_record(material_id, RecordType.IN.value, item.import_quantity, item.reason_category, ' (新建物料)', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
@@ -5302,10 +5441,7 @@ async def confirm_import_excel(
                     if material_id is None:
                         continue
                     batch_id = _create_batch(material_id, item.import_quantity, item.location, contact_id, item.variant, item.batch_no)
-                    sa_conn.execute(
-                        update(_t_materials).where(_t_materials.c.id == material_id)
-                        .values(quantity=_t_materials.c.quantity + item.import_quantity)
-                    )
+                    # 单一真相源：不再写 materials.quantity
                     _create_record(material_id, RecordType.IN.value, item.import_quantity, item.reason_category, ' (新批次)', batch_id, contact_id)
                     in_count += 1
                     records_created += 1
@@ -5329,10 +5465,7 @@ async def confirm_import_excel(
                         .values(quantity=item.import_quantity,
                                 location=item.location or '', variant=item.variant)
                     )
-                    sa_conn.execute(
-                        update(_t_materials).where(_t_materials.c.id == material_id)
-                        .values(quantity=_t_materials.c.quantity + diff)
-                    )
+                    # 单一真相源：不再写 materials.quantity（batch 写入已是真相）
 
                     rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
                     new_record_id = _create_record(
@@ -5371,19 +5504,23 @@ async def confirm_import_excel(
                         continue
 
                     existing = sa_conn.execute(
-                        select(_t_materials.c.id, _t_materials.c.quantity)
-                        .where(and_(_t_materials.c.sku == item.sku, *mat_scope_preds))
+                        select(_t_materials.c.id).where(and_(_t_materials.c.sku == item.sku, *mat_scope_preds))
                     ).first()
 
                     if existing is not None:
                         # SKU已存在，按已有物料处理
-                        if item.import_quantity != existing.quantity:
-                            material_id = existing.id
-                            diff = item.import_quantity - existing.quantity
-                            sa_conn.execute(
-                                update(_t_materials).where(_t_materials.c.id == material_id)
-                                .values(quantity=item.import_quantity)
-                            )
+                        # 单一真相源：当前库存读自 active batches sum
+                        material_id = existing.id
+                        current_qty = int(sa_conn.execute(
+                            select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+                            .where(and_(
+                                _t_batches.c.material_id == material_id,
+                                _t_batches.c.is_exhausted == 0,
+                            ))
+                        ).scalar() or 0)
+                        if item.import_quantity != current_qty:
+                            diff = item.import_quantity - current_qty
+                            # 单一真相源：不再写 materials.quantity
                             rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
                             if diff > 0:
                                 batch_id = _create_batch(material_id, abs(diff), item.location, contact_id, item.variant)
@@ -5417,7 +5554,7 @@ async def confirm_import_excel(
                         insert(_t_materials).values(
                             name=item.name, sku=item.sku,
                             category=item.category or '未分类',
-                            quantity=item.import_quantity,
+                            quantity=0,
                             unit=item.unit or '个', safe_stock=item.safe_stock,
                             location=item.location or '',
                             warehouse_id=wh_id, tenant_id=wh_tenant_id, created_at=now_dt,
@@ -5431,14 +5568,21 @@ async def confirm_import_excel(
                     new_count += 1
                 else:
                     material = sa_conn.execute(
-                        select(_t_materials.c.id, _t_materials.c.quantity)
+                        select(_t_materials.c.id)
                         .where(and_(_t_materials.c.sku == item.sku, *mat_scope_preds))
                     ).first()
                     if not material:
                         continue
 
                     material_id = material.id
-                    current_qty = material.quantity
+                    # 单一真相源：当前库存读自 active batches sum
+                    current_qty = int(sa_conn.execute(
+                        select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+                        .where(and_(
+                            _t_batches.c.material_id == material_id,
+                            _t_batches.c.is_exhausted == 0,
+                        ))
+                    ).scalar() or 0)
 
                     # 更新基本信息（含 variant 提取后可能变更的物料名称）
                     sa_conn.execute(
@@ -5457,10 +5601,7 @@ async def confirm_import_excel(
 
                     if item.operation == RecordType.IN.value:
                         batch_id = _create_batch(material_id, abs_diff, item.location, contact_id, item.variant)
-                        sa_conn.execute(
-                            update(_t_materials).where(_t_materials.c.id == material_id)
-                            .values(quantity=current_qty + abs_diff)
-                        )
+                        # 单一真相源：不再写 materials.quantity
                         _create_record(material_id, RecordType.IN.value, abs_diff, item.reason_category, '', batch_id, contact_id)
                         in_count += 1
                         records_created += 1
@@ -5476,10 +5617,7 @@ async def confirm_import_excel(
                                 new_count=new_count, records_created=records_created,
                                 message=f"出库失败：SKU {item.sku} 出库 {abs_diff} 超过当前库存 {current_qty}，已终止导入。"
                             )
-                        sa_conn.execute(
-                            update(_t_materials).where(_t_materials.c.id == material_id)
-                            .values(quantity=current_qty - abs_diff)
-                        )
+                        # 单一真相源：不再写 materials.quantity；FIFO 在 _fifo_consume 中扣 batches
                         out_reason = item.reason_category or 'sell'
                         out_ins = sa_conn.execute(
                             insert(_t_inventory_records).values(
