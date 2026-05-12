@@ -609,6 +609,81 @@ class TestImportConfirmBatchMode:
         conn.close()
         assert new_batch_qty == old_batch_qty + 10
 
+    def test_batch_mode_revives_exhausted_batch(self, admin_client, material_with_batch):
+        """An ``is_exhausted=1`` batch must be revived (is_exhausted -> 0) and its
+        quantity must count toward on-hand stock when Excel batch-mode confirm
+        writes a positive quantity for the same batch_no.
+
+        Regression: pre-fix the UPDATE in ``import-excel/confirm`` (batch-mode
+        existing-batch branch) updated quantity/location/variant but left
+        is_exhausted untouched, so all downstream readers (which filter
+        ``WHERE is_exhausted=0``) silently ignored the resurrected stock.
+        """
+        from database import get_db_connection
+
+        batch_no = material_with_batch['batch_no']
+        material_id = material_with_batch['id']
+
+        # 1) Pre-exhaust the batch directly in DB to simulate a historically
+        #    exhausted row that the user is now re-importing.
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE batches SET quantity = 0, is_exhausted = 1 WHERE batch_no = ?',
+            (batch_no,),
+        )
+        # Also drop the LEGACY batch's quantity to 0/exhausted so the only
+        # stock signal comes from the soon-to-be-revived target batch.
+        cursor.execute(
+            'UPDATE batches SET quantity = 0, is_exhausted = 1 WHERE material_id = ? AND batch_no != ?',
+            (material_id, batch_no),
+        )
+        conn.commit()
+        conn.close()
+
+        # Sanity: API should report zero stock now.
+        resp = admin_client.get("/api/materials/product-stats", params={"name": material_with_batch['name']})
+        pre = resp.json()
+        assert pre['current_stock'] == 0, pre
+
+        # 2) Excel batch-mode confirm: same batch_no, positive import_quantity.
+        resp = admin_client.post("/api/materials/import-excel/confirm", json={
+            "changes": [{
+                "sku": material_with_batch['sku'],
+                "name": material_with_batch['name'],
+                "category": "Test",
+                "unit": "個",
+                "safe_stock": 20,
+                "location": "A区-01",
+                "current_quantity": 0,
+                "import_quantity": 42,
+                "difference": 42,
+                "operation": "in",
+                "batch_no": batch_no,
+            }],
+            "reason_category": "purchase",
+            "is_batch_mode": True,
+            "warehouse_id": material_with_batch['warehouse_id'],
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()['success'] is True
+
+        # 3) Batch must be revived AND API stock must reflect the new value.
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT quantity, is_exhausted FROM batches WHERE batch_no = ?',
+            (batch_no,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        assert row['quantity'] == 42
+        assert row['is_exhausted'] == 0, "exhausted batch was not revived"
+
+        resp = admin_client.get("/api/materials/product-stats", params={"name": material_with_batch['name']})
+        post = resp.json()
+        assert post['current_stock'] == 42, post
+
 
 # ============ Round-trip Tests ============
 

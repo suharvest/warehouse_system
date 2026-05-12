@@ -5460,10 +5460,14 @@ async def confirm_import_excel(
                         continue
 
                     diff = item.difference
+                    # 复活已耗尽批次：用户用 Excel 给历史 is_exhausted=1 的批次写回正数时，
+                    # 必须同步清掉 is_exhausted 标记，否则所有 WHERE is_exhausted=0 的读端
+                    # 会无视这一行 → 库存静默丢失。反向：若新值 <= 0 则标记耗尽。
                     sa_conn.execute(
                         update(_t_batches).where(_t_batches.c.id == batch.id)
                         .values(quantity=item.import_quantity,
-                                location=item.location or '', variant=item.variant)
+                                location=item.location or '', variant=item.variant,
+                                is_exhausted=0 if item.import_quantity > 0 else 1)
                     )
                     # 单一真相源：不再写 materials.quantity（batch 写入已是真相）
 
