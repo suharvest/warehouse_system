@@ -175,6 +175,20 @@ def _seed_dashboard_setup(admin_client):
         (f"DMB-{suffix}", f"sb-{suffix}", wh_b, t_b))
     mat_b = cur.lastrowid
 
+    # 单一真相源：插入 active batch 表达库存（mat_a=100, mat_b=200）
+    cur.execute(
+        "INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, "
+        "is_exhausted, warehouse_id, tenant_id, location) "
+        "VALUES (?, ?, 100, 100, 0, ?, ?, '')",
+        (f"LEGACY-DMA-{suffix}", mat_a, wh_a, t_a),
+    )
+    cur.execute(
+        "INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, "
+        "is_exhausted, warehouse_id, tenant_id, location) "
+        "VALUES (?, ?, 200, 200, 0, ?, ?, '')",
+        (f"LEGACY-DMB-{suffix}", mat_b, wh_b, t_b),
+    )
+
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     for _ in range(5):
         cur.execute(

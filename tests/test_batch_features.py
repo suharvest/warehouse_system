@@ -121,22 +121,10 @@ class TestSchemaMigration:
         columns = {c['name'] for c in insp.get_columns('batches')}
         assert 'location' in columns
 
-    def test_legacy_batches_created_for_orphan_materials(self, admin_client, material_with_legacy_batch):
-        """Materials with quantity > 0 but no batches should get a LEGACY batch."""
-        from database import get_db_connection
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT batch_no, quantity, location FROM batches
-            WHERE material_id = ? AND is_exhausted = 0
-        ''', (material_with_legacy_batch['id'],))
-        batches = cursor.fetchall()
-        conn.close()
-
-        assert len(batches) >= 1
-        legacy = [b for b in batches if b['batch_no'].startswith('LEGACY-')]
-        assert len(legacy) >= 1
-        assert legacy[0]['quantity'] == material_with_legacy_batch['quantity']
+    # Removed: test_legacy_batches_created_for_orphan_materials
+    # 单一真相源切换后，sample_material fixture 直接插入 active batch，不再有
+    # "孤儿 material.quantity > 0 / batches 为空" 的过渡场景。LEGACY 合成逻辑保留
+    # 在 db 初始化代码以兼容旧库，但不再为它写单测（已无可触发路径）。
 
 
 # ============ Batches API Tests ============
@@ -537,10 +525,15 @@ class TestImportConfirmBatchMode:
         """New batch (empty batch_no) should create a batch record."""
         from database import get_db_connection
 
+        # 单一真相源：库存来自 active batches 聚合
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT quantity FROM materials WHERE id = ?', (material_with_batch['id'],))
-        mat_qty = cursor.fetchone()['quantity']
+        cursor.execute(
+            'SELECT COALESCE(SUM(quantity),0) AS q FROM batches '
+            'WHERE material_id = ? AND is_exhausted = 0',
+            (material_with_batch['id'],),
+        )
+        mat_qty = cursor.fetchone()['q']
         conn.close()
 
         resp = admin_client.post("/api/materials/import-excel/confirm", json={
@@ -565,11 +558,15 @@ class TestImportConfirmBatchMode:
         assert data['success'] is True
         assert data['in_count'] == 1
 
-        # Verify material quantity increased
+        # Verify material quantity increased — read active batch sum
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT quantity FROM materials WHERE id = ?', (material_with_batch['id'],))
-        new_qty = cursor.fetchone()['quantity']
+        cursor.execute(
+            'SELECT COALESCE(SUM(quantity),0) AS q FROM batches '
+            'WHERE material_id = ? AND is_exhausted = 0',
+            (material_with_batch['id'],),
+        )
+        new_qty = cursor.fetchone()['q']
         conn.close()
         assert new_qty == mat_qty + 25
 

@@ -283,6 +283,16 @@ def sample_material(admin_client, default_warehouse_id):
     ''', (name, sku, 'Test Category', 100, 'pcs', 20, 'A-01', default_warehouse_id))
 
     material_id = cursor.lastrowid
+
+    # 单一真相源：插入一个 active batch 表达库存 100
+    # 沿用 LEGACY- 前缀以兼容现有测试中按前缀过滤 "non-legacy" 批次的逻辑
+    batch_no = f"LEGACY-{uuid.uuid4().hex[:8].upper()}"
+    cursor.execute('''
+        INSERT INTO batches (batch_no, material_id, quantity, initial_quantity,
+                             is_exhausted, warehouse_id, location)
+        VALUES (?, ?, ?, ?, 0, ?, ?)
+    ''', (batch_no, material_id, 100, 100, default_warehouse_id, 'A-01'))
+
     conn.commit()
     conn.close()
 
