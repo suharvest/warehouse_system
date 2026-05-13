@@ -74,7 +74,7 @@ def upgrade() -> None:
             "(batch_no, material_id, quantity, initial_quantity, location, "
             " created_at, is_exhausted, tenant_id, warehouse_id) "
             "SELECT "
-            "  '" + LEGACY_PREFIX + "' || m.id, "
+            "  CONCAT('" + LEGACY_PREFIX + "', m.id), "
             "  m.id, "
             "  m.quantity - COALESCE(b.active_sum, 0), "
             "  m.quantity - COALESCE(b.active_sum, 0), "

@@ -3,6 +3,7 @@ import os
 import hashlib
 import secrets
 from datetime import datetime, timedelta
+from typing import Optional
 import random
 
 # R3: wire-format string enums. Support both ``backend.database`` (package)
@@ -314,7 +315,7 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS warehouses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slug TEXT UNIQUE NOT NULL,
+            slug TEXT NOT NULL,
             name TEXT NOT NULL,
             address TEXT,
             is_default INTEGER DEFAULT 0,
@@ -348,7 +349,7 @@ def init_database():
         CREATE TABLE IF NOT EXISTS materials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            sku TEXT UNIQUE NOT NULL,
+            sku TEXT NOT NULL,
             category TEXT NOT NULL,
             quantity INTEGER DEFAULT 0,
             unit TEXT DEFAULT '个',
@@ -391,7 +392,7 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
+            username TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'view',
             display_name TEXT,
@@ -461,7 +462,7 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_no TEXT UNIQUE NOT NULL,
+            batch_no TEXT NOT NULL,
             material_id INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
             initial_quantity INTEGER NOT NULL,
@@ -481,6 +482,8 @@ def init_database():
             batch_id INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            tenant_id INTEGER DEFAULT 1 REFERENCES tenants(id),
+            warehouse_id INTEGER REFERENCES warehouses(id),
             FOREIGN KEY (record_id) REFERENCES inventory_records (id),
             FOREIGN KEY (batch_id) REFERENCES batches (id)
         )
@@ -535,7 +538,7 @@ def init_database():
         CREATE TABLE IF NOT EXISTS erp_providers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            provider_name TEXT UNIQUE NOT NULL,
+            provider_name TEXT NOT NULL,
             class_name TEXT NOT NULL,
             filename TEXT NOT NULL,
             config TEXT,
@@ -767,7 +770,9 @@ def init_database():
 
     # 多租户索引
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_warehouses_tenant ON warehouses(tenant_id)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_warehouses_slug_tenant ON warehouses(slug, tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_tenant ON users(username, tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id)')
     # 联系方已改为租户级，warehouse_id 始终为 NULL，不再建该索引
     cursor.execute('DROP INDEX IF EXISTS idx_contacts_warehouse')
@@ -775,7 +780,11 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_connections_tenant ON mcp_connections(tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_materials_tenant ON materials(tenant_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_batches_tenant ON batches(tenant_id)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_no_wh ON batches(batch_no, warehouse_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_records_tenant ON inventory_records(tenant_id)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_erp_providers_name_tenant ON erp_providers(provider_name, tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bc_tenant ON batch_consumptions(tenant_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bc_warehouse ON batch_consumptions(warehouse_id)')
 
     # ============================================
     # DEPLOY_MODE 校验
@@ -848,30 +857,34 @@ def get_materials_quantity_map(material_ids):
         return {int(r.material_id): int(r.qty or 0) for r in conn.execute(stmt).fetchall()}
 
 
-def generate_batch_no(material_id: int, cursor=None) -> str:
-    """生成批次号: YYYYMMDD-XXX (globally unique)
+def generate_batch_no(material_id: int, warehouse_id: Optional[int] = None, cursor=None) -> str:
+    """生成批次号: YYYYMMDD-XXX (warehouse-scoped unique)
 
     传入 cursor 可在同一事务内看到未提交的批次（避免批量创建时序号冲突）。
     无 cursor 时：dialect-portable 路径走 SA Core。
+    warehouse_id 用于隔离多仓库场景下的批次号序列。
     """
     today = datetime.now().strftime('%Y%m%d')
     like_pat = f'{today}-%'
 
     if cursor is not None:
         cursor.execute(
-            "SELECT batch_no FROM batches WHERE batch_no LIKE ? ORDER BY batch_no DESC LIMIT 1",
-            (like_pat,),
+            "SELECT batch_no FROM batches WHERE batch_no LIKE ? AND (warehouse_id = ? OR ? IS NULL) ORDER BY batch_no DESC LIMIT 1",
+            (like_pat, warehouse_id, warehouse_id),
         )
         row = cursor.fetchone()
         last_no = row['batch_no'] if row else None
     else:
-        from sqlalchemy import select
+        from sqlalchemy import select, or_, and_
         from db import get_engine
         from metadata import batches as _t_batches
         with get_engine().connect() as conn:
             row = conn.execute(
                 select(_t_batches.c.batch_no)
-                .where(_t_batches.c.batch_no.like(like_pat))
+                .where(and_(
+                    _t_batches.c.batch_no.like(like_pat),
+                    or_(_t_batches.c.warehouse_id == warehouse_id, warehouse_id is None),
+                ))
                 .order_by(_t_batches.c.batch_no.desc())
                 .limit(1)
             ).first()
