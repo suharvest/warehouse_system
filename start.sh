@@ -8,6 +8,7 @@ echo ""
 # 解析参数
 USE_VITE=false
 DEPLOY_MODE="${DEPLOY_MODE:-single_tenant}"
+MCP_DEBUG="${MCP_DEBUG:-0}"
 for arg in "$@"; do
     case $arg in
         --vite)
@@ -18,9 +19,14 @@ for arg in "$@"; do
             DEPLOY_MODE=multi_tenant
             shift
             ;;
+        --mcp-debug)
+            MCP_DEBUG=1
+            shift
+            ;;
     esac
 done
 export DEPLOY_MODE
+export MCP_DEBUG
 
 # 检查是否安装了 uv
 if ! command -v uv &> /dev/null; then
@@ -56,9 +62,9 @@ if [ "$USE_VITE" = false ] && [ ! -f "frontend/dist/index.html" ]; then
 fi
 
 # 初始化数据库（仅当数据库不存在时）
-if [ ! -f "backend/warehouse.db" ]; then
+if [ ! -f "warehouse.db" ]; then
     echo "正在初始化数据库..."
-    cd backend && uv run python database.py && cd ..
+    uv run --project backend python backend/database.py
     echo "数据库初始化完成！"
 else
     echo "数据库已存在，跳过初始化"
@@ -74,6 +80,8 @@ cleanup() {
     lsof -ti:2124 | xargs kill -9 2>/dev/null
     [ "$USE_VITE" = true ] && lsof -ti:2125 | xargs kill -9 2>/dev/null
     pkill -9 -f "run_backend.py" 2>/dev/null
+    pkill -9 -f "mcp_pipe.py" 2>/dev/null
+    pkill -9 -f "warehouse_mcp.py" 2>/dev/null
     echo '所有服务已停止'
     exit 0
 }
@@ -83,6 +91,7 @@ trap cleanup INT TERM EXIT
 echo ""
 echo "启动服务..."
 echo "部署模式: $DEPLOY_MODE"
+[ "${MCP_DEBUG:-0}" = "1" ] && echo "MCP 调试模式: 已开启（工具调用入参/返回值将记录到进程日志）"
 echo ""
 
 # 清理残留进程
