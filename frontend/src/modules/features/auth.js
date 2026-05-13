@@ -281,6 +281,7 @@ export async function handleSetup(event) {
             document.getElementById('setup-modal').classList.remove('show');
             await updateUserDisplay();
             updatePermissionUI();
+            if (onLoginSuccessFn) await onLoginSuccessFn();
         } else {
             errorDiv.textContent = data.message || t('operationFailed');
             errorDiv.style.display = 'block';
