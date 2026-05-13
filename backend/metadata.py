@@ -329,6 +329,7 @@ mcp_connections = Table(
     Column("status", String(32), server_default="stopped"),
     Column("error_message", Text),
     Column("restart_count", Integer, server_default="0"),
+    Column("debug_mode", Integer, server_default="0"),
     # init_database stores these as TEXT (ISO strings).
     Column("created_at", String(32)),
     Column("updated_at", String(32)),

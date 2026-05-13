@@ -649,6 +649,7 @@ class MCPConnectionItem(BaseModel):
     websocket_error: Optional[str] = None
     error_message: Optional[str] = None
     restart_count: int = 0
+    debug_mode: bool = False
     pid: Optional[int] = None
     uptime_seconds: Optional[int] = None
     created_at: Optional[str] = None

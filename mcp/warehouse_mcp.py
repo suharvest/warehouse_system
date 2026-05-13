@@ -20,9 +20,37 @@ import sys
 import os
 import logging
 import yaml
+import functools
+import json
 
-# 配置日志
+# 调试模式：MCP_DEBUG=1 时打印每个 tool 的入参和返回值到 stderr（由 mcp_pipe.py 转发到终端）
+_MCP_DEBUG = os.environ.get('MCP_DEBUG') == '1'
+
+if _MCP_DEBUG:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s [MCP] %(levelname)s %(message)s',
+        stream=sys.stderr,
+    )
 logger = logging.getLogger('WarehouseMCP')
+
+# MCP Tool 调用日志装饰器（仅 MCP_DEBUG=1 时生效）
+def log_mcp_call(func):
+    if not _MCP_DEBUG:
+        return func  # 非调试模式，直接返回原函数，零开销
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        logger.info(f"→ {func.__name__}({json.dumps(kwargs, ensure_ascii=False, default=str)})")
+        try:
+            result = func(*args, **kwargs)
+            result_str = json.dumps(result, ensure_ascii=False, default=str)
+            logger.info(f"← {func.__name__} => {result_str[:3000]}")
+            return result
+        except Exception as e:
+            logger.error(f"✗ {func.__name__} => {e}", exc_info=True)
+            raise
+    return wrapper
 
 # 修复 Windows 控制台 UTF-8 编码
 if sys.platform == 'win32':
@@ -107,7 +135,7 @@ def _load_provider_from_db_or_default(default_config: dict):
         resp = _requests.get(
             f"{api_base}/erp/providers/active-for-mcp",
             headers=headers,
-            timeout=default_config.get('timeout', 10),
+            timeout=(5, default_config.get('timeout', 10)),
         )
     except Exception as e:
         logger.warning(f"调用 active-for-mcp 失败: {e}，回退到默认 Provider")
@@ -193,7 +221,7 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
         headers['Authorization'] = f"Bearer {auth.get('token', '')}"
     body = {"operation": operation, "warehouse_id": warehouse_id}
     try:
-        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=15)
+        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
         if resp.status_code >= 400:
             logger.warning("face verify returned %s: %s", resp.status_code, resp.text[:200])
             return {"status": "deny", "failure_reason": f"http_{resp.status_code}"}
@@ -216,11 +244,22 @@ def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
     return None
 
 
+# 通用异常兜底：无论 provider 内部抛什么，都返回结构化 dict，让 AI 告知用户重试
+def _tool_error(op: str, e: Exception) -> dict:
+    logger.error(f"{op} 异常: {e}", exc_info=True)
+    return {
+        "success": False,
+        "error": str(e),
+        "message": f"{op}时遇到错误，请稍后重试。",
+    }
+
+
 # 创建 MCP 服务器
 mcp = FastMCP("Warehouse System")
 
 
 @mcp.tool()
+@log_mcp_call
 def resolve_name(text: str, entity_type: str = "all") -> dict:
     """
     将模糊文本（语音识别、用户口语输入等）解析为系统中精确的实体名称。
@@ -243,10 +282,14 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
         confident: 是否高置信度（true 时可直接使用 best_match）
         candidates: 候选列表（confident=false 时需从中选择）
     """
-    return _provider.resolve_name(text, entity_type)
+    try:
+        return _provider.resolve_name(text, entity_type)
+    except Exception as e:
+        return _tool_error("名称解析", e)
 
 
 @mcp.tool()
+@log_mcp_call
 def query_stock(product_name: str, show_batches: bool = False) -> dict:
     """
     查询产品库存详情。支持模糊名称输入，内建自动解析。
@@ -269,10 +312,14 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
         （含 variant 变体标识和 location 位置）。
         success=false 时：如有候选项会在 candidates 中列出
     """
-    return _provider.query_stock(product_name, show_batches)
+    try:
+        return _provider.query_stock(product_name, show_batches)
+    except Exception as e:
+        return _tool_error("查询库存", e)
 
 
 @mcp.tool()
+@log_mcp_call
 def stock_in(product_name: str, quantity: int,
              reason_category: str = "purchase", reason_note: str = "",
              operator: str = "MCP系统",
@@ -308,11 +355,15 @@ def stock_in(product_name: str, quantity: int,
     blocked = _enforce_face("stock_in")
     if blocked is not None:
         return blocked
-    return _provider.stock_in(product_name, quantity, reason_category, reason_note,
-                              operator, True, location, contact_id, variant)
+    try:
+        return _provider.stock_in(product_name, quantity, reason_category, reason_note,
+                                  operator, True, location, contact_id, variant)
+    except Exception as e:
+        return _tool_error("入库", e)
 
 
 @mcp.tool()
+@log_mcp_call
 def stock_out(product_name: str, quantity: int,
               reason_category: str, reason_note: str = "",
               operator: str = "MCP系统",
@@ -356,12 +407,16 @@ def stock_out(product_name: str, quantity: int,
     blocked = _enforce_face("stock_out")
     if blocked is not None:
         return blocked
-    return _provider.stock_out(product_name, quantity, reason_category, reason_note,
-                               operator, True, variant, location,
-                               batch_no=batch_no, location_fuzzy=True)
+    try:
+        return _provider.stock_out(product_name, quantity, reason_category, reason_note,
+                                   operator, True, variant, location,
+                                   batch_no=batch_no, location_fuzzy=True)
+    except Exception as e:
+        return _tool_error("出库", e)
 
 
 @mcp.tool()
+@log_mcp_call
 def search(query: str = None, entity_type: str = "material",
            category: str = None, status: str = None,
            contact_type: str = None,
@@ -395,11 +450,15 @@ def search(query: str = None, entity_type: str = "material",
                每个批次含 variant 变体标识）
         total: 总匹配数（可能大于返回的 items 数量）
     """
-    return _provider.search(query, entity_type, category, status, contact_type, True,
-                            include_batches, max_results)
+    try:
+        return _provider.search(query, entity_type, category, status, contact_type, True,
+                                include_batches, max_results)
+    except Exception as e:
+        return _tool_error("搜索", e)
 
 
 @mcp.tool()
+@log_mcp_call
 def get_today_statistics() -> dict:
     """
     查询当天仓库统计概览。无需参数，直接调用即可。
@@ -407,7 +466,10 @@ def get_today_statistics() -> dict:
     返回：今日入库量、出库量、库存总量、低库存数量、净变化量。
     适用于：「今天仓库情况怎么样」「今日出入库汇总」等问题。
     """
-    return _provider.get_today_statistics()
+    try:
+        return _provider.get_today_statistics()
+    except Exception as e:
+        return _tool_error("统计查询", e)
 
 
 # 启动服务器

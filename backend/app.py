@@ -27,7 +27,7 @@ from database import (
     generate_session_token, generate_api_key, hash_api_key,
     generate_batch_no, needs_password_rehash,
     REASON_CATEGORIES, REASON_CATEGORY_LABELS,
-    get_deploy_mode,
+    get_deploy_mode, _is_sqlite,
 )
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
@@ -588,6 +588,30 @@ def _route_has_guard(dep) -> bool:
         if _route_has_guard(sub):
             return True
     return False
+
+
+def _seed_base_data() -> None:
+    """幂等补种：确保 tenant 1 和默认仓库存在。
+
+    Docker 走纯 Alembic 路径，迁移只建表结构不插数据；
+    本地 start.sh 走 init_database()，已有种子数据（INSERT OR IGNORE）。
+    两条路径都调用此函数，冲突忽略保证幂等。
+    """
+    try:
+        sqlite = _is_sqlite()
+        ignore_kw = "OR IGNORE" if sqlite else "IGNORE"
+        with get_engine().begin() as conn:
+            conn.execute(text(
+                f"INSERT {ignore_kw} INTO tenants (id, slug, name, is_active) "
+                "VALUES (1, :slug, :name, 1)"
+            ), {"slug": "default", "name": "默认租户"})
+            conn.execute(text(
+                f"INSERT {ignore_kw} INTO warehouses "
+                "(id, slug, name, is_default, is_disabled, tenant_id) "
+                "VALUES (1, :slug, :name, 1, 0, 1)"
+            ), {"slug": "default", "name": "默认仓库"})
+    except Exception as e:
+        logger.warning(f"_seed_base_data() skipped: {e}")
 
 
 def _validate_deploy_mode_invariants() -> None:
@@ -5887,6 +5911,10 @@ async def _run_migrations():
     )
     alembic_command.upgrade(cfg, "head")
 
+    # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。
+    # Docker 部署走纯 Alembic 路径，Alembic 只建表不插数据，需在此补齐。
+    _seed_base_data()
+
     # DEPLOY_MODE 不变式校验 — 启动阶段就把不一致状态拦掉，避免运行时 UI/业务半对半错。
     # 故意让异常向上抛：违反不变式应阻止启动，不该被吞掉。
     _validate_deploy_mode_invariants()
@@ -5919,13 +5947,15 @@ async def startup_mcp_manager():
                     _t_mcp_connections.c.name,
                     _t_mcp_connections.c.mcp_endpoint,
                     _t_mcp_connections.c.api_key,
+                    _t_mcp_connections.c.debug_mode,
                 ).where(_t_mcp_connections.c.auto_start == 1)
             ).all()
 
         for row in rows:
             logger.info(f"Auto-starting MCP connection: {row.name}")
             await mcp_manager.start_connection(
-                row.id, row.mcp_endpoint, row.api_key
+                row.id, row.mcp_endpoint, row.api_key,
+                debug_mode=bool(row.debug_mode)
             )
             # 更新数据库状态（status 列为 String，updated_at 为 String(32) ISO 字符串）
             status_info = mcp_manager.get_connection_status(row.id)
@@ -5958,6 +5988,7 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
         websocket_error=status_info.get('websocket_error'),
         error_message=status_info.get('error_message') or row['error_message'],
         restart_count=status_info.get('restart_count', row['restart_count'] or 0),
+        debug_mode=bool(row.get('debug_mode', 0)),
         pid=status_info.get('pid'),
         uptime_seconds=status_info.get('uptime_seconds'),
         created_at=row['created_at'],
@@ -5983,7 +6014,7 @@ async def list_mcp_connections(
             _t_mcp_connections.c.mcp_endpoint, _t_mcp_connections.c.api_key,
             _t_mcp_connections.c.role, _t_mcp_connections.c.auto_start,
             _t_mcp_connections.c.status, _t_mcp_connections.c.error_message,
-            _t_mcp_connections.c.restart_count,
+            _t_mcp_connections.c.restart_count, _t_mcp_connections.c.debug_mode,
             _t_mcp_connections.c.created_at, _t_mcp_connections.c.updated_at,
             _t_mcp_connections.c.warehouse_id, _t_mcp_connections.c.tenant_id,
             _t_warehouses.c.name.label('warehouse_name'),
@@ -6226,7 +6257,8 @@ async def start_mcp_connection(
     row = dict(_r._mapping)
 
     success = await mcp_manager.start_connection(
-        conn_id, row['mcp_endpoint'], row['api_key']
+        conn_id, row['mcp_endpoint'], row['api_key'],
+        debug_mode=bool(row.get('debug_mode', 0))
     )
 
     status_info = mcp_manager.get_connection_status(conn_id)
@@ -6331,6 +6363,53 @@ async def restart_mcp_connection(
     return MCPConnectionResponse(
         success=success,
         message="连接已重启" if success else "重启失败",
+        connection=_build_connection_item(row, status_info)
+    )
+
+
+@app.post("/api/mcp/connections/{conn_id}/debug", response_model=MCPConnectionResponse)
+async def toggle_mcp_debug(
+    conn_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN))
+):
+    """切换MCP连接的调试模式"""
+    body = await request.json()
+    enable = bool(body.get('enable', False))
+
+    with get_engine().connect() as sa_conn:
+        _r = load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+    row = dict(_r._mapping)
+
+    # 更新 DB
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_mcp_connections)
+            .where(_t_mcp_connections.c.id == conn_id)
+            .values(debug_mode=1 if enable else 0, updated_at=datetime.now().isoformat())
+        )
+
+    # 如果进程正在运行，重启以应用新设置
+    if conn_id in mcp_manager.connections and mcp_manager.connections[conn_id].status == 'running':
+        success = await mcp_manager.toggle_debug(conn_id, row['mcp_endpoint'], row['api_key'], enable)
+    else:
+        success = True
+
+    status_info = mcp_manager.get_connection_status(conn_id)
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id)
+        ).first()
+    row = dict(_r._mapping) if _r else None
+
+    return MCPConnectionResponse(
+        success=success,
+        message=f"调试模式已{'开启' if enable else '关闭'}",
         connection=_build_connection_item(row, status_info)
     )
 
