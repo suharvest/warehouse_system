@@ -377,6 +377,7 @@ class AuthStatusResponse(BaseModel):
     initialized: bool  # 系统是否已初始化（有管理员）
     logged_in: bool
     user: Optional['UserInfo'] = None
+    system_mode: Optional[str] = None  # 'single_tenant' | 'multi_tenant'
 
 
 class UserInfo(BaseModel):
@@ -608,6 +609,7 @@ class OperatorListItem(BaseModel):
 class DatabaseClearRequest(BaseModel):
     """清空数据库请求"""
     confirm: bool
+    target_tenant_id: Optional[int] = None  # 全局 admin 必须显式指定目标租户
 
 
 class DatabaseOperationResponse(BaseModel):
