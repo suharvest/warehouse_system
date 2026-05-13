@@ -332,11 +332,35 @@ export async function deleteMCPConnection(connId) {
 // ============ 日志查看 ============
 export async function showMCPLogs(connId) {
     try {
-        const data = await mcpFetch(`/mcp/connections/${connId}/logs?lines=100`);
+        const data = await mcpFetch(`/mcp/connections/${connId}/logs?lines=200`);
         const logs = data.logs || [];
-        alert(logs.length > 0 ? logs.join('\n') : t('mcpNoLogs'));
+        if (logs.length === 0) {
+            alert(t('mcpNoLogs') || '暂无日志');
+            return;
+        }
+        const win = window.open('', '_blank', 'width=900,height=600,scrollbars=yes');
+        if (win) {
+            win.document.write(`<pre style="font-family:monospace;font-size:12px;padding:10px;white-space:pre-wrap;word-break:break-all;">${logs.map(l => l.replace(/</g, '&lt;')).join('\n')}</pre>`);
+            win.document.close();
+        } else {
+            alert(logs.join('\n'));
+        }
     } catch (error) {
         console.error('获取日志失败:', error);
+    }
+}
+
+// ============ 调试模式切换 ============
+export async function toggleMCPDebug(connId, enable) {
+    try {
+        await mcpFetch(`/mcp/connections/${connId}/debug`, {
+            method: 'POST',
+            body: JSON.stringify({ enable: enable === '1' || enable === true })
+        });
+        await loadMCPConnections();
+    } catch (error) {
+        console.error('切换调试模式失败:', error);
+        alert(error.data?.detail || t('operationFailed'));
     }
 }
 
