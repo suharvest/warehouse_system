@@ -207,7 +207,8 @@ export async function handleLogin(event) {
             closeLoginModal();
             await updateUserDisplay();
             updatePermissionUI();
-            if (refreshCurrentTabFn) refreshCurrentTabFn();
+            if (switchTabFn) switchTabFn(getCurrentTab());
+            else if (refreshCurrentTabFn) refreshCurrentTabFn();
         } else {
             errorDiv.textContent = data.message || t('loginFailed');
             errorDiv.style.display = 'block';

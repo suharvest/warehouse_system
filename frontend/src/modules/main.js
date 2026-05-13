@@ -522,6 +522,18 @@ function initEventDelegation() {
         }
     });
 
+    // Submit 事件（处理表单 Enter 键）
+    document.addEventListener('submit', function (e) {
+        const form = e.target;
+        if (form.id === 'login-form') {
+            e.preventDefault();
+            handleLogin(e);
+        } else if (form.id === 'setup-form') {
+            e.preventDefault();
+            handleSetup(e);
+        }
+    });
+
     // Change 事件
     document.addEventListener('change', function (e) {
         const actionEl = e.target.closest('[data-action-change]');
