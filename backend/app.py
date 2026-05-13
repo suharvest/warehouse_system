@@ -65,6 +65,7 @@ from models import (
 )
 from fuzzy_match import FuzzyMatcher
 from sqlalchemy import select, and_, or_, insert, update, delete, case, text
+from sqlalchemy.exc import IntegrityError
 from db import get_engine
 from metadata import (
     warehouses as _t_warehouses,
@@ -1018,16 +1019,21 @@ def _warehouse_before_create(sa_conn, current_user, request: CreateWarehouseRequ
             status_code=400,
             detail="仓库标识只能包含小写字母、数字和连字符，且不能以连字符开头"
         )
-    existing = sa_conn.execute(
-        select(_t_warehouses.c.id).where(_t_warehouses.c.slug == request.slug)
-    ).first()
+    target_tenant_id = request.tenant_id if current_user.tenant_id is None else current_user.tenant_id
+    slug_filter = and_(
+        _t_warehouses.c.slug == request.slug,
+        _t_warehouses.c.tenant_id == target_tenant_id,
+    )
+    existing = sa_conn.execute(select(_t_warehouses.c.id).where(slug_filter)).first()
     if existing:
         raise HTTPException(status_code=400, detail="仓库标识已存在")
 
 
 def _warehouse_values_for_create(sa_conn, current_user, request: CreateWarehouseRequest) -> dict:
     if current_user.tenant_id is None:
-        wh_tenant_id = request.tenant_id or 1
+        if not request.tenant_id:
+            raise HTTPException(status_code=400, detail="全局管理员创建仓库时必须指定 tenant_id")
+        wh_tenant_id = request.tenant_id
         tenant_row = sa_conn.execute(
             select(_t_tenants.c.id).where(
                 and_(_t_tenants.c.id == wh_tenant_id, _t_tenants.c.is_active == 1)
@@ -1348,12 +1354,14 @@ async def delete_tenant(
 async def get_auth_status(current_user: CurrentUser = Depends(get_current_user)):
     """获取认证状态"""
     initialized = has_admin_user()
+    system_mode = "multi_tenant" if get_deploy_mode() == "multi_tenant" else "single_tenant"
 
     if current_user.is_guest:
         return AuthStatusResponse(
             initialized=initialized,
             logged_in=False,
-            user=None
+            user=None,
+            system_mode=system_mode,
         )
 
     return AuthStatusResponse(
@@ -1365,8 +1373,10 @@ async def get_auth_status(current_user: CurrentUser = Depends(get_current_user))
             display_name=current_user.display_name,
             role=current_user.role,
             tenant_id=current_user.tenant_id
-        )
+        ),
+        system_mode=system_mode,
     )
+
 
 
 @app.post("/api/auth/setup", response_model=LoginResponse)
@@ -1443,20 +1453,27 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
     ).where(_t_users.c.username == login_data.username)
 
     with get_engine().connect() as sa_conn:
-        user = sa_conn.execute(user_stmt).first()
+        user_rows = sa_conn.execute(user_stmt).all()
 
-    if not user:
+    if not user_rows:
         return LoginResponse(success=False, message="用户名或密码错误")
 
-    if user.is_disabled:
-        return LoginResponse(success=False, message="账号已被禁用")
-
-    if user.tenant_id is not None and not bool(user.tenant_is_active):
-        return LoginResponse(success=False, message="租户已停用")
-
-    # bcrypt verification 在事务外执行（CPU 密集）
-    if not verify_password(login_data.password, user.password_hash):
+    # 过滤：非禁用 + 租户有效 + 密码正确
+    matched = [
+        u for u in user_rows
+        if not u.is_disabled
+        and (u.tenant_id is None or bool(u.tenant_is_active))
+        and verify_password(login_data.password, u.password_hash)
+    ]
+    if len(matched) == 0:
         return LoginResponse(success=False, message="用户名或密码错误")
+    if len(matched) > 1:
+        return LoginResponse(success=False, message="同名账号存在于多个租户，请联系管理员")
+    user = matched[0]
+
+    # 单独检查禁用和租户停用（以便给出更明确的错误信息）
+    # 注意：上方 matched 已过滤 is_disabled，此处只处理密码错误后的候选
+    # 如果所有同名用户均被禁用或租户停用，matched 为空已返回"用户名或密码错误"
 
     # 透明密码升级：如果使用旧的SHA256哈希，自动升级到bcrypt
     new_hash = None
@@ -1644,8 +1661,12 @@ def _user_before_create(sa_conn, current_user, request: CreateUserRequest):
         raise HTTPException(status_code=400, detail="无效的角色")
     if len(request.password) < 4:
         raise HTTPException(status_code=400, detail="密码长度至少4位")
+    # 用户名唯一性按租户隔离检查
+    target_tenant_id = request.tenant_id if request.tenant_id is not None else current_user.tenant_id
     existing = sa_conn.execute(
-        select(_t_users.c.id).where(_t_users.c.username == request.username)
+        select(_t_users.c.id).where(
+            and_(_t_users.c.username == request.username, _t_users.c.tenant_id == target_tenant_id)
+        )
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="用户名已存在")
@@ -1701,7 +1722,11 @@ def _user_values_for_update(sa_conn, current_user, request: UpdateUserRequest, r
     if request.username is not None:
         dup = sa_conn.execute(
             select(_t_users.c.id).where(
-                and_(_t_users.c.username == request.username, _t_users.c.id != user_id)
+                and_(
+                    _t_users.c.username == request.username,
+                    _t_users.c.id != user_id,
+                    _t_users.c.tenant_id == row.tenant_id,
+                )
             )
         ).first()
         if dup:
@@ -1975,11 +2000,14 @@ def _table_columns(cursor, table: str) -> List[str]:
     return [row['name'] if isinstance(row, sqlite3.Row) else row[1] for row in cursor.fetchall()]
 
 
-def _unique_warehouse_slug(cursor, base_slug: str) -> str:
+def _unique_warehouse_slug(cursor, base_slug: str, tenant_id: Optional[int] = None) -> str:
     slug = base_slug
     idx = 1
     while True:
-        cursor.execute('SELECT 1 FROM warehouses WHERE slug = ?', (slug,))
+        if tenant_id is not None:
+            cursor.execute('SELECT 1 FROM warehouses WHERE slug = ? AND tenant_id = ?', (slug, tenant_id))
+        else:
+            cursor.execute('SELECT 1 FROM warehouses WHERE slug = ?', (slug,))
         if not cursor.fetchone():
             return slug
         idx += 1
@@ -1992,7 +2020,7 @@ def _ensure_default_warehouse_for_tenant(cursor, tenant_id: int) -> int:
     if row:
         return row['id']
     base_slug = 'default' if tenant_id == 1 else f'tenant-{tenant_id}-default'
-    slug = _unique_warehouse_slug(cursor, base_slug)
+    slug = _unique_warehouse_slug(cursor, base_slug, tenant_id=tenant_id)
     cursor.execute(
         'INSERT INTO warehouses (slug, name, is_default, tenant_id, created_at) VALUES (?, ?, 1, ?, ?)',
         (slug, '默认仓库', tenant_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -2120,9 +2148,9 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
     for row in wh_rows:
         old_id = row['id'] if 'id' in row.keys() else None
         slug = row['slug'] if 'slug' in row.keys() and row['slug'] else f'tenant-{tenant_id}-warehouse'
-        cursor.execute('SELECT 1 FROM warehouses WHERE slug = ?', (slug,))
+        cursor.execute('SELECT 1 FROM warehouses WHERE slug = ? AND tenant_id = ?', (slug, tenant_id))
         if cursor.fetchone():
-            slug = _unique_warehouse_slug(cursor, f'{slug}-t{tenant_id}')
+            slug = _unique_warehouse_slug(cursor, f'{slug}-t{tenant_id}', tenant_id=tenant_id)
         new_id = _insert_row_with_overrides(
             cursor, 'warehouses', row, target_columns['warehouses'],
             {'tenant_id': tenant_id, 'slug': slug, 'created_at': row['created_at'] if 'created_at' in row.keys() else now},
@@ -2234,9 +2262,15 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
         old_batch = row['batch_id'] if 'batch_id' in row.keys() else None
         if old_record not in record_map or old_batch not in batch_map:
             continue
+        old_wh = row['warehouse_id'] if 'warehouse_id' in row.keys() else None
         _insert_row_with_overrides(
             cursor, 'batch_consumptions', row, target_columns['batch_consumptions'],
-            {'record_id': record_map[old_record], 'batch_id': batch_map[old_batch]},
+            {
+                'record_id': record_map[old_record],
+                'batch_id': batch_map[old_batch],
+                'tenant_id': tenant_id,
+                'warehouse_id': warehouse_map.get(old_wh, default_id) if old_wh is not None else default_id,
+            },
             {'id'}
         )
         imported_consumptions += 1
@@ -2246,7 +2280,10 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
 
 
 @app.get("/api/database/export")
-def export_database(current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))):
+def export_database(
+    target_tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))
+):
     """导出仓库数据为SQLite数据库文件（仅管理员）
 
     只导出仓库相关表：materials, inventory_records, batches, batch_consumptions, contacts
@@ -2265,6 +2302,13 @@ def export_database(current_user: CurrentUser = Depends(require_permission(Resou
             status_code=400,
             detail="DB export is only available on the sqlite-backed deployment",
         )
+
+    if current_user.tenant_id is None:
+        if target_tenant_id is None:
+            raise HTTPException(status_code=400, detail="全局管理员导出时必须通过 ?target_tenant_id= 指定目标租户")
+        export_tenant_id = target_tenant_id
+    else:
+        export_tenant_id = current_user.tenant_id
 
     # 获取当前数据库路径
     db_path = os.environ.get('DATABASE_PATH', 'warehouse.db')
@@ -2289,7 +2333,7 @@ def export_database(current_user: CurrentUser = Depends(require_permission(Resou
                     # 创建表
                     temp_cursor.execute(result['sql'])
 
-                    rows = _export_rows_for_scope(source_cursor, table, current_user.tenant_id)
+                    rows = _export_rows_for_scope(source_cursor, table, export_tenant_id)
                     if rows:
                         columns = [desc[0] for desc in source_cursor.description]
                         placeholders = ','.join(['?' for _ in columns])
@@ -2329,6 +2373,7 @@ def export_database(current_user: CurrentUser = Depends(require_permission(Resou
 async def import_database(
     request: Request,
     file: UploadFile = File(...),
+    target_tenant_id: Optional[int] = None,
     current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))
 ):
     """导入仓库数据（仅管理员）
@@ -2391,42 +2436,10 @@ async def import_database(
                 if current_user.tenant_id is not None:
                     details = _import_tenant_database(cursor, import_cursor, available_tables, current_user.tenant_id)
                 else:
-                    _clear_database_scope(cursor, None)
-
-                    # 按顺序导入数据
-                    for table in WAREHOUSE_TABLES:
-                        if table not in available_tables:
-                            details[table] = 0
-                            continue
-
-                        # 获取源表的数据
-                        import_cursor.execute(f"SELECT * FROM {table}")
-                        rows = import_cursor.fetchall()
-
-                        if rows:
-                            # 获取目标表的列名
-                            target_columns = set(_table_columns(cursor, table))
-
-                            # 获取源表的列名
-                            source_columns = [desc[0] for desc in import_cursor.description]
-
-                            # 只使用目标表中存在的列
-                            common_columns = [col for col in source_columns if col in target_columns]
-
-                            if common_columns:
-                                placeholders = ','.join(['?' for _ in common_columns])
-                                insert_sql = f"INSERT INTO {table} ({','.join(common_columns)}) VALUES ({placeholders})"
-
-                                for row in rows:
-                                    values = [row[col] for col in common_columns]
-                                    cursor.execute(insert_sql, values)
-
-                        details[table] = len(rows)
-
-                    # 确保每个活跃租户至少有一个默认仓库
-                    cursor.execute('SELECT id FROM tenants WHERE is_active = 1 ORDER BY id')
-                    for row in cursor.fetchall():
-                        _ensure_default_warehouse_for_tenant(cursor, row['id'])
+                    # 全局 admin 必须显式指定目标租户，防止意外覆盖所有租户数据
+                    if target_tenant_id is None:
+                        raise HTTPException(status_code=400, detail="全局管理员导入时必须通过 ?target_tenant_id= 指定目标租户")
+                    details = _import_tenant_database(cursor, import_cursor, available_tables, target_tenant_id)
 
                 conn.commit()
 
@@ -2477,11 +2490,18 @@ async def clear_database(
             detail="DB clear is only available on the sqlite-backed deployment",
         )
 
+    if current_user.tenant_id is None:
+        if request.target_tenant_id is None:
+            raise HTTPException(status_code=400, detail="全局管理员必须显式指定 target_tenant_id")
+        scope_tenant_id = request.target_tenant_id
+    else:
+        scope_tenant_id = current_user.tenant_id
+
     with get_db() as conn:
         cursor = conn.cursor()
 
         try:
-            details = _clear_database_scope(cursor, current_user.tenant_id)
+            details = _clear_database_scope(cursor, scope_tenant_id)
             conn.commit()
 
         except Exception as e:
@@ -4222,7 +4242,7 @@ async def stock_in(
     unit = row.unit
 
     record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
-    batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id)
+    batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id, warehouse_id=wh_id)
     now_dt = datetime.now()
 
     with get_engine().begin() as sa_conn:
@@ -5313,7 +5333,7 @@ async def confirm_import_excel(
         allocated_batch_nos = set()
 
         def _alloc_batch_no(material_id):
-            candidate = generate_batch_no(material_id)
+            candidate = generate_batch_no(material_id, warehouse_id=wh_id)
             if candidate not in allocated_batch_nos:
                 allocated_batch_nos.add(candidate)
                 return candidate
@@ -6444,9 +6464,13 @@ if _mcp_dir not in _sys.path:
     _sys.path.insert(0, _mcp_dir)
 
 
-def _get_providers_custom_dir() -> str:
-    """返回自定义 Provider 存储目录（确保存在）。"""
-    custom_dir = os.path.join(_mcp_dir, 'providers', 'custom')
+def _get_providers_custom_dir(tenant_id: Optional[int] = None) -> str:
+    """返回自定义 Provider 存储目录（确保存在）。按 tenant_id 隔离子目录。"""
+    base = os.path.join(_mcp_dir, 'providers', 'custom')
+    if tenant_id is not None:
+        custom_dir = os.path.join(base, str(tenant_id))
+    else:
+        custom_dir = base
     os.makedirs(custom_dir, exist_ok=True)
     return custom_dir
 
@@ -6590,8 +6614,13 @@ async def upload_erp_provider(
     class_name = result['class_name']
     filename = f"{provider_name}.py"
 
-    # 保存到 custom 目录
-    custom_dir = _get_providers_custom_dir()
+    # 全局管理员必须显式指定 tenant
+    target_tid = current_user.tenant_id
+    if target_tid is None:
+        raise HTTPException(status_code=400, detail="全局管理员上传 ERP Provider 时需指定 tenant_id")
+
+    # 保存到 custom 目录（按 tenant_id 隔离）
+    custom_dir = _get_providers_custom_dir(tenant_id=target_tid)
     dest_path = os.path.join(custom_dir, filename)
     with open(dest_path, 'wb') as f:
         f.write(content)
@@ -6608,16 +6637,16 @@ async def upload_erp_provider(
                     provider_name=provider_name,
                     class_name=class_name,
                     filename=filename,
-                    tenant_id=current_user.tenant_id or 1,
+                    tenant_id=target_tid,
                     created_at=now_dt,
                     updated_at=now_dt,
                 )
             )
             provider_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
-    except Exception:
-        # provider_name 唯一约束冲突
+    except IntegrityError:
+        # provider_name 在当前租户内唯一约束冲突
         os.unlink(dest_path)
-        raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 已存在")
+        raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 在当前租户下已存在")
 
     logger.info(f"上传 ERP Provider: {provider_name} ({class_name})，操作人: {current_user.display_name}")
     return {
@@ -6763,7 +6792,7 @@ def _erp_before_delete(sa_conn, current_user, row):
         raise HTTPException(status_code=400, detail="请先停用 Provider 再删除")
     # File unlink (best-effort) before SQL delete — same order as the
     # original hand-rolled handler.
-    custom_dir = _get_providers_custom_dir()
+    custom_dir = _get_providers_custom_dir(tenant_id=row.tenant_id)
     filepath = os.path.join(custom_dir, row.filename)
     if os.path.exists(filepath):
         os.unlink(filepath)
@@ -6836,7 +6865,7 @@ async def test_erp_provider(
     if isinstance(_cfg, (bytes, bytearray)):
         _cfg = _cfg.decode('utf-8')
     config = (_json.loads(_cfg) if _cfg else {}) if isinstance(_cfg, str) else (_cfg or {})
-    custom_dir = _get_providers_custom_dir()
+    custom_dir = _get_providers_custom_dir(tenant_id=row.get('tenant_id'))
     filepath = os.path.join(custom_dir, row['filename'])
 
     if not os.path.exists(filepath):
@@ -6982,7 +7011,7 @@ async def get_erp_provider_status(
     if isinstance(_cfg, (bytes, bytearray)):
         _cfg = _cfg.decode('utf-8')
     config = (_json.loads(_cfg) if _cfg else {}) if isinstance(_cfg, str) else (_cfg or {})
-    custom_dir = _get_providers_custom_dir()
+    custom_dir = _get_providers_custom_dir(tenant_id=row.get('tenant_id'))
     filepath = os.path.join(custom_dir, row['filename'])
 
     if not os.path.exists(filepath):
