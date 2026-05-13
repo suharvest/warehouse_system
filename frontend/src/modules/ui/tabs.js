@@ -202,6 +202,11 @@ export function renderWarehouseSwitcher() {
     const switcher = document.getElementById('warehouseSwitcher');
     if (!switcher) return;
 
+    // 换账号后仓库列表可能完全不同，检查当前仓库是否还在列表里，不在则重置
+    if (currentWarehouse && !allWarehouses.find(w => w.id === currentWarehouse.id)) {
+        setCurrentWarehouse(null);
+    }
+
     // 单仓库时自动选中默认仓库
     if (allWarehouses.length === 1 && !currentWarehouse) {
         setCurrentWarehouse(allWarehouses[0]);
