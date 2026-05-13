@@ -8,11 +8,29 @@
 """
 
 import logging
+import re
 from datetime import datetime
 
 from .base import BaseProvider
 
 logger = logging.getLogger("WarehouseMCP")
+
+
+def _normalize_batch_no(batch_no: str) -> str:
+    """归一化批次号：去掉连字符/空格，补回标准格式 YYYYMMDD-NNN。
+
+    语音输入 "20260513023" → "20260513-023"
+    已标准格式 "20260513-023" → 不变
+    非日期格式批次号（如 "B-2026-003"）→ 原样返回
+    """
+    if not batch_no:
+        return batch_no
+    s = re.sub(r'[\s\-－–—]+', '', batch_no).strip()
+    # YYYYMMDDNNN 形式（11位纯数字）→ 在第8位后插入 -
+    m = re.fullmatch(r'(\d{8})(\d+)', s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return batch_no
 
 
 class DefaultProvider(BaseProvider):
@@ -34,8 +52,31 @@ class DefaultProvider(BaseProvider):
         return self.http_get("/fuzzy-match", params={"q": text, "entity_type": entity_type})
 
     def query_stock(self, product_name, show_batches=False):
-        # 先尝试精确查询
+        # 先尝试精确查询，同时做多义检测
         data = self.http_get("/materials/product-stats", params={"name": product_name})
+
+        # 精确查询成功时，仍需检查是否存在同名多条（精确匹配只返回第一条）
+        if "error" not in data:
+            resolve_result = self.http_get(
+                "/fuzzy-match", params={"q": product_name, "entity_type": "material"}
+            )
+            candidates = resolve_result.get("candidates", [])
+            # 同名多条：所有候选都与查询词完全一致 → 需要用户澄清
+            exact_same = [c for c in candidates if c.get("name") == product_name]
+            if not resolve_result.get("confident") and len(exact_same) > 1:
+                def _fmt(c):
+                    sku = c.get("extra", {}).get("sku", "")
+                    return f"{c['name']}（SKU: {sku}）" if sku else c["name"]
+                items = "、".join(_fmt(c) for c in exact_same[:6])
+                return {
+                    "success": False,
+                    "error": f"找到 {len(exact_same)} 个同名产品",
+                    "candidates": exact_same[:6],
+                    "message": (
+                        f"'{product_name}' 在系统中有 {len(exact_same)} 个同名产品：{items}。"
+                        "请告知需要查询哪个（可指定 SKU 或其他特征）"
+                    ),
+                }
 
         # 精确查询失败时，自动走模糊匹配
         if "error" in data:
@@ -64,15 +105,19 @@ class DefaultProvider(BaseProvider):
                 if resolved_variant:
                     data["resolved_variant"] = resolved_variant
             else:
-                # 模糊匹配也无法确定，返回候选列表
+                # 模糊匹配也无法确定，返回候选列表（带 SKU 方便区分同名项）
                 candidates = resolve_result.get("candidates", [])
                 if candidates:
-                    ranked = [f"{c['name']}({c['score']}分)" for c in candidates[:5]]
+                    def _fmt_candidate(c):
+                        sku = c.get("extra", {}).get("sku", "")
+                        score = c["score"]
+                        return f"{c['name']}（SKU: {sku}，{score}分）" if sku else f"{c['name']}（{score}分）"
+                    ranked = [_fmt_candidate(c) for c in candidates[:5]]
                     return {
                         "success": False,
                         "error": f"名称 '{product_name}' 不够明确",
                         "candidates": candidates[:5],
-                        "message": f"按相似度排序的候选：{', '.join(ranked)}。请根据分数和上下文判断最佳匹配，优先选择高分项，如无法确定再询问用户",
+                        "message": f"找到以下候选产品：{', '.join(ranked)}。请告知是哪个（可指定 SKU）",
                     }
                 return {
                     "success": False,
@@ -183,7 +228,7 @@ class DefaultProvider(BaseProvider):
         if location is not None:
             payload["location"] = location
         if batch_no is not None:
-            payload["batch_no"] = batch_no
+            payload["batch_no"] = _normalize_batch_no(batch_no)
         if location_fuzzy:
             payload["location_fuzzy"] = True
         return self.http_post("/materials/stock-out", payload)

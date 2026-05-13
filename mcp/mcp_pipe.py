@@ -44,6 +44,11 @@ logger = logging.getLogger('MCP_PIPE')
 INITIAL_BACKOFF = 1  # Initial wait time in seconds
 MAX_BACKOFF = 600  # Maximum wait time in seconds
 
+# Timeout settings
+TOOL_CALL_TIMEOUT = 60   # Max seconds to wait for warehouse_mcp to produce one response line
+WS_PING_INTERVAL = 20    # WebSocket keepalive ping interval (seconds)
+WS_PING_TIMEOUT = 10     # WebSocket ping response deadline (seconds)
+
 async def connect_with_retry(uri, target):
     """Connect to WebSocket server with retry mechanism for a given server target."""
     reconnect_attempt = 0
@@ -67,7 +72,12 @@ async def connect_to_server(uri, target):
     """Connect to WebSocket server and pipe stdio for the given server target."""
     try:
         logger.info(f"[{target}] Connecting to WebSocket server...")
-        async with websockets.connect(uri) as websocket:
+        async with websockets.connect(
+            uri,
+            open_timeout=10,
+            ping_interval=WS_PING_INTERVAL,
+            ping_timeout=WS_PING_TIMEOUT,
+        ) as websocket:
             logger.info(f"[{target}] Successfully connected to WebSocket server")
 
             # Start server process (built from CLI arg or config)
@@ -83,10 +93,13 @@ async def connect_to_server(uri, target):
             )
             logger.info(f"[{target}] Started server process: {' '.join(cmd)}")
             
+            # Shared slot for the latest JSON-RPC request id (used to build timeout error)
+            last_request_id = [None]
+
             # Create two tasks: read from WebSocket and write to process, read from process and write to WebSocket
             await asyncio.gather(
-                pipe_websocket_to_process(websocket, process, target),
-                pipe_process_to_websocket(process, websocket, target),
+                pipe_websocket_to_process(websocket, process, target, last_request_id),
+                pipe_process_to_websocket(process, websocket, target, last_request_id),
                 pipe_process_stderr_to_terminal(process, target)
             )
     except websockets.exceptions.ConnectionClosed as e:
@@ -106,17 +119,27 @@ async def connect_to_server(uri, target):
                 process.kill()
             logger.info(f"[{target}] Server process terminated")
 
-async def pipe_websocket_to_process(websocket, process, target):
-    """Read data from WebSocket and write to process stdin"""
+async def pipe_websocket_to_process(websocket, process, target, last_request_id: list):
+    """Read data from WebSocket and write to process stdin.
+    Stores the most recent JSON-RPC request id in last_request_id[0] so the
+    timeout handler can send a proper error response.
+    """
     try:
         while True:
             # Read message from WebSocket
             message = await websocket.recv()
             logger.debug(f"[{target}] << {message[:120]}...")
-            
-            # Write to process stdin (in text mode)
+
+            # Track the latest request id for timeout error reporting
             if isinstance(message, bytes):
                 message = message.decode('utf-8')
+            try:
+                parsed = json.loads(message)
+                if 'id' in parsed:
+                    last_request_id[0] = parsed['id']
+            except Exception:
+                pass
+
             process.stdin.write(message + '\n')
             process.stdin.flush()
     except Exception as e:
@@ -127,21 +150,52 @@ async def pipe_websocket_to_process(websocket, process, target):
         if not process.stdin.closed:
             process.stdin.close()
 
-async def pipe_process_to_websocket(process, websocket, target):
-    """Read data from process stdout and send to WebSocket"""
+async def pipe_process_to_websocket(process, websocket, target, last_request_id: list):
+    """Read data from process stdout and send to WebSocket.
+    On timeout, sends a JSON-RPC error back before killing the subprocess so the
+    AI client receives a human-readable message instead of a silent disconnect.
+    """
     try:
         while True:
-            # Read data from process stdout
-            data = await asyncio.to_thread(process.stdout.readline)
-            
+            try:
+                data = await asyncio.wait_for(
+                    asyncio.to_thread(process.stdout.readline),
+                    timeout=TOOL_CALL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"[{target}] Tool call timed out after {TOOL_CALL_TIMEOUT}s — "
+                    "sending error to client, then killing subprocess"
+                )
+                # Send a proper JSON-RPC error so the AI can tell the user to retry
+                req_id = last_request_id[0]
+                error_resp = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32001,
+                        "message": (
+                            f"工具调用超时（>{TOOL_CALL_TIMEOUT}s），后端服务可能暂时繁忙。"
+                            "请稍后重试。"
+                        ),
+                    },
+                }, ensure_ascii=False)
+                try:
+                    await websocket.send(error_resp)
+                except Exception:
+                    pass
+                process.kill()
+                raise  # propagates to connect_to_server → triggers reconnect
+
             if not data:  # If no data, the process may have ended
                 logger.info(f"[{target}] Process has ended output")
                 break
-                
+
             # Send data to WebSocket
             logger.debug(f"[{target}] >> {data[:120]}...")
-            # In text mode, data is already a string, no need to decode
             await websocket.send(data)
+    except asyncio.TimeoutError:
+        raise  # already logged, let it bubble
     except Exception as e:
         logger.error(f"[{target}] Error in process to WebSocket pipe: {e}")
         raise  # Re-throw exception to trigger reconnection
@@ -150,19 +204,17 @@ async def pipe_process_stderr_to_terminal(process, target):
     """Read data from process stderr and print to terminal"""
     try:
         while True:
-            # Read data from process stderr
             data = await asyncio.to_thread(process.stderr.readline)
-            
-            if not data:  # If no data, the process may have ended
+            if not data:
                 logger.info(f"[{target}] Process has ended stderr output")
                 break
-                
-            # Print stderr data to terminal (in text mode, data is already a string)
             sys.stderr.write(data)
             sys.stderr.flush()
+    except asyncio.CancelledError:
+        pass  # Normal shutdown when gather cancels this task
     except Exception as e:
         logger.error(f"[{target}] Error in process stderr pipe: {e}")
-        raise  # Re-throw exception to trigger reconnection
+        raise
 
 def signal_handler(sig, frame):
     """Handle interrupt signals"""

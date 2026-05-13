@@ -565,6 +565,7 @@ def init_database():
             status TEXT DEFAULT 'stopped',
             error_message TEXT,
             restart_count INTEGER DEFAULT 0,
+            debug_mode INTEGER DEFAULT 0,
             created_at TEXT,
             updated_at TEXT
         )
@@ -666,6 +667,11 @@ def init_database():
         cursor.execute('SELECT role FROM mcp_connections LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN role TEXT DEFAULT \'operate\'')
+
+    try:
+        cursor.execute('SELECT debug_mode FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN debug_mode INTEGER DEFAULT 0')
 
     # 检查并添加 warehouse_id 字段到各表（多仓库支持）
     for table in ('batches', 'inventory_records', 'api_keys', 'mcp_connections'):

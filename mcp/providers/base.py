@@ -30,7 +30,11 @@ class BaseProvider(ABC):
         self.config = config
         self.base_url = config.get("api_base_url", "").rstrip("/")
         self.auth_config = config.get("auth", {})
-        self.timeout = config.get("timeout", 10)
+        # (connect_timeout, read_timeout) — connect is fast (localhost/LAN),
+        # read allows for slow DB queries without blocking the pipe indefinitely.
+        connect_timeout = config.get("connect_timeout", 5)
+        read_timeout = config.get("timeout", 10)
+        self.timeout = (connect_timeout, read_timeout)
 
     # ── 通用 Auth ──
 

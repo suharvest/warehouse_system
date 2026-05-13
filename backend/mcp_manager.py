@@ -32,6 +32,7 @@ class MCPProcess:
     websocket_error: Optional[str] = None
     error_message: Optional[str] = None
     restart_count: int = 0
+    debug_mode: bool = False
     started_at: Optional[datetime] = None
     logs: deque = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
     _log_task: Optional[asyncio.Task] = None
@@ -62,7 +63,7 @@ class MCPProcessManager:
             logger.info("MCP process monitor stopped")
 
     async def start_connection(self, conn_id: str, endpoint: str, api_key: str,
-                                auto_start: bool = True) -> bool:
+                                auto_start: bool = True, debug_mode: bool = False) -> bool:
         """启动一个 MCP 连接（子进程）"""
         # 如果已经有运行中的进程，先停止
         if conn_id in self.connections:
@@ -85,6 +86,8 @@ class MCPProcessManager:
         env['WAREHOUSE_API_KEY'] = api_key
         port = os.environ.get('PORT', '2124')
         env['WAREHOUSE_API_URL'] = f'http://localhost:{port}/api'
+        effective_debug = debug_mode or os.environ.get('MCP_DEBUG') == '1'
+        env['MCP_DEBUG'] = '1' if effective_debug else '0'
 
         try:
             # 传 warehouse_mcp.py 路径作为参数，避免依赖 mcp_config.json 的硬编码路径
@@ -105,7 +108,8 @@ class MCPProcessManager:
                 status='running',
                 websocket_status='connecting',
                 started_at=datetime.now(),
-                restart_count=0
+                restart_count=0,
+                debug_mode=effective_debug,
             )
             self.connections[conn_id] = mcp_proc
 
@@ -166,14 +170,21 @@ class MCPProcessManager:
 
     async def restart_connection(self, conn_id: str, endpoint: str = None,
                                   api_key: str = None) -> bool:
-        """重启一个 MCP 连接（重置计数器）"""
+        """重启一个 MCP 连接（重置计数器，保留原 debug_mode 设置）"""
+        old_debug = False
         if conn_id in self.connections:
             proc = self.connections[conn_id]
             endpoint = endpoint or proc.endpoint
             api_key = api_key or proc.api_key
+            old_debug = proc.debug_mode
             await self.stop_connection(conn_id)
 
-        return await self.start_connection(conn_id, endpoint, api_key)
+        return await self.start_connection(conn_id, endpoint, api_key, debug_mode=old_debug)
+
+    async def toggle_debug(self, conn_id: str, endpoint: str, api_key: str, enable: bool) -> bool:
+        """切换调试模式，重启进程使生效"""
+        await self.stop_connection(conn_id)
+        return await self.start_connection(conn_id, endpoint, api_key, debug_mode=enable)
 
     def remove_connection(self, conn_id: str):
         """从管理器中移除连接记录"""
@@ -249,7 +260,8 @@ class MCPProcessManager:
         return None
 
     async def _collect_logs(self, proc: MCPProcess):
-        """收集子进程的 stdout/stderr 输出"""
+        """收集子进程的 stdout/stderr 输出。MCP_DEBUG=1 时同步转发到 logger。"""
+        _mcp_debug = proc.debug_mode
         try:
             async def read_stream(stream, prefix):
                 while True:
@@ -260,6 +272,8 @@ class MCPProcessManager:
                     timestamp = datetime.now().strftime('%H:%M:%S')
                     proc.logs.append(f"[{timestamp}] {prefix} {text}")
                     self._update_websocket_status_from_log(proc, text)
+                    if _mcp_debug and prefix == 'ERR':
+                        logger.info(f"[mcp:{proc.conn_id}] {text}")
 
             if proc.process:
                 await asyncio.gather(
@@ -310,6 +324,22 @@ class MCPProcessManager:
         """自动重启崩溃的连接"""
         if conn_id not in self.connections:
             return
+
+        # If the DB record was deleted externally, clean up and don't restart
+        try:
+            from db import get_engine
+            from metadata import mcp_connections as _t_mcp
+            from sqlalchemy import select as _sa_select
+            with get_engine().connect() as _conn:
+                exists = _conn.execute(
+                    _sa_select(_t_mcp.c.id).where(_t_mcp.c.id == conn_id)
+                ).first()
+            if not exists:
+                logger.info(f"MCP connection '{conn_id}' no longer in DB, removing from manager")
+                self.remove_connection(conn_id)
+                return
+        except Exception as e:
+            logger.error(f"Failed to check DB for '{conn_id}': {e}")
 
         proc = self.connections[conn_id]
         proc.restart_count += 1
