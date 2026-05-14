@@ -88,10 +88,11 @@ class DefaultProvider(BaseProvider):
                 best = resolve_result["best_match"]
                 extra = best.get("extra", {})
                 resolved_variant = extra.get("variant")
+                resolved_name = extra.get("canonical_name")
                 # name+variant 组合匹配时，用原始物料名查询
-                if resolved_variant:
+                if not resolved_name and resolved_variant:
                     resolved_name = best["name"].replace(f" {resolved_variant}", "").strip()
-                else:
+                elif not resolved_name:
                     resolved_name = best["name"]
                 data = self.http_get("/materials/product-stats", params={"name": resolved_name})
                 if "error" in data:

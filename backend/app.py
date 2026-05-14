@@ -3709,7 +3709,7 @@ def get_product_stats(
         out_change = ((today_out - yesterday_out) / yesterday_out * 100) if yesterday_out > 0 else 0
 
         return ProductStats(
-            name=name,
+            name=product.name,
             sku=product.sku,
             current_stock=current_stock,
             unit=unit,
@@ -4183,6 +4183,7 @@ async def stock_in(
     operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
     operator_user_id = current_user.id
     resolved_from = None
+    resolved_material_id = None
     wh_id = require_warehouse_id(current_user, request.warehouse_id)
 
     if quantity <= 0:
@@ -4202,10 +4203,17 @@ async def stock_in(
     # 查询产品（先精确匹配，按仓库过滤；排除已禁用物料）
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(
-            select(_t_materials.c.id, _t_materials.c.unit).where(
-                and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+            select(_t_materials.c.id, _t_materials.c.name, _t_materials.c.unit).where(
+                and_(
+                    or_(_t_materials.c.name == product_name, _t_materials.c.sku == product_name),
+                    _t_materials.c.is_disabled == 0,
+                    *m_scope,
+                )
             )
         ).first()
+        if row and row.name != product_name:
+            resolved_from = product_name
+            product_name = row.name
 
     # 模糊匹配
     if not row and request.fuzzy:
@@ -4215,13 +4223,23 @@ async def stock_in(
 
         if result['confident'] and result['best_match']:
             resolved_from = product_name
-            product_name = result['best_match']['name']
+            best = result['best_match']
+            extra = best.get('extra') or {}
+            resolved_material_id = best.get('entity_id')
+            product_name = extra.get('canonical_name') or best['name']
             with get_engine().connect() as sa_conn:
+                row_preds = [_t_materials.c.is_disabled == 0, *m_scope]
+                if resolved_material_id is not None:
+                    row_preds.append(_t_materials.c.id == resolved_material_id)
+                else:
+                    row_preds.append(_t_materials.c.name == product_name)
                 row = sa_conn.execute(
-                    select(_t_materials.c.id, _t_materials.c.unit).where(
-                        and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+                    select(_t_materials.c.id, _t_materials.c.name, _t_materials.c.unit).where(
+                        and_(*row_preds)
                     )
                 ).first()
+                if row:
+                    product_name = row.name
         elif result['candidates']:
             names = [c['name'] for c in result['candidates'][:5]]
             return StockInResponse(
@@ -4322,6 +4340,7 @@ async def stock_out(
     operator_user_id = current_user.id
     resolved_from = None
     resolved_variant = None
+    resolved_material_id = None
     wh_id = require_warehouse_id(current_user, stock_data.warehouse_id)
 
     if quantity <= 0:
@@ -4337,10 +4356,20 @@ async def stock_out(
 
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(
-            select(_t_materials.c.id, _t_materials.c.unit, _t_materials.c.safe_stock).where(
-                and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+            select(
+                _t_materials.c.id, _t_materials.c.name,
+                _t_materials.c.unit, _t_materials.c.safe_stock,
+            ).where(
+                and_(
+                    or_(_t_materials.c.name == product_name, _t_materials.c.sku == product_name),
+                    _t_materials.c.is_disabled == 0,
+                    *m_scope,
+                )
             )
         ).first()
+        if row and row.name != product_name:
+            resolved_from = product_name
+            product_name = row.name
 
     if not row and stock_data.fuzzy:
         matcher = get_fuzzy_matcher()
@@ -4350,17 +4379,28 @@ async def stock_out(
             resolved_from = product_name
             best = result['best_match']
             extra = best.get('extra') or {}
+            resolved_material_id = best.get('entity_id')
             resolved_variant = extra.get('variant')
-            resolved_name = best['name']
+            resolved_name = extra.get('canonical_name') or best['name']
             if resolved_variant:
                 resolved_name = resolved_name.replace(f" {resolved_variant}", "").strip()
             product_name = resolved_name
             with get_engine().connect() as sa_conn:
+                row_preds = [_t_materials.c.is_disabled == 0, *m_scope]
+                if resolved_material_id is not None:
+                    row_preds.append(_t_materials.c.id == resolved_material_id)
+                else:
+                    row_preds.append(_t_materials.c.name == product_name)
                 row = sa_conn.execute(
-                    select(_t_materials.c.id, _t_materials.c.unit, _t_materials.c.safe_stock).where(
-                        and_(_t_materials.c.name == product_name, _t_materials.c.is_disabled == 0, *m_scope)
+                    select(
+                        _t_materials.c.id, _t_materials.c.name,
+                        _t_materials.c.unit, _t_materials.c.safe_stock,
+                    ).where(
+                        and_(*row_preds)
                     )
                 ).first()
+                if row:
+                    product_name = row.name
         elif result['candidates']:
             names = [c['name'] for c in result['candidates'][:5]]
             return StockOutResponse(

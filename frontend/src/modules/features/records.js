@@ -71,6 +71,38 @@ function populateReasonCategoryFilterSelect() {
         allItems.map(c => `<option value="${c.key}">${getReasonCategoryLabel(c.key)}</option>`).join('');
 }
 
+function parseBatchDetails(batchDetails) {
+    if (!batchDetails) return [];
+    return batchDetails.split(',').map(part => {
+        const text = part.trim();
+        const match = text.match(/^(.*?)[×xX]\s*(\d+)$/);
+        if (!match) return { batchNo: text, quantity: null };
+        return {
+            batchNo: match[1].trim(),
+            quantity: Number.parseInt(match[2], 10),
+        };
+    }).filter(item => item.batchNo);
+}
+
+function expandRecordRows(items) {
+    const rows = [];
+    items.forEach(item => {
+        const consumptions = item.type === 'out' ? parseBatchDetails(item.batch_details) : [];
+        if (consumptions.length === 0) {
+            rows.push({ ...item, display_quantity: item.quantity, display_batch_no: item.batch_no || '-' });
+            return;
+        }
+        consumptions.forEach(consumption => {
+            rows.push({
+                ...item,
+                display_quantity: consumption.quantity ?? item.quantity,
+                display_batch_no: consumption.batchNo,
+            });
+        });
+    });
+    return rows;
+}
+
 // ============ 记录列表加载 ============
 export async function loadRecords() {
     const startDate = document.getElementById('filter-start-date').value;
@@ -118,7 +150,7 @@ function renderRecordsTable(items) {
         return;
     }
 
-    items.forEach(item => {
+    expandRecordRows(items).forEach(item => {
         const tr = document.createElement('tr');
 
         const typeText = item.type === 'in' ? t('inbound') : t('outbound');
@@ -139,14 +171,6 @@ function renderRecordsTable(items) {
             statusClass = 'status-danger';
         }
 
-        // 批次信息
-        let batchDisplay = '-';
-        if (item.type === 'in' && item.batch_no) {
-            batchDisplay = item.batch_no;
-        } else if (item.type === 'out' && item.batch_details) {
-            batchDisplay = `<span class="batch-details" title="${item.batch_details}">${item.batch_details}</span>`;
-        }
-
         tr.innerHTML = `
             <td>${item.created_at}</td>
             <td>${item.material_name}</td>
@@ -154,8 +178,8 @@ function renderRecordsTable(items) {
             <td>${item.material_sku}</td>
             <td>${item.category || '-'}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
-            <td><strong>${item.quantity}</strong></td>
-            <td>${batchDisplay}</td>
+            <td><strong>${item.display_quantity}</strong></td>
+            <td>${item.display_batch_no}</td>
             <td>${item.contact_name || '-'}</td>
             <td>${item.operator_name || item.operator}</td>
             <td>${getReasonCategoryLabel(item.reason_category)}</td>

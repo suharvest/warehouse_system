@@ -2,6 +2,7 @@
 Stock-out tests: normal stock-out, insufficient inventory rejection, FIFO batch consumption.
 """
 import pytest
+import uuid
 
 
 @pytest.fixture()
@@ -106,6 +107,65 @@ class TestStockOut:
         assert resp.status_code == 200
         data = resp.json()
         assert data['success'] is False
+
+    def test_stock_out_compound_sku_name_resolves_single_duplicate_name(
+            self, admin_client, default_warehouse_id):
+        """Voice/MCP input may combine a code and name, with LV heard as LB."""
+        from database import get_db_connection
+        from app import get_fuzzy_matcher
+
+        name = f"电极帽-{uuid.uuid4().hex[:6]}"
+        rows = [
+            ("LV-0045", 50),
+            ("LV-0046", 100),
+        ]
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        material_ids = {}
+        for sku, qty in rows:
+            cursor.execute('''
+                INSERT INTO materials (name, sku, category, quantity, unit, safe_stock,
+                                       location, warehouse_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (name, sku, 'Test', qty, 'pcs', 1, '', default_warehouse_id))
+            mid = cursor.lastrowid
+            material_ids[sku] = mid
+            cursor.execute('''
+                INSERT INTO batches (batch_no, material_id, quantity, initial_quantity,
+                                     is_exhausted, warehouse_id)
+                VALUES (?, ?, ?, ?, 0, ?)
+            ''', (f"B-{sku}", mid, qty, qty, default_warehouse_id))
+        conn.commit()
+        conn.close()
+        get_fuzzy_matcher().invalidate_cache(entity_type="material")
+
+        phrases = [
+            f"LB0045{name}",
+            f"{name} LB0045",
+            f"SKU为LB0045的{name}",
+        ]
+        for phrase in phrases:
+            resp = admin_client.post("/api/materials/stock-out", json={
+                "product_name": phrase,
+                "quantity": 5,
+                "reason_category": "sell",
+                "warehouse_id": default_warehouse_id,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data['success'] is True, data
+            assert data['resolved_from'] == phrase
+            assert data['batch_consumptions'][0]['batch_id']
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT quantity FROM batches WHERE material_id = ?",
+                       (material_ids["LV-0045"],))
+        assert cursor.fetchone()['quantity'] == 35
+        cursor.execute("SELECT quantity FROM batches WHERE material_id = ?",
+                       (material_ids["LV-0046"],))
+        assert cursor.fetchone()['quantity'] == 100
+        conn.close()
 
 
 class TestFIFOConsumption:

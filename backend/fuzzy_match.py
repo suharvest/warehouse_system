@@ -99,7 +99,7 @@ class FuzzyMatcher:
                 for row in conn.execute(stmt).fetchall():
                     mid, name, sku, category = row.id, row.name, row.sku, row.category
                     tid, whid = row.tenant_id, row.warehouse_id
-                    extra = {"sku": sku, "category": category}
+                    extra = {"sku": sku, "category": category, "canonical_name": name}
                     self._add_entry("material", mid, {
                         "name": name, "entity_type": "material", "entity_id": mid,
                         "tenant_id": tid, "warehouse_id": whid, "extra": extra,
@@ -110,6 +110,20 @@ class FuzzyMatcher:
                             "name": sku, "entity_type": "material", "entity_id": mid,
                             "tenant_id": tid, "warehouse_id": whid, "extra": extra,
                             "pinyin": self._get_pinyin(self._normalize(sku)),
+                        }, bucket)
+                        combined = f"{sku} {name}"
+                        self._add_entry("material", mid, {
+                            "name": combined, "entity_type": "material", "entity_id": mid,
+                            "tenant_id": tid, "warehouse_id": whid,
+                            "extra": extra,
+                            "pinyin": self._get_pinyin(self._normalize(combined)),
+                        }, bucket)
+                        combined_rev = f"{name} {sku}"
+                        self._add_entry("material", mid, {
+                            "name": combined_rev, "entity_type": "material", "entity_id": mid,
+                            "tenant_id": tid, "warehouse_id": whid,
+                            "extra": extra,
+                            "pinyin": self._get_pinyin(self._normalize(combined_rev)),
                         }, bucket)
 
                 # 索引 "name + variant" 组合
@@ -135,7 +149,10 @@ class FuzzyMatcher:
                     self._add_entry("material", mid, {
                         "name": combined, "entity_type": "material", "entity_id": mid,
                         "tenant_id": tid, "warehouse_id": whid,
-                        "extra": {"sku": sku, "category": category, "variant": variant},
+                        "extra": {
+                            "sku": sku, "category": category,
+                            "canonical_name": name, "variant": variant,
+                        },
                         "pinyin": self._get_pinyin(self._normalize(combined)),
                     }, bucket)
 
@@ -276,6 +293,44 @@ class FuzzyMatcher:
 
         return max(text_score, pinyin_score)
 
+    @staticmethod
+    def _sku_tokens(norm_query: str) -> list[str]:
+        """Extract code-like tokens from a normalized mixed-language query."""
+        return re.findall(r'[a-z]+\d+|\d+', norm_query)
+
+    def _sku_name_score(self, norm_query: str, entry: dict) -> float | None:
+        """Boost material matches when SKU/code and name both appear in any order.
+
+        This covers spoken forms such as "SKU为LV0045的电极帽" and "电极帽LB0045".
+        The SKU token may be slightly off (e.g. V heard as B), but the material
+        name must also be present to avoid broad code-only false positives.
+        """
+        extra = entry.get("extra") or {}
+        sku = extra.get("sku")
+        canonical_name = extra.get("canonical_name")
+        if not sku or not canonical_name:
+            return None
+
+        norm_sku = self._normalize(sku)
+        norm_canonical = self._normalize(canonical_name)
+        if not norm_sku or not norm_canonical or norm_canonical not in norm_query:
+            return None
+
+        best_token_score = 0.0
+        sku_digits = ''.join(re.findall(r'\d+', norm_sku))
+        for token in self._sku_tokens(norm_query):
+            token_score = fuzz.ratio(token, norm_sku)
+            token_digits = ''.join(re.findall(r'\d+', token))
+            if sku_digits and token_digits == sku_digits:
+                token_score = max(token_score, 92.0)
+            best_token_score = max(best_token_score, token_score)
+
+        if best_token_score >= 90.0:
+            return 96.0 + min((best_token_score - 90.0) / 10.0, 1.0)
+        if best_token_score >= 80.0:
+            return 90.0 + (best_token_score - 80.0) * 0.4
+        return None
+
     # ---- public search -------------------------------------------------
 
     def search(self, query: str, entity_type: str = "all",
@@ -314,6 +369,9 @@ class FuzzyMatcher:
             norm_name = self._normalize(entry["name"])
             name_pinyin = entry["pinyin"]
             score = self._calc_score(norm_query, query_pinyin, norm_name, name_pinyin)
+            sku_name_score = self._sku_name_score(norm_query, entry)
+            if sku_name_score is not None:
+                score = max(score, sku_name_score)
 
             if score >= threshold:
                 results.append({
