@@ -410,6 +410,34 @@ class LoginResponse(BaseModel):
     is_first_login: bool = False
 
 
+# ============ Registration Models ============
+
+class VerifyDeviceRequest(BaseModel):
+    """设备验证请求"""
+    device_id: str
+
+
+class VerifyDeviceResponse(BaseModel):
+    """设备验证响应"""
+    authorized: bool
+    registered: bool
+    tenant_name: Optional[str] = None
+
+
+class RegisterRequest(BaseModel):
+    """注册请求"""
+    device_id: str
+    username: str
+    password: str
+    display_name: Optional[str] = None
+
+
+class ResetPasswordRequest(BaseModel):
+    """重置密码请求"""
+    device_id: str
+    new_password: str
+
+
 class CreateUserRequest(BaseModel):
     """创建用户请求"""
     username: str
