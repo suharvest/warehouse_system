@@ -101,6 +101,11 @@ export function exportProductRecords() {
     window.location.href = `${API_BASE_URL}/inventory/export-excel?${params}`;
 }
 
+// 下载示例文件
+export function downloadSampleExcel() {
+    window.location.href = `${API_BASE_URL}/materials/import-excel/sample`;
+}
+
 // ============ 导入功能 ============
 export async function showImportModal() {
     if (!getCurrentWarehouse()) {

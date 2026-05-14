@@ -18,7 +18,7 @@ import { initCharts, loadDashboardData, onTotalStockClick, onTodayInClick, onTod
 import { loadInventory, inventoryGoToPage, changeInventoryPageSize, applyInventoryFilter, resetInventoryFilter, applyInventoryFilters, setInventoryCallbacks } from './features/inventory.js';
 import { loadRecords, recordsGoToPage, changeRecordsPageSize, applyRecordsFilter, resetRecordsFilter, applyRecordsFilters, loadRecordsFilterOptions, showAddRecordModal, showAddRecordModalForProduct, closeAddRecordModal, submitAddRecord, setRecordsCallbacks } from './features/records.js';
 import { onProductSelect, initDetailCharts, loadProductDetail, loadProductTrend, loadDetailPieChart, loadProductRecords, detailGoToPage, changeDetailPageSize, refreshProductDetailForLanguage } from './features/product-detail.js';
-import { exportInventory, exportRecords, exportProductRecords, showImportModal, closeImportModal, handleFileSelect, confirmImport, closeNewSkuModal, skipNewSkus, confirmNewSkus, setImportExportCallbacks } from './features/import-export.js';
+import { exportInventory, exportRecords, exportProductRecords, showImportModal, closeImportModal, handleFileSelect, confirmImport, closeNewSkuModal, skipNewSkus, confirmNewSkus, setImportExportCallbacks, downloadSampleExcel } from './features/import-export.js';
 import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEditUserModal, closeEditUserModal, handleEditUser, toggleUserStatus, setUsersCallbacks, loadTenantInfo } from './features/users.js';
 import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
@@ -36,6 +36,9 @@ import {
     applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
     getFaceModalsHTML, onFaceTenantChange
 } from './features/face-recognition.js';
+
+// 新人引导
+import './features/onboarding.js';
 
 // 语言切换
 import { toggleLangDropdown, selectLanguage } from '../../i18n.js';
@@ -388,6 +391,7 @@ const actionHandlers = {
     // 库存操作
     'showImportModal': showImportModal,
     'closeImportModal': closeImportModal,
+    'downloadSampleExcel': downloadSampleExcel,
     'triggerFileUpload': () => {
         const fileInput = document.getElementById('excel-file');
         if (fileInput) fileInput.click();
