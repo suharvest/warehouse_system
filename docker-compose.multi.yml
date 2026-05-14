@@ -28,6 +28,7 @@ services:
     environment:
       PORT: 1025
       DEPLOY_MODE: ${DEPLOY_MODE:-single_tenant}
+      FACTORY_API_KEY: ${FACTORY_API_KEY:-}
 
   warehouse-b:
     <<: *warehouse-base
@@ -39,6 +40,7 @@ services:
     environment:
       PORT: 1026
       DEPLOY_MODE: ${DEPLOY_MODE:-single_tenant}
+      FACTORY_API_KEY: ${FACTORY_API_KEY:-}
 
   warehouse-c:
     <<: *warehouse-base
@@ -50,6 +52,7 @@ services:
     environment:
       PORT: 1027
       DEPLOY_MODE: ${DEPLOY_MODE:-single_tenant}
+      FACTORY_API_KEY: ${FACTORY_API_KEY:-}
 
 volumes:
   data_a:

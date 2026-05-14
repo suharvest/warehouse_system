@@ -23,11 +23,13 @@
 ## Frontend Verification (MANDATORY for UI changes)
 If your task modifies frontend/Web UI:
 1. Start the dev server
-2. Write a Playwright (.mjs) test that screenshots every changed page
-3. Assert key elements exist (buttons, forms, data)
-4. Test mobile viewport (375x812) for responsive layout
-5. Review screenshots visually with the Read tool
-6. Fix any rendering issues before marking task as done
+2. Use `playwright-cli` (already installed globally) for all browser interaction — screenshots, clicks, form fills, JS eval
+3. NEVER install `playwright` or `@playwright/test` via npm/npx — use `playwright-cli` instead
+4. Screenshot every changed page: `playwright-cli screenshot --filename=page.png`
+5. Test mobile viewport: `playwright-cli resize 375 812`
+6. Assert key elements exist: `playwright-cli snapshot` and check for expected text/selectors
+7. Review screenshots visually with the Read tool
+8. Fix any rendering issues before marking task as done
 Common pitfalls: Jinja2 auto-escaping HTML entities, Python set compound assignment creating local vars, shell literal backslash-n not being real newlines
 
 

@@ -106,7 +106,7 @@ VITE_LOG="$LOG_DIR/vite.log"
 
 # 启动后端（同时 serve 前端静态文件）
 echo "启动后端服务 (端口 2124)... 日志: $BACKEND_LOG"
-PYTHONUNBUFFERED=1 uv run python -u run_backend.py 2>&1 | tee "$BACKEND_LOG" &
+FACTORY_API_KEY="${FACTORY_API_KEY:-}" PYTHONUNBUFFERED=1 uv run python -u run_backend.py 2>&1 | tee "$BACKEND_LOG" &
 BACKEND_PID=$!
 
 sleep 2
