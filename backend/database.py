@@ -398,7 +398,9 @@ def init_database():
             display_name TEXT,
             is_disabled INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_by INTEGER REFERENCES users(id)
+            created_by INTEGER REFERENCES users(id),
+            tenant_id INTEGER DEFAULT 1,
+            last_login_at TIMESTAMP
         )
     ''')
 
@@ -569,6 +571,7 @@ def init_database():
             error_message TEXT,
             restart_count INTEGER DEFAULT 0,
             debug_mode INTEGER DEFAULT 0,
+            device_id TEXT UNIQUE,
             created_at TEXT,
             updated_at TEXT
         )
@@ -675,6 +678,12 @@ def init_database():
         cursor.execute('SELECT debug_mode FROM mcp_connections LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN debug_mode INTEGER DEFAULT 0')
+
+    try:
+        cursor.execute('SELECT device_id FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN device_id TEXT')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_device_id ON mcp_connections(device_id)')
 
     # 检查并添加 warehouse_id 字段到各表（多仓库支持）
     for table in ('batches', 'inventory_records', 'api_keys', 'mcp_connections'):

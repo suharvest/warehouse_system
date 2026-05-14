@@ -114,6 +114,7 @@ users = Table(
     _ts_col(),
     Column("created_by", Integer, ForeignKey("users.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
+    Column("last_login_at", DateTime, nullable=True),
     Index("idx_users_tenant", "tenant_id"),
     **MYSQL_TABLE_KW,
 )
@@ -336,6 +337,7 @@ mcp_connections = Table(
     Column("updated_at", String(32)),
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
+    Column("device_id", String(64), nullable=True, unique=True),
     Index("idx_mcp_connections_tenant", "tenant_id"),
     **MYSQL_TABLE_KW,
 )
