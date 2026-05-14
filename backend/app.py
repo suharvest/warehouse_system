@@ -4,6 +4,7 @@
 import os
 import logging
 import sqlite3
+import httpx
 from fastapi import FastAPI, Query, HTTPException, File, UploadFile, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -109,6 +110,9 @@ INIT_MOCK_DATA = os.environ.get('INIT_MOCK_DATA', 'true').lower() == 'true'
 ENABLE_SECURITY_HEADERS = os.environ.get('ENABLE_SECURITY_HEADERS', 'false').lower() == 'true'
 # 是否启用审计日志
 ENABLE_AUDIT_LOG = os.environ.get('ENABLE_AUDIT_LOG', 'true').lower() == 'true'
+# Factory 设备代理 API
+FACTORY_API_KEY = os.environ.get('FACTORY_API_KEY', '')
+FACTORY_API_BASE_URL = os.environ.get('FACTORY_API_BASE_URL', 'https://watcher-agent-api.seeed.cc')
 # Excel上传限制
 MAX_UPLOAD_SIZE_MB = int(os.environ.get('MAX_UPLOAD_SIZE_MB', '10'))
 MAX_IMPORT_ROWS = int(os.environ.get('MAX_IMPORT_ROWS', '10000'))
@@ -1435,7 +1439,8 @@ async def setup_admin(request: SetupRequest, response: Response):
             display_name=request.display_name,
             role=RoleName.ADMIN.value,
             tenant_id=setup_tenant_id
-        )
+        ),
+        is_first_login=True,
     )
 
 
@@ -1446,7 +1451,7 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
     user_stmt = select(
         _t_users.c.id, _t_users.c.username, _t_users.c.password_hash,
         _t_users.c.display_name, _t_users.c.role, _t_users.c.is_disabled,
-        _t_users.c.tenant_id,
+        _t_users.c.tenant_id, _t_users.c.last_login_at,
         _t_tenants.c.is_active.label('tenant_is_active'),
     ).select_from(
         _t_users.outerjoin(_t_tenants, _t_users.c.tenant_id == _t_tenants.c.id)
@@ -1501,6 +1506,15 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
     if new_hash is not None:
         logger.info(f"Password upgraded to bcrypt for user: {user.username}")
 
+    # 判断是否首次登录
+    is_first_login = user.last_login_at is None
+
+    # 更新 last_login_at
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_users).where(_t_users.c.id == user.id).values(last_login_at=datetime.now())
+        )
+
     # 审计日志
     audit_log("LOGIN", user.id, user.username, {"role": user.role})
 
@@ -1522,7 +1536,8 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
             display_name=user.display_name,
             role=user.role,
             tenant_id=user.tenant_id
-        )
+        ),
+        is_first_login=is_first_login,
     )
 
 
@@ -5750,6 +5765,66 @@ async def confirm_import_excel(
     )
 
 
+@app.get("/api/materials/import-excel/sample")
+async def download_sample_excel(
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
+):
+    """下载导入示例文件"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from io import BytesIO
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "库存数据"
+
+    CANONICAL = [
+        "物料名称", "规格", "物料编码(SKU)", "分类", "单位",
+        "安全库存", "批次号", "库存", "存放位置", "联系方",
+    ]
+    SAMPLES = [
+        ["M3 螺丝", "黑色 10mm", "SKU-0001", "紧固件", "个", 100, "B20260501-001", 500, "A-01-03", "深圳XX五金"],
+        ["M3 螺丝", "银色 8mm", "SKU-0002", "紧固件", "个", 80, "B20260502-001", 300, "A-01-04", "深圳XX五金"],
+        ["M6 螺母", "", "SKU-0003", "紧固件", "个", 200, "B20260503-001", 1000, "A-02-01", "东莞YY金属"],
+        ["钢板 Q235", "200x200x5mm", "SKU-0004", "板材", "张", 50, "", 150, "B-03-01", "佛山ZZ钢材"],
+    ]
+    WIDTHS = [16, 14, 20, 12, 8, 12, 20, 10, 14, 18]
+
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    for c, h in enumerate(CANONICAL, 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    for r, row in enumerate(SAMPLES, 2):
+        for c, val in enumerate(row, 1):
+            cell = ws.cell(row=r, column=c, value=val)
+            cell.border = thin_border
+
+    for i, w in enumerate(WIDTHS, 1):
+        col_letter = chr(64 + i)
+        ws.column_dimensions[col_letter].width = w
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=warehouse_import_sample.xlsx"},
+    )
+
+
 @app.get("/api/inventory/export-excel")
 def export_inventory_records(
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
@@ -6056,7 +6131,8 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
         warehouse_id=row['warehouse_id'] if 'warehouse_id' in row.keys() else None,
         warehouse_name=warehouse_name,
         tenant_id=row['tenant_id'] if 'tenant_id' in row.keys() else None,
-        tenant_name=tenant_name
+        tenant_name=tenant_name,
+        device_id=row.get('device_id'),
     )
 
 
@@ -6077,6 +6153,7 @@ async def list_mcp_connections(
             _t_mcp_connections.c.restart_count, _t_mcp_connections.c.debug_mode,
             _t_mcp_connections.c.created_at, _t_mcp_connections.c.updated_at,
             _t_mcp_connections.c.warehouse_id, _t_mcp_connections.c.tenant_id,
+            _t_mcp_connections.c.device_id,
             _t_warehouses.c.name.label('warehouse_name'),
             _t_tenants.c.name.label('tenant_name'),
         )
@@ -6122,6 +6199,23 @@ async def create_mcp_connection(
     # 验证角色
     role = request.role if request.role in _VALID_ROLE_VALUES else RoleName.OPERATE.value
 
+    # 规范化 device_id：strip 后空字符串视为 None
+    raw_device_id = request.device_id.strip() if request.device_id else None
+    device_id = raw_device_id if raw_device_id else None
+
+    # 设备去重校验
+    if device_id:
+        with get_engine().connect() as sa_conn:
+            existing = sa_conn.execute(
+                select(_t_mcp_connections.c.id, _t_mcp_connections.c.name)
+                .where(_t_mcp_connections.c.device_id == device_id)
+            ).first()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"设备 ID {device_id} 已被「{existing.name}」注册，一个设备只能注册一次",
+            )
+
     # 自动生成 API Key
     api_key_plain = generate_api_key()
     key_hash = hash_api_key(api_key_plain)
@@ -6148,21 +6242,28 @@ async def create_mcp_connection(
             )
         )
         # 创建 MCP 连接记录
-        sa_conn.execute(
-            insert(_t_mcp_connections).values(
-                id=conn_id,
-                name=request.name,
-                mcp_endpoint=request.mcp_endpoint,
-                api_key=api_key_plain,
-                role=role,
-                auto_start=1 if request.auto_start else 0,
-                warehouse_id=wh_id,
-                tenant_id=conn_tenant_id,
-                status='stopped',
-                created_at=now,
-                updated_at=now,
+        try:
+            sa_conn.execute(
+                insert(_t_mcp_connections).values(
+                    id=conn_id,
+                    name=request.name,
+                    mcp_endpoint=request.mcp_endpoint,
+                    api_key=api_key_plain,
+                    role=role,
+                    auto_start=1 if request.auto_start else 0,
+                    warehouse_id=wh_id,
+                    tenant_id=conn_tenant_id,
+                    device_id=device_id,
+                    status='stopped',
+                    created_at=now,
+                    updated_at=now,
+                )
             )
-        )
+        except IntegrityError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"设备 ID {device_id} 已被其他连接注册，一个设备只能注册一次",
+            )
 
     # 如果 auto_start，立即启动
     if request.auto_start:
@@ -6235,6 +6336,29 @@ async def update_mcp_connection(
         mcp_values['tenant_id'] = new_tenant_id
         apikey_values['warehouse_id'] = new_wh_id
         apikey_values['tenant_id'] = new_tenant_id
+    if request.device_id is not None:
+        # 规范化 device_id：strip 后空字符串视为解除绑定（传 NULL）
+        raw = request.device_id.strip()
+        new_device_id = raw if raw else None
+
+        # 设备去重校验（排除自身）
+        if new_device_id:
+            with get_engine().connect() as sa_conn:
+                existing = sa_conn.execute(
+                    select(_t_mcp_connections.c.id, _t_mcp_connections.c.name)
+                    .where(
+                        and_(
+                            _t_mcp_connections.c.device_id == new_device_id,
+                            _t_mcp_connections.c.id != conn_id,
+                        )
+                    )
+                ).first()
+            if existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"设备 ID {new_device_id} 已被「{existing.name}」注册，一个设备只能注册一次",
+                )
+        mcp_values['device_id'] = new_device_id
 
     if mcp_values:
         mcp_values['updated_at'] = datetime.now().isoformat()
@@ -6245,11 +6369,17 @@ async def update_mcp_connection(
                     .where(_t_api_keys.c.key_hash == key_hash)
                     .values(**apikey_values)
                 )
-            sa_conn.execute(
-                update(_t_mcp_connections)
-                .where(_t_mcp_connections.c.id == conn_id)
-                .values(**mcp_values)
-            )
+            try:
+                sa_conn.execute(
+                    update(_t_mcp_connections)
+                    .where(_t_mcp_connections.c.id == conn_id)
+                    .values(**mcp_values)
+                )
+            except IntegrityError:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"设备 ID {new_device_id} 已被其他连接注册，一个设备只能注册一次",
+                )
 
     with get_engine().connect() as sa_conn:
         _r = sa_conn.execute(
@@ -7645,6 +7775,39 @@ async def face_delete_subject(
             delete(_t_face_subjects).where(_t_face_subjects.c.id == subject_id)
         )
         return {"success": True}
+
+
+# ============ Factory 设备代理 API ============
+
+@app.get("/factory/devices")
+async def factory_devices(
+    request: Request,
+    page: int = Query(1, ge=1, description="页码，最小值 1"),
+    pageSize: int = Query(20, ge=1, le=100, description="每页数量，范围 1~100"),
+    query: Optional[str] = Query(None, description="搜索关键词（如设备 ID）"),
+):
+    """代理小智开发者设备查询接口，透传原始 JSON 结构。"""
+    # 验证 X-Factory-Key
+    incoming_key = request.headers.get("X-Factory-Key", "")
+    if not FACTORY_API_KEY or incoming_key != FACTORY_API_KEY:
+        return JSONResponse(
+            status_code=401,
+            content={"success": False, "message": "Unauthorized"},
+        )
+
+    upstream_url = f"{FACTORY_API_BASE_URL}/api/developers/devices"
+    params = {"page": page, "pageSize": pageSize}
+    if query:
+        params["query"] = query
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(upstream_url, params=params, headers={"X-Factory-Key": FACTORY_API_KEY})
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Upstream API timeout")
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Upstream API unavailable")
 
 
 # ============ 前端静态文件（all-in-one 部署）============

@@ -407,6 +407,7 @@ class LoginResponse(BaseModel):
     success: bool
     message: str
     user: Optional[UserInfo] = None
+    is_first_login: bool = False
 
 
 class CreateUserRequest(BaseModel):
@@ -628,6 +629,7 @@ class CreateMCPConnectionRequest(BaseModel):
     role: str = 'operate'  # 'admin' | 'operate' | 'view'
     auto_start: bool = True
     warehouse_id: Optional[int] = None  # 仓库ID（关联的MCP代理归属仓库）
+    device_id: Optional[str] = None  # 设备ID，全局唯一，用于设备去重
 
 
 class UpdateMCPConnectionRequest(BaseModel):
@@ -637,6 +639,7 @@ class UpdateMCPConnectionRequest(BaseModel):
     role: Optional[str] = None  # 'admin' | 'operate' | 'view'
     auto_start: Optional[bool] = None
     warehouse_id: Optional[int] = None
+    device_id: Optional[str] = None  # 设备ID，变更时同样做唯一校验
 
 
 class MCPConnectionItem(BaseModel):
@@ -660,6 +663,7 @@ class MCPConnectionItem(BaseModel):
     warehouse_name: Optional[str] = None
     tenant_id: Optional[int] = None
     tenant_name: Optional[str] = None
+    device_id: Optional[str] = None
 
 
 class MCPConnectionResponse(BaseModel):
