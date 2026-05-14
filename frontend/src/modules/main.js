@@ -13,7 +13,7 @@ import { initFilterDrawers, refreshFilterDrawerI18n } from './ui/filter-drawer.j
 import { switchTab, initFromHash, startAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules, renderWarehouseSwitcher, toggleWarehouseSwitcher, selectWarehouse } from './ui/tabs.js';
 
 // 功能模块
-import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks, initSessionExpiredHandler } from './features/auth.js';
+import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks, initSessionExpiredHandler, openRegisterModal, closeRegisterModal, registerVerifyDevice, registerSubmit, registerResetPassword, backToRegisterStep1 } from './features/auth.js';
 import { initCharts, loadDashboardData, onTotalStockClick, onTodayInClick, onTodayOutClick, onLowStockClick, setDashboardCallbacks } from './features/dashboard.js';
 import { loadInventory, inventoryGoToPage, changeInventoryPageSize, applyInventoryFilter, resetInventoryFilter, applyInventoryFilters, setInventoryCallbacks } from './features/inventory.js';
 import { loadRecords, recordsGoToPage, changeRecordsPageSize, applyRecordsFilter, resetRecordsFilter, applyRecordsFilters, loadRecordsFilterOptions, showAddRecordModal, showAddRecordModalForProduct, closeAddRecordModal, submitAddRecord, setRecordsCallbacks } from './features/records.js';
@@ -282,6 +282,14 @@ const actionHandlers = {
     'handleLogout': handleLogout,
     'handleSetup': () => handleSetup(new Event('click')),
 
+    // 自助注册
+    'openRegisterModal': openRegisterModal,
+    'closeRegisterModal': closeRegisterModal,
+    'registerVerifyDevice': () => registerVerifyDevice(),
+    'registerSubmit': () => registerSubmit(),
+    'registerResetPassword': () => registerResetPassword(),
+    'backToRegisterStep1': backToRegisterStep1,
+
     // 用户管理
     'showAddUserModal': showAddUserModal,
     'closeAddUserModal': closeAddUserModal,
@@ -535,6 +543,28 @@ function initEventDelegation() {
         } else if (form.id === 'setup-form') {
             e.preventDefault();
             handleSetup(e);
+        }
+    });
+
+    // 注册弹窗 Enter 键支持
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        const registerModal = document.getElementById('registerModal');
+        if (!registerModal || !registerModal.classList.contains('show')) return;
+
+        const step1Visible = document.getElementById('register-step1').style.display !== 'none';
+        const step2NewVisible = document.getElementById('register-step2-new').style.display !== 'none';
+        const step2ResetVisible = document.getElementById('register-step2-reset').style.display !== 'none';
+
+        if (step1Visible) {
+            e.preventDefault();
+            registerVerifyDevice();
+        } else if (step2NewVisible) {
+            e.preventDefault();
+            registerSubmit();
+        } else if (step2ResetVisible) {
+            e.preventDefault();
+            registerResetPassword();
         }
     });
 

@@ -176,6 +176,14 @@ export function showLoginModal() {
     document.getElementById('login-modal').classList.add('show');
     document.getElementById('login-username').focus();
     document.getElementById('login-error').style.display = 'none';
+
+    // 多租户模式 + 已初始化 → 显示「注册新租户」按钮
+    const dm = getDeployMode();
+    const initialized = getIsSystemInitialized();
+    const registerRow = document.getElementById('register-link-row');
+    if (registerRow) {
+        registerRow.style.display = (dm === 'multi_tenant' && initialized) ? 'block' : 'none';
+    }
 }
 
 // 关闭登录模态框
@@ -298,5 +306,218 @@ export async function handleSetup(event) {
         console.error('设置失败:', error);
         errorDiv.textContent = t('operationFailed');
         errorDiv.style.display = 'block';
+    }
+}
+
+// ============ 自助注册 ============
+
+export function openRegisterModal() {
+    closeLoginModal();
+    document.getElementById('registerModal').classList.add('show');
+    showRegisterStep1();
+}
+
+export function closeRegisterModal() {
+    document.getElementById('registerModal').classList.remove('show');
+    resetRegisterForm();
+}
+
+function showRegisterStep1() {
+    document.getElementById('register-modal-title').textContent = '注册新租户';
+    document.getElementById('register-step1').style.display = 'block';
+    document.getElementById('register-step2-new').style.display = 'none';
+    document.getElementById('register-step2-reset').style.display = 'none';
+    document.getElementById('register-footer-step1').style.display = '';
+    document.getElementById('register-footer-step2-new').style.display = 'none';
+    document.getElementById('register-footer-step2-reset').style.display = 'none';
+    document.getElementById('register-step1-error').style.display = 'none';
+    document.getElementById('register-device-id').value = '';
+    document.getElementById('register-device-id').focus();
+}
+
+function showRegisterStep2New() {
+    document.getElementById('register-modal-title').textContent = '创建管理员账号';
+    document.getElementById('register-step1').style.display = 'none';
+    document.getElementById('register-step2-new').style.display = 'block';
+    document.getElementById('register-step2-reset').style.display = 'none';
+    document.getElementById('register-footer-step1').style.display = 'none';
+    document.getElementById('register-footer-step2-new').style.display = '';
+    document.getElementById('register-footer-step2-reset').style.display = 'none';
+    document.getElementById('register-username').focus();
+}
+
+function showRegisterStep2Reset(tenantName) {
+    document.getElementById('register-modal-title').textContent = `重置密码 — ${tenantName}`;
+    document.getElementById('register-step1').style.display = 'none';
+    document.getElementById('register-step2-new').style.display = 'none';
+    document.getElementById('register-step2-reset').style.display = 'block';
+    document.getElementById('register-footer-step1').style.display = 'none';
+    document.getElementById('register-footer-step2-new').style.display = 'none';
+    document.getElementById('register-footer-step2-reset').style.display = '';
+    document.getElementById('register-reset-password').focus();
+}
+
+function resetRegisterForm() {
+    document.getElementById('register-device-id').value = '';
+    document.getElementById('register-username').value = '';
+    document.getElementById('register-password').value = '';
+    document.getElementById('register-display-name').value = '';
+    document.getElementById('register-reset-password').value = '';
+    document.getElementById('register-step1-error').style.display = 'none';
+    document.getElementById('register-step2-new-error').style.display = 'none';
+    document.getElementById('register-step2-reset-error').style.display = 'none';
+}
+
+export function backToRegisterStep1() {
+    showRegisterStep1();
+}
+
+let registerDeviceOk = false;
+
+export async function registerVerifyDevice() {
+    const deviceId = document.getElementById('register-device-id').value.trim();
+    const errorDiv = document.getElementById('register-step1-error');
+    const checkingDiv = document.getElementById('register-step1-checking');
+    const btn = document.getElementById('register-step1-btn');
+
+    if (!deviceId) {
+        errorDiv.textContent = '请输入设备 ID';
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    errorDiv.style.display = 'none';
+    checkingDiv.style.display = 'block';
+    btn.disabled = true;
+    registerDeviceOk = false;
+
+    try {
+        const resp = await fetch('/api/auth/register/verify-device', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId }),
+        });
+
+        const data = await resp.json();
+
+        if (!data.authorized) {
+            errorDiv.textContent = '设备未授权，请确认设备 ID 正确';
+            errorDiv.style.display = 'block';
+            return;
+        }
+
+        registerDeviceOk = true;
+
+        if (data.registered) {
+            showRegisterStep2Reset(data.tenant_name || '未知租户');
+        } else {
+            showRegisterStep2New();
+        }
+    } catch (e) {
+        console.error('设备验证失败:', e);
+        if (resp && resp.status === 503) {
+            errorDiv.textContent = '设备验证服务未配置，请联系管理员';
+        } else {
+            errorDiv.textContent = '验证失败，请稍后重试';
+        }
+        errorDiv.style.display = 'block';
+    } finally {
+        checkingDiv.style.display = 'none';
+        btn.disabled = false;
+    }
+}
+
+export async function registerSubmit() {
+    const deviceId = document.getElementById('register-device-id').value.trim();
+    const username = document.getElementById('register-username').value.trim();
+    const password = document.getElementById('register-password').value;
+    const displayName = document.getElementById('register-display-name').value.trim();
+    const errorDiv = document.getElementById('register-step2-new-error');
+    const submittingDiv = document.getElementById('register-step2-submitting');
+    const btn = document.getElementById('register-step2-new-btn');
+
+    if (!username || !password) {
+        errorDiv.textContent = '用户名和密码不能为空';
+        errorDiv.style.display = 'block';
+        return;
+    }
+    if (password.length < 6) {
+        errorDiv.textContent = '密码长度至少6位';
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    errorDiv.style.display = 'none';
+    submittingDiv.style.display = 'block';
+    btn.disabled = true;
+
+    try {
+        const resp = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId, username, password, display_name: displayName || undefined }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            closeRegisterModal();
+            setCurrentUser(data.user);
+            setIsSystemInitialized(true);
+            await updateUserDisplay();
+            updatePermissionUI();
+            setTimeout(() => startOnboarding(), 500);
+        } else {
+            errorDiv.textContent = data.message || data.detail || '注册失败';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        console.error('注册失败:', e);
+        errorDiv.textContent = '注册失败，请稍后重试';
+        errorDiv.style.display = 'block';
+    } finally {
+        submittingDiv.style.display = 'none';
+        btn.disabled = false;
+    }
+}
+
+export async function registerResetPassword() {
+    const deviceId = document.getElementById('register-device-id').value.trim();
+    const newPassword = document.getElementById('register-reset-password').value;
+    const errorDiv = document.getElementById('register-step2-reset-error');
+    const resettingDiv = document.getElementById('register-step2-resetting');
+    const btn = document.getElementById('register-step2-reset-btn');
+
+    if (!newPassword || newPassword.length < 6) {
+        errorDiv.textContent = '密码长度至少6位';
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    errorDiv.style.display = 'none';
+    resettingDiv.style.display = 'block';
+    btn.disabled = true;
+
+    try {
+        const resp = await fetch('/api/auth/reset-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: deviceId, new_password: newPassword }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            alert(data.message);
+            closeRegisterModal();
+        } else {
+            errorDiv.textContent = data.message || data.detail || '重置失败';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        console.error('重置密码失败:', e);
+        errorDiv.textContent = '重置失败，请稍后重试';
+        errorDiv.style.display = 'block';
+    } finally {
+        resettingDiv.style.display = 'none';
+        btn.disabled = false;
     }
 }

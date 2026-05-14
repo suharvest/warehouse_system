@@ -41,6 +41,8 @@ from models import (
     # Auth models
     AuthStatusResponse, UserInfo, SetupRequest, LoginRequest, LoginResponse,
     CreateUserRequest, UpdateUserRequest, UserListItem,
+    # Registration models
+    VerifyDeviceRequest, VerifyDeviceResponse, RegisterRequest, ResetPasswordRequest,
     CreateApiKeyRequest, ApiKeyStatusRequest, ApiKeyResponse, ApiKeyListItem,
     # Contact models
     CreateContactRequest, UpdateContactRequest, ContactItem, ContactListItem,
@@ -662,6 +664,8 @@ def _audit_routes() -> None:
         "/api/auth/login",
         "/api/auth/logout",
         "/api/auth/status",
+        "/api/auth/register",        # 自助注册（multi_tenant）
+        "/api/auth/reset-password",  # 凭设备ID重置密码
         "/api/system/mode",  # 部署元信息（single/multi tenant），前端在登录前就要据此渲染 UI
         "/docs",
         "/openapi.json",
@@ -1380,6 +1384,223 @@ async def get_auth_status(current_user: CurrentUser = Depends(get_current_user))
         ),
         system_mode=system_mode,
     )
+
+
+# ============ Registration APIs (multi_tenant self-service) ============
+
+@app.post("/api/auth/register/verify-device", response_model=VerifyDeviceResponse)
+async def register_verify_device(body: VerifyDeviceRequest):
+    """Step 1: 验证设备 ID 是否在工厂库中，以及是否已被注册。"""
+    device_id = body.device_id.strip()
+
+    if not FACTORY_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "Device verification not configured"},
+        )
+
+    # 调上游工厂 API 验证设备是否存在
+    upstream_url = f"{FACTORY_API_BASE_URL}/api/developers/devices"
+    authorized = False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                upstream_url,
+                params={"query": device_id, "page": 1, "pageSize": 1},
+                headers={"X-Factory-Key": FACTORY_API_KEY},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success") and data.get("data", {}).get("list"):
+                    authorized = True
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Device verification service unavailable")
+
+    if not authorized:
+        return VerifyDeviceResponse(authorized=False, registered=False)
+
+    # 查该设备是否已被某租户绑定
+    with get_engine().connect() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_tenants.c.name).where(_t_tenants.c.device_id == device_id)
+        ).first()
+
+    if existing:
+        return VerifyDeviceResponse(authorized=True, registered=True, tenant_name=existing.name)
+
+    return VerifyDeviceResponse(authorized=True, registered=False)
+
+
+@app.post("/api/auth/register")
+async def register_tenant(body: RegisterRequest, response: Response):
+    """Step 2: 创建租户 + admin 账号 + 默认仓库，绑定设备 ID。"""
+    if get_deploy_mode() != "multi_tenant":
+        raise HTTPException(status_code=403, detail="自助注册仅在多租户模式下可用")
+
+    if not has_admin_user():
+        raise HTTPException(status_code=400, detail="系统尚未初始化，请先创建全局管理员")
+
+    device_id = body.device_id.strip()
+    username = body.username.strip()
+    password = body.password.strip()
+
+    if not device_id or not username or not password:
+        raise HTTPException(status_code=400, detail="设备ID、用户名、密码均不能为空")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码长度至少6位")
+
+    # 再次验证设备（防止并发注册）
+    if not FACTORY_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "Device verification not configured"},
+        )
+    upstream_url = f"{FACTORY_API_BASE_URL}/api/developers/devices"
+    authorized = False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                upstream_url,
+                params={"query": device_id, "page": 1, "pageSize": 1},
+                headers={"X-Factory-Key": FACTORY_API_KEY},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success") and data.get("data", {}).get("list"):
+                    authorized = True
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Device verification service unavailable")
+
+    if not authorized:
+        raise HTTPException(status_code=400, detail="设备未授权，请确认设备 ID 正确")
+
+    # 生成租户 slug
+    tenant_slug_base = f"tenant-{secrets.token_hex(4)}"
+
+    with get_engine().begin() as sa_conn:
+        # 检查 device_id 唯一性
+        existing = sa_conn.execute(
+            select(_t_tenants.c.id).where(_t_tenants.c.device_id == device_id)
+        ).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="该设备已注册，如需重置密码请使用找回密码功能")
+
+        # 创建租户
+        result = sa_conn.execute(
+            insert(_t_tenants).values(
+                slug=tenant_slug_base,
+                name=f"租户-{device_id}",
+                device_id=device_id,
+            )
+        )
+        tenant_id = result.inserted_primary_key[0]
+
+        # 创建默认仓库
+        wh_result = sa_conn.execute(
+            insert(_t_warehouses).values(
+                slug=f"wh-{tenant_slug_base}",
+                name="默认仓库",
+                is_default=1,
+                tenant_id=tenant_id,
+                created_at=datetime.now(),
+            )
+        )
+        wh_id = wh_result.inserted_primary_key[0]
+
+        # 创建 admin 用户
+        password_hash = hash_password(password)
+        result = sa_conn.execute(
+            insert(_t_users).values(
+                username=username,
+                password_hash=password_hash,
+                display_name=body.display_name or username,
+                role=RoleName.ADMIN.value,
+                tenant_id=tenant_id,
+                created_by=None,
+            )
+        )
+        user_id = result.inserted_primary_key[0]
+
+        # 授权仓库
+        sa_conn.execute(
+            insert(_t_user_warehouses).values(user_id=user_id, warehouse_id=wh_id)
+        )
+
+        # 创建 session 自动登录
+        token = generate_session_token()
+        expires_at = datetime.now() + timedelta(hours=24)
+        sa_conn.execute(
+            insert(_t_sessions).values(user_id=user_id, token=token, expires_at=expires_at)
+        )
+
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        max_age=86400,
+        samesite="lax",
+        secure=False,
+    )
+
+    return {
+        "success": True,
+        "message": "注册成功",
+        "user": {
+            "id": user_id,
+            "username": username,
+            "display_name": body.display_name or username,
+            "role": RoleName.ADMIN.value,
+            "tenant_id": tenant_id,
+        },
+    }
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(body: ResetPasswordRequest):
+    """凭设备 ID 重置租户 admin 密码。"""
+    if get_deploy_mode() != "multi_tenant":
+        raise HTTPException(status_code=403, detail="仅在多租户模式下可用")
+
+    device_id = body.device_id.strip()
+    new_password = body.new_password.strip()
+
+    if not device_id or not new_password:
+        raise HTTPException(status_code=400, detail="设备ID和新密码均不能为空")
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="密码长度至少6位")
+
+    with get_engine().begin() as sa_conn:
+        # 查租户
+        tenant_row = sa_conn.execute(
+            select(_t_tenants.c.id, _t_tenants.c.name)
+            .where(_t_tenants.c.device_id == device_id)
+        ).first()
+        if not tenant_row:
+            raise HTTPException(status_code=404, detail="未找到该设备绑定的租户")
+
+        # 查该租户的 admin 用户
+        admin_row = sa_conn.execute(
+            select(_t_users.c.id, _t_users.c.username)
+            .where(
+                and_(
+                    _t_users.c.tenant_id == tenant_row.id,
+                    _t_users.c.role == RoleName.ADMIN.value,
+                    _t_users.c.is_disabled == 0,
+                )
+            )
+            .order_by(_t_users.c.id.asc())
+            .limit(1)
+        ).first()
+        if not admin_row:
+            raise HTTPException(status_code=404, detail="未找到该租户的管理员账号")
+
+        # 重置密码
+        new_hash = hash_password(new_password)
+        sa_conn.execute(
+            update(_t_users).where(_t_users.c.id == admin_row.id).values(password_hash=new_hash)
+        )
+
+    return {"success": True, "message": f"租户「{tenant_row.name}」管理员 {admin_row.username} 密码已重置"}
 
 
 

@@ -1500,10 +1500,75 @@
                     </div>
                     <div class="form-error" id="login-error" style="display:none;"></div>
                 </form>
+                <div id="register-link-row" style="display:none; margin-top:12px; text-align:center;">
+                    <button class="btn btn-link" id="register-link-btn" data-action="openRegisterModal" style="background:none;border:none;color:var(--primary-color,#4a90e2);cursor:pointer;font-size:14px;padding:0;text-decoration:underline;">注册新租户</button>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn cancel-btn" data-action="closeLoginModal" data-i18n="cancel">取消</button>
                 <button class="btn confirm-btn" data-action="handleLogin" data-i18n="login">登录</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自助注册模态框 -->
+    <div id="registerModal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 id="register-modal-title">注册新租户</h3>
+                <button class="close-btn" data-action="closeRegisterModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Step 1: 验证设备 -->
+                <div id="register-step1">
+                    <p style="color:#666;font-size:13px;margin-bottom:12px;">请输入设备 ID 以验证身份</p>
+                    <div class="form-group">
+                        <label>设备 ID <span class="required">*</span></label>
+                        <input type="text" id="register-device-id" placeholder="如：2074650">
+                    </div>
+                    <div class="form-error" id="register-step1-error" style="display:none;"></div>
+                    <div id="register-step1-checking" style="display:none;color:#666;font-size:13px;margin-top:8px;">正在验证设备...</div>
+                </div>
+                <!-- Step 2: 新建租户 -->
+                <div id="register-step2-new" style="display:none;">
+                    <p style="color:#666;font-size:13px;margin-bottom:12px;">设备验证通过，请设置管理员账号</p>
+                    <div class="form-group">
+                        <label>用户名 <span class="required">*</span></label>
+                        <input type="text" id="register-username" placeholder="管理员用户名">
+                    </div>
+                    <div class="form-group">
+                        <label>密码 <span class="required">*</span></label>
+                        <input type="password" id="register-password" placeholder="至少6位">
+                    </div>
+                    <div class="form-group">
+                        <label>显示名称</label>
+                        <input type="text" id="register-display-name" placeholder="可选">
+                    </div>
+                    <div class="form-error" id="register-step2-new-error" style="display:none;"></div>
+                    <div id="register-step2-submitting" style="display:none;color:#666;font-size:13px;margin-top:8px;">正在创建租户...</div>
+                </div>
+                <!-- Step 2: 重置密码（已注册设备） -->
+                <div id="register-step2-reset" style="display:none;">
+                    <p style="color:#666;font-size:13px;margin-bottom:12px;">该设备已注册，可重置管理员密码</p>
+                    <div class="form-group">
+                        <label>新密码 <span class="required">*</span></label>
+                        <input type="password" id="register-reset-password" placeholder="至少6位">
+                    </div>
+                    <div class="form-error" id="register-step2-reset-error" style="display:none;"></div>
+                    <div id="register-step2-resetting" style="display:none;color:#666;font-size:13px;margin-top:8px;">正在重置密码...</div>
+                </div>
+            </div>
+            <div class="modal-footer" id="register-footer-step1">
+                <button class="btn cancel-btn" data-action="closeRegisterModal">取消</button>
+                <button class="btn confirm-btn" id="register-step1-btn" data-action="registerVerifyDevice">验证设备</button>
+            </div>
+            <div class="modal-footer" id="register-footer-step2-new" style="display:none;">
+                <button class="btn cancel-btn" data-action="backToRegisterStep1">返回</button>
+                <button class="btn confirm-btn" id="register-step2-new-btn" data-action="registerSubmit">完成注册</button>
+            </div>
+            <div class="modal-footer" id="register-footer-step2-reset" style="display:none;">
+                <button class="btn cancel-btn" data-action="backToRegisterStep1">返回</button>
+                <button class="btn confirm-btn" id="register-step2-reset-btn" data-action="registerResetPassword">重置密码</button>
             </div>
         </div>
     </div>
