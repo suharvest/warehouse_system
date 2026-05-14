@@ -6,6 +6,7 @@ import {
     getIsSystemInitialized, setIsSystemInitialized,
     getCurrentTab, getDeployMode
 } from '../state.js';
+import { startOnboarding } from './onboarding.js';
 
 // 标记是否已显示过期提示（避免重复弹窗）
 let sessionExpiredNotified = false;
@@ -203,6 +204,9 @@ export async function handleLogin(event) {
 
         if (data.success) {
             setCurrentUser(data.user);
+            if (data.is_first_login) {
+                setTimeout(() => startOnboarding(), 500);
+            }
             if (onLoginSuccessFn) await onLoginSuccessFn();
             closeLoginModal();
             await updateUserDisplay();
@@ -280,6 +284,9 @@ export async function handleSetup(event) {
             setCurrentUser(data.user);
             setIsSystemInitialized(true);
             document.getElementById('setup-modal').classList.remove('show');
+            if (data.is_first_login) {
+                setTimeout(() => startOnboarding(), 500);
+            }
             await updateUserDisplay();
             updatePermissionUI();
             if (onLoginSuccessFn) await onLoginSuccessFn();

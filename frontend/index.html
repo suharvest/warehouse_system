@@ -1268,7 +1268,12 @@
                         <input type="text" id="mcp-conn-name" placeholder="仓库A - 深圳" required>
                     </div>
                     <div class="form-group">
-                        <label><span>Endpoint</span> <span class="required">*</span></label>
+                        <label>
+                            <span>Endpoint</span> <span class="required">*</span>
+                            <span class="help-icon">?
+                                <span class="help-tooltip">前往 <a href="https://sensecraft.seeed.cc/ai/device/local/37/" target="_blank" rel="noopener">SenseCraft 平台</a> → 选择设备 → 复制 WebSocket 连接地址</span>
+                            </span>
+                        </label>
                         <input type="text" id="mcp-conn-endpoint" placeholder="wss://sensecraft..." required>
                     </div>
                     <div class="form-group">
@@ -1313,6 +1318,12 @@
                             <p data-i18n="dropFileHere">点击选择Excel文件</p>
                         </div>
                     </label>
+                    <a href="#" data-action="downloadSampleExcel" style="display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; font-size: 13px; color: var(--primary-color, #3b82f6); text-decoration: none;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                        </svg>
+                        <span>下载示例文件</span>
+                    </a>
                 </div>
                 <div id="preview-area" style="display:none;">
                     <h4 data-i18n="importPreview">导入预览</h4>
