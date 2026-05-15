@@ -22,6 +22,7 @@ import logging
 import yaml
 import functools
 import json
+from datetime import datetime
 
 # 调试模式：MCP_DEBUG=1 时打印每个 tool 的入参和返回值到 stderr（由 mcp_pipe.py 转发到终端）
 _MCP_DEBUG = os.environ.get('MCP_DEBUG') == '1'
@@ -244,6 +245,236 @@ def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
     return None
 
 
+# ============================================================================
+# 反幻觉响应契约（最小闸门版）
+# ============================================================================
+# 设计目标：堵住 LLM 凭空编造执行结果的幻觉。
+# 真实事故：用户语音"出库批次003共3个"，后端因该批次仅2个返回失败，
+# LLM 仍口播"已出库3个，库存4个"，实际数据库零扣减。
+#
+# 闸门策略（两个硬字段）：
+#   1. facts.executed  : 布尔。是否真的改了数据库。
+#                        写工具（stock_in/out）成功才为 true；查询类永远 false。
+#                        失败时一定为 false，LLM 据此可判断"没扣"。
+#   2. speak/speak_ask/speak_failed : 三选一非空。LLM 必须照搬原文不许改写。
+#                        所有数字都已嵌入文本，LLM 无机会自己算。
+#
+# Prompt 硬规则（注入到每个 tool docstring 的 _RULES_FOOTER）告诉 LLM 怎么用。
+# ============================================================================
+
+_RULES_FOOTER = """\
+
+────────── 反幻觉硬规则（所有工具通用，违反即用户投诉） ──────────
+1. 数字必须来自响应的 facts 字段或 product/batch 字段，禁止口算或推测。
+2. 响应里有 speak / speak_ask / speak_failed 时必须**照搬原文**，禁止改写、合并、增减数字或状态描述。
+3. facts.executed=false 时操作**未发生**，禁止使用"已 / 完成 / 成功 / 出库了 / 入库了"等表示写入的词。
+4. success=false 时禁止生成成功结果；只能播报 speak_failed 或 speak_ask，不得自行重试。
+5. candidates 非空时必须让用户从中选择；禁止自行选最高分候选，禁止从对话历史里猜实体。
+6. 用户问"现在 / 还剩 / 目前 / 最新"时必须重新调 query_stock；禁止引用 5 秒前的查询结果。
+7. truncated=true 时必须告诉用户"结果太多已截断"，禁止假装"就这些"。
+8. side_effect 字段只表示工具类型（如 stock_out 表示这是出库工具），**不表示真的执行了**。
+   实际是否执行只看 facts.executed。
+9. 工具响应若缺少 speak / speak_ask / speak_failed 任一字段非空，必须回答"系统返回不完整，
+   我不能确认结果"，禁止编造业务结论。
+10. 用户说"你看着办 / 帮我处理"等模糊指令，涉及写操作时仍必须调工具并以工具结果为准；
+    禁止口头承诺已处理。
+11. next_action 决定下一步：
+    - done：仅播报 speak。
+    - ask_user_to_choose：用 speak_ask 问用户，等用户选了候选再继续。
+    - ask_user_to_confirm_partial_fallback：必须用 speak_ask 询问用户是否允许从其他批次补差额，
+      仅当用户明确说"是/可以/同意"后，再用 retry_hint.params_patch 合并到原参数重发；
+      用户说"否/不要/算了"则播报"那本次不出库"，结束。
+    - retry_forbidden / no_result：仅播报 speak_failed，禁止自动重试。
+12. retry_hint.requires_user_confirmation=true 时，未获得用户口头确认前**绝对不许**重发工具调用，
+    哪怕系统认为"显然应该补"也不行——尊重用户最终决定权。
+"""
+
+# 写操作集合 — 只有这类在 success=true 时才被认为 executed=true
+_WRITE_OPS = {"stock_in", "stock_out"}
+
+
+def _wrap_response(operation: str, resp: dict) -> dict:
+    """给所有 MCP 工具响应注入 facts.executed 和 speak/speak_ask/speak_failed。
+
+    职责：把幻觉风险点（数字、执行状态、下一步动作）全部落到结构化字段里，
+    让 LLM 无空间发挥。
+    """
+    if not isinstance(resp, dict):
+        return resp  # provider 异常情况，保持原样
+
+    success = bool(resp.get("success"))
+    facts = resp.setdefault("facts", {})
+    facts["query_at"] = datetime.now().isoformat(timespec="seconds")
+    # executed = "数据库真的被改了吗"
+    facts["executed"] = success and (operation in _WRITE_OPS)
+    resp["side_effect"] = (
+        "inventory_out" if operation == "stock_out"
+        else "inventory_in" if operation == "stock_in"
+        else "none"
+    )
+
+    speak = speak_ask = speak_failed = None
+    next_action = "done" if success else "retry_forbidden"
+    retry_hint = None
+
+    if operation == "stock_out":
+        if success:
+            p = resp.get("product") or {}
+            bcs = resp.get("batch_consumptions") or []
+            unit = (p.get("unit") or "个")
+            details = "、".join(
+                f"批次{b.get('batch_no')}出{b.get('quantity')}{unit}" for b in bcs
+            )
+            tail = f"（{details}）" if details else ""
+            speak = (
+                f"已出库{p.get('name', '')}共{p.get('out_quantity', '?')}{unit}{tail}，"
+                f"当前库存{p.get('new_quantity', '?')}{unit}。"
+            )
+        else:
+            err = resp.get("error") or ""
+            msg = resp.get("message") or "出库失败"
+            if err in ("ambiguous_name", "location_ambiguous"):
+                cands = resp.get("candidates") or []
+                names = "、".join((c.get("name") or "") for c in cands[:5])
+                speak_ask = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+                next_action = "ask_user_to_choose"
+            elif err == "batch_insufficient_stock":
+                bn = resp.get("batch_no_requested") or "该批次"
+                avail = resp.get("batch_available")
+                short = resp.get("shortfall")
+                can = resp.get("can_fallback")
+                other = resp.get("fallback_total_available")
+                if can:
+                    # 进入"询问用户是否允许从其他批次补差额"流程
+                    speak_ask = (
+                        f"批次{bn}只有{avail}个，缺{short}个；其他批次合计{other}个可补。"
+                        f"要不要先扣完{bn}的{avail}个，再从其他批次补{short}个？请说是或否。"
+                    )
+                    next_action = "ask_user_to_confirm_partial_fallback"
+                    retry_hint = {
+                        "allowed": True,
+                        "tool": "stock_out",
+                        "params_patch": {"allow_partial_fallback": True},
+                        "requires_user_confirmation": True,
+                        "reason": "用户口头确认后，使用 params_patch 重发同一请求即可。",
+                    }
+                else:
+                    speak_failed = (
+                        f"本次没有扣任何库存。批次{bn}只有{avail}个，"
+                        f"其他批次合计{other}个也不够补{short}个，无法完成出库。"
+                    )
+                    next_action = "retry_forbidden"
+            else:
+                speak_failed = f"本次没有扣任何库存。{msg}"
+                next_action = "retry_forbidden"
+
+    elif operation == "stock_in":
+        if success:
+            p = resp.get("product") or {}
+            b = resp.get("batch") or {}
+            unit = (p.get("unit") or "个")
+            bn = b.get("batch_no") or "-"
+            speak = (
+                f"已入库{p.get('name', '')}{p.get('in_quantity', '?')}{unit}，"
+                f"批次号{bn}，当前库存{p.get('new_quantity', '?')}{unit}。"
+            )
+        else:
+            err = resp.get("error") or ""
+            msg = resp.get("message") or "入库失败"
+            if err == "ambiguous_name":
+                cands = resp.get("candidates") or []
+                names = "、".join((c.get("name") or "") for c in cands[:5])
+                speak_ask = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+                next_action = "ask_user_to_choose"
+            else:
+                speak_failed = f"本次没有入库。{msg}"
+                next_action = "retry_forbidden"
+
+    elif operation == "query_stock":
+        if success:
+            p = resp.get("product") or {}
+            unit = (p.get("unit") or "个")
+            qty = p.get("current_stock", "?")
+            extra = ""
+            batches = resp.get("batches") or []
+            if batches:
+                extra = f"，共{len(batches)}个批次"
+            speak = f"{p.get('name', '')}当前库存{qty}{unit}{extra}。"
+        else:
+            cands = resp.get("candidates") or []
+            if cands:
+                names = "、".join((c.get("name") or "") for c in cands[:5])
+                speak_ask = f"找到多个相似产品：{names}。请告诉我具体是哪个。"
+                next_action = "ask_user_to_choose"
+            else:
+                speak_failed = resp.get("message") or "查询失败，未找到该产品。"
+                next_action = "no_result"
+
+    elif operation == "search":
+        total = int(resp.get("total") or 0)
+        count = int(resp.get("count") or 0)
+        facts["truncated"] = total > count
+        if success and total > 0:
+            speak = f"找到{total}条匹配，已返回{count}条。"
+            if total > count:
+                speak += "结果太多已截断，可缩小关键词。"
+        elif success:
+            speak_failed = "没有找到任何匹配的结果。"
+            next_action = "no_result"
+        else:
+            speak_failed = resp.get("message") or "搜索失败。"
+            next_action = "retry_forbidden"
+
+    elif operation == "resolve_name":
+        if resp.get("confident") and resp.get("best_match"):
+            best = resp["best_match"]
+            speak = f"我识别为{best.get('name', '')}。"
+            next_action = "done"
+        elif resp.get("candidates"):
+            names = "、".join((c.get("name") or "") for c in resp["candidates"][:5])
+            speak_ask = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+            next_action = "ask_user_to_choose"
+        else:
+            speak_failed = resp.get("message") or "没有找到匹配的名称。"
+            next_action = "no_result"
+
+    elif operation == "get_today_statistics":
+        if success:
+            s = resp.get("statistics") or {}
+            speak = (
+                f"今天入库{s.get('today_in', 0)}件、出库{s.get('today_out', 0)}件，"
+                f"净变化{s.get('net_change', 0)}件，当前库存总量{s.get('total_stock', 0)}件，"
+                f"低库存{s.get('low_stock_count', 0)}个。"
+            )
+        else:
+            speak_failed = resp.get("message") or "统计查询失败。"
+
+    # 三个 speak 字段一定要全部出现（哪怕为 None），让 LLM 无歧义
+    resp["speak"] = speak
+    resp["speak_ask"] = speak_ask
+    resp["speak_failed"] = speak_failed
+    resp["next_action"] = next_action
+    resp["retry_hint"] = retry_hint
+    return resp
+
+
+def _antihallucination(operation: str):
+    """装饰器：包装返回值，注入 facts.executed / speak* / next_action / retry_hint。
+
+    设计变更（2026-05-15）：之前把 _RULES_FOOTER 追加到每个 tool 的 docstring，
+    导致 ListToolsRequest 响应体超过 xiaozhi WS 缓冲（实测 ~17KB），云端用
+    1009 (message too big) 直接关闭连接。
+    现在规则只通过 FastMCP(instructions=...) 在 initialize 阶段一次性下发，
+    不在每个 tool 描述里重复，将 ListTools 响应大小压回到 ~2KB 量级。
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return _wrap_response(operation, fn(*args, **kwargs))
+        return wrapper
+    return deco
+
+
 # 通用异常兜底：无论 provider 内部抛什么，都返回结构化 dict，让 AI 告知用户重试
 def _tool_error(op: str, e: Exception) -> dict:
     logger.error(f"{op} 异常: {e}", exc_info=True)
@@ -255,11 +486,14 @@ def _tool_error(op: str, e: Exception) -> dict:
 
 
 # 创建 MCP 服务器
-mcp = FastMCP("Warehouse System")
+# instructions 字段会在 MCP initialize 响应里下发给客户端（xiaozhi 会注入到系统 prompt），
+# 比塞进每个 tool 的 docstring 高效得多（避免 ListTools 响应过大触发 WS 1009 message too big）。
+mcp = FastMCP("Warehouse System", instructions=_RULES_FOOTER.strip())
 
 
 @mcp.tool()
 @log_mcp_call
+@_antihallucination("resolve_name")
 def resolve_name(text: str, entity_type: str = "all") -> dict:
     """
     将模糊文本（语音识别、用户口语输入等）解析为系统中精确的实体名称。
@@ -290,6 +524,7 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 
 @mcp.tool()
 @log_mcp_call
+@_antihallucination("query_stock")
 def query_stock(product_name: str, show_batches: bool = False) -> dict:
     """
     查询产品库存详情。支持模糊名称输入，内建自动解析。
@@ -320,6 +555,7 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
 
 @mcp.tool()
 @log_mcp_call
+@_antihallucination("stock_in")
 def stock_in(product_name: str, quantity: int,
              reason_category: str = "purchase", reason_note: str = "",
              operator: str = "MCP系统",
@@ -364,11 +600,13 @@ def stock_in(product_name: str, quantity: int,
 
 @mcp.tool()
 @log_mcp_call
+@_antihallucination("stock_out")
 def stock_out(product_name: str, quantity: int,
               reason_category: str, reason_note: str = "",
               operator: str = "MCP系统",
               variant: str = None, location: str = None,
-              batch_no: str = None) -> dict:
+              batch_no: str = None,
+              allow_partial_fallback: bool = False) -> dict:
     """
     产品出库。可直接传入模糊名称，自动解析为精确产品。
     默认按 FIFO 消耗批次；若指定 variant / location，则仅从匹配批次中 FIFO 消耗。
@@ -396,8 +634,12 @@ def stock_out(product_name: str, quantity: int,
                   若模糊结果歧义会返回候选让 LLM 判断。
         batch_no: 指定批次号（可选，如"B-2026-003"）。
                   用户明确说"出 B-2026-003 这批"时才传。
-                  指定后只从该批次扣，不足直接报错（不 fallback 到 FIFO 补齐）。
+                  默认指定后只从该批次扣，不足时返回 batch_insufficient_stock 失败。
                   若同时传 location/variant 与批次实际不符，会报 batch_field_mismatch。
+        allow_partial_fallback: 默认 False。仅在用户**明确确认**"愿意从其他批次补差额"
+                  后才置 True 重发。看到 next_action=ask_user_to_confirm_partial_fallback
+                  时**必须先用 speak_ask 询问用户**，得到肯定答复再用 retry_hint.params_patch
+                  重发；禁止首次调用就置 True，禁止未经用户同意就重试。
 
     返回：
         success=true 时：出库成功，含批次消耗详情（每个消耗批次含 variant 字段）
@@ -410,13 +652,15 @@ def stock_out(product_name: str, quantity: int,
     try:
         return _provider.stock_out(product_name, quantity, reason_category, reason_note,
                                    operator, True, variant, location,
-                                   batch_no=batch_no, location_fuzzy=True)
+                                   batch_no=batch_no, location_fuzzy=True,
+                                   allow_partial_fallback=allow_partial_fallback)
     except Exception as e:
         return _tool_error("出库", e)
 
 
 @mcp.tool()
 @log_mcp_call
+@_antihallucination("search")
 def search(query: str = None, entity_type: str = "material",
            category: str = None, status: str = None,
            contact_type: str = None,
@@ -459,6 +703,7 @@ def search(query: str = None, entity_type: str = "material",
 
 @mcp.tool()
 @log_mcp_call
+@_antihallucination("get_today_statistics")
 def get_today_statistics() -> dict:
     """
     查询当天仓库统计概览。无需参数，直接调用即可。

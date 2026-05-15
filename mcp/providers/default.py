@@ -215,7 +215,8 @@ class DefaultProvider(BaseProvider):
 
     def stock_out(self, product_name, quantity, reason_category, reason_note,
                   operator, fuzzy, variant=None, location=None,
-                  batch_no=None, location_fuzzy=False):
+                  batch_no=None, location_fuzzy=False,
+                  allow_partial_fallback=False):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
@@ -232,6 +233,8 @@ class DefaultProvider(BaseProvider):
             payload["batch_no"] = _normalize_batch_no(batch_no)
         if location_fuzzy:
             payload["location_fuzzy"] = True
+        if allow_partial_fallback:
+            payload["allow_partial_fallback"] = True
         return self.http_post("/materials/stock-out", payload)
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,

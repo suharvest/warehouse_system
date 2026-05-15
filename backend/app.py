@@ -4736,12 +4736,6 @@ async def stock_out(
                     message=f"批次 {batch.batch_no} 实际变体 "
                             f"'{batch.variant}'，与指定的 '{effective_variant}' 不符")
 
-            if batch.quantity < quantity:
-                return StockOutResponse(
-                    success=False, error="batch_insufficient_stock",
-                    message=f"批次 {batch.batch_no} 余量 {batch.quantity} {unit}，"
-                            f"不足以出库 {quantity} {unit}（不会自动补其它批次）")
-
             # 单一真相源：从 active batches 聚合读取出库前库存（不再写 materials.quantity）。
             old_quantity = int(sa_conn.execute(
                 select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
@@ -4751,6 +4745,184 @@ async def stock_out(
                 ))
             ).scalar() or 0)
             new_quantity = old_quantity - quantity
+
+            if batch.quantity < quantity:
+                shortfall = quantity - batch.quantity
+                # 其他批次合计可用（用于 can_fallback 判断和后续 FIFO）
+                other_avail = int(sa_conn.execute(
+                    select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
+                    .where(and_(
+                        _t_batches.c.material_id == material_id,
+                        _t_batches.c.id != batch.id,
+                        _t_batches.c.is_exhausted == 0,
+                        _t_batches.c.quantity > 0,
+                    ))
+                ).scalar() or 0)
+                can_fallback = other_avail >= shortfall
+
+                if not stock_data.allow_partial_fallback:
+                    # 未授权 fallback：返回结构化失败，含 can_fallback 让 MCP 询问用户
+                    return StockOutResponse(
+                        success=False, error="batch_insufficient_stock",
+                        batch_no_requested=batch.batch_no,
+                        batch_available=batch.quantity,
+                        shortfall=shortfall,
+                        can_fallback=can_fallback,
+                        fallback_total_available=other_avail,
+                        message=(
+                            f"批次 {batch.batch_no} 余量 {batch.quantity} {unit}，"
+                            f"不足以出库 {quantity} {unit}，"
+                            f"还差 {shortfall} {unit}。"
+                            + (f"其他批次合计 {other_avail} {unit} 可补差额，是否确认？"
+                               if can_fallback else
+                               f"其他批次合计仅 {other_avail} {unit}，也不足补差额。")
+                        ),
+                    )
+
+                # 已授权 fallback：同事务内"先扣指定批次全部 + FIFO 补差额"。
+                if not can_fallback:
+                    return StockOutResponse(
+                        success=False, error="batch_insufficient_stock",
+                        batch_no_requested=batch.batch_no,
+                        batch_available=batch.quantity,
+                        shortfall=shortfall,
+                        can_fallback=False,
+                        fallback_total_available=other_avail,
+                        message=f"无法补足：指定批次 {batch.batch_no} 仅 {batch.quantity} {unit}，"
+                                f"其他批次合计 {other_avail} {unit}，仍缺 {shortfall - other_avail} {unit}。",
+                    )
+
+                # 进入"先扣完指定批次 + FIFO 补差额"事务路径
+                ins_rec = sa_conn.execute(
+                    insert(_t_inventory_records).values(
+                        material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
+                        operator=operator, operator_user_id=operator_user_id,
+                        reason_category=reason_category, reason_note=reason_note,
+                        contact_id=stock_data.contact_id, warehouse_id=wh_id,
+                        tenant_id=record_tenant_id, created_at=now_dt,
+                    )
+                )
+                record_id = ins_rec.inserted_primary_key[0]
+
+                batch_consumptions = []
+
+                # ① 先把指定批次的余量全扣完
+                consumed_from_specified = batch.quantity
+                spec_upd = sa_conn.execute(
+                    update(_t_batches)
+                    .where(and_(
+                        _t_batches.c.id == batch.id,
+                        _t_batches.c.quantity >= consumed_from_specified,
+                        _t_batches.c.is_exhausted == 0,
+                    ))
+                    .values(quantity=0, is_exhausted=1)
+                )
+                if spec_upd.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
+                sa_conn.execute(
+                    insert(_t_batch_consumptions).values(
+                        record_id=record_id, batch_id=batch.id,
+                        quantity=consumed_from_specified, created_at=now_dt,
+                    )
+                )
+                batch_consumptions.append(BatchConsumption(
+                    batch_no=batch.batch_no, batch_id=batch.id,
+                    quantity=consumed_from_specified, remaining=0, variant=batch.variant,
+                ))
+
+                # ② FIFO 在其他批次（排除指定批次）中扣 shortfall
+                remaining_to_consume = shortfall
+                fifo_stmt = (
+                    select(
+                        _t_batches.c.id, _t_batches.c.batch_no, _t_batches.c.quantity,
+                        _t_batches.c.variant,
+                    )
+                    .where(and_(
+                        _t_batches.c.material_id == material_id,
+                        _t_batches.c.id != batch.id,
+                        _t_batches.c.is_exhausted == 0,
+                        _t_batches.c.quantity > 0,
+                        *b_scope,
+                    ))
+                    .order_by(_t_batches.c.created_at.asc())
+                    .with_for_update()
+                )
+                for fb in sa_conn.execute(fifo_stmt).all():
+                    if remaining_to_consume <= 0:
+                        break
+                    take = min(fb.quantity, remaining_to_consume)
+                    upd = sa_conn.execute(
+                        update(_t_batches)
+                        .where(and_(
+                            _t_batches.c.id == fb.id,
+                            _t_batches.c.quantity >= take,
+                            _t_batches.c.is_exhausted == 0,
+                        ))
+                        .values(
+                            quantity=_t_batches.c.quantity - take,
+                            is_exhausted=case(
+                                (_t_batches.c.quantity - take <= 0, 1),
+                                else_=0,
+                            ),
+                        )
+                    )
+                    if upd.rowcount != 1:
+                        raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
+                    sa_conn.execute(
+                        insert(_t_batch_consumptions).values(
+                            record_id=record_id, batch_id=fb.id,
+                            quantity=take, created_at=now_dt,
+                        )
+                    )
+                    batch_consumptions.append(BatchConsumption(
+                        batch_no=fb.batch_no, batch_id=fb.id,
+                        quantity=take, remaining=max(fb.quantity - take, 0),
+                        variant=fb.variant,
+                    ))
+                    remaining_to_consume -= take
+
+                if remaining_to_consume > 0:
+                    # 事务内 raise，前面所有扣减回滚
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"出库失败：可用批次不足，仍缺 {remaining_to_consume} {unit}",
+                    )
+
+                get_fuzzy_matcher().invalidate_cache(
+                    entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
+                )
+
+                audit_log("STOCK_OUT", current_user.id, current_user.username, {
+                    "product": product_name, "quantity": quantity,
+                    "old_qty": old_quantity, "new_qty": new_quantity,
+                    "resolved_from": resolved_from,
+                    "specified_batch": batch.batch_no,
+                    "partial_fallback": True,
+                    "batches": [bc.batch_no for bc in batch_consumptions],
+                })
+
+                warning = ""
+                if safe_stock is not None and new_quantity < safe_stock:
+                    if new_quantity < safe_stock * 0.5:
+                        warning = f"⚠️ 警告：库存告急！当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit} 的50%"
+                    else:
+                        warning = f"⚠️ 提醒：库存偏低，当前库存 {new_quantity} {unit}，低于安全库存 {safe_stock} {unit}"
+
+                details = "、".join(f"{bc.batch_no}×{bc.quantity}" for bc in batch_consumptions)
+                return StockOutResponse(
+                    success=True, operation="stock_out",
+                    product=StockOperationProduct(
+                        name=product_name, old_quantity=old_quantity,
+                        out_quantity=quantity, new_quantity=new_quantity,
+                        unit=unit, safe_stock=safe_stock,
+                    ),
+                    batch_consumptions=batch_consumptions,
+                    message=f"出库成功（指定批次 {batch.batch_no} 不足，已从其他批次 FIFO 补足）："
+                            f"{product_name} 共出 {quantity} {unit}（{details}），"
+                            f"库存 {old_quantity}→{new_quantity} {unit}",
+                    warning=warning if warning else None,
+                    resolved_from=resolved_from,
+                )
 
             ins_rec = sa_conn.execute(
                 insert(_t_inventory_records).values(

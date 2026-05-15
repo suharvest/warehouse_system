@@ -189,6 +189,10 @@ class StockOperationRequest(BaseModel):
     fuzzy: bool = True  # 是否启用模糊匹配
     warehouse_id: Optional[int] = None  # 仓库ID（写操作必填）
     location_fuzzy: bool = False  # 出库时对 location 做作用域模糊（仅 MCP 使用）
+    # 反幻觉契约 第二阶段：指定 batch_no 但余量不足时，是否允许
+    # "先扣完该批次 + FIFO 从其他批次补差额"。
+    # 默认 False —— 必须由用户在前端/语音对话中明确确认后由 MCP 重发时置 True。
+    allow_partial_fallback: bool = False
 
 
 class StockOperationProduct(BaseModel):
@@ -610,6 +614,13 @@ class StockOutResponse(BaseModel):
     error: Optional[str] = None
     resolved_from: Optional[str] = None  # 模糊匹配时原始查询文本
     candidates: Optional[list] = None  # 模糊匹配候选列表
+    # 反幻觉契约 第二阶段：batch_insufficient_stock 失败时填充，
+    # 让 MCP 包装器据此生成 speak_ask 并设置 retry_hint。
+    batch_no_requested: Optional[str] = None  # 用户原本指定的批次号
+    batch_available: Optional[int] = None     # 该批次实际余量
+    shortfall: Optional[int] = None           # 缺多少
+    can_fallback: Optional[bool] = None       # 其他批次是否够补差额
+    fallback_total_available: Optional[int] = None  # 其他批次合计可用
 
 
 class BatchItem(BaseModel):
