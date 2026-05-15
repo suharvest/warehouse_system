@@ -362,6 +362,7 @@ function resetRegisterForm() {
     document.getElementById('register-username').value = '';
     document.getElementById('register-password').value = '';
     document.getElementById('register-display-name').value = '';
+    document.getElementById('register-reset-username').value = '';
     document.getElementById('register-reset-password').value = '';
     document.getElementById('register-step1-error').style.display = 'none';
     document.getElementById('register-step2-new-error').style.display = 'none';
@@ -482,11 +483,17 @@ export async function registerSubmit() {
 
 export async function registerResetPassword() {
     const deviceId = document.getElementById('register-device-id').value.trim();
+    const username = document.getElementById('register-reset-username').value.trim();
     const newPassword = document.getElementById('register-reset-password').value;
     const errorDiv = document.getElementById('register-step2-reset-error');
     const resettingDiv = document.getElementById('register-step2-resetting');
     const btn = document.getElementById('register-step2-reset-btn');
 
+    if (!username) {
+        errorDiv.textContent = '请输入管理员用户名';
+        errorDiv.style.display = 'block';
+        return;
+    }
     if (!newPassword || newPassword.length < 6) {
         errorDiv.textContent = '密码长度至少6位';
         errorDiv.style.display = 'block';
@@ -501,7 +508,7 @@ export async function registerResetPassword() {
         const resp = await fetch('/api/auth/reset-password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ device_id: deviceId, new_password: newPassword }),
+            body: JSON.stringify({ device_id: deviceId, username, new_password: newPassword }),
         });
         const data = await resp.json();
 

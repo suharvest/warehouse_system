@@ -3,6 +3,7 @@
 """
 import os
 import logging
+import secrets
 import sqlite3
 import httpx
 from fastapi import FastAPI, Query, HTTPException, File, UploadFile, Request, Response, Depends
@@ -1392,16 +1393,27 @@ async def get_auth_status(current_user: CurrentUser = Depends(get_current_user))
 async def register_verify_device(body: VerifyDeviceRequest):
     """Step 1: 验证设备 ID 是否在工厂库中，以及是否已被注册。"""
     device_id = body.device_id.strip()
+    if not device_id:
+        return VerifyDeviceResponse(authorized=False, registered=False)
 
+    # 先查本地：该设备是否已被某租户绑定（已注册直接返回，不走工厂 API）
+    with get_engine().connect() as sa_conn:
+        existing = sa_conn.execute(
+            select(_t_tenants.c.name).where(_t_tenants.c.device_id == device_id)
+        ).first()
+    if existing:
+        return VerifyDeviceResponse(authorized=True, registered=True, tenant_name=existing.name)
+
+    # 未注册 → 调上游工厂 API 验证是否为合法设备
     if not FACTORY_API_KEY:
         return JSONResponse(
             status_code=503,
             content={"success": False, "message": "Device verification not configured"},
         )
 
-    # 调上游工厂 API 验证设备是否存在
-    upstream_url = f"{FACTORY_API_BASE_URL}/api/developers/devices"
+    upstream_url = f"{FACTORY_API_BASE_URL}/factory/devices"
     authorized = False
+    upstream_ok = False
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
@@ -1410,23 +1422,23 @@ async def register_verify_device(body: VerifyDeviceRequest):
                 headers={"X-Factory-Key": FACTORY_API_KEY},
             )
             if resp.status_code == 200:
+                upstream_ok = True
                 data = resp.json()
                 if data.get("success") and data.get("data", {}).get("list"):
                     authorized = True
+            elif resp.status_code == 401:
+                logger.error(f"Factory API returned 401 — check FACTORY_API_KEY")
+                raise HTTPException(status_code=502, detail="Device verification service misconfigured")
+            else:
+                logger.error(f"Factory API returned {resp.status_code}: {resp.text[:200]}")
+                raise HTTPException(status_code=502, detail="Device verification service error")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Device verification service timeout")
     except httpx.RequestError:
         raise HTTPException(status_code=502, detail="Device verification service unavailable")
 
     if not authorized:
         return VerifyDeviceResponse(authorized=False, registered=False)
-
-    # 查该设备是否已被某租户绑定
-    with get_engine().connect() as sa_conn:
-        existing = sa_conn.execute(
-            select(_t_tenants.c.name).where(_t_tenants.c.device_id == device_id)
-        ).first()
-
-    if existing:
-        return VerifyDeviceResponse(authorized=True, registered=True, tenant_name=existing.name)
 
     return VerifyDeviceResponse(authorized=True, registered=False)
 
@@ -1449,41 +1461,46 @@ async def register_tenant(body: RegisterRequest, response: Response):
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="密码长度至少6位")
 
-    # 再次验证设备（防止并发注册）
-    if not FACTORY_API_KEY:
-        return JSONResponse(
-            status_code=503,
-            content={"success": False, "message": "Device verification not configured"},
-        )
-    upstream_url = f"{FACTORY_API_BASE_URL}/api/developers/devices"
-    authorized = False
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                upstream_url,
-                params={"query": device_id, "page": 1, "pageSize": 1},
-                headers={"X-Factory-Key": FACTORY_API_KEY},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("success") and data.get("data", {}).get("list"):
-                    authorized = True
-    except httpx.RequestError:
-        raise HTTPException(status_code=502, detail="Device verification service unavailable")
-
-    if not authorized:
-        raise HTTPException(status_code=400, detail="设备未授权，请确认设备 ID 正确")
-
-    # 生成租户 slug
-    tenant_slug_base = f"tenant-{secrets.token_hex(4)}"
-
     with get_engine().begin() as sa_conn:
-        # 检查 device_id 唯一性
+        # 先查 device_id 唯一性（本地 DB 先兜底）
         existing = sa_conn.execute(
             select(_t_tenants.c.id).where(_t_tenants.c.device_id == device_id)
         ).first()
         if existing:
             raise HTTPException(status_code=409, detail="该设备已注册，如需重置密码请使用找回密码功能")
+
+        # 调工厂 API 验证设备（防止并发注册）
+        if not FACTORY_API_KEY:
+            raise HTTPException(status_code=503, detail="Device verification not configured")
+        upstream_url = f"{FACTORY_API_BASE_URL}/factory/devices"
+        authorized = False
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    upstream_url,
+                    params={"query": device_id, "page": 1, "pageSize": 1},
+                    headers={"X-Factory-Key": FACTORY_API_KEY},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("success") and data.get("data", {}).get("list"):
+                        authorized = True
+                elif resp.status_code == 401:
+                    logger.error(f"Factory API returned 401 — check FACTORY_API_KEY")
+                    raise HTTPException(status_code=502, detail="Device verification service misconfigured")
+                else:
+                    logger.error(f"Factory API returned {resp.status_code}: {resp.text[:200]}")
+                    raise HTTPException(status_code=502, detail="Device verification service error")
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Device verification service timeout")
+        except httpx.RequestError:
+            raise HTTPException(status_code=502, detail="Device verification service unavailable")
+
+        if not authorized:
+            raise HTTPException(status_code=400, detail="设备未授权，请确认设备 ID 正确")
+
+        # 生成租户 slug
+        tenant_slug_base = f"tenant-{secrets.token_hex(4)}"
 
         # 创建租户
         result = sa_conn.execute(
@@ -1557,15 +1574,16 @@ async def register_tenant(body: RegisterRequest, response: Response):
 
 @app.post("/api/auth/reset-password")
 async def reset_password(body: ResetPasswordRequest):
-    """凭设备 ID 重置租户 admin 密码。"""
+    """凭设备 ID + 管理员用户名重置密码。"""
     if get_deploy_mode() != "multi_tenant":
         raise HTTPException(status_code=403, detail="仅在多租户模式下可用")
 
     device_id = body.device_id.strip()
+    username = body.username.strip()
     new_password = body.new_password.strip()
 
-    if not device_id or not new_password:
-        raise HTTPException(status_code=400, detail="设备ID和新密码均不能为空")
+    if not device_id or not username or not new_password:
+        raise HTTPException(status_code=400, detail="设备ID、用户名、新密码均不能为空")
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="密码长度至少6位")
 
@@ -1578,21 +1596,20 @@ async def reset_password(body: ResetPasswordRequest):
         if not tenant_row:
             raise HTTPException(status_code=404, detail="未找到该设备绑定的租户")
 
-        # 查该租户的 admin 用户
+        # 查该租户下指定用户名的 admin
         admin_row = sa_conn.execute(
             select(_t_users.c.id, _t_users.c.username)
             .where(
                 and_(
                     _t_users.c.tenant_id == tenant_row.id,
+                    _t_users.c.username == username,
                     _t_users.c.role == RoleName.ADMIN.value,
                     _t_users.c.is_disabled == 0,
                 )
             )
-            .order_by(_t_users.c.id.asc())
-            .limit(1)
         ).first()
         if not admin_row:
-            raise HTTPException(status_code=404, detail="未找到该租户的管理员账号")
+            raise HTTPException(status_code=404, detail="设备ID与管理员用户名不匹配")
 
         # 重置密码
         new_hash = hash_password(new_password)
@@ -8016,7 +8033,7 @@ async def factory_devices(
             content={"success": False, "message": "Unauthorized"},
         )
 
-    upstream_url = f"{FACTORY_API_BASE_URL}/api/developers/devices"
+    upstream_url = f"{FACTORY_API_BASE_URL}/factory/devices"
     params = {"page": page, "pageSize": pageSize}
     if query:
         params["query"] = query
