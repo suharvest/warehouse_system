@@ -62,6 +62,24 @@ class FuzzyMatcher:
         """去除空格、横杠、斜杠、括号、逗号等干扰字符，统一比较基准"""
         return re.sub(r'[\s\-－/／\(\)（）\[\]【】,，、]+', '', text).lower()
 
+    @staticmethod
+    def _tokenize(text: str) -> str:
+        """中英文边界补空格 + 折叠空格，供 token_set_ratio 切词使用。
+
+        关键场景：ASR / 用户口语 "银色M3螺丝" 没有空格，RapidFuzz 无法切分，
+        token_set_ratio 退化成单 token。补空格后变 "银色 m3 螺丝"，与索引项
+        "M3 螺丝 银色 8mm" → "m3 螺丝 银色 8mm" 的 token_set_ratio = 100，
+        匹配上 "name + variant" 组合索引项。
+        """
+        # 中文↔ASCII 边界插空格（中→ASCII，ASCII→中）
+        t = re.sub(r'([一-鿿])([A-Za-z0-9])', r'\1 \2', text)
+        t = re.sub(r'([A-Za-z0-9])([一-鿿])', r'\1 \2', t)
+        # 标点统一替换为空格（保留单词边界，与 _normalize 不同）
+        t = re.sub(r'[\-－/／\(\)（）\[\]【】,，、]+', ' ', t)
+        # 折叠多空格
+        t = re.sub(r'\s+', ' ', t).strip().lower()
+        return t
+
     def _get_pinyin(self, text: str) -> str:
         """将文本转为无声调拼音字符串（带 LRU 缓存）"""
         cache = self._pinyin_cache
@@ -103,12 +121,14 @@ class FuzzyMatcher:
                     self._add_entry("material", mid, {
                         "name": name, "entity_type": "material", "entity_id": mid,
                         "tenant_id": tid, "warehouse_id": whid, "extra": extra,
+                        "tokens": self._tokenize(name),
                         "pinyin": self._get_pinyin(self._normalize(name)),
                     }, bucket)
                     if sku and sku != name:
                         self._add_entry("material", mid, {
                             "name": sku, "entity_type": "material", "entity_id": mid,
                             "tenant_id": tid, "warehouse_id": whid, "extra": extra,
+                            "tokens": self._tokenize(sku),
                             "pinyin": self._get_pinyin(self._normalize(sku)),
                         }, bucket)
                         combined = f"{sku} {name}"
@@ -116,6 +136,7 @@ class FuzzyMatcher:
                             "name": combined, "entity_type": "material", "entity_id": mid,
                             "tenant_id": tid, "warehouse_id": whid,
                             "extra": extra,
+                            "tokens": self._tokenize(combined),
                             "pinyin": self._get_pinyin(self._normalize(combined)),
                         }, bucket)
                         combined_rev = f"{name} {sku}"
@@ -123,6 +144,7 @@ class FuzzyMatcher:
                             "name": combined_rev, "entity_type": "material", "entity_id": mid,
                             "tenant_id": tid, "warehouse_id": whid,
                             "extra": extra,
+                            "tokens": self._tokenize(combined_rev),
                             "pinyin": self._get_pinyin(self._normalize(combined_rev)),
                         }, bucket)
 
@@ -153,6 +175,7 @@ class FuzzyMatcher:
                             "sku": sku, "category": category,
                             "canonical_name": name, "variant": variant,
                         },
+                        "tokens": self._tokenize(combined),
                         "pinyin": self._get_pinyin(self._normalize(combined)),
                     }, bucket)
 
@@ -168,6 +191,7 @@ class FuzzyMatcher:
                         "tenant_id": row.tenant_id, "warehouse_id": row.warehouse_id,
                         "extra": {"is_supplier": bool(row.is_supplier),
                                   "is_customer": bool(row.is_customer)},
+                        "tokens": self._tokenize(name),
                         "pinyin": self._get_pinyin(self._normalize(name)),
                     }, bucket)
 
@@ -187,12 +211,14 @@ class FuzzyMatcher:
                         self._add_entry("operator", uid, {
                             "name": display_name, "entity_type": "operator", "entity_id": uid,
                             "tenant_id": tid, "warehouse_id": None, "extra": {},
+                            "tokens": self._tokenize(display_name),
                             "pinyin": self._get_pinyin(self._normalize(display_name)),
                         }, bucket)
                     if username != display_name:
                         self._add_entry("operator", uid, {
                             "name": username, "entity_type": "operator", "entity_id": uid,
                             "tenant_id": tid, "warehouse_id": None, "extra": {},
+                            "tokens": self._tokenize(username),
                             "pinyin": self._get_pinyin(self._normalize(username)),
                         }, bucket)
 
@@ -276,7 +302,9 @@ class FuzzyMatcher:
         return best["score"] >= self._confident_score and gap > self._confident_gap
 
     def _calc_score(self, norm_query: str, query_pinyin: str,
-                    norm_name: str, name_pinyin: str) -> float:
+                    norm_name: str, name_pinyin: str,
+                    query_tokens: str | None = None,
+                    name_tokens: str | None = None) -> float:
         if norm_query in norm_name:
             return 90.0 + 10.0 * (len(norm_query) / len(norm_name))
         if norm_name in norm_query:
@@ -286,6 +314,13 @@ class FuzzyMatcher:
         text_ratio = fuzz.ratio(norm_query, norm_name)
         text_partial = fuzz.partial_ratio(norm_query, norm_name)
         text_score = text_ratio * 0.4 + text_partial * 0.6
+
+        # token_set_ratio：顺序无关 + 子集容忍。
+        # 处理 "银色 M3 螺丝" vs "M3 螺丝 银色 8mm" 这种口语顺序与索引顺序不一致的情况。
+        # 乘 0.95 略加权降，避免压过精确子串匹配（90+）的稳定排序。
+        if query_tokens and name_tokens:
+            text_token_set = fuzz.token_set_ratio(query_tokens, name_tokens) * 0.95
+            text_score = max(text_score, text_token_set)
 
         pinyin_ratio = fuzz.ratio(query_pinyin, name_pinyin) * 0.85
         pinyin_token = fuzz.token_sort_ratio(query_pinyin, name_pinyin) * 0.8
@@ -343,6 +378,8 @@ class FuzzyMatcher:
         if not norm_query:
             return []
         query_pinyin = self._get_pinyin(norm_query)
+        # 用原始 query（保留中英文边界信息）做 tokenize，给 token_set_ratio 用
+        query_tokens = self._tokenize(query)
         results = []
 
         # 在锁内拍快照，避免并发写入时迭代损坏
@@ -368,7 +405,9 @@ class FuzzyMatcher:
 
             norm_name = self._normalize(entry["name"])
             name_pinyin = entry["pinyin"]
-            score = self._calc_score(norm_query, query_pinyin, norm_name, name_pinyin)
+            name_tokens = entry.get("tokens")
+            score = self._calc_score(norm_query, query_pinyin, norm_name, name_pinyin,
+                                     query_tokens=query_tokens, name_tokens=name_tokens)
             sku_name_score = self._sku_name_score(norm_query, entry)
             if sku_name_score is not None:
                 score = max(score, sku_name_score)
