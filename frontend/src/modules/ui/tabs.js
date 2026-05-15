@@ -6,7 +6,8 @@ import {
     trendChart, categoryChart, topStockChart,
     detailTrendChart, detailPieChart,
     currentProductName,
-    currentWarehouse, setCurrentWarehouse, allWarehouses, setAllWarehouses, getStoredWarehouseSlug
+    currentWarehouse, setCurrentWarehouse, allWarehouses, setAllWarehouses, getStoredWarehouseSlug,
+    getCurrentUser
 } from '../state.js';
 
 // 功能模块引用（由 main.js 设置）
@@ -309,6 +310,9 @@ export function resetCountdown() {
 }
 
 export function refreshCurrentTab() {
+    // 未登录时不发请求，避免刷出满屏 401
+    if (!getCurrentUser()) return;
+
     switch (currentTab) {
         case 'dashboard':
             if (modules.loadDashboardData) modules.loadDashboardData();
