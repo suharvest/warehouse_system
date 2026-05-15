@@ -68,14 +68,21 @@ def upgrade():
 
 
 def downgrade():
+    """非对称 downgrade：只清掉本 revision 命名的 unique constraint，不删 device_id 列。
+
+    本 migration upgrade 在 legacy-path db 上是 no-op（列和唯一索引由
+    backend/database.py:563-575 / 683-686 创建），因此 downgrade 不能假设
+    "列是本 revision 创建的"——盲 drop 会破坏 legacy 库结构。
+    Alembic 社区通用做法：data-bearing 列宁可留无害遗物也不误删。
+    下一次 upgrade 检测列已存在会自动跳过 add_column，幂等性不受影响。
+    """
     bind = op.get_bind()
     inspector = inspect(bind)
 
-    with op.batch_alter_table('mcp_connections') as batch_op:
-        # 仅当 Alembic 创建的命名约束存在时才 drop（避开 legacy 的 idx_ 索引名）
-        for uc in inspector.get_unique_constraints('mcp_connections'):
-            if uc.get('name') == 'uq_mcp_connections_device_id':
+    # 仅 drop Alembic 命名的 constraint（legacy 用 idx_mcp_connections_device_id 索引，
+    # 名字不同，不会被误删）
+    for uc in inspector.get_unique_constraints('mcp_connections'):
+        if uc.get('name') == 'uq_mcp_connections_device_id':
+            with op.batch_alter_table('mcp_connections') as batch_op:
                 batch_op.drop_constraint('uq_mcp_connections_device_id', type_='unique')
-                break
-        if _column_exists(inspector, 'mcp_connections', 'device_id'):
-            batch_op.drop_column('device_id')
+            break
