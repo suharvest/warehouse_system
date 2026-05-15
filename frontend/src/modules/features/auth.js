@@ -16,6 +16,7 @@ let onAuthChange = null;
 let switchTabFn = null;
 let refreshCurrentTabFn = null;
 let onLoginSuccessFn = null;
+let onLogoutFn = null;
 
 // 设置回调
 export function setAuthCallbacks(callbacks) {
@@ -23,6 +24,7 @@ export function setAuthCallbacks(callbacks) {
     switchTabFn = callbacks.switchTab;
     refreshCurrentTabFn = callbacks.refreshCurrentTab;
     onLoginSuccessFn = callbacks.onLoginSuccess;
+    onLogoutFn = callbacks.onLogout;
 }
 
 // 初始化 session 过期处理
@@ -243,6 +245,9 @@ export async function handleLogout() {
     setCurrentUser(null);
     await updateUserDisplay();
     updatePermissionUI();
+
+    // 停止自动刷新定时器
+    if (onLogoutFn) onLogoutFn();
 
     // 如果在需要权限的页面，切换到看板
     if ((getCurrentTab() === 'users' || getCurrentTab() === 'mcp') && switchTabFn) {
@@ -474,9 +479,11 @@ export async function registerSubmit() {
                 return;
             }
             errorDiv.textContent = data.message || '注册失败';
+            errorDiv.style.display = 'block';
         } else {
             const data = await resp.json().catch(() => ({}));
             errorDiv.textContent = data.error || data.detail || data.message || `注册失败（${resp.status}）`;
+            errorDiv.style.display = 'block';
         }
     } catch (e) {
         console.error('注册失败:', e);
@@ -525,13 +532,16 @@ export async function registerResetPassword() {
                 return;
             }
             errorDiv.textContent = data.message || '重置失败';
+            errorDiv.style.display = 'block';
         } else {
             const data = await resp.json().catch(() => ({}));
             errorDiv.textContent = data.error || data.detail || data.message || `重置失败（${resp.status}）`;
+            errorDiv.style.display = 'block';
         }
     } catch (e) {
         console.error('重置密码失败:', e);
         errorDiv.textContent = '网络错误，请检查网络连接后重试';
+        errorDiv.style.display = 'block';
     } finally {
         resettingDiv.style.display = 'none';
         btn.disabled = false;
