@@ -4794,6 +4794,10 @@ async def stock_out(
             if batch.quantity < quantity:
                 shortfall = quantity - batch.quantity
                 # 其他批次合计可用（用于 can_fallback 判断和后续 FIFO）
+                # 必须带 *b_scope —— 否则在多租户/多仓场景下，
+                # 预检会把其他 scope 的批次数量算进 can_fallback，让 wrapper
+                # 生成"其他批次可补"的 speak_ask 骗用户答"是"，然后真扣时
+                # FIFO 的 *b_scope 又把那些批次拒之门外，导致 409 回滚。
                 other_avail = int(sa_conn.execute(
                     select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
                     .where(and_(
@@ -4801,6 +4805,7 @@ async def stock_out(
                         _t_batches.c.id != batch.id,
                         _t_batches.c.is_exhausted == 0,
                         _t_batches.c.quantity > 0,
+                        *b_scope,
                     ))
                 ).scalar() or 0)
                 can_fallback = other_avail >= shortfall
