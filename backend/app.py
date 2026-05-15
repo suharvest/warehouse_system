@@ -622,6 +622,46 @@ def _seed_base_data() -> None:
         logger.warning(f"_seed_base_data() skipped: {e}")
 
 
+def _validate_schema_matches_metadata() -> None:
+    """启动时校验：SQLAlchemy metadata 声明的每一列都真实存在于 db。
+
+    背景：曾踩坑两次——开发者在 metadata.py 给现有表加新列后忘写对应的
+    Alembic 迁移，启动时 `alembic upgrade head` 因为没有新脚本是 no-op，
+    问题被推迟到运行时第一次查询该列才报 `no such column` 500。
+
+    这个校验把"模型加列但没迁移"的失败提到启动阶段，让 CI / 本地运行立刻崩，
+    强制开发者补迁移再启动。比运行时 500 更早、更明确。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from metadata import metadata as _md
+
+    inspector = sa_inspect(get_engine())
+    actual_tables = set(inspector.get_table_names())
+    problems: list[str] = []
+
+    for table in _md.sorted_tables:
+        if table.name not in actual_tables:
+            # 表整体缺失：通常是 Alembic 还没创建到此表。比缺列更严重。
+            problems.append(f"表 {table.name} 在 db 中不存在")
+            continue
+        actual_cols = {c["name"] for c in inspector.get_columns(table.name)}
+        expected_cols = {c.name for c in table.columns}
+        missing = expected_cols - actual_cols
+        if missing:
+            problems.append(
+                f"表 {table.name} 缺少列 {sorted(missing)}（metadata.py 已声明但 db 中没有，"
+                f"很可能 metadata.py 加了列却忘写 Alembic 迁移）"
+            )
+
+    if problems:
+        raise RuntimeError(
+            "DB schema 与 metadata 不一致，拒绝启动：\n  - "
+            + "\n  - ".join(problems)
+            + "\n请补一个 Alembic 迁移：cd backend && alembic revision -m '...' "
+              "然后在 upgrade() 里 op.add_column(...)，再 alembic upgrade head。"
+        )
+
+
 def _validate_deploy_mode_invariants() -> None:
     """启动时校验 DEPLOY_MODE 与 DB 状态自洽，否则拒绝启动。
 
@@ -2563,8 +2603,13 @@ def export_database(
     else:
         export_tenant_id = current_user.tenant_id
 
-    # 获取当前数据库路径
-    db_path = os.environ.get('DATABASE_PATH', 'warehouse.db')
+    # 获取当前数据库路径 — 与 database.py / db.py / alembic env.py 保持一致，
+    # 默认锚定到项目根，避免 CWD 不同造成"两个 db" 的踩坑。
+    _default_db = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'warehouse.db',
+    )
+    db_path = os.environ.get('DATABASE_PATH', _default_db)
 
     # 创建临时文件
     temp_fd, temp_path = tempfile.mkstemp(suffix='.db')
@@ -6459,6 +6504,10 @@ async def _run_migrations():
     # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。
     # Docker 部署走纯 Alembic 路径，Alembic 只建表不插数据，需在此补齐。
     _seed_base_data()
+
+    # Schema 不变式校验 — 防止 metadata.py 加列忘写迁移（曾踩坑两次）。
+    # 故意让异常向上抛：缺列时拒绝启动，不该被吞掉。
+    _validate_schema_matches_metadata()
 
     # DEPLOY_MODE 不变式校验 — 启动阶段就把不一致状态拦掉，避免运行时 UI/业务半对半错。
     # 故意让异常向上抛：违反不变式应阻止启动，不该被吞掉。

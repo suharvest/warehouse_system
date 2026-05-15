@@ -38,7 +38,13 @@ def _resolve_url() -> str:
     cfg_url = config.get_main_option("sqlalchemy.url")
     if cfg_url and not cfg_url.startswith("driver://"):
         return cfg_url
-    db_path = os.environ.get("DATABASE_PATH", "warehouse.db")
+    # 与 backend/database.py 保持一致：默认锚定到项目根 (backend/ 的上一级)
+    # 否则从不同 CWD 跑 alembic 会迁错 db 文件（已踩坑过）。
+    default_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "warehouse.db",
+    )
+    db_path = os.environ.get("DATABASE_PATH", default_path)
     return f"sqlite:///{db_path}"
 
 
