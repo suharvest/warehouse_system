@@ -21,6 +21,10 @@ mcp/config.yml
 .env.production
 .env.*.local
 
+# 生产部署 compose（包含敏感默认值如 API key / DB 连接）
+# 模板见 docker-compose.prod.yml.example
+docker-compose.prod.yml
+
 # 虚拟环境
 .venv/
 venv/
