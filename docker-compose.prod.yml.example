@@ -1,0 +1,73 @@
+# 生产环境 Docker Compose 配置（all-in-one 镜像，multi-arch amd64+arm64）
+#
+# 这是模板文件。实际部署时复制一份：
+#   cp docker-compose.prod.yml.example docker-compose.prod.yml
+# 真实 docker-compose.prod.yml 已加入 .gitignore，不会被提交。
+#
+# 部署步骤：
+#   1. 复制本模板，按需调整端口 / 资源 / pull_policy
+#   2. 在本文件同目录创建 .env（也已 gitignore），填入敏感配置：
+#
+#      # ── 通用 ──
+#      FACTORY_API_KEY=<sensecraft factory 后台拷贝>
+#      DEPLOY_MODE=multi_tenant            # 或 single_tenant
+#      CORS_ORIGINS=*                      # 生产强烈建议改具体域名
+#
+#      # ── 选 A：SQLite（默认，零配置，数据落 /data 卷）──
+#      #   不用填 DATABASE_URL，留空即可
+#
+#      # ── 选 B：MySQL（外部数据库）──
+#      DATABASE_URL=mysql+pymysql://<user>:<password>@<host>:3306/<dbname>?charset=utf8mb4
+#      #   driver 必须是 mysql+pymysql，?charset=utf8mb4 必带（中文物料名）
+#      #   MySQL server 上 database 要事先建好，backend 只建表不建库
+#      #   填了 DATABASE_URL，DATABASE_PATH 和 /data 卷会被自动忽略（backend/db.py:30-38）
+#
+#   3. docker compose -f docker-compose.prod.yml pull
+#   4. docker compose -f docker-compose.prod.yml up -d
+#   5. 访问 http://localhost:1024（按 ports 配的对外端口）
+#
+# 镜像 sensecraft-missionpack.seeed.cn/solution/warehouse:latest 同时
+# 提供 amd64 + arm64，docker 会按主机架构自动拉对应版本。
+#
+# 本地构建调试：把 image 行注释、build 行解开。
+
+services:
+  warehouse:
+    image: sensecraft-missionpack.seeed.cn/solution/warehouse:latest
+    # build: .                          # 本地构建调试时用
+    pull_policy: always                 # 自动拉最新；首次部署稳定后可改 missing 减少拉取
+    container_name: warehouse-prod
+    ports:
+      - "1024:2125"                     # 宿主端口:容器端口（容器内固定 2125）
+    volumes:
+      - warehouse_data:/data            # SQLite 数据持久化；MySQL 模式下闲置无害
+    environment:
+      - PORT=2125
+      # DATABASE_URL 优先于 DATABASE_PATH（backend/db.py:30-38）：
+      #   .env 里填了 DATABASE_URL → 走 MySQL/Postgres，/data 卷闲置
+      #   .env 里没填 → DATABASE_URL 为空字符串，退回 DATABASE_PATH，走 SQLite
+      - DATABASE_URL=${DATABASE_URL:-}
+      - DATABASE_PATH=/data/warehouse.db
+      - DEPLOY_MODE=${DEPLOY_MODE:-single_tenant}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-10}
+      - MAX_IMPORT_ROWS=${MAX_IMPORT_ROWS:-10000}
+      - FACTORY_API_KEY=${FACTORY_API_KEY:-}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+volumes:
+  warehouse_data:
+    driver: local
