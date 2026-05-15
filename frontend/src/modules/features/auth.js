@@ -401,6 +401,13 @@ export async function registerVerifyDevice() {
 
         const data = await resp.json();
 
+        if (!resp.ok) {
+            // 服务端错误：502/503/504
+            errorDiv.textContent = data.error || data.detail || data.message || '设备验证服务异常，请稍后重试';
+            errorDiv.style.display = 'block';
+            return;
+        }
+
         if (!data.authorized) {
             errorDiv.textContent = '设备未授权，请确认设备 ID 正确';
             errorDiv.style.display = 'block';
@@ -416,11 +423,7 @@ export async function registerVerifyDevice() {
         }
     } catch (e) {
         console.error('设备验证失败:', e);
-        if (resp && resp.status === 503) {
-            errorDiv.textContent = '设备验证服务未配置，请联系管理员';
-        } else {
-            errorDiv.textContent = '验证失败，请稍后重试';
-        }
+        errorDiv.textContent = '网络错误，请检查网络连接后重试';
         errorDiv.style.display = 'block';
     } finally {
         checkingDiv.style.display = 'none';
@@ -458,23 +461,26 @@ export async function registerSubmit() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ device_id: deviceId, username, password, display_name: displayName || undefined }),
         });
-        const data = await resp.json();
 
-        if (data.success) {
-            closeRegisterModal();
-            setCurrentUser(data.user);
-            setIsSystemInitialized(true);
-            await updateUserDisplay();
-            updatePermissionUI();
-            setTimeout(() => startOnboarding(), 500);
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.success) {
+                closeRegisterModal();
+                setCurrentUser(data.user);
+                setIsSystemInitialized(true);
+                await updateUserDisplay();
+                updatePermissionUI();
+                setTimeout(() => startOnboarding(), 500);
+                return;
+            }
+            errorDiv.textContent = data.message || '注册失败';
         } else {
-            errorDiv.textContent = data.message || data.detail || '注册失败';
-            errorDiv.style.display = 'block';
+            const data = await resp.json().catch(() => ({}));
+            errorDiv.textContent = data.error || data.detail || data.message || `注册失败（${resp.status}）`;
         }
     } catch (e) {
         console.error('注册失败:', e);
-        errorDiv.textContent = '注册失败，请稍后重试';
-        errorDiv.style.display = 'block';
+        errorDiv.textContent = '网络错误，请检查网络连接后重试';
     } finally {
         submittingDiv.style.display = 'none';
         btn.disabled = false;
@@ -510,19 +516,22 @@ export async function registerResetPassword() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ device_id: deviceId, username, new_password: newPassword }),
         });
-        const data = await resp.json();
 
-        if (data.success) {
-            alert(data.message);
-            closeRegisterModal();
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.success) {
+                alert(data.message);
+                closeRegisterModal();
+                return;
+            }
+            errorDiv.textContent = data.message || '重置失败';
         } else {
-            errorDiv.textContent = data.message || data.detail || '重置失败';
-            errorDiv.style.display = 'block';
+            const data = await resp.json().catch(() => ({}));
+            errorDiv.textContent = data.error || data.detail || data.message || `重置失败（${resp.status}）`;
         }
     } catch (e) {
         console.error('重置密码失败:', e);
-        errorDiv.textContent = '重置失败，请稍后重试';
-        errorDiv.style.display = 'block';
+        errorDiv.textContent = '网络错误，请检查网络连接后重试';
     } finally {
         resettingDiv.style.display = 'none';
         btn.disabled = false;
