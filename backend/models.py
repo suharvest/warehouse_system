@@ -435,6 +435,7 @@ class RegisterRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     """重置密码请求"""
     device_id: str
+    username: str
     new_password: str
 
 

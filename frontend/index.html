@@ -1549,7 +1549,11 @@
                 </div>
                 <!-- Step 2: 重置密码（已注册设备） -->
                 <div id="register-step2-reset" style="display:none;">
-                    <p style="color:#666;font-size:13px;margin-bottom:12px;">该设备已注册，可重置管理员密码</p>
+                    <p style="color:#666;font-size:13px;margin-bottom:12px;">该设备已注册，请提供管理员用户名与新密码</p>
+                    <div class="form-group">
+                        <label>管理员用户名 <span class="required">*</span></label>
+                        <input type="text" id="register-reset-username" placeholder="注册时的管理员用户名">
+                    </div>
                     <div class="form-group">
                         <label>新密码 <span class="required">*</span></label>
                         <input type="password" id="register-reset-password" placeholder="至少6位">
