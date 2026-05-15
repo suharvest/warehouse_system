@@ -14,7 +14,12 @@ if _url and not _url.startswith('sqlite'):
     print('migrate_data.py is sqlite-only; current DATABASE_URL is non-sqlite, skipping.')
     sys.exit(0)
 
-DATABASE_PATH = os.environ.get('DATABASE_PATH', 'warehouse.db')
+# 默认锚定到项目根，与 database.py / db.py / alembic env.py 保持一致。
+_DEFAULT_DB = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'warehouse.db',
+)
+DATABASE_PATH = os.environ.get('DATABASE_PATH', _DEFAULT_DB)
 
 
 def get_db_connection():
