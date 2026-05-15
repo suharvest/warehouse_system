@@ -1594,7 +1594,7 @@ async def reset_password(body: ResetPasswordRequest):
             .where(_t_tenants.c.device_id == device_id)
         ).first()
         if not tenant_row:
-            raise HTTPException(status_code=404, detail="未找到该设备绑定的租户")
+            raise HTTPException(status_code=404, detail="未找到该设备对应的租户，请确认设备 ID 正确")
 
         # 查该租户下指定用户名的 admin
         admin_row = sa_conn.execute(
@@ -1609,7 +1609,7 @@ async def reset_password(body: ResetPasswordRequest):
             )
         ).first()
         if not admin_row:
-            raise HTTPException(status_code=404, detail="设备ID与管理员用户名不匹配")
+            raise HTTPException(status_code=404, detail="管理员用户名不正确，请确认后重试")
 
         # 重置密码
         new_hash = hash_password(new_password)
