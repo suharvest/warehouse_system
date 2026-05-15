@@ -10,7 +10,7 @@ import {
 // UI 模块
 import { initDropdownListeners, initSearchableSelect, setProductSelectorValue, clearProductSelector, clearRecordProductSelector, toggleDropdown, toggleDropdownItem } from './ui/dropdown.js';
 import { initFilterDrawers, refreshFilterDrawerI18n } from './ui/filter-drawer.js';
-import { switchTab, initFromHash, startAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules, renderWarehouseSwitcher, toggleWarehouseSwitcher, selectWarehouse } from './ui/tabs.js';
+import { switchTab, initFromHash, startAutoUpdate, stopAutoUpdate, refreshCurrentTab, goBackToInventory, setTabModules, renderWarehouseSwitcher, toggleWarehouseSwitcher, selectWarehouse } from './ui/tabs.js';
 
 // 功能模块
 import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks, initSessionExpiredHandler, openRegisterModal, closeRegisterModal, registerVerifyDevice, registerSubmit, registerResetPassword, backToRegisterStep1 } from './features/auth.js';
@@ -77,7 +77,8 @@ function setupModuleCallbacks() {
         onAuthChange: () => {},
         switchTab,
         refreshCurrentTab,
-        onLoginSuccess: loadWarehouses
+        onLoginSuccess: loadWarehouses,
+        onLogout: stopAutoUpdate,
     });
 
     // 设置看板回调

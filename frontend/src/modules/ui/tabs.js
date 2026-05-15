@@ -286,8 +286,15 @@ export function selectWarehouse(slug) {
 }
 
 // ============ 自动刷新 ============
+export function stopAutoUpdate() {
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        setCountdownInterval(null);
+    }
+}
+
 export function startAutoUpdate() {
-    if (countdownInterval) clearInterval(countdownInterval);
+    stopAutoUpdate();
 
     const interval = setInterval(function () {
         setCountdownSeconds(countdownSeconds - 1);
