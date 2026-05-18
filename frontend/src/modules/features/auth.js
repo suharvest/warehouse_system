@@ -4,7 +4,8 @@ import { authApi, setSessionExpiredHandler } from '../api.js';
 import {
     getCurrentUser, setCurrentUser,
     getIsSystemInitialized, setIsSystemInitialized,
-    getCurrentTab, getDeployMode
+    getCurrentTab, getDeployMode,
+    setCurrentWarehouse, setAllWarehouses
 } from '../state.js';
 import { startOnboarding } from './onboarding.js';
 
@@ -249,10 +250,10 @@ export async function handleLogout() {
     // 停止自动刷新定时器
     if (onLogoutFn) onLogoutFn();
 
-    // 如果在需要权限的页面，切换到看板
-    if ((getCurrentTab() === 'users' || getCurrentTab() === 'mcp') && switchTabFn) {
-        switchTabFn('dashboard');
-    }
+    // 清掉会话相关的页面上下文，并整页刷新，避免登出后残留上一位用户的数据。
+    setCurrentWarehouse(null);
+    setAllWarehouses([]);
+    window.location.replace('/');
 }
 
 // 显示设置模态框（首次使用）
