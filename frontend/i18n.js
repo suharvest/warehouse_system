@@ -396,6 +396,7 @@ const translations = {
         isDefault: '默认',
         warehouseColumn: '仓库',
         writeRequiresWarehouse: '写操作需要选择具体仓库',
+        importRequiresWarehouse: '请先选择一个仓库，再导入库存',
         cannotDeleteDefault: '不能删除默认仓库',
 
         // 租户
@@ -927,6 +928,7 @@ const translations = {
         isDefault: 'Default',
         warehouseColumn: 'Warehouse',
         writeRequiresWarehouse: 'Write operations require selecting a specific warehouse',
+        importRequiresWarehouse: 'Please select a warehouse before importing inventory',
         cannotDeleteDefault: 'Cannot delete default warehouse',
 
         // Tenants

@@ -2,6 +2,7 @@
 import { t } from '../../../i18n.js';
 import { API_BASE_URL, getCurrentWarehouseId } from '../api.js';
 import { getCurrentProductName, getCurrentTab, getCurrentWarehouse } from '../state.js';
+import { showToast } from '../ui-components.js';
 
 // 回调函数引用
 let loadAllProductsFn = null;
@@ -109,7 +110,7 @@ export function downloadSampleExcel() {
 // ============ 导入功能 ============
 export async function showImportModal() {
     if (!getCurrentWarehouse()) {
-        alert(t('writeRequiresWarehouse') || '写操作需要选择具体仓库');
+        showToast(t('importRequiresWarehouse') || '请先选择一个仓库，再导入库存', 'info', 3500);
         return;
     }
     document.getElementById('import-modal').classList.add('show');
