@@ -195,7 +195,13 @@ export function switchWarehouse(warehouse) {
 export function updateWarehouseSwitcherDisplay() {
     const nameEl = document.getElementById('currentWarehouseName');
     if (nameEl) {
-        nameEl.textContent = currentWarehouse ? currentWarehouse.name : (modules.t ? modules.t('allWarehouses') : '全部仓库');
+        if (currentWarehouse) {
+            nameEl.textContent = currentWarehouse.name;
+        } else if (allWarehouses.length === 0) {
+            nameEl.textContent = modules.t ? modules.t('noWarehouseAccess') : '无仓库访问权限';
+        } else {
+            nameEl.textContent = modules.t ? modules.t('allWarehouses') : '全部仓库';
+        }
     }
 }
 
@@ -222,6 +228,12 @@ export function renderWarehouseSwitcher() {
     if (!dropdown) return;
 
     const t = modules.t || (k => k);
+
+    if (allWarehouses.length === 0) {
+        dropdown.innerHTML = `<div class="warehouse-option disabled">${t('noWarehouseAccess')}</div>`;
+        return;
+    }
+
     let html = `<div class="warehouse-option${!currentWarehouse ? ' active' : ''}" data-action="selectWarehouse" data-slug="">
         ${t('allWarehouses')}
     </div>`;
