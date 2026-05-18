@@ -158,8 +158,8 @@
   }
 
   .warehouse-dropdown {
-    @apply hidden absolute top-full right-0 mt-1 bg-white
-           border border-border rounded shadow-md z-modal min-w-[140px];
+    @apply hidden absolute top-full left-0 mt-1 bg-white
+           border border-border rounded shadow-md z-modal min-w-[140px] max-h-[320px] overflow-y-auto;
   }
 
   .warehouse-dropdown.show {
@@ -620,6 +620,13 @@
   .form-group select,
   .form-group textarea {
     @apply w-full py-2 px-3 border border-border rounded-md text-sm transition-all duration-200 bg-white;
+  }
+
+  .form-group input:disabled,
+  .form-group select:disabled,
+  .form-group textarea:disabled {
+    @apply bg-gray-100 text-text-muted border-gray-200 cursor-not-allowed;
+    opacity: 1;
   }
 
   .form-group input:focus,
