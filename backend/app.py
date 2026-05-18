@@ -68,7 +68,7 @@ from models import (
     RoleName, RecordType,
 )
 from fuzzy_match import FuzzyMatcher
-from sqlalchemy import select, and_, or_, insert, update, delete, case, text
+from sqlalchemy import select, and_, or_, insert, update, delete, case, text, false
 from sqlalchemy.exc import IntegrityError
 from db import get_engine
 from metadata import (
@@ -141,6 +141,11 @@ app = FastAPI(
     description="智能硬件仓库管理系统后端 API",
     version="2.0.0"
 )
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 # 注册速率限制异常处理（带 CORS 头）
 app.state.limiter = limiter
@@ -708,6 +713,7 @@ def _audit_routes() -> None:
         "/api/auth/register",        # 自助注册（multi_tenant）
         "/api/auth/reset-password",  # 凭设备ID重置密码
         "/api/system/mode",  # 部署元信息（single/multi tenant），前端在登录前就要据此渲染 UI
+        "/factory/devices",  # 工厂设备代理使用 X-Factory-Key 做接口级鉴权
         "/docs",
         "/openapi.json",
         "/redoc",
@@ -832,7 +838,7 @@ def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] 
     - 否则返回 None（全局视图）
     """
     if warehouse_id is not None:
-        # 校验用户是否有权访问该仓库（非全局 admin）— Phase 2c: SA Core read.
+        # 校验仓库存在、租户归属，以及非 admin 的显式仓库授权。
         if current_user.tenant_id is not None:
             stmt = select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == warehouse_id)
             with get_engine().connect() as sa_conn:
@@ -841,6 +847,8 @@ def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] 
                 raise HTTPException(status_code=404, detail='仓库不存在')
             if wh.tenant_id != current_user.tenant_id:
                 raise HTTPException(status_code=403, detail='无权访问该仓库')
+        if current_user.role != RoleName.ADMIN and not current_user.can_access_warehouse(None, warehouse_id):
+            raise HTTPException(status_code=403, detail='无权访问该仓库')
         return warehouse_id
     if current_user.warehouse_id is not None:
         return current_user.warehouse_id
@@ -945,6 +953,25 @@ def build_scope_predicates(table, tenant_id, warehouse_id=None) -> list:
     return preds
 
 
+def build_authorized_scope_predicates(table, current_user: CurrentUser, warehouse_id=None) -> list:
+    """Tenant + warehouse predicates that respect per-user warehouse grants.
+
+    ``build_scope_predicates`` intentionally models tenant/global-admin scope.
+    For non-admin users, a missing ``warehouse_id`` must not mean "all tenant
+    warehouses"; it means "all explicitly authorized warehouses", which may be
+    empty for a newly-created user.
+    """
+    preds = build_scope_predicates(table, current_user.tenant_id, warehouse_id)
+    if (
+        warehouse_id is None
+        and current_user.role != RoleName.ADMIN
+        and hasattr(table.c, "warehouse_id")
+    ):
+        warehouse_ids = current_user.get_authorized_warehouses(None)
+        preds.append(table.c.warehouse_id.in_(warehouse_ids) if warehouse_ids else false())
+    return preds
+
+
 def assert_row_in_scope(
     row,
     current_user: 'CurrentUser',
@@ -1008,6 +1035,9 @@ async def list_warehouses(
 ):
     """获取仓库列表 — Phase 2b: read via SQLAlchemy Core."""
     conds = list(build_scope_predicates(_t_warehouses, current_user.tenant_id, None))
+    if current_user.role != RoleName.ADMIN:
+        warehouse_ids = current_user.get_authorized_warehouses(None)
+        conds.append(_t_warehouses.c.id.in_(warehouse_ids) if warehouse_ids else false())
     if not (include_disabled and current_user.role == RoleName.ADMIN):
         conds.append(_t_warehouses.c.is_disabled == 0)
     stmt = select(
@@ -1741,22 +1771,26 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
     if not user_rows:
         return LoginResponse(success=False, message="用户名或密码错误")
 
-    # 过滤：非禁用 + 租户有效 + 密码正确
-    matched = [
+    password_matched = [
         u for u in user_rows
-        if not u.is_disabled
-        and (u.tenant_id is None or bool(u.tenant_is_active))
-        and verify_password(login_data.password, u.password_hash)
+        if verify_password(login_data.password, u.password_hash)
+    ]
+    if len(password_matched) == 0:
+        return LoginResponse(success=False, message="用户名或密码错误")
+
+    enabled_matched = [u for u in password_matched if not u.is_disabled]
+    if len(enabled_matched) == 0:
+        return LoginResponse(success=False, message="用户已被禁用")
+
+    matched = [
+        u for u in enabled_matched
+        if u.tenant_id is None or bool(u.tenant_is_active)
     ]
     if len(matched) == 0:
-        return LoginResponse(success=False, message="用户名或密码错误")
+        return LoginResponse(success=False, message="租户已停用，请联系管理员")
     if len(matched) > 1:
         return LoginResponse(success=False, message="同名账号存在于多个租户，请联系管理员")
     user = matched[0]
-
-    # 单独检查禁用和租户停用（以便给出更明确的错误信息）
-    # 注意：上方 matched 已过滤 is_disabled，此处只处理密码错误后的候选
-    # 如果所有同名用户均被禁用或租户停用，matched 为空已返回"用户名或密码错误"
 
     # 透明密码升级：如果使用旧的SHA256哈希，自动升级到bcrypt
     new_hash = None
@@ -3101,8 +3135,8 @@ def get_dashboard_stats(
 ):
     """获取仪表盘统计数据（排除禁用物料）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
-    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
+    r_scope = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
 
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_s = today_start.strftime('%Y-%m-%d %H:%M:%S')
@@ -3210,7 +3244,7 @@ def get_category_distribution(
 ):
     """获取库存类型分布 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     # 单一真相源：active batches 聚合
     batch_sum = (
         select(
@@ -3243,7 +3277,7 @@ def get_weekly_trend(
 ):
     """获取近7天出入库趋势 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    scope_preds = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    scope_preds = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
 
     dates = []
     in_data = []
@@ -3288,7 +3322,7 @@ def get_top_stock(
 ):
     """获取库存TOP10 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     batch_sum = (
         select(
             _t_batches.c.material_id.label('material_id'),
@@ -3338,7 +3372,7 @@ def get_low_stock_alert(
         qty_col < _t_materials.c.safe_stock,
         _t_materials.c.is_disabled == 0,
     ]
-    preds.extend(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds.extend(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     j_lsa = _t_materials.outerjoin(batch_sum, batch_sum.c.material_id == _t_materials.c.id)
     stmt = (
         select(
@@ -3699,7 +3733,7 @@ def get_all_materials(
     """获取所有库存（兼容旧API）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     preds = [_t_materials.c.is_disabled == 0]
-    preds.extend(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds.extend(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     batch_sum = (
         select(
             _t_batches.c.material_id.label('material_id'),
@@ -3785,7 +3819,7 @@ def get_materials_list(
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
     # 构建物料筛选条件
-    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
 
     if not status_filter or 'disabled' not in status_filter:
         preds.append(_t_materials.c.is_disabled == 0)
@@ -3932,7 +3966,7 @@ def get_categories(
 ):
     """获取所有物料分类 — Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     stmt = select(_t_materials.c.category).distinct().order_by(_t_materials.c.category)
     if preds:
         stmt = stmt.where(and_(*preds))
@@ -3951,7 +3985,7 @@ def get_product_stats(
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
 
     today = datetime.now().strftime('%Y-%m-%d')
     yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -4033,8 +4067,8 @@ def get_material_batches(
     if wh_id is not None:
         with get_db() as conn:
             check_warehouse_access(conn, current_user, wh_id)
-    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
-    b_scope = list(build_scope_predicates(_t_batches, current_user.tenant_id, wh_id))
+    m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
+    b_scope = list(build_authorized_scope_predicates(_t_batches, current_user, wh_id))
     with get_engine().connect() as sa_conn:
         material = sa_conn.execute(
             select(_t_materials.c.id).where(and_(_t_materials.c.name == name, *m_scope))
@@ -4085,8 +4119,8 @@ def get_product_trend(
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     # Phase 2f: SA Core read.
-    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
-    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
+    r_scope = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
 
     with get_engine().connect() as sa_conn:
         product = sa_conn.execute(
@@ -4143,8 +4177,8 @@ def get_product_records(
         raise HTTPException(status_code=400, detail="缺少产品名称参数")
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
-    m_scope = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    r_scope = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
+    m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
 
     with get_engine().connect() as sa_conn:
         product = sa_conn.execute(
@@ -4230,7 +4264,7 @@ def get_inventory_records_paginated(
 ):
     """获取所有进出库记录（分页+筛选）— Phase 2e: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
-    r_scope = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    r_scope = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
 
     # 解析状态筛选
     status_filter = status.split(',') if status else None
@@ -4496,7 +4530,7 @@ async def stock_in(
     ensure_contact_tenant(None, current_user, request.contact_id,
                           resolve_tenant_id_for_write(current_user, wh_id))
 
-    m_scope = build_scope_predicates(_t_materials, current_user.tenant_id, wh_id)
+    m_scope = build_authorized_scope_predicates(_t_materials, current_user, wh_id)
 
     # 查询产品（先精确匹配，按仓库过滤；排除已禁用物料）
     with get_engine().connect() as sa_conn:
@@ -4649,8 +4683,8 @@ async def stock_out(
     ensure_contact_tenant(None, current_user, stock_data.contact_id,
                           resolve_tenant_id_for_write(current_user, wh_id))
 
-    m_scope = build_scope_predicates(_t_materials, current_user.tenant_id, wh_id)
-    b_scope = build_scope_predicates(_t_batches, current_user.tenant_id, wh_id)
+    m_scope = build_authorized_scope_predicates(_t_materials, current_user, wh_id)
+    b_scope = build_authorized_scope_predicates(_t_batches, current_user, wh_id)
 
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(
@@ -5223,7 +5257,7 @@ def export_materials_excel(
     # 解析状态筛选
     status_filter = status.split(',') if status else None
 
-    preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+    preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     if not status_filter or 'disabled' not in status_filter:
         preds.append(_t_materials.c.is_disabled == 0)
     if name:
@@ -5496,7 +5530,7 @@ async def preview_import_excel(
         # 联系方为租户级（不绑定仓库），用 tenant 单独构造 scope
         contact_tenant_id = resolve_tenant_id_for_write(current_user, wh_id) if wh_id is not None else current_user.tenant_id
         contact_preds_base = list(build_scope_predicates(_t_contacts, contact_tenant_id, None))
-        mat_scope_preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+        mat_scope_preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
 
         # 联系方解析辅助
         def resolve_contact(name):
@@ -5789,7 +5823,7 @@ async def confirm_import_excel(
         import_skus = set(item.sku for item in request.changes)
 
         # 将不在导入文件中的SKU标记为禁用（需显式确认，仅限当前仓库）
-        mat_scope_preds = list(build_scope_predicates(_t_materials, current_user.tenant_id, wh_id))
+        mat_scope_preds = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
         if import_skus:
             if request.confirm_disable_missing_skus:
                 sa_conn.execute(
@@ -6297,7 +6331,7 @@ def export_inventory_records(
     """导出出入库记录为Excel（支持筛选，含批次信息）— Phase 3f: SA Core read."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
 
-    preds = list(build_scope_predicates(_t_inventory_records, current_user.tenant_id, wh_id))
+    preds = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
     if start_date:
         preds.append(_sa_func.date(_t_inventory_records.c.created_at) >= start_date)
     if end_date:
