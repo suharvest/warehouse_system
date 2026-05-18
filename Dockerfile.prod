@@ -69,6 +69,6 @@ ENV LOG_LEVEL=INFO
 EXPOSE ${PORT}
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",1025)}/api/dashboard/stats', timeout=5)" || exit 1
+    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",1025)}/health', timeout=5)" || exit 1
 
 CMD [".venv/bin/python", "run_backend.py"]

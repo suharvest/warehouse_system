@@ -69,7 +69,7 @@ server {
     # 健康检查端点
     location /health {
         access_log off;
-        proxy_pass http://warehouse_backend/api/dashboard/stats;
+        proxy_pass http://warehouse_backend/health;
     }
 }
 
