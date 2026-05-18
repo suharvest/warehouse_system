@@ -9,6 +9,7 @@ echo ""
 USE_VITE=false
 DEPLOY_MODE="${DEPLOY_MODE:-single_tenant}"
 MCP_DEBUG="${MCP_DEBUG:-0}"
+FACTORY_API_KEY="${FACTORY_API_KEY:-}"
 for arg in "$@"; do
     case $arg in
         --vite)
@@ -23,10 +24,19 @@ for arg in "$@"; do
             MCP_DEBUG=1
             shift
             ;;
+        --factory-key)
+            FACTORY_API_KEY="$2"
+            shift 2
+            ;;
+        --factory-key=*)
+            FACTORY_API_KEY="${arg#*=}"
+            shift
+            ;;
     esac
 done
 export DEPLOY_MODE
 export MCP_DEBUG
+export FACTORY_API_KEY
 
 # 检查是否安装了 uv
 if ! command -v uv &> /dev/null; then
@@ -91,6 +101,7 @@ trap cleanup INT TERM EXIT
 echo ""
 echo "启动服务..."
 echo "部署模式: $DEPLOY_MODE"
+[ -n "${FACTORY_API_KEY}" ] && echo "Factory Key: 已配置" || echo "Factory Key: 未配置（/factory/devices 将返回 401）"
 [ "${MCP_DEBUG:-0}" = "1" ] && echo "MCP 调试模式: 已开启（工具调用入参/返回值将记录到进程日志）"
 echo ""
 
@@ -106,7 +117,7 @@ VITE_LOG="$LOG_DIR/vite.log"
 
 # 启动后端（同时 serve 前端静态文件）
 echo "启动后端服务 (端口 2124)... 日志: $BACKEND_LOG"
-FACTORY_API_KEY="${FACTORY_API_KEY:-}" PYTHONUNBUFFERED=1 uv run python -u run_backend.py 2>&1 | tee "$BACKEND_LOG" &
+PYTHONUNBUFFERED=1 uv run python -u run_backend.py 2>&1 | tee "$BACKEND_LOG" &
 BACKEND_PID=$!
 
 sleep 2
