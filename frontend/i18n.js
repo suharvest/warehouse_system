@@ -42,6 +42,9 @@ const translations = {
 
         // 库存列表
         inventoryList: '库存列表',
+        inventoryGroupBySku: '聚合同批次',
+        inventoryMixedValues: '多个',
+        inventoryBatchesUnit: '个批次',
         searchPlaceholder: '搜索产品名称或编码...',
         autoUpdate: '自动更新:',
         seconds: '秒',
@@ -580,6 +583,9 @@ const translations = {
         outbound: 'Outbound',
 
         inventoryList: 'Inventory List',
+        inventoryGroupBySku: 'Merge batches',
+        inventoryMixedValues: 'Multiple',
+        inventoryBatchesUnit: 'batches',
         searchPlaceholder: 'Search by name or code...',
         autoUpdate: 'Auto update:',
         seconds: 's',

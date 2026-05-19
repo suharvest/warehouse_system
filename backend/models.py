@@ -337,6 +337,10 @@ class MaterialItemWithDisabled(BaseModel):
     variant: Optional[str] = None
     warehouse_id: Optional[int] = None
     warehouse_name: Optional[str] = None
+    # 聚合模式（group_by_sku=true）专用字段
+    batch_count: Optional[int] = None  # 该物料活跃批次数
+    location_mixed: Optional[bool] = None  # 批次位置是否存在多种不同值
+    variant_mixed: Optional[bool] = None  # 批次变体是否存在多种不同值
 
 
 class InventoryRecordItem(BaseModel):

@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from datetime import datetime, timedelta
 from contextlib import contextmanager
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from io import BytesIO
 from functools import wraps
@@ -3801,9 +3801,10 @@ def get_materials_list(
     fuzzy: bool = Query(True, description="名称模糊匹配开关"),
     format: Optional[str] = Query(None, description="brief时精简返回"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    group_by_sku: bool = Query(False, description="按SKU聚合：每个物料一行，批次/位置/变体合并展示"),
     current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
-    """获取物料列表（分页+筛选）— 一行一批次 — Phase 2d: SA Core read."""
+    """获取物料列表（分页+筛选）— 默认一行一批次；group_by_sku=true 时一行一物料."""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
 
     status_filter = status.split(',') if status else None
@@ -3914,13 +3915,43 @@ def get_materials_list(
 
         filtered.append((row, item_status))
 
+    # 聚合模式：按 material_id 合并多批次为单行
+    if group_by_sku and format != "brief":
+        grouped: Dict[int, Dict[str, Any]] = {}
+        for row, item_status in filtered:
+            mid = row.material_id
+            g = grouped.get(mid)
+            if g is None:
+                g = {
+                    'row': row,
+                    'status': item_status,
+                    'batch_nos': set(),
+                    'locations': set(),
+                    'variants': set(),
+                }
+                grouped[mid] = g
+            if row.batch_no:
+                g['batch_nos'].add(row.batch_no)
+                # location/variant 仅统计活跃批次的非空值
+                loc = (row.batch_location or '').strip()
+                if loc:
+                    g['locations'].add(loc)
+                var = (row.variant or '').strip()
+                if var:
+                    g['variants'].add(var)
+        filtered = [(g['row'], g['status'], g) for g in grouped.values()]
+        # 保持物料名升序（query 已 order_by name）
+        filtered.sort(key=lambda x: (x[0].name or '', x[0].sku or ''))
+    else:
+        filtered = [(r, s, None) for r, s in filtered]
+
     total = len(filtered)
     total_pages = math.ceil(total / page_size) if total > 0 else 1
     offset = (page - 1) * page_size
     page_rows = filtered[offset:offset + page_size]
 
     result = []
-    for row, item_status in page_rows:
+    for row, item_status, agg in page_rows:
         is_disabled = bool(row.is_disabled)
         status_text_map = {'normal': '正常', 'warning': '偏低', 'danger': '告急', 'disabled': '禁用'}
 
@@ -3930,6 +3961,37 @@ def get_materials_list(
 
         if format == "brief":
             result.append({"id": row.material_id, "name": row.name, "sku": row.sku})
+        elif agg is not None:
+            # 聚合行：一行一物料
+            batch_nos = agg['batch_nos']
+            locations = agg['locations']
+            variants = agg['variants']
+            loc_mixed = len(locations) > 1
+            var_mixed = len(variants) > 1
+            single_loc = next(iter(locations)) if len(locations) == 1 else ''
+            single_var = next(iter(variants)) if len(variants) == 1 else ''
+            single_batch_no = next(iter(batch_nos)) if len(batch_nos) == 1 else ''
+            result.append(MaterialItemWithDisabled(
+                name=row.name,
+                sku=row.sku,
+                category=row.category,
+                quantity=row.total_quantity or 0,  # 聚合视图：用总库存
+                unit=row.unit,
+                safe_stock=row.safe_stock,
+                location='' if loc_mixed else (single_loc or (row.material_location or '')),
+                status=item_status,
+                status_text=status_text_map.get(item_status, ''),
+                is_disabled=is_disabled,
+                batch_no=single_batch_no,
+                contact_name='',
+                total_quantity=row.total_quantity,
+                variant='' if var_mixed else single_var,
+                warehouse_id=row.warehouse_id,
+                warehouse_name=row.warehouse_name,
+                batch_count=len(batch_nos),
+                location_mixed=loc_mixed,
+                variant_mixed=var_mixed,
+            ))
         else:
             result.append(MaterialItemWithDisabled(
                 name=row.name,
