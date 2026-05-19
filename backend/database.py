@@ -957,6 +957,55 @@ def verify_password(password: str, password_hash: str) -> bool:
         return hashlib.sha256((password + salt).encode()).hexdigest() == password_hash
 
 
+# 自助注册保留用户名（避免新租户撞上系统类账号、便于运维识别）
+RESERVED_USERNAMES = frozenset({
+    "admin", "administrator", "root", "superuser", "sysadmin",
+    "system", "support", "guest", "test", "demo",
+    "user", "null", "none", "anonymous", "watcher",
+})
+
+# 常见弱密码 top 列表（小写比对，含数字串、键盘序、常见词）
+WEAK_PASSWORDS = frozenset({
+    "12345678", "123456789", "1234567890", "11111111", "00000000",
+    "password", "passw0rd", "password1", "qwerty12", "qwertyui",
+    "abcdefgh", "abc12345", "iloveyou", "admin123", "administrator",
+    "welcome1", "letmein1", "monkey12", "dragon12", "football",
+    "baseball", "sunshine", "princess", "trustno1", "asdfghjk",
+    "1qaz2wsx", "zaq12wsx", "qazwsxedc",
+})
+
+
+def validate_username(username: str) -> Optional[str]:
+    """校验用户名。返回错误消息；None 表示通过。"""
+    if not username:
+        return "用户名不能为空"
+    if len(username) < 3:
+        return "用户名长度至少3位"
+    if len(username) > 64:
+        return "用户名过长（最多64字符）"
+    if username.lower() in RESERVED_USERNAMES:
+        return "该用户名为系统保留，请换一个"
+    return None
+
+
+def validate_password_strength(password: str) -> Optional[str]:
+    """自助注册密码强度校验。返回错误消息；None 表示通过。"""
+    if not password:
+        return "密码不能为空"
+    if len(password) < 8:
+        return "密码长度至少8位"
+    if len(password) > 128:
+        return "密码过长"
+    # 至少包含字母 + 数字两类
+    has_letter = any(c.isalpha() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    if not (has_letter and has_digit):
+        return "密码需同时包含字母和数字"
+    if password.lower() in WEAK_PASSWORDS:
+        return "密码过于常见，请换一个更复杂的密码"
+    return None
+
+
 def needs_password_rehash(password_hash: str) -> bool:
     """
     检查密码是否需要升级到bcrypt

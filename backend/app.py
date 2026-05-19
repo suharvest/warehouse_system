@@ -28,6 +28,7 @@ from database import (
     has_admin_user, hash_password, verify_password,
     generate_session_token, generate_api_key, hash_api_key,
     generate_batch_no, needs_password_rehash,
+    validate_username, validate_password_strength,
     REASON_CATEGORIES, REASON_CATEGORY_LABELS,
     get_deploy_mode, _is_sqlite,
 )
@@ -1528,8 +1529,12 @@ async def register_tenant(body: RegisterRequest, response: Response):
 
     if not device_id or not username or not password:
         raise HTTPException(status_code=400, detail="设备ID、用户名、密码均不能为空")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="密码长度至少6位")
+    err = validate_username(username)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    err = validate_password_strength(password)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
 
     with get_engine().begin() as sa_conn:
         # 先查 device_id 唯一性（本地 DB 先兜底）
@@ -1654,8 +1659,9 @@ async def reset_password(body: ResetPasswordRequest):
 
     if not device_id or not username or not new_password:
         raise HTTPException(status_code=400, detail="设备ID、用户名、新密码均不能为空")
-    if len(new_password) < 6:
-        raise HTTPException(status_code=400, detail="密码长度至少6位")
+    err = validate_password_strength(new_password)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
 
     with get_engine().begin() as sa_conn:
         # 查租户

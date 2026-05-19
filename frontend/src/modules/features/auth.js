@@ -12,6 +12,38 @@ import { startOnboarding } from './onboarding.js';
 // 标记是否已显示过期提示（避免重复弹窗）
 let sessionExpiredNotified = false;
 
+// 自助注册用户名/密码校验（与后端 database.py 保持一致）
+const RESERVED_USERNAMES = new Set([
+    'admin', 'administrator', 'root', 'superuser', 'sysadmin',
+    'system', 'support', 'guest', 'test', 'demo',
+    'user', 'null', 'none', 'anonymous', 'watcher',
+]);
+const WEAK_PASSWORDS = new Set([
+    '12345678', '123456789', '1234567890', '11111111', '00000000',
+    'password', 'passw0rd', 'password1', 'qwerty12', 'qwertyui',
+    'abcdefgh', 'abc12345', 'iloveyou', 'admin123', 'administrator',
+    'welcome1', 'letmein1', 'monkey12', 'dragon12', 'football',
+    'baseball', 'sunshine', 'princess', 'trustno1', 'asdfghjk',
+    '1qaz2wsx', 'zaq12wsx', 'qazwsxedc',
+]);
+function validateUsername(username) {
+    if (!username) return '用户名不能为空';
+    if (username.length < 3) return '用户名长度至少3位';
+    if (username.length > 64) return '用户名过长（最多64字符）';
+    if (RESERVED_USERNAMES.has(username.toLowerCase())) return '该用户名为系统保留，请换一个';
+    return null;
+}
+function validatePasswordStrength(password) {
+    if (!password) return '密码不能为空';
+    if (password.length < 8) return '密码长度至少8位';
+    if (password.length > 128) return '密码过长';
+    const hasLetter = /[A-Za-z]/.test(password);
+    const hasDigit = /\d/.test(password);
+    if (!(hasLetter && hasDigit)) return '密码需同时包含字母和数字';
+    if (WEAK_PASSWORDS.has(password.toLowerCase())) return '密码过于常见，请换一个更复杂的密码';
+    return null;
+}
+
 // 回调函数引用（由 main.js 设置）
 let onAuthChange = null;
 let switchTabFn = null;
@@ -451,8 +483,15 @@ export async function registerSubmit() {
         errorDiv.style.display = 'block';
         return;
     }
-    if (password.length < 6) {
-        errorDiv.textContent = '密码长度至少6位';
+    const userErr = validateUsername(username);
+    if (userErr) {
+        errorDiv.textContent = userErr;
+        errorDiv.style.display = 'block';
+        return;
+    }
+    const pwdErr = validatePasswordStrength(password);
+    if (pwdErr) {
+        errorDiv.textContent = pwdErr;
         errorDiv.style.display = 'block';
         return;
     }
@@ -508,8 +547,9 @@ export async function registerResetPassword() {
         errorDiv.style.display = 'block';
         return;
     }
-    if (!newPassword || newPassword.length < 6) {
-        errorDiv.textContent = '密码长度至少6位';
+    const pwdErr = validatePasswordStrength(newPassword);
+    if (pwdErr) {
+        errorDiv.textContent = pwdErr;
         errorDiv.style.display = 'block';
         return;
     }
