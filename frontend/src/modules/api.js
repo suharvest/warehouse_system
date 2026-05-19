@@ -137,6 +137,7 @@ export const inventoryApi = {
       query.set('status', params.status.join(','));
     }
     query.set('fuzzy', 'false');
+    if (params.groupBySku) query.set('group_by_sku', 'true');
     return fetchJson(`/materials/list?${query.toString()}`);
   },
 

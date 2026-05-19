@@ -522,6 +522,11 @@
                             <div class="section-header">
                                 <div class="section-title" data-i18n="inventoryList">库存列表</div>
                                 <div class="action-buttons">
+                                    <label class="agg-toggle" for="inventory-group-by-sku">
+                                        <input type="checkbox" id="inventory-group-by-sku" data-action-change="toggleInventoryGroupBySku" class="agg-toggle__input">
+                                        <span class="agg-toggle__track"><span class="agg-toggle__thumb"></span></span>
+                                        <span class="agg-toggle__label" data-i18n="inventoryGroupBySku">聚合同批次</span>
+                                    </label>
                                     <button class="action-btn import-btn" data-action="showImportModal">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">

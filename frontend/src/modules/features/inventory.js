@@ -10,6 +10,9 @@ import { getDropdownSelectedValues, resetDropdownSelection } from '../ui/dropdow
 // 回调函数引用
 let switchTabFn = null;
 
+// 视图模式：是否按 SKU 聚合
+let groupBySku = false;
+
 // 设置回调
 export function setInventoryCallbacks(callbacks) {
     switchTabFn = callbacks.switchTab;
@@ -26,7 +29,8 @@ export async function loadInventory() {
         pageSize: inventoryPageSize,
         name: name || undefined,
         category: category || undefined,
-        status: selectedStatuses.length > 0 ? selectedStatuses : undefined
+        status: selectedStatuses.length > 0 ? selectedStatuses : undefined,
+        groupBySku
     };
 
     try {
@@ -67,17 +71,38 @@ function renderInventoryTable(items) {
             statusClass = 'status-danger';
         }
 
+        // 聚合视图下的多值展示：批次号 / 变体 / 位置
+        const mixedLabel = t('inventoryMixedValues') || '多个';
+        let variantCell, batchCell, locationCell;
+        if (groupBySku) {
+            const count = item.batch_count || 0;
+            if (count === 0) batchCell = '-';
+            else if (count === 1) batchCell = item.batch_no || '-';
+            else batchCell = `<span class="agg-badge">${count} ${t('inventoryBatchesUnit') || '个批次'}</span>`;
+
+            variantCell = item.variant_mixed
+                ? `<span class="agg-badge agg-badge--muted">${mixedLabel}</span>`
+                : (item.variant || '-');
+            locationCell = item.location_mixed
+                ? `<span class="agg-badge agg-badge--muted">${mixedLabel}</span>`
+                : (item.location || '-');
+        } else {
+            variantCell = item.variant || '-';
+            batchCell = item.batch_no || '-';
+            locationCell = item.location || '-';
+        }
+
         tr.innerHTML = `
             <td>${item.name}</td>
-            <td>${item.variant || '-'}</td>
+            <td>${variantCell}</td>
             <td>${item.sku}</td>
             <td>${item.category}</td>
-            <td>${item.batch_no || '-'}</td>
+            <td>${batchCell}</td>
             <td><strong>${item.quantity}</strong></td>
             <td>${item.unit}</td>
             <td>${item.safe_stock != null ? item.safe_stock : '-'}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-            <td>${item.location || '-'}</td>
+            <td>${locationCell}</td>
         `;
 
         tr.addEventListener('click', function () {
@@ -131,6 +156,13 @@ export function resetInventoryFilter() {
     document.getElementById('filter-inventory-name').value = '';
     document.getElementById('filter-inventory-category').value = '';
     resetDropdownSelection('filter-inventory-status-dropdown');
+    setInventoryCurrentPage(1);
+    loadInventory();
+}
+
+// 切换"按 SKU 聚合"视图
+export function toggleInventoryGroupBySku(checked) {
+    groupBySku = !!checked;
     setInventoryCurrentPage(1);
     loadInventory();
 }

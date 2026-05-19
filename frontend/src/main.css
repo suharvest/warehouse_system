@@ -35,3 +35,82 @@
 .warehouse-option-indent {
     padding-left: 24px !important;
 }
+
+/* Aggregated inventory list (group-by-sku mode) badge */
+.agg-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #047857;
+    background: #ecfdf5;
+    border: 1px solid #a7f3d0;
+    border-radius: 999px;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+.agg-badge--muted {
+    color: #6b7280;
+    background: #f3f4f6;
+    border-color: #e5e7eb;
+}
+
+/* iOS-style toggle for "merge batches" mode */
+.agg-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: 12px;
+    padding: 6px 10px;
+    font-size: 13px;
+    color: #374151;
+    cursor: pointer;
+    user-select: none;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+}
+.agg-toggle:hover {
+    background: #f9fafb;
+}
+.agg-toggle__input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+}
+.agg-toggle__track {
+    position: relative;
+    display: inline-block;
+    width: 34px;
+    height: 20px;
+    background: #d1d5db;
+    border-radius: 999px;
+    transition: background 0.2s ease;
+    flex-shrink: 0;
+}
+.agg-toggle__thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    transition: transform 0.2s ease;
+}
+.agg-toggle__input:checked + .agg-toggle__track {
+    background: #10b981;
+}
+.agg-toggle__input:checked + .agg-toggle__track .agg-toggle__thumb {
+    transform: translateX(14px);
+}
+.agg-toggle__input:focus-visible + .agg-toggle__track {
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+}
+.agg-toggle__label {
+    font-weight: 500;
+}

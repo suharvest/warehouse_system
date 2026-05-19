@@ -15,7 +15,7 @@ import { switchTab, initFromHash, startAutoUpdate, stopAutoUpdate, refreshCurren
 // 功能模块
 import { checkAuthStatus, showLoginModal, closeLoginModal, handleLogin, handleLogout, showSetupModal, handleSetup, updateUserDisplay, updatePermissionUI, setAuthCallbacks, initSessionExpiredHandler, openRegisterModal, closeRegisterModal, registerVerifyDevice, registerSubmit, registerResetPassword, backToRegisterStep1 } from './features/auth.js';
 import { initCharts, loadDashboardData, onTotalStockClick, onTodayInClick, onTodayOutClick, onLowStockClick, setDashboardCallbacks } from './features/dashboard.js';
-import { loadInventory, inventoryGoToPage, changeInventoryPageSize, applyInventoryFilter, resetInventoryFilter, applyInventoryFilters, setInventoryCallbacks } from './features/inventory.js';
+import { loadInventory, inventoryGoToPage, changeInventoryPageSize, applyInventoryFilter, resetInventoryFilter, applyInventoryFilters, setInventoryCallbacks, toggleInventoryGroupBySku } from './features/inventory.js';
 import { loadRecords, recordsGoToPage, changeRecordsPageSize, applyRecordsFilter, resetRecordsFilter, applyRecordsFilters, loadRecordsFilterOptions, showAddRecordModal, showAddRecordModalForProduct, closeAddRecordModal, submitAddRecord, setRecordsCallbacks } from './features/records.js';
 import { onProductSelect, initDetailCharts, loadProductDetail, loadProductTrend, loadDetailPieChart, loadProductRecords, detailGoToPage, changeDetailPageSize, refreshProductDetailForLanguage } from './features/product-detail.js';
 import { exportInventory, exportRecords, exportProductRecords, showImportModal, closeImportModal, handleFileSelect, confirmImport, closeNewSkuModal, skipNewSkus, confirmNewSkus, setImportExportCallbacks, downloadSampleExcel } from './features/import-export.js';
@@ -421,6 +421,7 @@ const actionHandlers = {
     'inventoryPrevPage': () => inventoryGoToPage(getInventoryCurrentPage() - 1),
     'inventoryNextPage': () => inventoryGoToPage(getInventoryCurrentPage() + 1),
     'changeInventoryPageSize': (el) => changeInventoryPageSize(el.value),
+    'toggleInventoryGroupBySku': (el) => toggleInventoryGroupBySku(el.checked),
     'detailPrevPage': () => detailGoToPage(getDetailCurrentPage() - 1),
     'detailNextPage': () => detailGoToPage(getDetailCurrentPage() + 1),
     'changeDetailPageSize': (el) => changeDetailPageSize(el.value),
