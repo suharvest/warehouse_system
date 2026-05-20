@@ -1,0 +1,866 @@
+[
+  {
+    "method": "GET",
+    "name": "list_api_keys",
+    "path": "/api/api-keys",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "api_keys_create",
+    "path": "/api/api-keys",
+    "response_model": "ApiKeyResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_item",
+    "path": "/api/api-keys/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "toggle_api_key_status",
+    "path": "/api/api-keys/{key_id}/status",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "login",
+    "path": "/api/auth/login",
+    "response_model": "LoginResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "logout",
+    "path": "/api/auth/logout",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_current_user_info",
+    "path": "/api/auth/me",
+    "response_model": "UserInfo",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "register_tenant",
+    "path": "/api/auth/register",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "register_verify_device",
+    "path": "/api/auth/register/verify-device",
+    "response_model": "VerifyDeviceResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "reset_password",
+    "path": "/api/auth/reset-password",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "setup_admin",
+    "path": "/api/auth/setup",
+    "response_model": "LoginResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_auth_status",
+    "path": "/api/auth/status",
+    "response_model": "AuthStatusResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_my_warehouses",
+    "path": "/api/auth/warehouses",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_batch_by_no",
+    "path": "/api/batches/by-no",
+    "response_model": "BatchDetailResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_contacts",
+    "path": "/api/contacts",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "contacts_create",
+    "path": "/api/contacts",
+    "response_model": "ContactItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_customers",
+    "path": "/api/contacts/customers",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_suppliers",
+    "path": "/api/contacts/suppliers",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_item",
+    "path": "/api/contacts/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_item",
+    "path": "/api/contacts/{item_id}",
+    "response_model": "ContactItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "contacts_update",
+    "path": "/api/contacts/{item_id}",
+    "response_model": "ContactItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_category_distribution",
+    "path": "/api/dashboard/category-distribution",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_low_stock_alert",
+    "path": "/api/dashboard/low-stock-alert",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_dashboard_stats",
+    "path": "/api/dashboard/stats",
+    "response_model": "DashboardStats",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_top_stock",
+    "path": "/api/dashboard/top-stock",
+    "response_model": "TopStock",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_weekly_trend",
+    "path": "/api/dashboard/weekly-trend",
+    "response_model": "WeeklyTrend",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "clear_database",
+    "path": "/api/database/clear",
+    "response_model": "DatabaseOperationResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "export_database",
+    "path": "/api/database/export",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "import_database",
+    "path": "/api/database/import",
+    "response_model": "DatabaseOperationResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_erp_providers",
+    "path": "/api/erp/providers",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "upload_erp_provider",
+    "path": "/api/erp/providers",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_active_provider_for_mcp",
+    "path": "/api/erp/providers/active-for-mcp",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_item",
+    "path": "/api/erp/providers/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_item",
+    "path": "/api/erp/providers/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "erp_providers_update",
+    "path": "/api/erp/providers/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "activate_erp_provider",
+    "path": "/api/erp/providers/{provider_id}/activate",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "deactivate_erp_provider",
+    "path": "/api/erp/providers/{provider_id}/deactivate",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_erp_provider_status",
+    "path": "/api/erp/providers/{provider_id}/status",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "test_erp_provider",
+    "path": "/api/erp/providers/{provider_id}/test",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "face_get_config",
+    "path": "/api/face/config",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "face_put_config",
+    "path": "/api/face/config",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "face_list_enrollments",
+    "path": "/api/face/enrollments",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "face_create_enrollment",
+    "path": "/api/face/enrollments",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "face_delete_enrollment",
+    "path": "/api/face/enrollments/{enrollment_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "face_list_logs",
+    "path": "/api/face/logs",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "face_list_rules",
+    "path": "/api/face/rules",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "face_create_rule",
+    "path": "/api/face/rules",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "face_delete_rule",
+    "path": "/api/face/rules/{rule_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "face_update_rule",
+    "path": "/api/face/rules/{rule_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "face_list_subjects",
+    "path": "/api/face/subjects",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "face_create_subject",
+    "path": "/api/face/subjects",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "face_delete_subject",
+    "path": "/api/face/subjects/{subject_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "face_update_subject",
+    "path": "/api/face/subjects/{subject_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "face_test_connection",
+    "path": "/api/face/test-connection",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "face_verify_mcp",
+    "path": "/api/face/verify-mcp",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "fuzzy_match_endpoint",
+    "path": "/api/fuzzy-match",
+    "response_model": "FuzzyMatchResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "add_inventory_record",
+    "path": "/api/inventory/add-record",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "export_inventory_records",
+    "path": "/api/inventory/export-excel",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_inventory_records_paginated",
+    "path": "/api/inventory/records",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_all_materials",
+    "path": "/api/materials/all",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_material_batches",
+    "path": "/api/materials/batches",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "move_batch_location",
+    "path": "/api/materials/batches/move-location",
+    "response_model": "BatchMoveResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_categories",
+    "path": "/api/materials/categories",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "export_materials_excel",
+    "path": "/api/materials/export-excel",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "confirm_import_excel",
+    "path": "/api/materials/import-excel/confirm",
+    "response_model": "ExcelImportResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "preview_import_excel",
+    "path": "/api/materials/import-excel/preview",
+    "response_model": "ExcelImportPreviewResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "download_sample_excel",
+    "path": "/api/materials/import-excel/sample",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_materials_list",
+    "path": "/api/materials/list",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_product_records",
+    "path": "/api/materials/product-records",
+    "response_model": "PaginatedProductRecordsResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_product_stats",
+    "path": "/api/materials/product-stats",
+    "response_model": "ProductStats",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_product_trend",
+    "path": "/api/materials/product-trend",
+    "response_model": "WeeklyTrend",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "stock_in",
+    "path": "/api/materials/stock-in",
+    "response_model": "StockInResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "stock_out",
+    "path": "/api/materials/stock-out",
+    "response_model": "StockOutResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_mcp_connections",
+    "path": "/api/mcp/connections",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "create_mcp_connection",
+    "path": "/api/mcp/connections",
+    "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_mcp_connection",
+    "path": "/api/mcp/connections/{conn_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "update_mcp_connection",
+    "path": "/api/mcp/connections/{conn_id}",
+    "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "toggle_mcp_debug",
+    "path": "/api/mcp/connections/{conn_id}/debug",
+    "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_mcp_connection_logs",
+    "path": "/api/mcp/connections/{conn_id}/logs",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "restart_mcp_connection",
+    "path": "/api/mcp/connections/{conn_id}/restart",
+    "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "start_mcp_connection",
+    "path": "/api/mcp/connections/{conn_id}/start",
+    "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "stop_mcp_connection",
+    "path": "/api/mcp/connections/{conn_id}/stop",
+    "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_operators_for_filter",
+    "path": "/api/operators",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_reason_categories",
+    "path": "/api/reason-categories",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "unified_search",
+    "path": "/api/search",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_system_mode",
+    "path": "/api/system/mode",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "set_system_mode",
+    "path": "/api/system/mode",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_tenants",
+    "path": "/api/tenants",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "create_tenant",
+    "path": "/api/tenants",
+    "response_model": "TenantItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_tenant",
+    "path": "/api/tenants/{tenant_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "update_tenant",
+    "path": "/api/tenants/{tenant_id}",
+    "response_model": "TenantItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_users",
+    "path": "/api/users",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "users_create",
+    "path": "/api/users",
+    "response_model": "UserListItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_item",
+    "path": "/api/users/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "users_update",
+    "path": "/api/users/{item_id}",
+    "response_model": "UserListItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "get_user_warehouses",
+    "path": "/api/users/{user_id}/warehouses",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "set_user_warehouses",
+    "path": "/api/users/{user_id}/warehouses",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_warehouses",
+    "path": "/api/warehouses",
+    "response_model": "List",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "warehouses_create",
+    "path": "/api/warehouses",
+    "response_model": "WarehouseItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_item",
+    "path": "/api/warehouses/{item_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "warehouses_update",
+    "path": "/api/warehouses/{item_id}",
+    "response_model": "WarehouseItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "swagger_ui_html",
+    "path": "/docs",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "swagger_ui_redirect",
+    "path": "/docs/oauth2-redirect",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "factory_devices",
+    "path": "/factory/devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "health_check",
+    "path": "/health",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "openapi",
+    "path": "/openapi.json",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "redoc_html",
+    "path": "/redoc",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "serve_spa",
+    "path": "/{path:path}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  }
+]
