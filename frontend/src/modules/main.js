@@ -129,10 +129,16 @@ async function loadCategories() {
     }
 }
 
-// 并行重拉用户作用域内的三组基础数据。init() 阶段无 session 会被 401 拦截，
+// 重拉用户作用域内的三组基础数据。init() 阶段无 session 会被 401 拦截，
 // 把状态留在空数组（典型症状：产品选择器下拉空白）；登录成功后必须重跑此函数。
+//
+// warehouses 必须**先于** categories/products 完成：api.js:25 的
+// injectWarehouseParam 依赖 getCurrentWarehouse() 才能给 categories/products
+// 端点附 warehouse_id 参数。三个并发跑会让 products 在 currentWarehouse 还
+// 没就绪时发请求，多仓用户会拿到错误作用域的数据。
 async function loadUserScopedData() {
-    await Promise.all([loadWarehouses(), loadCategories(), loadAllProducts()]);
+    await loadWarehouses();
+    await Promise.all([loadCategories(), loadAllProducts()]);
 }
 
 function populateCategorySelect() {
