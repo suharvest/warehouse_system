@@ -625,3 +625,23 @@ def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optiona
             detail=f"warehouse_id={warehouse_id} 无效或未关联租户"
         )
     return row.tenant_id
+
+
+# ============ MCP process manager dependency ============
+
+def get_mcp_manager(request: Request):
+    """Return the singleton ``MCPProcessManager`` attached to ``app.state``.
+
+    Uses a lazy-init fallback so that FastAPI ``TestClient`` (which by default
+    does not trigger ``@app.on_event("startup")``) still gets a usable manager.
+    In production the startup hook in ``app.py`` instantiates the manager
+    first, so this fallback is a no-op there.
+    """
+    state = request.app.state
+    mgr = getattr(state, "mcp_manager", None)
+    if mgr is None:
+        # Local import keeps deps.py free of subprocess imports at module load.
+        from mcp_manager import MCPProcessManager
+        mgr = MCPProcessManager()
+        state.mcp_manager = mgr
+    return mgr
