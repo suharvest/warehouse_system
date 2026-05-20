@@ -62,20 +62,24 @@ locked to the existing handlers.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import Table, insert, select, update as sa_update
 
 
 # Imported lazily inside register() so we don't create a hard cycle with
-# backend/app.py (which imports this module). The functions are stable.
+# the registration target (FastAPI app or APIRouter). The functions are stable.
 
 
 def _load_helpers():
-    # Local import avoids circular import at module load time.
-    from app import load_or_404, get_engine  # type: ignore
+    # Local import avoids circular import at module load time. Pull helpers
+    # straight from deps / db rather than re-exporting through app.py — this
+    # keeps the dependency arrow pointing away from app.py so we can register
+    # ResourceRouter routes onto APIRouter instances declared in router modules.
+    from deps import load_or_404  # type: ignore
+    from db import get_engine  # type: ignore
     return load_or_404, get_engine
 
 
@@ -122,7 +126,7 @@ class ResourceRouter:
         See module docstring.
     """
 
-    app: FastAPI
+    app: Union[FastAPI, APIRouter]
     prefix: str
     table: Table
     # ``None`` skips ``response_model=`` on the FastAPI route declarations,
