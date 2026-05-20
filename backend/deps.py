@@ -32,6 +32,7 @@ from database import (
 from db import get_engine
 from metadata import (
     api_keys as _t_api_keys,
+    contacts as _t_contacts,
     sessions as _t_sessions,
     tenants as _t_tenants,
     user_warehouses as _t_user_warehouses,
@@ -535,3 +536,92 @@ def assert_row_in_scope(
         row_tenant = getattr(row, tenant_key, None)
     if row_tenant != current_user.tenant_id:
         raise HTTPException(status_code=403, detail=forbidden)
+
+
+def infer_single_writable_warehouse_id(current_user: CurrentUser) -> Optional[int]:
+    """写操作未指定仓库时，若当前用户只有一个可写仓库则自动使用它。
+
+    Phase 2c: SA Core read.
+    """
+    if current_user.tenant_id is None:
+        return None
+    if current_user.role == RoleName.ADMIN:
+        stmt = select(_t_warehouses.c.id).where(
+            and_(
+                _t_warehouses.c.tenant_id == current_user.tenant_id,
+                _t_warehouses.c.is_disabled == 0,
+            )
+        )
+    else:
+        stmt = select(_t_warehouses.c.id).select_from(
+            _t_user_warehouses.join(_t_warehouses, _t_user_warehouses.c.warehouse_id == _t_warehouses.c.id)
+        ).where(
+            and_(
+                _t_user_warehouses.c.user_id == current_user.id,
+                _t_warehouses.c.tenant_id == current_user.tenant_id,
+                _t_warehouses.c.is_disabled == 0,
+            )
+        )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return rows[0].id if len(rows) == 1 else None
+
+
+def ensure_contact_tenant(cursor, current_user: CurrentUser, contact_id: Optional[int],
+                           target_tenant_id: Optional[int] = None):
+    """确认 contact_id 属于当前租户（写操作场景）。
+
+    contact_id 为 None 时直接通过。租户用户只能引用本租户联系方；
+    全局 admin 必须显式提供 target_tenant_id（写入目标租户），并校验联系方属于该租户。
+    不匹配抛 400，避免跨租户写入引用。
+    """
+    if contact_id is None:
+        return
+    # Phase 2c: SA Core read. ``cursor`` retained for signature compatibility but unused.
+    stmt = select(_t_contacts.c.tenant_id).where(_t_contacts.c.id == contact_id)
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(stmt).first()
+    if not row:
+        raise HTTPException(status_code=400, detail=f"联系方 {contact_id} 不存在")
+    expected_tenant = current_user.tenant_id if current_user.tenant_id is not None else target_tenant_id
+    if expected_tenant is None:
+        raise HTTPException(status_code=400, detail="无法确定联系方所属租户")
+    if row.tenant_id != expected_tenant:
+        raise HTTPException(status_code=403, detail=f"联系方 {contact_id} 不属于当前租户")
+
+
+def require_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
+    """写操作：必须指定仓库ID（从请求或API key获取）"""
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    if wh_id is None:
+        wh_id = infer_single_writable_warehouse_id(current_user)
+    if wh_id is None:
+        raise HTTPException(status_code=400, detail="写操作必须指定仓库 (warehouse_id)")
+    return wh_id
+
+
+def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
+    """Resolve the tenant that should own a write record.
+
+    Tenant users always write to their own tenant. Global admins must specify
+    a warehouse — the record is owned by that warehouse's tenant. Falling back
+    to a default tenant silently is unsafe (it lets a global admin's writes
+    land in the default tenant by accident) so we now reject it with HTTP 400.
+    """
+    if current_user.tenant_id is not None:
+        return current_user.tenant_id
+    if warehouse_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="全局管理员写操作必须指定 warehouse_id（无法推导目标租户）"
+        )
+    # Phase 2c: SA Core read.
+    stmt = select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == warehouse_id)
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(stmt).first()
+    if not row or row.tenant_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"warehouse_id={warehouse_id} 无效或未关联租户"
+        )
+    return row.tenant_id
