@@ -18,11 +18,7 @@ from sqlalchemy import select, and_
 from db import get_engine
 from metadata import materials, contacts, users, batches
 
-# R3: wire-format string enum. Tolerate both bare and package import styles.
-try:
-    from models import RoleName  # type: ignore
-except ImportError:  # pragma: no cover
-    from backend.models import RoleName  # type: ignore
+from models import RoleName
 
 
 # 已知 entity_type，按需构建。新增类型时在此扩展。

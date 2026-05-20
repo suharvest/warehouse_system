@@ -6,12 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import random
 
-# R3: wire-format string enums. Support both ``backend.database`` (package)
-# and bare ``database`` (sys.path-tweaked) import styles used across tests.
-try:
-    from models import RecordType, RoleName  # type: ignore
-except ImportError:  # pragma: no cover
-    from backend.models import RecordType, RoleName  # type: ignore
+from models import RecordType, RoleName
 
 # 尝试导入bcrypt（生产环境使用）
 try:
