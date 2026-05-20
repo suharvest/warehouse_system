@@ -27,7 +27,10 @@ _ALLOWED_IMPORTS = {
 # 禁止调用/使用的危险内置
 _BLOCKED_BUILTINS = {"eval", "exec", "__import__", "compile", "open"}
 
-# 必须实现的 6 个抽象方法
+# 必须实现的 6 个核心方法（BaseProvider 中的 @abstractmethod）。
+# 注意：BaseProvider 上的 query_batch / move_batch_location 是**可选扩展**，
+# 提供了 not_implemented 默认实现，不在这里强制要求——第三方 provider 可以
+# 不实现，调用时会返回结构化的 not_implemented 失败响应。
 _REQUIRED_METHODS = {
     "resolve_name", "query_stock", "stock_in",
     "stock_out", "search", "get_today_statistics",

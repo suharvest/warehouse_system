@@ -220,3 +220,44 @@ class BaseProvider(ABC):
         返回: {success, date, statistics, message}
         """
         ...
+
+    # ↓↓↓ 以下两个方法是后续扩展（query_batch / move_batch_location），
+    # 提供"未实现"默认值而**不**用 @abstractmethod，以兼容 mcp/providers/custom/
+    # 下已存在的第三方 provider（否则它们因 ABC 强制无法实例化）。
+    # 新 provider 应当 override 这两个方法；不 override 时 MCP 工具会拿到
+    # success=False 的结构化失败响应，由 LLM 走 speak_failed 告知用户。
+
+    def query_batch(self, batch_no: str) -> dict:
+        """按批次号查询批次详情（只读）。
+
+        返回: {success, batch, message} 或 {success: false, error, message}
+        error="batch_not_found" 表示作用域内确实没有该批次。
+        默认实现返回 not_implemented；子类应当 override。
+        """
+        return {
+            "success": False,
+            "error": "not_implemented",
+            "message": f"当前 Provider 未实现按批次号查询（query_batch）",
+        }
+
+    def move_batch_location(
+        self,
+        batch_no: str,
+        new_location: str,
+        quantity: int | None = None,
+        from_location: str | None = None,
+        product_name: str | None = None,
+        operator: str = "MCP系统",
+    ) -> dict:
+        """批次库位移动（支持部分数量拆分移位）。
+
+        quantity 为 None 或等于批次余量 → 整批移位
+        quantity 小于批次余量 → 拆分：源批次扣减，目标库位创建同物料新批次
+        返回: {success, operation, moved_quantity, source_batch, target_batch, ...}
+        默认实现返回 not_implemented；子类应当 override。
+        """
+        return {
+            "success": False,
+            "error": "not_implemented",
+            "message": f"当前 Provider 未实现批次库位移动（move_batch_location）",
+        }

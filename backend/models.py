@@ -622,6 +622,58 @@ class StockOutResponse(BaseModel):
     # 让 MCP 包装器据此生成 speak_ask 并设置 retry_hint。
     batch_no_requested: Optional[str] = None  # 用户原本指定的批次号
     batch_available: Optional[int] = None     # 该批次实际余量
+
+
+class BatchMoveRequest(BaseModel):
+    """批次库位移动请求
+
+    支持整批移位（quantity 留空或等于批次余量）和部分数量移位（拆分新批次）。
+    """
+    batch_no: str                                # 源批次号
+    new_location: str                            # 目标库位
+    quantity: Optional[int] = None               # 移位数量；None 表示整批
+    from_location: Optional[str] = None          # 可选：源库位校验
+    product_name: Optional[str] = None           # 可选：物料名校验
+    operator: Optional[str] = "MCP系统"
+    warehouse_id: Optional[int] = None
+
+
+class BatchMoveResponse(BaseModel):
+    """批次库位移动响应"""
+    success: bool
+    operation: Optional[str] = None
+    moved_quantity: Optional[int] = None
+    source_batch: Optional[BatchInfo] = None     # 源批次（移位后剩余）
+    target_batch: Optional[BatchInfo] = None     # 目标批次（同批次或拆分出的新批次）
+    from_location: Optional[str] = None
+    to_location: Optional[str] = None
+    full_move: Optional[bool] = None
+    message: str
+    error: Optional[str] = None
+
+
+class BatchDetailItem(BaseModel):
+    """按批次号查询的批次详情（含已耗尽批次）"""
+    batch_no: str
+    quantity: int
+    initial_quantity: int
+    location: Optional[str] = None
+    variant: Optional[str] = None
+    is_exhausted: bool
+    material_name: str
+    material_sku: Optional[str] = None
+    unit: str
+    warehouse_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    created_at: str
+
+
+class BatchDetailResponse(BaseModel):
+    """按批次号查询响应"""
+    success: bool
+    batch: Optional[BatchDetailItem] = None
+    message: str
+    error: Optional[str] = None
     shortfall: Optional[int] = None           # 缺多少
     can_fallback: Optional[bool] = None       # 其他批次是否够补差额
     fallback_total_available: Optional[int] = None  # 其他批次合计可用

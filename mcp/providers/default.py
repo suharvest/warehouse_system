@@ -311,3 +311,25 @@ class DefaultProvider(BaseProvider):
                 "error": str(e),
                 "message": f"查询统计数据失败: {e}",
             }
+
+    def query_batch(self, batch_no):
+        return self.http_get(
+            "/batches/by-no",
+            params={"batch_no": _normalize_batch_no(batch_no), "include_exhausted": True},
+        )
+
+    def move_batch_location(self, batch_no, new_location, quantity=None,
+                            from_location=None, product_name=None,
+                            operator="MCP系统"):
+        payload = {
+            "batch_no": _normalize_batch_no(batch_no),
+            "new_location": new_location,
+            "operator": operator,
+        }
+        if quantity is not None:
+            payload["quantity"] = quantity
+        if from_location is not None:
+            payload["from_location"] = from_location
+        if product_name is not None:
+            payload["product_name"] = product_name
+        return self.http_post("/materials/batches/move-location", payload)

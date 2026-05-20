@@ -51,6 +51,8 @@ from models import (
     PaginatedContactsResponse,
     # Batch models
     BatchInfo, BatchConsumption, StockInResponse, StockOutResponse,
+    BatchMoveRequest, BatchMoveResponse,
+    BatchDetailItem, BatchDetailResponse,
     # Operator model
     OperatorListItem,
     # Database management models
@@ -4175,6 +4177,83 @@ def get_material_batches(
     }
 
 
+@app.get("/api/batches/by-no", response_model=BatchDetailResponse)
+def get_batch_by_no(
+    batch_no: str = Query(..., description="批次号（精确匹配）"),
+    warehouse_id: Optional[int] = Query(None, description="仓库 ID（可选；不传则跨仓查租户内）"),
+    include_exhausted: bool = Query(True, description="是否包含已耗尽批次（默认 True，方便溯源）"),
+    current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
+):
+    """按批次号查询批次详情。
+
+    - 200 + success=true：找到（即使已耗尽也算找到，is_exhausted 区分）
+    - 200 + success=false + error="batch_not_found"：作用域内确实没有该批次
+    设计选择：MCP 上游需要按 batch_no 直接查询，不依赖产品名。
+    error 走 success=false 而不是 HTTP 404，以便 MCP wrap 成 speak_failed 而非 transport 错误。
+    """
+    bn = (batch_no or '').strip()
+    if not bn:
+        raise HTTPException(status_code=400, detail="缺少 batch_no 参数")
+
+    wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    if wh_id is not None:
+        with get_db() as conn:
+            check_warehouse_access(conn, current_user, wh_id)
+
+    b_scope = list(build_authorized_scope_predicates(_t_batches, current_user, wh_id))
+    preds = [_t_batches.c.batch_no == bn, *b_scope]
+    if not include_exhausted:
+        preds.append(_t_batches.c.is_exhausted == 0)
+
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(
+                _t_batches.c.batch_no, _t_batches.c.quantity,
+                _t_batches.c.initial_quantity, _t_batches.c.location,
+                _t_batches.c.variant, _t_batches.c.is_exhausted,
+                _t_batches.c.created_at,
+                _t_materials.c.name.label('material_name'),
+                _t_materials.c.sku.label('material_sku'),
+                _t_materials.c.unit,
+                _t_warehouses.c.name.label('warehouse_name'),
+                _t_contacts.c.name.label('contact_name'),
+            ).select_from(
+                _t_batches
+                .join(_t_materials, _t_batches.c.material_id == _t_materials.c.id)
+                .outerjoin(_t_warehouses, _t_batches.c.warehouse_id == _t_warehouses.c.id)
+                .outerjoin(_t_contacts, _t_batches.c.contact_id == _t_contacts.c.id)
+            ).where(and_(*preds))
+        ).first()
+
+    if not row:
+        return BatchDetailResponse(
+            success=False,
+            error="batch_not_found",
+            message=f"未找到批次 '{bn}'",
+        )
+
+    created_at_str = (row.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                      if isinstance(row.created_at, datetime) else (row.created_at or ''))
+    return BatchDetailResponse(
+        success=True,
+        batch=BatchDetailItem(
+            batch_no=row.batch_no,
+            quantity=row.quantity,
+            initial_quantity=row.initial_quantity,
+            location=row.location or None,
+            variant=row.variant or None,
+            is_exhausted=bool(row.is_exhausted),
+            material_name=row.material_name,
+            material_sku=row.material_sku or None,
+            unit=row.unit,
+            warehouse_name=row.warehouse_name or None,
+            contact_name=row.contact_name or None,
+            created_at=created_at_str,
+        ),
+        message=f"批次 '{bn}' 查询成功",
+    )
+
+
 @app.get("/api/materials/product-trend", response_model=WeeklyTrend)
 def get_product_trend(
     name: str = Query(..., description="产品名称"),
@@ -5306,6 +5385,248 @@ async def stock_out(
                 f"库存从 {old_quantity} 更新到 {new_quantity} {unit}",
         warning=warning if warning else None,
         resolved_from=resolved_from,
+    )
+
+
+@app.post("/api/materials/batches/move-location", response_model=BatchMoveResponse)
+async def move_batch_location(
+    request: BatchMoveRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.WRITE))
+):
+    """批次库位移动。
+
+    - quantity 留空或等于批次余量 → 整批移位（仅更新 location）
+    - quantity 小于批次余量 → 拆分：源批次扣减 quantity，并在目标库位创建同物料/变体的新批次
+    - 不改变物料总库存，仅改变批次的 location/数量分布
+    """
+    wh_id = require_warehouse_id(current_user, request.warehouse_id)
+    check_warehouse_access(None, current_user, wh_id)
+
+    new_location = (request.new_location or '').strip()
+    if not new_location:
+        return BatchMoveResponse(
+            success=False, error="empty_location",
+            message="移位失败：目标库位不能为空"
+        )
+
+    batch_no_norm = (request.batch_no or '').strip()
+    if not batch_no_norm:
+        return BatchMoveResponse(
+            success=False, error="missing_batch_no",
+            message="移位失败：必须指定批次号"
+        )
+
+    operator = request.operator if request.operator and request.operator != "MCP系统" else current_user.get_operator_name()
+    record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
+
+    b_scope = list(build_authorized_scope_predicates(_t_batches, current_user, wh_id))
+    operator_user_id = current_user.id
+
+    with get_engine().begin() as sa_conn:
+        # 先用 FOR UPDATE 锁住源批次行（参考 stock_out FIFO 路径 app.py:5226），
+        # 防止并发拆分移位导致的 lost update / 总库存膨胀。
+        # 为了能拿到 material name/unit，单独查 materials（无需锁）。
+        locked = sa_conn.execute(
+            select(
+                _t_batches.c.id, _t_batches.c.material_id, _t_batches.c.quantity,
+                _t_batches.c.location, _t_batches.c.variant, _t_batches.c.contact_id,
+                _t_batches.c.batch_no,
+            ).where(and_(
+                _t_batches.c.batch_no == batch_no_norm,
+                _t_batches.c.is_exhausted == 0,
+                *b_scope,
+            )).with_for_update()
+        ).first()
+
+        if not locked:
+            return BatchMoveResponse(
+                success=False, error="batch_not_found",
+                message=f"移位失败：批次 '{batch_no_norm}' 不存在或已耗尽"
+            )
+
+        mat = sa_conn.execute(
+            select(_t_materials.c.name, _t_materials.c.unit)
+            .where(_t_materials.c.id == locked.material_id)
+        ).first()
+        material_name = mat.name if mat else ''
+        unit = mat.unit if mat else ''
+
+        # 用 namespace dict 方便下面统一引用
+        class _B:
+            pass
+        batch = _B()
+        batch.id = locked.id
+        batch.material_id = locked.material_id
+        batch.quantity = locked.quantity
+        batch.location = locked.location
+        batch.variant = locked.variant
+        batch.contact_id = locked.contact_id
+        batch.batch_no = locked.batch_no
+        batch.material_name = material_name
+        batch.unit = unit
+
+        if request.product_name and request.product_name.strip() and request.product_name.strip() != batch.material_name:
+            return BatchMoveResponse(
+                success=False, error="product_mismatch",
+                message=(f"移位失败：批次 '{batch_no_norm}' 属于 '{batch.material_name}'，"
+                         f"与指定的 '{request.product_name}' 不符")
+            )
+
+        cur_loc = (batch.location or '').strip()
+        if request.from_location is not None:
+            req_from = request.from_location.strip()
+            if cur_loc != req_from:
+                return BatchMoveResponse(
+                    success=False, error="from_location_mismatch",
+                    message=(f"移位失败：批次 '{batch_no_norm}' 当前位置为 "
+                             f"'{cur_loc or '（未设置）'}'，与指定的 '{req_from}' 不符")
+                )
+
+        if new_location == cur_loc:
+            return BatchMoveResponse(
+                success=False, error="same_location",
+                message=f"移位失败：批次 '{batch_no_norm}' 已经位于 '{new_location}'"
+            )
+
+        move_qty = request.quantity if request.quantity is not None else batch.quantity
+        if move_qty <= 0:
+            return BatchMoveResponse(
+                success=False, error="invalid_quantity",
+                message=f"移位失败：移位数量 {move_qty} 无效（必须大于 0）"
+            )
+        if move_qty > batch.quantity:
+            return BatchMoveResponse(
+                success=False, error="insufficient_quantity",
+                message=(f"移位失败：批次 '{batch_no_norm}' 当前余量 {batch.quantity} "
+                         f"{batch.unit}，无法移位 {move_qty} {batch.unit}"),
+            )
+
+        now_dt = datetime.now()
+        full_move = (move_qty == batch.quantity)
+
+        if full_move:
+            upd = sa_conn.execute(
+                _t_batches.update()
+                .where(and_(
+                    _t_batches.c.id == batch.id,
+                    _t_batches.c.quantity == batch.quantity,
+                    _t_batches.c.is_exhausted == 0,
+                ))
+                .values(location=new_location)
+            )
+            if upd.rowcount != 1:
+                raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
+            target_batch_no = batch.batch_no
+            target_batch_id = batch.id
+            source_remaining = 0  # 整批迁移：源库位已无该批次
+        else:
+            # 防御性：拆分扣减用条件 UPDATE，rowcount=0 表示别的事务先动过
+            source_remaining = batch.quantity - move_qty
+            upd = sa_conn.execute(
+                _t_batches.update()
+                .where(and_(
+                    _t_batches.c.id == batch.id,
+                    _t_batches.c.quantity == batch.quantity,
+                    _t_batches.c.is_exhausted == 0,
+                ))
+                .values(quantity=source_remaining)
+            )
+            if upd.rowcount != 1:
+                raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
+
+            # generate_batch_no 走独立连接看不到未提交行，拆分 INSERT 撞 unique
+            # (batches.batch_no UNIQUE) 时重试，最多 5 次。
+            target_batch_id = None
+            target_batch_no = None
+            for _attempt in range(5):
+                candidate_no = generate_batch_no(batch.material_id, warehouse_id=wh_id)
+                try:
+                    ins = sa_conn.execute(
+                        insert(_t_batches).values(
+                            batch_no=candidate_no,
+                            material_id=batch.material_id,
+                            quantity=move_qty,
+                            initial_quantity=move_qty,
+                            contact_id=batch.contact_id,
+                            location=new_location,
+                            variant=batch.variant,
+                            warehouse_id=wh_id,
+                            tenant_id=record_tenant_id,
+                            created_at=now_dt,
+                        )
+                    )
+                    target_batch_id = ins.inserted_primary_key[0]
+                    target_batch_no = candidate_no
+                    break
+                except IntegrityError:
+                    continue
+            if target_batch_no is None:
+                raise HTTPException(status_code=409, detail="批次号生成冲突，请重试")
+
+        # 库存台账：仅在**拆分**移位时写 inventory_records，记录"源批次扣减 + 新批次入账"
+        # 便于按 batch_id 重放溯源。整批移位时只是同一批次换 location，
+        # audit_log 已足够，不再额外往 inventory_records 写双条（避免污染当日 in/out 报表）。
+        # reason_category 复用 transfer_out/transfer_in（已存在于 REASON_CATEGORIES），
+        # reason_note 用 BATCH_RELOCATE 前缀标识本次是库内库位移动而非跨仓调拨。
+        if not full_move:
+            relocate_note = f"BATCH_RELOCATE: {cur_loc or '（未设置）'} -> {new_location}"
+            sa_conn.execute(
+                insert(_t_inventory_records).values(
+                    material_id=batch.material_id, type=RecordType.OUT.value,
+                    quantity=move_qty, operator=operator, operator_user_id=operator_user_id,
+                    reason_category='transfer_out', reason_note=relocate_note,
+                    contact_id=batch.contact_id, batch_id=batch.id,
+                    warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
+                )
+            )
+            sa_conn.execute(
+                insert(_t_inventory_records).values(
+                    material_id=batch.material_id, type=RecordType.IN.value,
+                    quantity=move_qty, operator=operator, operator_user_id=operator_user_id,
+                    reason_category='transfer_in', reason_note=relocate_note,
+                    contact_id=batch.contact_id, batch_id=target_batch_id,
+                    warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
+                )
+            )
+
+    # 缓存失效：location/variant 出现在 search/aggregate 视图里
+    get_fuzzy_matcher().invalidate_cache(
+        entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
+    )
+
+    audit_log("BATCH_MOVE_LOCATION", current_user.id, current_user.username, {
+        "batch_no": batch_no_norm,
+        "material": batch.material_name,
+        "from_location": cur_loc,
+        "to_location": new_location,
+        "moved_quantity": move_qty,
+        "full_move": full_move,
+        "target_batch_no": target_batch_no,
+        "source_batch_id": batch.id,
+        "target_batch_id": target_batch_id,
+        "operator": operator,
+    })
+
+    kind = "整批移位" if full_move else "拆分移位"
+    extra = "" if full_move else f"（新批次 {target_batch_no}，原批次余 {source_remaining} {batch.unit}）"
+    return BatchMoveResponse(
+        success=True,
+        operation="move_batch_location",
+        moved_quantity=move_qty,
+        from_location=cur_loc,
+        to_location=new_location,
+        full_move=full_move,
+        source_batch=BatchInfo(
+            batch_no=batch.batch_no, batch_id=batch.id,
+            quantity=source_remaining, variant=batch.variant,
+        ),
+        target_batch=BatchInfo(
+            batch_no=target_batch_no, batch_id=target_batch_id,
+            quantity=move_qty, variant=batch.variant,
+        ),
+        message=(f"{kind}成功：{batch.material_name} 批次 {batch_no_norm} "
+                 f"从 '{cur_loc or '（未设置）'}' 移动 {move_qty} {batch.unit} "
+                 f"到 '{new_location}'{extra}"),
     )
 
 
@@ -6702,6 +7023,34 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
     )
 
 
+def _normalize_mcp_endpoint(endpoint: str) -> str:
+    return (endpoint or '').strip()
+
+
+def _ensure_unique_mcp_endpoint(endpoint: str, exclude_conn_id: Optional[str] = None) -> None:
+    """Prevent two local MCP processes from connecting to the same cloud endpoint.
+
+    SenseCraft/Xiaozhi endpoints identify one cloud-side device session. If two
+    configured agents reuse the same endpoint, the cloud side may accept only one
+    active WebSocket, making the other agent appear connected but unable to serve
+    tools reliably.
+    """
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="云端链接不能为空")
+    stmt = select(_t_mcp_connections.c.id, _t_mcp_connections.c.name).where(
+        _t_mcp_connections.c.mcp_endpoint == endpoint
+    )
+    if exclude_conn_id is not None:
+        stmt = stmt.where(_t_mcp_connections.c.id != exclude_conn_id)
+    with get_engine().connect() as sa_conn:
+        existing = sa_conn.execute(stmt).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"云端链接已被「{existing.name}」使用。同一个云端智能体入口只需配置一次。",
+        )
+
+
 @app.get("/api/mcp/connections")
 async def list_mcp_connections(
     warehouse_id: Optional[int] = Query(None),
@@ -6761,6 +7110,8 @@ async def create_mcp_connection(
     conn_id = str(uuid.uuid4())[:8]
     now_dt = datetime.now()
     now = now_dt.isoformat()
+    mcp_endpoint = _normalize_mcp_endpoint(request.mcp_endpoint)
+    _ensure_unique_mcp_endpoint(mcp_endpoint)
 
     # 验证角色
     role = request.role if request.role in _VALID_ROLE_VALUES else RoleName.OPERATE.value
@@ -6813,7 +7164,7 @@ async def create_mcp_connection(
                 insert(_t_mcp_connections).values(
                     id=conn_id,
                     name=request.name,
-                    mcp_endpoint=request.mcp_endpoint,
+                    mcp_endpoint=mcp_endpoint,
                     api_key=api_key_plain,
                     role=role,
                     auto_start=1 if request.auto_start else 0,
@@ -6833,7 +7184,7 @@ async def create_mcp_connection(
 
     # 如果 auto_start，立即启动
     if request.auto_start:
-        await mcp_manager.start_connection(conn_id, request.mcp_endpoint, api_key_plain)
+        await mcp_manager.start_connection(conn_id, mcp_endpoint, api_key_plain)
         status_info = mcp_manager.get_connection_status(conn_id)
         with get_engine().begin() as sa_conn:
             sa_conn.execute(
@@ -6875,6 +7226,10 @@ async def update_mcp_connection(
 
     old_endpoint = row['mcp_endpoint']
     key_hash = hash_api_key(row['api_key'])
+    new_endpoint = None
+    if request.mcp_endpoint is not None:
+        new_endpoint = _normalize_mcp_endpoint(request.mcp_endpoint)
+        _ensure_unique_mcp_endpoint(new_endpoint, exclude_conn_id=conn_id)
 
     # Resolve warehouse access (helper retains ``conn`` arg for signature
     # compatibility but reads via SA Core internally).
@@ -6891,7 +7246,7 @@ async def update_mcp_connection(
         mcp_values['name'] = request.name
         apikey_values['name'] = f'Agent: {request.name}'
     if request.mcp_endpoint is not None:
-        mcp_values['mcp_endpoint'] = request.mcp_endpoint
+        mcp_values['mcp_endpoint'] = new_endpoint
     if request.role is not None and request.role in _VALID_ROLE_VALUES:
         mcp_values['role'] = request.role
         apikey_values['role'] = request.role
@@ -6953,7 +7308,7 @@ async def update_mcp_connection(
         ).first()
     row = dict(_r._mapping) if _r else None
 
-    if request.mcp_endpoint is not None and request.mcp_endpoint != old_endpoint:
+    if new_endpoint is not None and new_endpoint != old_endpoint:
         if (conn_id in mcp_manager.connections
             and mcp_manager.connections[conn_id].process
             and mcp_manager.connections[conn_id].process.returncode is None):
