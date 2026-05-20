@@ -342,12 +342,11 @@ async def face_create_enrollment(
     # TODO: migrate to SA Core in a future pass — orchestrator currently
     # expects a sqlite-style ``conn`` for its internal writes.
     with get_db() as conn:
-        try:
-            from backend.face.orchestrator import enroll_face as _enroll
-            from backend.face.endpoint_client import FaceEndpointError
-        except ImportError:
-            from face.orchestrator import enroll_face as _enroll  # type: ignore
-            from face.endpoint_client import FaceEndpointError  # type: ignore
+        # backend 走 `sys.path.insert(0, 'backend')` 平铺布局
+        # （run_backend.py + tests/conftest.py 都这么做），face 子包以
+        # 顶层名访问。无需双路径 try/except fallback。
+        from face.orchestrator import enroll_face as _enroll
+        from face.endpoint_client import FaceEndpointError
         try:
             result = await _enroll(
                 conn,
@@ -388,10 +387,7 @@ async def face_test_connection(
     payload: FaceTestConnectionPayload,
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
-    try:
-        from backend.face.endpoint_client import health as _health, FaceEndpointError
-    except ImportError:
-        from face.endpoint_client import health as _health, FaceEndpointError  # type: ignore
+    from face.endpoint_client import health as _health, FaceEndpointError
     try:
         info = await _health(payload.endpoint, payload.auth_token)
         return {"success": True, "info": info}
@@ -464,10 +460,7 @@ async def face_verify_mcp(
     if current_user.tenant_id is None:
         return {"status": "skipped", "failure_reason": "no_tenant_context",
                 "confidence": None, "matched_subject_id": None}
-    try:
-        from backend.face.orchestrator import verify_mcp_face as _verify
-    except ImportError:
-        from face.orchestrator import verify_mcp_face as _verify  # type: ignore
+    from face.orchestrator import verify_mcp_face as _verify
     with get_db() as conn:
         decision = await _verify(
             conn,

@@ -5061,10 +5061,10 @@ async def move_batch_location(
                 )
             )
 
-    # 缓存失效：location/variant 出现在 search/aggregate 视图里
-    get_fuzzy_matcher().invalidate_cache(
-        entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
-    )
+    # 移位不动 materials 表（既不改 name 也不改 variant），fuzzy matcher 的
+    # material 名字索引不需要失效。location 是 batch 字段，根本不在 material
+    # 索引里，旧代码这里调 invalidate_cache(entity_type="material") 是纯浪费
+    # （codex 复审已指出）。
 
     audit_log("BATCH_MOVE_LOCATION", current_user.id, current_user.username, {
         "batch_no": batch_no_norm,
