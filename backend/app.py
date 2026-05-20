@@ -4591,9 +4591,9 @@ async def stock_out(
                         detail=f"出库失败：可用批次不足，仍缺 {remaining_to_consume} {unit}",
                     )
 
-                get_fuzzy_matcher().invalidate_cache(
-                    entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
-                )
+                # 出库不改 materials.name / batches.variant，fuzzy material 索引
+                # 不需要失效（codex 复审 a6a98bcad2d766c5b 已确认，索引也不按
+                # is_exhausted 过滤所以 exhausted 也不影响命中）。
 
                 audit_log("STOCK_OUT", current_user.id, current_user.username, {
                     "product": product_name, "quantity": quantity,
@@ -4670,10 +4670,7 @@ async def stock_out(
                 quantity=consume_qty, remaining=remaining_qty, variant=batch.variant,
             )]
 
-        # R5: stock-out only affects material partition's variant index
-        get_fuzzy_matcher().invalidate_cache(
-            entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
-        )
+        # 出库不改索引（同上）。
 
         audit_log("STOCK_OUT", current_user.id, current_user.username, {
             "product": product_name, "quantity": quantity,
@@ -4821,10 +4818,7 @@ async def stock_out(
                 detail=f"出库失败：{product_name} 可用批次不足，仍缺 {remaining_to_consume} {unit}，请检查批次/库位/变体筛选条件",
             )
 
-    # R5: FIFO stock-out only affects material partition
-    get_fuzzy_matcher().invalidate_cache(
-        entity_type="material", tenant_id=record_tenant_id, warehouse_id=wh_id,
-    )
+    # 出库不改索引（同上）。
 
     audit_log("STOCK_OUT", current_user.id, current_user.username, {
         "product": product_name, "quantity": quantity,
