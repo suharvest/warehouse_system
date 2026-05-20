@@ -77,7 +77,14 @@ function setupModuleCallbacks() {
         onAuthChange: () => {},
         switchTab,
         refreshCurrentTab,
-        onLoginSuccess: loadWarehouses,
+        // 登录成功后必须重新拉这三组数据：init() 阶段无 session 会被
+        // 401 拦截，导致 allProducts/categories/warehouses 卡在空数组
+        // （症状：产品选择器下拉永远空）。
+        onLoginSuccess: async () => {
+            await loadWarehouses();
+            loadCategories();
+            loadAllProducts();
+        },
         onLogout: stopAutoUpdate,
     });
 
