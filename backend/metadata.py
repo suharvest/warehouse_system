@@ -87,7 +87,9 @@ warehouses = Table(
     "warehouses",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("slug", String(64), nullable=False, unique=True),
+    # slug 在迁移 a1b2c3d4e5f6 之后改为 (slug, tenant_id) 复合 unique；
+    # 旧的全局 unique=True 已废弃，仅按 tenant 范围唯一。
+    Column("slug", String(64), nullable=False),
     Column("name", String(255), nullable=False),
     Column("address", Text),
     Column("is_default", Boolean, nullable=False, server_default="0"),
@@ -95,6 +97,7 @@ warehouses = Table(
     _ts_col(),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Index("idx_warehouses_tenant", "tenant_id"),
+    Index("idx_warehouses_slug_tenant", "slug", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
 
@@ -106,6 +109,8 @@ users = Table(
     "users",
     metadata,
     Column("id", Integer, primary_key=True),
+    # username 在迁移 c3d4e5f6a7b8 之后改为 (username, tenant_id) 复合 unique；
+    # 同一用户名允许在不同租户里复用。
     Column("username", String(64), nullable=False),
     Column("password_hash", String(255), nullable=False),
     Column("role", String(32), nullable=False, server_default="view"),
@@ -116,6 +121,7 @@ users = Table(
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Column("last_login_at", DateTime, nullable=True),
     Index("idx_users_tenant", "tenant_id"),
+    Index("idx_users_username_tenant", "username", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
 
@@ -142,9 +148,9 @@ materials = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("name", String(255), nullable=False),
-    # NOTE: init_database() declares sku UNIQUE *and* later creates a unique
-    # composite index (sku, warehouse_id). We preserve both.
-    Column("sku", String(64), nullable=False, unique=True),
+    # sku 在迁移 a1b2c3d4e5f6 之后改为 (sku, warehouse_id) 复合 unique；
+    # 同一 SKU 允许在不同仓库里复用。索引声明见下方 idx_materials_sku_wh。
+    Column("sku", String(64), nullable=False),
     Column("category", String(64), nullable=False),
     Column("quantity", Integer, server_default="0"),
     Column("unit", String(16), server_default="个"),
@@ -194,7 +200,10 @@ batches = Table(
     "batches",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("batch_no", String(64), nullable=False, unique=True),
+    # batch_no 在迁移 a1b2c3d4e5f6 之后改为 (batch_no, warehouse_id) 复合 unique；
+    # 同一批次号允许在不同仓库里复用（实际由 generate_batch_no 按仓库递增）。
+    # 索引声明见下方 idx_batches_no_wh。
+    Column("batch_no", String(64), nullable=False),
     Column("material_id", Integer, ForeignKey("materials.id"), nullable=False),
     Column("quantity", Integer, nullable=False),
     Column("initial_quantity", Integer, nullable=False),
@@ -208,6 +217,7 @@ batches = Table(
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Index("idx_batches_warehouse", "warehouse_id"),
     Index("idx_batches_tenant", "tenant_id"),
+    Index("idx_batches_no_wh", "batch_no", "warehouse_id", unique=True),
     **MYSQL_TABLE_KW,
 )
 
@@ -297,6 +307,7 @@ erp_providers = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("name", String(255), nullable=False),
+    # provider_name 在迁移 d4e5f6a7b8c9 之后改为 (provider_name, tenant_id) 复合 unique。
     Column("provider_name", String(64), nullable=False),
     Column("class_name", String(255), nullable=False),
     Column("filename", String(255), nullable=False),
@@ -307,6 +318,7 @@ erp_providers = Table(
     _ts_col(),
     Column("updated_at", DateTime, server_default=func.current_timestamp()),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
+    Index("idx_erp_providers_name_tenant", "provider_name", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
 
