@@ -565,33 +565,6 @@ def build_warehouse_filter(warehouse_id: Optional[int], table_alias: str = '') -
 # (Phase 2 prep, task #6).
 
 
-def assert_row_in_scope(
-    row,
-    current_user: 'CurrentUser',
-    *,
-    forbidden: str = "无权访问该资源",
-    tenant_key: str = "tenant_id",
-):
-    """Row-ownership assertion companion to ``build_scope_predicates``.
-
-    For tenant-scoped users (current_user.tenant_id is not None) the row's
-    ``tenant_key`` value must match. Global admins (tenant_id is None) pass
-    through unconditionally — mirroring the list-predicate semantics.
-
-    Accepts either a SQLAlchemy ``Row`` (attribute access) or a mapping
-    (dict-style). Raises HTTPException(403) on mismatch.
-    """
-    if current_user.tenant_id is None:
-        return
-    # Resolve the row's tenant value via either attribute or mapping access.
-    try:
-        row_tenant = row[tenant_key]  # mapping / Row mapping access
-    except (KeyError, TypeError):
-        row_tenant = getattr(row, tenant_key, None)
-    if row_tenant != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail=forbidden)
-
-
 def resolve_tenant_id_for_write(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> int:
     """Resolve the tenant that should own a write record.
 

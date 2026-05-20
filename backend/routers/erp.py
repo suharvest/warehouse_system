@@ -26,6 +26,7 @@ from deps import (
     Action,
     CurrentUser,
     Resource,
+    assert_row_in_scope,
     build_scope_predicates,
     load_or_404,
     logger,
@@ -195,22 +196,10 @@ async def upload_erp_provider(
 
 
 def _ensure_provider_tenant(row, current_user: CurrentUser):
-    """确认 provider 属于当前租户（全局 admin 例外）。失败抛 403。
-
-    Inlined ``assert_row_in_scope`` (still defined in app.py) to keep this
-    router self-contained — behavior is byte-for-byte identical: global
-    admins (tenant_id is None) pass through; otherwise the row's tenant_id
-    must match the caller's.
-    """
-    if current_user.tenant_id is None:
-        return
-    forbidden = "无权操作其他租户的 Provider"
-    try:
-        row_tenant = row["tenant_id"]
-    except (KeyError, TypeError):
-        row_tenant = getattr(row, "tenant_id", None)
-    if row_tenant != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail=forbidden)
+    """确认 provider 属于当前租户（全局 admin 例外）。失败抛 403。"""
+    assert_row_in_scope(
+        row, current_user, forbidden="无权操作其他租户的 Provider"
+    )
 
 
 @router.get("/api/erp/providers/active-for-mcp")
