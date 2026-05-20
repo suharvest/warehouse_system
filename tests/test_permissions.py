@@ -12,15 +12,15 @@ import logging
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
 
-from app import (
+from deps import (
     Action,
     Resource,
     Role,
     _ACTION_TO_ROLE,
-    _audit_routes,
-    _route_has_guard,
     require_permission,
 )
+# _audit_routes / _route_has_guard remain in app.py (audit utilities).
+from app import _audit_routes, _route_has_guard
 
 
 # --------------------------- Enum tests ---------------------------
