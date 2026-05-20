@@ -6380,7 +6380,15 @@ async def add_inventory_record(
 
 # ============ MCP 连接管理 ============
 
-# 全局 MCP 进程管理器实例
+# MCP process manager singleton lives on ``app.state.mcp_manager`` so that
+# multi-worker deploys keep one manager per worker process and tests can
+# inject/override the instance. The startup hook below promotes the module-
+# level instance onto ``app.state``. ``deps.get_mcp_manager`` lazily falls
+# back when running under FastAPI ``TestClient`` (which skips lifespan
+# events). The bare module-level reference here is kept ONLY because the
+# legacy in-file route handlers still reference ``mcp_manager`` directly;
+# it is removed in the follow-up commit that moves those handlers to
+# ``routers/mcp_admin.py`` and switches them to ``Depends(get_mcp_manager)``.
 mcp_manager = MCPProcessManager()
 
 
@@ -6430,6 +6438,10 @@ async def _run_migrations():
 @app.on_event("startup")
 async def startup_mcp_manager():
     """启动时恢复 auto_start 的 MCP 连接"""
+    # Promote the module-level singleton onto app.state so that
+    # ``Depends(get_mcp_manager)`` (and any per-worker isolation) sees the
+    # exact same instance that legacy in-file handlers reference.
+    app.state.mcp_manager = mcp_manager
     await mcp_manager.start_monitor()
 
     # 恢复 auto_start 的连接 — Phase 3e: subprocess/network 在 engine.begin() 之外
@@ -6466,7 +6478,9 @@ async def startup_mcp_manager():
 @app.on_event("shutdown")
 async def shutdown_mcp_manager():
     """关闭时停止所有 MCP 连接"""
-    await mcp_manager.stop_all()
+    mcp_manager = getattr(app.state, "mcp_manager", None)
+    if mcp_manager is not None:
+        await mcp_manager.stop_all()
 
 
 def _build_connection_item(row, status_info: dict, warehouse_name: str = None, tenant_name: str = None) -> MCPConnectionItem:
