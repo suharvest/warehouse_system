@@ -111,8 +111,17 @@ def client(app_instance):
 
 
 @pytest.fixture(scope="session")
-def _admin_setup(client):
+def _admin_setup(app_instance):
     """One-time admin user setup (session-scoped).
+
+    Uses a throwaway TestClient (NOT the shared ``client`` fixture) for the
+    setup call. Reason: ``/api/auth/setup`` issues a session cookie that
+    persists on whatever TestClient instance made the request; reusing the
+    shared session-scoped ``client`` would silently authenticate it for the
+    rest of the test session, breaking unauthenticated 401 assertions in
+    tests like ``test_active_for_mcp_requires_auth``,
+    ``test_dashboard_endpoints_reject_unauthenticated``,
+    ``test_fuzzy_match_requires_auth``.
 
     On MySQL, also snapshot the admin user row so the per-test truncate
     fixture can re-insert it after wiping all tables. This keeps the
@@ -120,7 +129,9 @@ def _admin_setup(client):
     same password hash) is restored after each test, so the cached
     credentials returned here continue to authenticate.
     """
-    resp = client.post("/api/auth/setup", json={
+    from fastapi.testclient import TestClient
+    setup_client = TestClient(app_instance)
+    resp = setup_client.post("/api/auth/setup", json={
         "username": "admin",
         "password": "Admin123!",
         "display_name": "Test Admin"
