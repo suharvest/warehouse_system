@@ -866,25 +866,35 @@ def get_materials_quantity_map(material_ids):
         return {int(r.material_id): int(r.qty or 0) for r in conn.execute(stmt).fetchall()}
 
 
-def generate_batch_no(material_id: int, warehouse_id: Optional[int] = None, cursor=None) -> str:
+def generate_batch_no(material_id: int, warehouse_id: int, cursor=None) -> str:
     """生成批次号: YYYYMMDD-XXX (warehouse-scoped unique)
 
     传入 cursor 可在同一事务内看到未提交的批次（避免批量创建时序号冲突）。
     无 cursor 时：dialect-portable 路径走 SA Core。
-    warehouse_id 用于隔离多仓库场景下的批次号序列。
+
+    warehouse_id 是**必填**：批次号在迁移 a1b2c3d4e5f6 后改为
+    (batch_no, warehouse_id) 复合唯一，而 NULL 不参与复合唯一约束。
+    若调用者拿不到 warehouse_id（例如全局 admin 写入路径），上游应当先用
+    require_warehouse_id() 解析或显式拒绝，避免跨租户碰撞静默通过。
     """
+    if not isinstance(warehouse_id, int) or warehouse_id <= 0:
+        raise ValueError(
+            f"generate_batch_no 需要正整数的 warehouse_id（收到 {warehouse_id!r}）："
+            "(batch_no, warehouse_id) 是复合唯一约束，NULL/0/非整型会绕过 DB 层保护，"
+            "可能导致跨租户批次号碰撞。请在调用前通过 require_warehouse_id() 解析。"
+        )
     today = datetime.now().strftime('%Y%m%d')
     like_pat = f'{today}-%'
 
     if cursor is not None:
         cursor.execute(
-            "SELECT batch_no FROM batches WHERE batch_no LIKE ? AND (warehouse_id = ? OR ? IS NULL) ORDER BY batch_no DESC LIMIT 1",
-            (like_pat, warehouse_id, warehouse_id),
+            "SELECT batch_no FROM batches WHERE batch_no LIKE ? AND warehouse_id = ? ORDER BY batch_no DESC LIMIT 1",
+            (like_pat, warehouse_id),
         )
         row = cursor.fetchone()
         last_no = row['batch_no'] if row else None
     else:
-        from sqlalchemy import select, or_, and_
+        from sqlalchemy import select, and_
         from db import get_engine
         from metadata import batches as _t_batches
         with get_engine().connect() as conn:
@@ -892,7 +902,7 @@ def generate_batch_no(material_id: int, warehouse_id: Optional[int] = None, curs
                 select(_t_batches.c.batch_no)
                 .where(and_(
                     _t_batches.c.batch_no.like(like_pat),
-                    or_(_t_batches.c.warehouse_id == warehouse_id, warehouse_id is None),
+                    _t_batches.c.warehouse_id == warehouse_id,
                 ))
                 .order_by(_t_batches.c.batch_no.desc())
                 .limit(1)
