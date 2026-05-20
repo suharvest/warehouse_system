@@ -14,13 +14,15 @@ These were defined in ``app.py`` before; the bodies below are copied
 verbatim (no logic changes) so that the snapshot in
 ``tests/fixtures/route_inventory.json`` remains byte-for-byte identical.
 """
+import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum, IntEnum
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, false, or_, select, update
 
 from database import (
     get_db_connection,
@@ -37,6 +39,12 @@ from metadata import (
     warehouses as _t_warehouses,
 )
 from models import RoleName
+
+
+# Module-level constants used by audit_log. Mirror the values previously
+# defined in app.py so callsites see identical behavior.
+ENABLE_AUDIT_LOG = os.environ.get('ENABLE_AUDIT_LOG', 'true').lower() == 'true'
+logger = logging.getLogger('warehouse')
 
 
 # ============ DB connection context manager ============
@@ -408,3 +416,95 @@ def load_or_404(
         if row_tenant != tenant_id:
             raise HTTPException(status_code=403, detail=forbidden)
     return row
+
+
+# ============ Shared scope / audit / warehouse-access helpers ============
+# Phase 2 prep (task #6): these were defined in app.py and are needed by
+# routers/erp.py (and the future routers/* modules). Bodies are byte-for-byte
+# copied — no behavior change.
+
+
+def build_scope_predicates(table, tenant_id, warehouse_id=None) -> list:
+    """Return a list of SA Core boolean predicates that scope a query
+    by tenant_id and (optionally) warehouse_id. Mirrors the semantics
+    of build_scope_filter but returns ColumnElements instead of a
+    SQL fragment string.
+
+    Behavior parity with build_scope_filter:
+      - tenant_id is None -> no tenant filter (global admin)
+      - tenant_id is int  -> add table.c.tenant_id == tenant_id
+      - warehouse_id is None -> no warehouse filter
+      - warehouse_id is int  -> add table.c.warehouse_id == warehouse_id
+    """
+    preds = []
+    if tenant_id is not None:
+        preds.append(table.c.tenant_id == tenant_id)
+    if warehouse_id is not None:
+        preds.append(table.c.warehouse_id == warehouse_id)
+    return preds
+
+
+def build_authorized_scope_predicates(table, current_user: CurrentUser, warehouse_id=None) -> list:
+    """Tenant + warehouse predicates that respect per-user warehouse grants.
+
+    ``build_scope_predicates`` intentionally models tenant/global-admin scope.
+    For non-admin users, a missing ``warehouse_id`` must not mean "all tenant
+    warehouses"; it means "all explicitly authorized warehouses", which may be
+    empty for a newly-created user.
+    """
+    preds = build_scope_predicates(table, current_user.tenant_id, warehouse_id)
+    if (
+        warehouse_id is None
+        and current_user.role != RoleName.ADMIN
+        and hasattr(table.c, "warehouse_id")
+    ):
+        warehouse_ids = current_user.get_authorized_warehouses(None)
+        preds.append(table.c.warehouse_id.in_(warehouse_ids) if warehouse_ids else false())
+    return preds
+
+
+def audit_log(action: str, user_id: int = None, username: str = None, details: dict = None):
+    """记录审计日志"""
+    if not ENABLE_AUDIT_LOG:
+        return
+    log_data = {
+        "action": action,
+        "user_id": user_id,
+        "username": username,
+        "timestamp": datetime.now().isoformat(),
+        "details": details or {}
+    }
+    logger.info(f"AUDIT: {action} | user={username}({user_id}) | {details}")
+
+
+def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> Optional[int]:
+    """
+    解析仓库ID：
+    - 如果请求指定了 warehouse_id，使用它
+    - 如果用户通过 API key 绑定了仓库，使用 API key 的仓库
+    - 否则返回 None（全局视图）
+    """
+    if warehouse_id is not None:
+        # 校验仓库存在、租户归属，以及非 admin 的显式仓库授权。
+        if current_user.tenant_id is not None:
+            stmt = select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == warehouse_id)
+            with get_engine().connect() as sa_conn:
+                wh = sa_conn.execute(stmt).first()
+            if not wh:
+                raise HTTPException(status_code=404, detail='仓库不存在')
+            if wh.tenant_id != current_user.tenant_id:
+                raise HTTPException(status_code=403, detail='无权访问该仓库')
+        if current_user.role != RoleName.ADMIN and not current_user.can_access_warehouse(None, warehouse_id):
+            raise HTTPException(status_code=403, detail='无权访问该仓库')
+        return warehouse_id
+    if current_user.warehouse_id is not None:
+        return current_user.warehouse_id
+    return None
+
+
+def check_warehouse_access(conn, current_user: CurrentUser, warehouse_id: int):
+    """检查用户是否有权访问指定仓库，无权限则抛出403"""
+    if current_user.role == RoleName.ADMIN and current_user.tenant_id is None:
+        return
+    if not current_user.can_access_warehouse(conn, warehouse_id):
+        raise HTTPException(status_code=403, detail="无权访问该仓库")
