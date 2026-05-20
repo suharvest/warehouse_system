@@ -287,10 +287,18 @@ _RULES_FOOTER = """\
     - retry_forbidden / no_result：仅播报 speak_failed，禁止自动重试。
 12. retry_hint.requires_user_confirmation=true 时，未获得用户口头确认前**绝对不许**重发工具调用，
     哪怕系统认为"显然应该补"也不行——尊重用户最终决定权。
+13. query_stock ↔ query_batch 路由纠错（仅一次例外，覆盖第 4/11 条 retry_forbidden）：
+    a. 首次调用任一查询工具失败且 candidates 为空时，**允许**换到另一个查询工具重试**一次**；
+       重试时**必须**传 routing_retry=true，否则视为违反第 4 条。
+    b. 响应里 facts.routing_retry_used=true 表示本次已经是纠错重试。
+    c. 看到 facts.routing_retry_used=true 时**禁止**再发起任何工具调用，
+       无论成败都只能按响应播报（success→speak；failure→speak_failed）。
+    d. 禁止用 routing_retry=true 重发**同一**工具——纠错只能是换到另一个工具。
+    e. routing_retry 仅适用于 query_stock 和 query_batch，其他工具不接受此参数。
 """
 
 # 写操作集合 — 只有这类在 success=true 时才被认为 executed=true
-_WRITE_OPS = {"stock_in", "stock_out"}
+_WRITE_OPS = {"stock_in", "stock_out", "move_batch_location"}
 
 
 def _wrap_response(operation: str, resp: dict) -> dict:
@@ -310,6 +318,7 @@ def _wrap_response(operation: str, resp: dict) -> dict:
     resp["side_effect"] = (
         "inventory_out" if operation == "stock_out"
         else "inventory_in" if operation == "stock_in"
+        else "batch_relocate" if operation == "move_batch_location"
         else "none"
     )
 
@@ -438,6 +447,59 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             speak_failed = resp.get("message") or "没有找到匹配的名称。"
             next_action = "no_result"
 
+    elif operation == "query_batch":
+        if success:
+            b = resp.get("batch") or {}
+            unit = b.get("unit") or "个"
+            var = f"（{b.get('variant')}）" if b.get("variant") else ""
+            loc = b.get("location") or "未指定库位"
+            wh = b.get("warehouse_name")
+            wh_info = f"，仓库：{wh}" if wh else ""
+            if b.get("is_exhausted"):
+                speak = (
+                    f"批次{b.get('batch_no', '')}已耗尽，原本是"
+                    f"{b.get('material_name', '')}{var}，"
+                    f"初始数量{b.get('initial_quantity', '?')}{unit}，位于{loc}{wh_info}。"
+                )
+            else:
+                speak = (
+                    f"批次{b.get('batch_no', '')}是{b.get('material_name', '')}{var}，"
+                    f"当前余量{b.get('quantity', '?')}{unit}，位于{loc}{wh_info}。"
+                )
+        else:
+            err = resp.get("error") or ""
+            if err == "batch_not_found":
+                speak_failed = resp.get("message") or "没有找到该批次。"
+                next_action = "no_result"
+            else:
+                speak_failed = resp.get("message") or "批次查询失败。"
+                next_action = "retry_forbidden"
+
+    elif operation == "move_batch_location":
+        if success:
+            src = resp.get("source_batch") or {}
+            tgt = resp.get("target_batch") or {}
+            moved = resp.get("moved_quantity", "?")
+            full = bool(resp.get("full_move"))
+            to_loc = resp.get("to_location") or ""
+            if full:
+                speak = (
+                    f"已把批次{src.get('batch_no', '')}整体挪到"
+                    f"{to_loc or '新库位'}，共{moved}件。"
+                )
+            else:
+                speak = (
+                    f"已从批次{src.get('batch_no', '')}拆出{moved}件到"
+                    f"{to_loc or '新库位'}，新批次{tgt.get('batch_no', '')}，"
+                    f"原批次还剩{src.get('quantity', '?')}件。"
+                )
+        else:
+            msg = resp.get("message") or "批次移位失败"
+            # 移位错误均无候选可选；要么是用户输入有误（让用户重述/纠正），要么是系统拒绝。
+            # 一律走 retry_forbidden + speak_failed，由 LLM 在下一轮对话里询问用户重新输入。
+            speak_failed = f"本次没有移动批次。{msg}"
+            next_action = "retry_forbidden"
+
     elif operation == "get_today_statistics":
         if success:
             s = resp.get("statistics") or {}
@@ -525,7 +587,8 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 @mcp.tool()
 @log_mcp_call
 @_antihallucination("query_stock")
-def query_stock(product_name: str, show_batches: bool = False) -> dict:
+def query_stock(product_name: str, show_batches: bool = False,
+                routing_retry: bool = False) -> dict:
     """
     查询产品库存详情。支持模糊名称输入，内建自动解析。
 
@@ -540,6 +603,9 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
         product_name: 产品名称（支持模糊输入，可包含规格型号，如"空气开关D10A2P"、"螺丝"等）
         show_batches: 是否在返回结果中包含完整批次列表（默认 false）。
                       多批次时消息中已自动包含明细，此参数控制是否额外返回结构化数据。
+        routing_retry: 路由纠错标志。仅当上一次 query_batch 失败且 candidates 为空、
+                      LLM 判断用户其实是说产品名时置 True（详见 _RULES_FOOTER 第 13 条）。
+                      默认 False。
 
     返回:
         success=true 时：产品库存详情（name, sku, current_stock, unit, safe_stock,
@@ -548,9 +614,52 @@ def query_stock(product_name: str, show_batches: bool = False) -> dict:
         success=false 时：如有候选项会在 candidates 中列出
     """
     try:
-        return _provider.query_stock(product_name, show_batches)
+        resp = _provider.query_stock(product_name, show_batches)
     except Exception as e:
-        return _tool_error("查询库存", e)
+        resp = _tool_error("查询库存", e)
+    resp.setdefault("facts", {})["routing_retry_used"] = bool(routing_retry)
+    return resp
+
+
+@mcp.tool()
+@log_mcp_call
+@_antihallucination("query_batch")
+def query_batch(batch_no: str, routing_retry: bool = False) -> dict:
+    """
+    按**批次号**查询批次详情（只读）。
+
+    使用时机（用户语音典型说法）：
+    - "B-2026-003 是什么"
+    - "批次 20260513-001 还剩多少"
+    - "B 二零二六零零三在哪个货架"
+
+    与 query_stock 的分工：
+    - 用户说**产品名**（"螺丝"、"指示灯红色"）→ 用 query_stock
+    - 用户说**批次号**（含日期数字串如 20260513，或字母-年-编号如 B-2026-003）→ 用本工具
+    - 任一查询失败且 candidates 为空 → 切换到另一工具重试**一次**，
+      重试时**必须**置 routing_retry=True（详见 _RULES_FOOTER 第 13 条）
+
+    批次号自动归一化语音输入（"20260513023" → "20260513-023"）。
+    含已耗尽批次（is_exhausted=true）方便溯源——播报时会明确告知"已耗尽"。
+
+    参数：
+        batch_no: 批次号（必填）
+        routing_retry: 路由纠错标志。仅当上一次 query_stock 失败且 candidates 为空、
+                      LLM 判断用户其实是说批次号时置 True。默认 False。
+
+    返回：
+        success=true：含 batch 字段（batch_no, quantity, initial_quantity, location,
+                     variant, is_exhausted, material_name, material_sku, unit,
+                     warehouse_name, contact_name, created_at）
+        success=false 且 error="batch_not_found"：作用域内确实没有该批次
+        facts.routing_retry_used 字段会回显本次是否为路由纠错重试
+    """
+    try:
+        resp = _provider.query_batch(batch_no)
+    except Exception as e:
+        resp = _tool_error("批次查询", e)
+    resp.setdefault("facts", {})["routing_retry_used"] = bool(routing_retry)
+    return resp
 
 
 @mcp.tool()
@@ -699,6 +808,61 @@ def search(query: str = None, entity_type: str = "material",
                                 include_batches, max_results)
     except Exception as e:
         return _tool_error("搜索", e)
+
+
+@mcp.tool()
+@log_mcp_call
+@_antihallucination("move_batch_location")
+def move_batch_location(batch_no: str, new_location: str,
+                         quantity: int = None,
+                         from_location: str = None,
+                         product_name: str = None,
+                         operator: str = "MCP系统") -> dict:
+    """
+    批次库位移动。支持整批移位和**部分数量拆分移位**。
+
+    使用场景（用户语音常见说法）：
+    - "把 B-2026-003 这批整体挪到 B-02 区" → 整批移位（不传 quantity）
+    - "把 B-2026-003 这批挪 50 个到 B-02 区" → 拆分移位（quantity=50）
+    - "A-01 的螺丝挪一半到 B-02" → 用户先确认 batch_no 再调用
+
+    与入库/出库的区别：本工具**不改变物料总库存**，只调整批次的库位/数量分布。
+    禁止用此工具完成出库或入库；如果用户想"调拨到别的仓库"应改用调拨流程。
+
+    MCP 上游通常是 ASR（语音识别），batch_no 自动归一化（"20260513023" → "20260513-023"）。
+
+    参数：
+        batch_no: 源批次号（必填，如 "B-2026-003" 或 "20260513-023"）
+        new_location: 目标库位（必填，如 "B-02 架"）
+        quantity: 移位数量（可选）。
+                  None 或等于该批次余量时 → 整批移位（仅更新 location）；
+                  小于该批次余量时 → 拆分：源批次扣减此数量，并在目标库位新建同物料/同变体的新批次；
+                  大于该批次余量时 → 报错 insufficient_quantity。
+        from_location: 源库位校验（可选）。指定后若与批次当前位置不符会返回
+                       from_location_mismatch，用于防止 ASR 误识别批次号导致挪错。
+        product_name: 物料名校验（可选）。指定后若与批次实际所属物料不符会返回 product_mismatch。
+        operator: 操作员（默认 "MCP系统"）
+
+    返回：
+        success=true 时：含 source_batch（移位后源批次余量）、target_batch（目标批次，
+                         整批移位时与源批次同 id/同 batch_no，拆分时是新生成的批次）、
+                         moved_quantity、from_location、to_location、full_move
+        success=false 时：error 取值为
+            - missing_batch_no / empty_location
+            - batch_not_found（批次不存在或已耗尽）
+            - product_mismatch / from_location_mismatch
+            - same_location（新旧库位相同，无需移动）
+            - invalid_quantity / insufficient_quantity
+    """
+    blocked = _enforce_face("move_batch_location")
+    if blocked is not None:
+        return blocked
+    try:
+        return _provider.move_batch_location(
+            batch_no, new_location, quantity, from_location, product_name, operator
+        )
+    except Exception as e:
+        return _tool_error("批次移位", e)
 
 
 @mcp.tool()
