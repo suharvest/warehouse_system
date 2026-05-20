@@ -89,11 +89,8 @@ from metadata import (
     system_settings as _t_system_settings,
     erp_providers as _t_erp_providers,
     mcp_connections as _t_mcp_connections,
-    tenant_face_config as _t_tenant_face_config,
-    tenant_face_operation_rules as _t_tenant_face_rules,
-    face_subjects as _t_face_subjects,
-    face_enrollments as _t_face_enrollments,
-    face_auth_logs as _t_face_auth_logs,
+    # 5 个 face 表别名已随 routers/face.py 一起搬走（commit 3fd71ce）。
+    # app.py 不再直接引用 face 表；如有其他路由确实需要，请直接 import 全名。
 )
 from sqlalchemy import func as _sa_func
 import math
