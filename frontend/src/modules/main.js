@@ -77,14 +77,7 @@ function setupModuleCallbacks() {
         onAuthChange: () => {},
         switchTab,
         refreshCurrentTab,
-        // 登录成功后必须重新拉这三组数据：init() 阶段无 session 会被
-        // 401 拦截，导致 allProducts/categories/warehouses 卡在空数组
-        // （症状：产品选择器下拉永远空）。
-        onLoginSuccess: async () => {
-            await loadWarehouses();
-            loadCategories();
-            loadAllProducts();
-        },
+        onLoginSuccess: loadUserScopedData,
         onLogout: stopAutoUpdate,
     });
 
@@ -134,6 +127,12 @@ async function loadCategories() {
     } catch (error) {
         console.error('加载分类失败:', error);
     }
+}
+
+// 并行重拉用户作用域内的三组基础数据。init() 阶段无 session 会被 401 拦截，
+// 把状态留在空数组（典型症状：产品选择器下拉空白）；登录成功后必须重跑此函数。
+async function loadUserScopedData() {
+    await Promise.all([loadWarehouses(), loadCategories(), loadAllProducts()]);
 }
 
 function populateCategorySelect() {
@@ -624,15 +623,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     // 检查认证状态
     await checkAuthStatus();
 
-    // 加载仓库列表（需在 initFromHash 之前，因为 initFromHash 会用到仓库信息）
-    await loadWarehouses();
+    // 加载仓库 / 分类 / 产品（warehouses 必须在 initFromHash 之前就绪）
+    await loadUserScopedData();
 
     // 初始化图表
     initCharts();
-
-    // 加载分类和产品
-    loadCategories();
-    loadAllProducts();
 
     // 从 URL hash 初始化
     initFromHash();
