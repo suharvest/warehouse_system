@@ -88,6 +88,15 @@ export let currentWarehouse = null;  // { id, slug, name, is_default } or null (
 export let allWarehouses = [];
 export const getCurrentWarehouse = () => currentWarehouse;
 export const getAllWarehouses = () => allWarehouses;
+
+// 切仓 epoch：每次切仓递增。loaders 在 fetch 前 capture，commit state 前
+// 比对——过时的响应（用户已切到别的仓）直接丢弃，避免 A 慢响应覆盖 B
+// 的数据（防"快速 A→B 切仓"race，参考 codex audit agentId a6b9aa8cf2d4799ed）。
+let warehouseEpoch = 0;
+export const getWarehouseEpoch = () => warehouseEpoch;
+export function bumpWarehouseEpoch() {
+    warehouseEpoch += 1;
+}
 export function setCurrentWarehouse(wh) {
     currentWarehouse = wh;
     // 持久化 slug：刷新或后续会话能恢复上下文，避免 URL 是 / 时丢仓库

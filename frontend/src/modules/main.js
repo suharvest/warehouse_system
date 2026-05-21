@@ -4,7 +4,8 @@ import { inventoryApi, warehousesApi } from './api.js';
 import {
     getAllCategories, setAllCategories, getAllProducts, setAllProducts,
     getCurrentTab, getRecordsCurrentPage, getInventoryCurrentPage, getDetailCurrentPage, getContactsCurrentPage,
-    setAllWarehouses, getAllWarehouses
+    setAllWarehouses, getAllWarehouses,
+    getWarehouseEpoch,
 } from './state.js';
 
 // UI 模块
@@ -120,8 +121,11 @@ function setupModuleCallbacks() {
 
 // ============ 加载分类和产品 ============
 async function loadCategories() {
+    // capture epoch at call site; bail out if user switches warehouse mid-flight
+    const myEpoch = getWarehouseEpoch();
     try {
         const categories = await inventoryApi.getCategories();
+        if (getWarehouseEpoch() !== myEpoch) return;  // stale, drop
         setAllCategories(categories);
         populateCategorySelect();
     } catch (error) {
@@ -164,12 +168,16 @@ function populateCategorySelect() {
 }
 
 async function loadAllProducts() {
+    // capture epoch at call site；分页循环里每轮也比对，确保切仓后
+    // 不再继续拉旧仓数据，也不会把已拉到的旧仓 items 写进状态。
+    const myEpoch = getWarehouseEpoch();
     try {
         let page = 1;
         let allItems = [];
         let hasMore = true;
 
         while (hasMore) {
+            if (getWarehouseEpoch() !== myEpoch) return;  // 切仓了，停止拉
             const data = await inventoryApi.getList({
                 page: page,
                 pageSize: 100,
@@ -184,6 +192,7 @@ async function loadAllProducts() {
             }
         }
 
+        if (getWarehouseEpoch() !== myEpoch) return;  // 切仓了，丢弃结果
         setAllProducts(allItems);
         populateProductSelector();
     } catch (error) {
