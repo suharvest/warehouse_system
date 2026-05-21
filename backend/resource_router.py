@@ -66,7 +66,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Table, insert, select, update as sa_update
+from sqlalchemy import Table, and_, insert, select, update as sa_update
 
 
 # Imported lazily inside register() so we don't create a hard cycle with
@@ -333,9 +333,18 @@ class ResourceRouter:
                     before_update(sa_conn, current_user, request, row)
                 values = values_for_update(sa_conn, current_user, request, row)
                 if values:
-                    sa_conn.execute(
-                        sa_update(table).where(table.c.id == item_id).values(**values)
+                    # 防御性：WHERE 加 tenant_id 兜底（load_or_404 已检过一次，
+                    # 但 update 时若行被并发 reparent 或 load 路径有 bug，这层
+                    # 是最后一道防线）。全局 admin（tenant_id is None）跳过此
+                    # 约束允许跨租户管理。
+                    where_clauses = [table.c.id == item_id]
+                    if current_user.tenant_id is not None:
+                        where_clauses.append(table.c.tenant_id == current_user.tenant_id)
+                    res = sa_conn.execute(
+                        sa_update(table).where(and_(*where_clauses)).values(**values)
                     )
+                    if res.rowcount != 1:
+                        raise HTTPException(status_code=403, detail=forbidden)
                     if after_commit is not None:
                         after_commit("update", sa_conn, current_user, item_id)
 
@@ -392,23 +401,33 @@ class ResourceRouter:
                     tenant_id=current_user.tenant_id,
                     forbidden=forbidden,
                 )
+                # 同 update：WHERE 加 tenant_id 防御越租户写入。before_delete
+                # 由资源自己拼 SQL，需要资源自己保证 tenant scope；这里只兜底
+                # 默认 hard/soft delete 路径。
+                where_clauses = [table.c.id == item_id]
+                if current_user.tenant_id is not None:
+                    where_clauses.append(table.c.tenant_id == current_user.tenant_id)
                 if before_delete is not None:
                     before_delete(sa_conn, current_user, row)
                 elif hard_delete:
                     # Hard delete — used by resources whose historical
                     # wire behaviour was a SQL DELETE (api-keys).
                     from sqlalchemy import delete as sa_delete
-                    sa_conn.execute(sa_delete(table).where(table.c.id == item_id))
+                    res = sa_conn.execute(sa_delete(table).where(and_(*where_clauses)))
+                    if res.rowcount != 1:
+                        raise HTTPException(status_code=403, detail=forbidden)
                 else:
                     # Default: soft-disable via ``is_disabled``. Resources
                     # without that column MUST supply a before_delete that
                     # performs whatever delete semantic they want (hard
                     # delete, cascade, etc.).
-                    sa_conn.execute(
+                    res = sa_conn.execute(
                         sa_update(table)
-                        .where(table.c.id == item_id)
+                        .where(and_(*where_clauses))
                         .values(is_disabled=1)
                     )
+                    if res.rowcount != 1:
+                        raise HTTPException(status_code=403, detail=forbidden)
                 if after_commit is not None:
                     after_commit("delete", sa_conn, current_user, item_id)
             return delete_response
