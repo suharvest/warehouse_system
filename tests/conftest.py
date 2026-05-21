@@ -317,3 +317,53 @@ def sample_material(admin_client, default_warehouse_id):
         'safe_stock': 20,
         'warehouse_id': default_warehouse_id
     }
+
+
+@pytest.fixture()
+def multi_warehouse_setup(admin_client, default_warehouse_id):
+    """Create a second warehouse + one contact per warehouse, used by
+    cross-warehouse / cross-tenant write-defense regression tests.
+
+    Returns ``{ warehouse_a_id, warehouse_b_id, contact_a_id, contact_b_id }``.
+
+    Both warehouses live under tenant 1 here (the default tenant). True
+    cross-*tenant* tests should build their own tenants via the
+    /api/tenants endpoint (see test_multi_tenant_isolation.py helpers).
+    This fixture only guarantees two warehouses with one contact each so
+    we can exercise scope filters when needed.
+    """
+    import uuid as _uuid
+    suffix = _uuid.uuid4().hex[:8]
+    # Create a second warehouse under the default tenant.
+    wh_resp = admin_client.post("/api/warehouses", json={
+        "slug": f"wh-mw-{suffix}",
+        "name": f"MW Warehouse {suffix}",
+    })
+    assert wh_resp.status_code == 200, wh_resp.text
+    warehouse_b_id = wh_resp.json()["id"]
+
+    # Contact A: bound to default warehouse 1 tenant
+    ca = admin_client.post("/api/contacts", json={
+        "name": f"contact-a-{suffix}",
+        "is_supplier": True,
+        "is_customer": False,
+    })
+    assert ca.status_code == 200, ca.text
+    contact_a_id = ca.json()["id"]
+
+    # Contact B: same tenant, but we still create a second contact so we
+    # have a distinct row id to probe permission checks.
+    cb = admin_client.post("/api/contacts", json={
+        "name": f"contact-b-{suffix}",
+        "is_supplier": True,
+        "is_customer": False,
+    })
+    assert cb.status_code == 200, cb.text
+    contact_b_id = cb.json()["id"]
+
+    return {
+        "warehouse_a_id": default_warehouse_id,
+        "warehouse_b_id": warehouse_b_id,
+        "contact_a_id": contact_a_id,
+        "contact_b_id": contact_b_id,
+    }
