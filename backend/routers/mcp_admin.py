@@ -348,17 +348,24 @@ async def update_mcp_connection(
 
     if mcp_values:
         mcp_values['updated_at'] = datetime.now().isoformat()
+        # 防御性 tenant 约束：load_or_404 已检过一次，UPDATE 再加一层防
+        # 行被并发 reparent / load 路径有 bug 时的越租户写入
+        mcp_where = [_t_mcp_connections.c.id == conn_id]
+        if current_user.tenant_id is not None:
+            mcp_where.append(_t_mcp_connections.c.tenant_id == current_user.tenant_id)
         with get_engine().begin() as sa_conn:
             if apikey_values:
+                # api_keys.key_hash 是全局唯一索引（metadata.py），且 key_hash 来自
+                # 已通过 tenant scope 校验的 mcp_connections 行，无需重复约束
                 sa_conn.execute(
                     update(_t_api_keys)
                     .where(_t_api_keys.c.key_hash == key_hash)
                     .values(**apikey_values)
                 )
             try:
-                sa_conn.execute(
+                res = sa_conn.execute(
                     update(_t_mcp_connections)
-                    .where(_t_mcp_connections.c.id == conn_id)
+                    .where(and_(*mcp_where))
                     .values(**mcp_values)
                 )
             except IntegrityError:
@@ -366,6 +373,8 @@ async def update_mcp_connection(
                     status_code=409,
                     detail=f"设备 ID {new_device_id} 已被其他连接注册，一个设备只能注册一次",
                 )
+            if res.rowcount != 1:
+                raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     with get_engine().connect() as sa_conn:
         _r = sa_conn.execute(
@@ -409,11 +418,17 @@ async def delete_mcp_connection(
 
     # 删除数据库记录及关联的 API Key
     api_key_plain = row['api_key']
+    # 防御性 tenant 约束：同 update 路径
+    mcp_where = [_t_mcp_connections.c.id == conn_id]
+    if current_user.tenant_id is not None:
+        mcp_where.append(_t_mcp_connections.c.tenant_id == current_user.tenant_id)
     with get_engine().begin() as sa_conn:
         if api_key_plain:
             key_hash = hash_api_key(api_key_plain)
             sa_conn.execute(delete(_t_api_keys).where(_t_api_keys.c.key_hash == key_hash))
-        sa_conn.execute(delete(_t_mcp_connections).where(_t_mcp_connections.c.id == conn_id))
+        res = sa_conn.execute(delete(_t_mcp_connections).where(and_(*mcp_where)))
+        if res.rowcount != 1:
+            raise HTTPException(status_code=403, detail="无权访问其他租户的MCP连接")
 
     return {"success": True, "message": "连接已删除"}
 
