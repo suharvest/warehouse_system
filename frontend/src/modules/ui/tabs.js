@@ -7,7 +7,8 @@ import {
     detailTrendChart, detailPieChart,
     currentProductName,
     currentWarehouse, setCurrentWarehouse, allWarehouses, setAllWarehouses, getStoredWarehouseSlug,
-    getCurrentUser
+    getCurrentUser,
+    bumpWarehouseEpoch,
 } from '../state.js';
 
 // 功能模块引用（由 main.js 设置）
@@ -170,6 +171,11 @@ function initWarehouseFromPath() {
 // ============ 仓库切换 ============
 
 export function switchWarehouse(warehouse) {
+    // FIRST：递增 epoch，让任何"上一仓"还在 flight 的 loader 在响应回来
+    // 时检测到过时，自动丢弃。否则快速切仓 A→B 会让 A 的慢响应覆盖 B 的
+    // currentWarehouse 对应数据。
+    bumpWarehouseEpoch();
+
     setCurrentWarehouse(warehouse);
     updateWarehouseSwitcherDisplay();
 
