@@ -935,7 +935,8 @@ async def get_auth_status(current_user: CurrentUser = Depends(get_current_user))
 # ============ Registration APIs (multi_tenant self-service) ============
 
 @app.post("/api/auth/register/verify-device", response_model=VerifyDeviceResponse)
-async def register_verify_device(body: VerifyDeviceRequest):
+@limiter.limit("10/hour")  # 防 device_id 暴力枚举（同 IP）；并发场景由工厂 API 自身限速兜底
+async def register_verify_device(request: Request, body: VerifyDeviceRequest):
     """Step 1: 验证设备 ID 是否在工厂库中，以及是否已被注册。"""
     device_id = body.device_id.strip()
     if not device_id:
@@ -989,7 +990,8 @@ async def register_verify_device(body: VerifyDeviceRequest):
 
 
 @app.post("/api/auth/register")
-async def register_tenant(body: RegisterRequest, response: Response):
+@limiter.limit("5/hour")  # 防批量注册（同 IP）：自助注册是低频操作，5/h 远超正常用户需求
+async def register_tenant(request: Request, body: RegisterRequest, response: Response):
     """Step 2: 创建租户 + admin 账号 + 默认仓库，绑定设备 ID。"""
     if get_deploy_mode() != "multi_tenant":
         raise HTTPException(status_code=403, detail="自助注册仅在多租户模式下可用")
@@ -1122,8 +1124,17 @@ async def register_tenant(body: RegisterRequest, response: Response):
 
 
 @app.post("/api/auth/reset-password")
-async def reset_password(body: ResetPasswordRequest):
-    """凭设备 ID + 管理员用户名重置密码。"""
+@limiter.limit("5/hour")  # device_id 作为 possession factor 的恢复操作：限速防暴力枚举/批量接管
+async def reset_password(request: Request, body: ResetPasswordRequest):
+    """凭设备 ID + 管理员用户名重置密码。
+
+    安全模型：device_id 视为物理持有因子（"谁手里有设备 → 谁能恢复 admin"）。
+    物理保管是客户责任；本端做的补强是：
+      - 限速（@limiter.limit 5/hour）防暴力枚举 device_id 或批量接管攻击
+      - 每次尝试（成功/失败）写 audit log，含 IP 与 UA，便于事后追溯
+
+    未来若客户上线邮箱/SMS 通道，应当在成功后异步推送通知给原 admin。
+    """
     if get_deploy_mode() != "multi_tenant":
         raise HTTPException(status_code=403, detail="仅在多租户模式下可用")
 
@@ -1131,10 +1142,22 @@ async def reset_password(body: ResetPasswordRequest):
     username = body.username.strip()
     new_password = body.new_password.strip()
 
+    # audit_log 公共字段：client IP / UA 取自 request（@limiter 已注入）
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent", "")[:200]
+    audit_base = {
+        "device_id": device_id,
+        "username_attempted": username,
+        "client_ip": client_ip,
+        "user_agent": user_agent,
+    }
+
     if not device_id or not username or not new_password:
+        audit_log("RESET_PASSWORD_FAIL", None, None, {**audit_base, "reason": "empty_field"})
         raise HTTPException(status_code=400, detail="设备ID、用户名、新密码均不能为空")
     err = validate_password_strength(new_password)
     if err:
+        audit_log("RESET_PASSWORD_FAIL", None, None, {**audit_base, "reason": "weak_password"})
         raise HTTPException(status_code=400, detail=err)
 
     with get_engine().begin() as sa_conn:
@@ -1144,6 +1167,7 @@ async def reset_password(body: ResetPasswordRequest):
             .where(_t_tenants.c.device_id == device_id)
         ).first()
         if not tenant_row:
+            audit_log("RESET_PASSWORD_FAIL", None, None, {**audit_base, "reason": "unknown_device_id"})
             raise HTTPException(status_code=404, detail="未找到该设备对应的租户，请确认设备 ID 正确")
 
         # 查该租户下指定用户名的 admin
@@ -1159,6 +1183,9 @@ async def reset_password(body: ResetPasswordRequest):
             )
         ).first()
         if not admin_row:
+            audit_log("RESET_PASSWORD_FAIL", None, None, {
+                **audit_base, "reason": "unknown_admin", "tenant_id": tenant_row.id, "tenant_name": tenant_row.name,
+            })
             raise HTTPException(status_code=404, detail="管理员用户名不正确，请确认后重试")
 
         # 重置密码
@@ -1167,6 +1194,9 @@ async def reset_password(body: ResetPasswordRequest):
             update(_t_users).where(_t_users.c.id == admin_row.id).values(password_hash=new_hash)
         )
 
+    audit_log("RESET_PASSWORD_SUCCESS", admin_row.id, admin_row.username, {
+        **audit_base, "tenant_id": tenant_row.id, "tenant_name": tenant_row.name,
+    })
     return {"success": True, "message": f"租户「{tenant_row.name}」管理员 {admin_row.username} 密码已重置"}
 
 
