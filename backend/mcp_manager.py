@@ -44,7 +44,18 @@ class MCPProcessManager:
     def __init__(self):
         self.connections: Dict[str, MCPProcess] = {}
         self._monitor_task: Optional[asyncio.Task] = None
+        # per-connection async lock：串行化同一 conn_id 的所有 state
+        # 变更（start / stop / restart / toggle_debug），避免并发
+        # /start + /stop 把 self.connections[conn_id] 改成不一致状态
+        # （codex audit ad0265a253981469c HIGH）。
+        self._locks: Dict[str, asyncio.Lock] = {}
         atexit.register(self._cleanup_on_exit)
+
+    def _get_lock(self, conn_id: str) -> asyncio.Lock:
+        """懒创建 per-connection 锁。"""
+        if conn_id not in self._locks:
+            self._locks[conn_id] = asyncio.Lock()
+        return self._locks[conn_id]
 
     async def start_monitor(self):
         """启动后台监控任务"""
@@ -64,12 +75,21 @@ class MCPProcessManager:
 
     async def start_connection(self, conn_id: str, endpoint: str, api_key: str,
                                 auto_start: bool = True, debug_mode: bool = False) -> bool:
-        """启动一个 MCP 连接（子进程）"""
-        # 如果已经有运行中的进程，先停止
+        """启动一个 MCP 连接（子进程）。串行化同 conn_id 的状态变更。"""
+        async with self._get_lock(conn_id):
+            return await self._start_connection_locked(
+                conn_id, endpoint, api_key, auto_start, debug_mode
+            )
+
+    async def _start_connection_locked(self, conn_id: str, endpoint: str, api_key: str,
+                                        auto_start: bool = True, debug_mode: bool = False) -> bool:
+        """start_connection 的内部实现，**调用者必须已持有 self._get_lock(conn_id)**。
+        给 restart / toggle_debug 复用以避免锁重入死锁。"""
+        # 如果已经有运行中的进程，先停止（同样 unlocked，避免锁重入）
         if conn_id in self.connections:
             existing = self.connections[conn_id]
             if existing.process and existing.process.returncode is None:
-                await self.stop_connection(conn_id)
+                await self._stop_connection_locked(conn_id)
 
         # 确定 mcp_pipe.py 和 warehouse_mcp.py 路径
         mcp_pipe_path = self._get_mcp_pipe_path()
@@ -135,7 +155,12 @@ class MCPProcessManager:
             return False
 
     async def stop_connection(self, conn_id: str) -> bool:
-        """停止一个 MCP 连接"""
+        """停止一个 MCP 连接。串行化同 conn_id 的状态变更。"""
+        async with self._get_lock(conn_id):
+            return await self._stop_connection_locked(conn_id)
+
+    async def _stop_connection_locked(self, conn_id: str) -> bool:
+        """stop_connection 的内部实现，**调用者必须已持有 self._get_lock(conn_id)**。"""
         if conn_id not in self.connections:
             return False
 
@@ -170,26 +195,39 @@ class MCPProcessManager:
 
     async def restart_connection(self, conn_id: str, endpoint: str = None,
                                   api_key: str = None) -> bool:
-        """重启一个 MCP 连接（重置计数器，保留原 debug_mode 设置）"""
-        old_debug = False
-        if conn_id in self.connections:
-            proc = self.connections[conn_id]
-            endpoint = endpoint or proc.endpoint
-            api_key = api_key or proc.api_key
-            old_debug = proc.debug_mode
-            await self.stop_connection(conn_id)
+        """重启一个 MCP 连接（重置计数器，保留原 debug_mode 设置）。一次性持锁
+        覆盖 stop + start，避免别人插队改状态。"""
+        async with self._get_lock(conn_id):
+            old_debug = False
+            if conn_id in self.connections:
+                proc = self.connections[conn_id]
+                endpoint = endpoint or proc.endpoint
+                api_key = api_key or proc.api_key
+                old_debug = proc.debug_mode
+                await self._stop_connection_locked(conn_id)
 
-        return await self.start_connection(conn_id, endpoint, api_key, debug_mode=old_debug)
+            return await self._start_connection_locked(
+                conn_id, endpoint, api_key, debug_mode=old_debug
+            )
 
     async def toggle_debug(self, conn_id: str, endpoint: str, api_key: str, enable: bool) -> bool:
-        """切换调试模式，重启进程使生效"""
-        await self.stop_connection(conn_id)
-        return await self.start_connection(conn_id, endpoint, api_key, debug_mode=enable)
+        """切换调试模式，重启进程使生效。一次性持锁覆盖 stop + start。"""
+        async with self._get_lock(conn_id):
+            await self._stop_connection_locked(conn_id)
+            return await self._start_connection_locked(
+                conn_id, endpoint, api_key, debug_mode=enable
+            )
 
     def remove_connection(self, conn_id: str):
-        """从管理器中移除连接记录"""
+        """从管理器中移除连接记录。
+
+        调用方应当先 `await stop_connection(conn_id)`（已持过锁串行化），再
+        同步调本方法。dict del 是 CPython GIL 下的原子操作，无需异步锁。
+        """
         if conn_id in self.connections:
             del self.connections[conn_id]
+        # 清理 lock 释放内存（lock 已不再被任何 coroutine 持有）
+        self._locks.pop(conn_id, None)
 
     def get_connection_status(self, conn_id: str) -> dict:
         """获取连接的实时状态"""
