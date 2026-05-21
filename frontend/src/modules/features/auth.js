@@ -5,7 +5,9 @@ import {
     getCurrentUser, setCurrentUser,
     getIsSystemInitialized, setIsSystemInitialized,
     getCurrentTab, getDeployMode,
-    setCurrentWarehouse, setAllWarehouses
+    setCurrentWarehouse, setAllWarehouses,
+    setAllProducts, setAllCategories,
+    bumpWarehouseEpoch,
 } from '../state.js';
 import { startOnboarding } from './onboarding.js';
 
@@ -74,6 +76,14 @@ async function handleSessionExpired() {
 
     // 清除用户状态
     setCurrentUser(null);
+    // 完整清理上一会话的作用域数据，避免下个用户登录时混淆。
+    // 不发 /logout HTTP（session 已过期）。bumpWarehouseEpoch() 让任何
+    // in-flight loaders 在收到响应时直接丢弃，避免污染新会话。
+    bumpWarehouseEpoch();
+    setCurrentWarehouse(null);
+    setAllWarehouses([]);
+    setAllProducts([]);
+    setAllCategories([]);
     await updateUserDisplay();
     updatePermissionUI();
 

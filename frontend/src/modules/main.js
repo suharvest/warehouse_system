@@ -6,6 +6,7 @@ import {
     getCurrentTab, getRecordsCurrentPage, getInventoryCurrentPage, getDetailCurrentPage, getContactsCurrentPage,
     setAllWarehouses, getAllWarehouses,
     getWarehouseEpoch,
+    setUserDataLoadError,
 } from './state.js';
 
 // UI 模块
@@ -128,8 +129,11 @@ async function loadCategories() {
         if (getWarehouseEpoch() !== myEpoch) return;  // stale, drop
         setAllCategories(categories);
         populateCategorySelect();
+        // 成功路径清零，避免之前一次失败的标志残留
+        setUserDataLoadError(null);
     } catch (error) {
         console.error('加载分类失败:', error);
+        setUserDataLoadError(error);
     }
 }
 
@@ -143,6 +147,16 @@ async function loadCategories() {
 async function loadUserScopedData() {
     await loadWarehouses();
     await Promise.all([loadCategories(), loadAllProducts()]);
+}
+
+// 用户作用域数据 retry 入口。loaders 失败后用户没有 UI 按钮可触发重试，
+// 暂时挂到 window 上让用户在 console 调 window.__retryUserScopedData()
+// 自救。后续 UI 加 toast/banner 可直接 import 调用。
+export async function retryUserScopedData() {
+    return loadUserScopedData();
+}
+if (typeof window !== 'undefined') {
+    window.__retryUserScopedData = retryUserScopedData;
 }
 
 function populateCategorySelect() {
@@ -171,6 +185,8 @@ async function loadAllProducts() {
     // capture epoch at call site；分页循环里每轮也比对，确保切仓后
     // 不再继续拉旧仓数据，也不会把已拉到的旧仓 items 写进状态。
     const myEpoch = getWarehouseEpoch();
+    // 进入加载即清零错误标志；失败时 catch 会重新设置
+    setUserDataLoadError(null);
     try {
         let page = 1;
         let allItems = [];
@@ -198,6 +214,7 @@ async function loadAllProducts() {
     } catch (error) {
         console.error('加载产品列表失败:', error);
         setAllProducts([]);
+        setUserDataLoadError(error);
     }
 }
 

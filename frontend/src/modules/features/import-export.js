@@ -23,6 +23,9 @@ let importPreviewData = null;
 let pendingNewSkus = [];
 let _importReasonCategories = null;
 
+// In-flight guard：防止用户双击"确认导入"按钮重复执行导入
+let isImporting = false;
+
 // 根据操作类型获取默认原因分类
 function _defaultReasonForOp(operation) {
     if (operation === 'in' || operation === 'new') return 'purchase';
@@ -39,6 +42,15 @@ function _collectRowReasonCategories() {
             importPreviewData.preview[idx].reason_category = select.value || null;
         }
     });
+}
+
+function _formatApiError(data, fallback) {
+    if (!data) return fallback;
+    if (typeof data.detail === 'string') return data.detail;
+    if (Array.isArray(data.detail)) {
+        return data.detail.map(item => item.msg || JSON.stringify(item)).join('\n');
+    }
+    return data.message || fallback;
 }
 
 // 生成行内原因下拉 HTML
@@ -453,6 +465,12 @@ export async function confirmNewSkus() {
 }
 
 async function executeImport(confirmNewSkusFlag) {
+    // 双击/重复提交保护
+    if (isImporting) return;
+    const confirmBtn = document.getElementById('confirm-import-btn');
+    isImporting = true;
+    if (confirmBtn) confirmBtn.disabled = true;
+
     const reasonNote = document.getElementById('import-reason-note').value.trim() || null;
     const confirmDisableMissing = document.getElementById('confirm-disable-missing')?.checked || false;
 
@@ -479,7 +497,7 @@ async function executeImport(confirmNewSkusFlag) {
             return;
         }
 
-        const data = await response.json();
+        const data = await response.json().catch(() => null);
 
         if (data.success) {
             alert(data.message);
@@ -489,10 +507,13 @@ async function executeImport(confirmNewSkusFlag) {
             if (getCurrentTab() === 'inventory' && loadInventoryFn) loadInventoryFn();
             if (getCurrentTab() === 'dashboard' && loadDashboardDataFn) loadDashboardDataFn();
         } else {
-            alert(data.message || t('importFailed'));
+            alert(_formatApiError(data, t('importFailed')));
         }
     } catch (error) {
         console.error('导入失败:', error);
         alert(t('importFailed'));
+    } finally {
+        isImporting = false;
+        if (confirmBtn) confirmBtn.disabled = false;
     }
 }

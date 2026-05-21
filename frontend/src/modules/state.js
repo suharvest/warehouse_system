@@ -76,6 +76,14 @@ export let allProducts = [];
 export const getAllProducts = () => allProducts;
 export function setAllProducts(products) { allProducts = products; }
 
+// 用户作用域数据（products/categories/warehouses）加载失败标志。
+// loaders 失败时调用 setUserDataLoadError(err)；成功时 setUserDataLoadError(null)。
+// UI 可读 getUserDataLoadError() 决定是否显示 retry 按钮（暂未接 UI，
+// 现阶段通过 window.__retryUserScopedData() 在 console 触发重试）。
+let userDataLoadError = null;
+export const getUserDataLoadError = () => userDataLoadError;
+export function setUserDataLoadError(err) { userDataLoadError = err; }
+
 // 可搜索下拉组件状态
 export let productSelectorHighlightIndex = -1;
 export let recordProductHighlightIndex = -1;

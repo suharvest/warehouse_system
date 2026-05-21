@@ -25,6 +25,9 @@ export function setRecordsCallbacks(callbacks) {
 // 新增记录状态
 let addRecordForProduct = false;
 
+// In-flight guard：防止用户双击"确认"按钮重复提交导致库存被扣减两次
+let isSubmittingRecord = false;
+
 // 原因分类缓存
 let reasonCategoriesCache = null;
 
@@ -506,6 +509,12 @@ export function closeAddRecordModal() {
 }
 
 export async function submitAddRecord() {
+    // 双击/重复提交保护：函数级 flag + 按钮 disabled
+    if (isSubmittingRecord) return;
+    const submitBtn = document.querySelector('[data-action="submitAddRecord"]');
+    isSubmittingRecord = true;
+    if (submitBtn) submitBtn.disabled = true;
+    try {
     const productName = addRecordForProduct
         ? currentProductName
         : document.getElementById('record-product').value;
@@ -586,5 +595,9 @@ export async function submitAddRecord() {
             console.error('[records] submitAddRecord error:', error);
             alert(t('operationFailed') || '操作失败');
         }
+    }
+    } finally {
+        isSubmittingRecord = false;
+        if (submitBtn) submitBtn.disabled = false;
     }
 }
