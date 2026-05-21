@@ -1209,6 +1209,7 @@ async def reset_password(request: Request, body: ResetPasswordRequest):
 @app.post("/api/auth/setup", response_model=LoginResponse)
 async def setup_admin(request: SetupRequest, response: Response):
     """首次设置管理员账号"""
+    # 事务外快速失败（常规路径）
     if has_admin_user():
         raise HTTPException(status_code=400, detail="系统已初始化，无法重复设置")
 
@@ -1223,6 +1224,16 @@ async def setup_admin(request: SetupRequest, response: Response):
     setup_tenant_id = None if get_deploy_mode() == 'multi_tenant' else 1
 
     with get_engine().begin() as sa_conn:
+        # 事务内再查一次防 setup 并发 race（两请求同时通过事务外 has_admin_user 检查）。
+        # 完全的 race-free 需要 DB advisory lock；这里的 in-tx recheck 把窗口
+        # 从"事务外 + bcrypt 数百毫秒"缩到"事务内几毫秒"，实践已可忽略。
+        existing_admin = sa_conn.execute(
+            select(_sa_func.count()).select_from(_t_users)
+            .where(_t_users.c.role == RoleName.ADMIN.value)
+        ).scalar() or 0
+        if existing_admin > 0:
+            raise HTTPException(status_code=400, detail="系统已初始化，无法重复设置")
+
         result = sa_conn.execute(
             insert(_t_users).values(
                 username=request.username,
@@ -4246,7 +4257,8 @@ async def stock_in(
     unit = row.unit
 
     record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
-    batch_no = request.batch_no.strip() if request.batch_no and request.batch_no.strip() else generate_batch_no(material_id, warehouse_id=wh_id)
+    user_supplied_batch_no = bool(request.batch_no and request.batch_no.strip())
+    batch_no = request.batch_no.strip() if user_supplied_batch_no else generate_batch_no(material_id, warehouse_id=wh_id)
     now_dt = datetime.now()
 
     with get_engine().begin() as sa_conn:
@@ -4260,15 +4272,33 @@ async def stock_in(
         ).scalar() or 0)
         new_quantity = old_quantity + quantity
 
-        ins_batch = sa_conn.execute(
-            insert(_t_batches).values(
-                batch_no=batch_no, material_id=material_id, quantity=quantity,
-                initial_quantity=quantity, contact_id=request.contact_id,
-                location=request.location, variant=request.variant,
-                warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
-            )
-        )
-        batch_id = ins_batch.inserted_primary_key[0]
+        # batch_no 撞 unique (batch_no, warehouse_id) 时：
+        # - 用户显式传入的 batch_no 直接 409，让前端报错（用户输错了）
+        # - 系统生成的 batch_no（同 date+wh 高并发可能撞）retry 最多 5 次（参考
+        #   move_batch_location 的同款保护）
+        batch_id = None
+        for _attempt in range(5):
+            try:
+                ins_batch = sa_conn.execute(
+                    insert(_t_batches).values(
+                        batch_no=batch_no, material_id=material_id, quantity=quantity,
+                        initial_quantity=quantity, contact_id=request.contact_id,
+                        location=request.location, variant=request.variant,
+                        warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
+                    )
+                )
+                batch_id = ins_batch.inserted_primary_key[0]
+                break
+            except IntegrityError:
+                if user_supplied_batch_no:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"批次号 '{batch_no}' 在该仓库已存在，请换一个"
+                    )
+                # 系统生成的：重新分配一个再试
+                batch_no = generate_batch_no(material_id, warehouse_id=wh_id)
+        if batch_id is None:
+            raise HTTPException(status_code=409, detail="批次号生成冲突，请重试")
 
         sa_conn.execute(
             insert(_t_inventory_records).values(
@@ -5933,11 +5963,15 @@ async def confirm_import_excel(
                     material_id = _lookup_material_id(item.sku)
                     if material_id is None:
                         continue
+                    # FOR UPDATE 锁批次行：Excel 导入是 overwrite quantity 语义，
+                    # 两份并发 Excel 同时 import 同批次会丢更新；锁让它们串行化
+                    # （codex audit adf4d1b463d92850e HIGH）。
                     batch = sa_conn.execute(
                         select(_t_batches.c.id, _t_batches.c.quantity)
                         .where(and_(_t_batches.c.batch_no == item.batch_no,
                                     _t_batches.c.material_id == material_id,
                                     *batch_scope_preds))
+                        .with_for_update()
                     ).first()
                     if not batch:
                         continue
@@ -5946,12 +5980,20 @@ async def confirm_import_excel(
                     # 复活已耗尽批次：用户用 Excel 给历史 is_exhausted=1 的批次写回正数时，
                     # 必须同步清掉 is_exhausted 标记，否则所有 WHERE is_exhausted=0 的读端
                     # 会无视这一行 → 库存静默丢失。反向：若新值 <= 0 则标记耗尽。
-                    sa_conn.execute(
-                        update(_t_batches).where(_t_batches.c.id == batch.id)
+                    upd_res = sa_conn.execute(
+                        update(_t_batches).where(and_(
+                            _t_batches.c.id == batch.id,
+                            _t_batches.c.quantity == batch.quantity,
+                        ))
                         .values(quantity=item.import_quantity,
                                 location=item.location or '', variant=item.variant,
                                 is_exhausted=0 if item.import_quantity > 0 else 1)
                     )
+                    if upd_res.rowcount != 1:
+                        # 行被并发其它事务改过（虽然 FOR UPDATE 应该兜底，但加这层
+                        # 校验避免任何 corner case 静默丢更新）
+                        raise HTTPException(status_code=409,
+                                            detail=f"批次 {item.batch_no} 在导入期间被其它操作修改，请重试")
                     # 单一真相源：不再写 materials.quantity（batch 写入已是真相）
 
                     rec_type = RecordType.IN.value if diff > 0 else RecordType.OUT.value
