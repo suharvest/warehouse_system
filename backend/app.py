@@ -4190,6 +4190,13 @@ async def stock_in(
             message=f"入库失败：数量 {quantity} 无效"
         )
 
+    if reason_category not in REASON_CATEGORIES["in"]:
+        return StockInResponse(
+            success=False,
+            error="invalid_reason_category",
+            message=f"reason_category={reason_category!r} 无效，合法值: {','.join(REASON_CATEGORIES['in'])}",
+        )
+
     check_warehouse_access(None, current_user, wh_id)
     # 校验 contact_id 跨租户归属（防止恶意/前端误传）
     ensure_contact_tenant(None, current_user, request.contact_id,
@@ -4362,6 +4369,13 @@ async def stock_out(
     if quantity <= 0:
         return StockOutResponse(success=False, error="出库数量必须大于0",
                                 message=f"出库失败：数量 {quantity} 无效")
+
+    if reason_category not in REASON_CATEGORIES["out"]:
+        return StockOutResponse(
+            success=False,
+            error="invalid_reason_category",
+            message=f"reason_category={reason_category!r} 无效，合法值: {','.join(REASON_CATEGORIES['out'])}",
+        )
 
     check_warehouse_access(None, current_user, wh_id)
     ensure_contact_tenant(None, current_user, stock_data.contact_id,
