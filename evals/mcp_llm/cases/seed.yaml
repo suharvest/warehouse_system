@@ -1,0 +1,59 @@
+profiles:
+  base:
+    description: "标准库存场景：覆盖 fuzzy 名、SKU、同名变体、低库存、零库存"
+    materials:
+      - sku: LED-RED-10
+        name: 红色LED指示灯
+        category: 电气
+        unit: 个
+        safe_stock: 20
+        location: A-01
+        batches:
+          - batch_no: B-2026-003
+            quantity: 5
+            initial_quantity: 5
+      - sku: BRG-NJ409
+        name: 轴承-NJ409MC3
+        category: 机械
+        unit: 个
+        safe_stock: 10
+        location: C2-2-07
+        stock: 12
+      - sku: SCR-DRV-100
+        name: 螺丝刀
+        category: 工具
+        unit: 把
+        safe_stock: 5
+        location: D-03
+        stock: 0
+      - sku: SCR-M3
+        name: 螺丝
+        category: 五金
+        unit: 个
+        safe_stock: 50
+        location: E-01
+        stock: 47
+      - sku: SCR-M4
+        name: 螺丝
+        category: 五金
+        unit: 个
+        safe_stock: 50
+        location: E-02
+        stock: 33
+      - sku: CAP-100UF
+        name: 电容100uF
+        category: 电气
+        unit: 个
+        safe_stock: 30
+        location: A-05
+        stock: 8
+      - sku: WIRE-RED-1M
+        name: 红色导线1米
+        category: 电气
+        unit: 米
+        safe_stock: 100
+        location: A-10
+        stock: 250
+    contacts:
+      - name: 张三供应商
+        is_supplier: true
