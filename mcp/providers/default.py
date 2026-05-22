@@ -7,30 +7,93 @@
 - 净变化计算（get_today_statistics）
 """
 
+import json
 import logging
 import re
 from datetime import datetime
 
 from .base import BaseProvider
 
+# Cloud WS gateway (watcher-agent-api.seeed.cc) caps inbound frames around 13 KB.
+# Trim per-tool responses to a safer threshold so a single big result can't kill
+# the WebSocket with 1009. Critical for `search` with include_batches=True.
+_MCP_RESPONSE_BUDGET_BYTES = 10_000
+
 logger = logging.getLogger("WarehouseMCP")
+
+_BATCH_NO_RE = re.compile(r"^\d{8}-\d+$")
+
+# reason_category 归一化映射：覆盖 LLM 口语 / 中文别名 / 常见英文同义词。
+# 目标是把 4B 模型胡乱传的"production / use / scrap / 领用"等映射回后端枚举。
+# 后端权威枚举（database.py:21）：
+#   in:  purchase return refund produce transfer_in other_in
+#   out: sell lend consume loss transfer_out other_out
+_REASON_ALIAS = {
+    # ===== IN =====
+    "purchase": "purchase", "采购": "purchase", "进货": "purchase", "采购入库": "purchase",
+    "buy": "purchase", "buying": "purchase",
+    "return": "return", "退还": "return", "归还": "return", "借还": "return",
+    "refund": "refund", "退货": "refund", "退货入库": "refund", "退款": "refund",
+    "produce": "produce", "生产": "produce", "生产入库": "produce", "production": "produce",
+    "produced": "produce", "manufacture": "produce", "completed": "produce",
+    "transfer_in": "transfer_in", "调入": "transfer_in", "调拨入库": "transfer_in",
+    "other_in": "other_in", "其他入库": "other_in",
+    # ===== OUT =====
+    "sell": "sell", "sale": "sell", "sold": "sell", "出售": "sell", "销售": "sell",
+    "销售出库": "sell",
+    "lend": "lend", "borrow": "lend", "loan": "lend", "借出": "lend",
+    "consume": "consume", "use": "consume", "used": "consume", "using": "consume",
+    "usage": "consume", "consumption": "consume", "consumed": "consume",
+    "领用": "consume", "消耗": "consume", "研发领用": "consume", "生产领料": "consume",
+    "生产领用": "consume",
+    "loss": "loss", "scrap": "loss", "scrapped": "loss", "损耗": "loss", "损失": "loss",
+    "report_loss": "loss",
+    "transfer_out": "transfer_out", "调出": "transfer_out", "调拨出库": "transfer_out",
+    "transfer": "transfer_out",  # 不带方向的歧义 -> 按出库处理（更安全）
+    "other_out": "other_out", "其他出库": "other_out", "返修出库": "other_out",
+    "返修": "other_out",
+}
+
+
+def _normalize_reason_category(value):
+    """把 LLM/用户传来的 reason_category 归一化为后端合法枚举值。
+
+    未命中映射时返回原值，由后端做最终拒绝（fail-closed）。"""
+    if value is None:
+        return value
+    key = str(value).strip().lower()
+    return _REASON_ALIAS.get(key, value)
 
 
 def _normalize_batch_no(batch_no: str) -> str:
-    """归一化批次号：去掉连字符/空格，补回标准格式 YYYYMMDD-NNN。
+    """归一化批次号，覆盖 ASR / 用户口语输入的常见噪声。
 
-    语音输入 "20260513023" → "20260513-023"
-    已标准格式 "20260513-023" → 不变
-    非日期格式批次号（如 "B-2026-003"）→ 原样返回
+    支持的归一化：
+    1. 大小写：包含字母时统一大写（"b-2026-003" → "B-2026-003"）
+    2. 全角/中文连字符 / em-dash 转半角连字符
+    3. 空格分隔 → 连字符（"SEED BRG NJ409" → "SEED-BRG-NJ409"）
+    4. 纯数字 YYYYMMDDNNN（11+ 位）→ 第 8 位后插 -（"20260513023" → "20260513-023"）
+    5. 多个连续连字符压缩
+    标准格式（"B-2026-003", "SEED-BRG-NJ409"）→ 大小写归一后不变
     """
     if not batch_no:
         return batch_no
-    s = re.sub(r'[\s\-－–—]+', '', batch_no).strip()
-    # YYYYMMDDNNN 形式（11位纯数字）→ 在第8位后插入 -
-    m = re.fullmatch(r'(\d{8})(\d+)', s)
+    s = batch_no.strip()
+    # 全角/中文连字符 → 半角；全角空格 → 半角空格
+    s = s.translate(str.maketrans({'－': '-', '–': '-', '—': '-', '　': ' '}))
+    # 含字母 → 大写
+    if re.search(r'[a-zA-Z]', s):
+        s = s.upper()
+    # 空格 → 连字符
+    s = re.sub(r'\s+', '-', s)
+    # 多个连续连字符压成一个
+    s = re.sub(r'-+', '-', s)
+    # 纯数字 YYYYMMDDNNN：去掉所有 - 后第 8 位插 -
+    digits_only = s.replace('-', '')
+    m = re.fullmatch(r'(\d{8})(\d+)', digits_only)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
-    return batch_no
+    return s
 
 
 class DefaultProvider(BaseProvider):
@@ -46,12 +109,20 @@ class DefaultProvider(BaseProvider):
                 "key": config["api_key"],
             }
         super().__init__(config)
-        self.max_results = int(config.get("max_results", 30))
+        self.max_results = int(config.get("max_results", 10))
 
     def resolve_name(self, text, entity_type="all"):
         return self.http_get("/fuzzy-match", params={"q": text, "entity_type": entity_type})
 
-    def query_stock(self, product_name, show_batches=False):
+    def query_stock(self, product_name, show_batches=False, _routing_fallback=False):
+        def _batch_fallback(original_resp):
+            if _routing_fallback or not _BATCH_NO_RE.fullmatch(str(product_name or "").strip()):
+                return original_resp
+            batch_resp = self.query_batch(product_name, _routing_fallback=True)
+            if isinstance(batch_resp, dict) and batch_resp.get("success"):
+                return batch_resp
+            return original_resp
+
         # 先尝试精确查询，同时做多义检测
         data = self.http_get("/materials/product-stats", params={"name": product_name})
 
@@ -96,11 +167,11 @@ class DefaultProvider(BaseProvider):
                     resolved_name = best["name"]
                 data = self.http_get("/materials/product-stats", params={"name": resolved_name})
                 if "error" in data:
-                    return {
+                    return _batch_fallback({
                         "success": False,
                         "error": data["error"],
                         "message": f"产品 '{resolved_name}' 查询失败",
-                    }
+                    })
                 # 标记名称经过了模糊解析
                 data["resolved_from"] = product_name
                 if resolved_variant:
@@ -120,11 +191,11 @@ class DefaultProvider(BaseProvider):
                         "candidates": candidates[:5],
                         "message": f"找到以下候选产品：{', '.join(ranked)}。请告知是哪个（可指定 SKU）",
                     }
-                return {
+                return _batch_fallback({
                     "success": False,
                     "error": f"未找到与 '{product_name}' 匹配的产品",
                     "message": f"系统中没有与 '{product_name}' 相似的产品",
-                }
+                })
 
         unit = data["unit"]
         quantity = data["current_stock"]
@@ -199,7 +270,7 @@ class DefaultProvider(BaseProvider):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
-            "reason_category": reason_category,
+            "reason_category": _normalize_reason_category(reason_category),
             "reason_note": reason_note or None,
             "operator": operator,
             "fuzzy": fuzzy,
@@ -220,7 +291,7 @@ class DefaultProvider(BaseProvider):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
-            "reason_category": reason_category,
+            "reason_category": _normalize_reason_category(reason_category),
             "reason_note": reason_note or None,
             "operator": operator,
             "fuzzy": fuzzy,
@@ -259,20 +330,39 @@ class DefaultProvider(BaseProvider):
 
         items = data.get("items", [])
 
+        # Size guard: items is already sorted by relevance score desc from backend,
+        # so dropping from the tail keeps the most relevant matches. A fuzzy query
+        # like "D015343" can match 26 materials and with include_batches=True the
+        # serialized response easily exceeds 16 KB — the cloud gateway then rejects
+        # with WS close 1009. Trim by relevance until under _MCP_RESPONSE_BUDGET_BYTES.
+        truncated_by_size = False
+        while items and len(json.dumps(items, ensure_ascii=False).encode("utf-8")) > _MCP_RESPONSE_BUDGET_BYTES:
+            items.pop()  # tail = lowest score
+            truncated_by_size = True
+
         type_label = {"material": "物料", "contact": "联系方", "operator": "操作员"}.get(
             entity_type, entity_type
         )
         total = data.get("total", 0)
         msg = f"搜索{type_label}成功，找到 {total} 条匹配记录"
         if total > len(items):
-            msg += f"（已返回前 {len(items)} 条，可通过 max_results 参数调整上限）"
-        return {
+            if truncated_by_size:
+                msg += (
+                    f"（结果较大，已截断到前 {len(items)} 条以避免传输上限；"
+                    "如需更多细节请用更具体的 query 或改用 query_stock/query_batch）"
+                )
+            else:
+                msg += f"（已返回前 {len(items)} 条，可通过 max_results 参数调整上限）"
+        result = {
             "success": True,
             "count": len(items),
             "total": total,
             "items": items,
             "message": msg,
         }
+        if truncated_by_size:
+            result["truncated"] = True
+        return result
 
     def get_today_statistics(self):
         try:
@@ -312,11 +402,24 @@ class DefaultProvider(BaseProvider):
                 "message": f"查询统计数据失败: {e}",
             }
 
-    def query_batch(self, batch_no):
-        return self.http_get(
+    def query_batch(self, batch_no, _routing_fallback=False):
+        resp = self.http_get(
             "/batches/by-no",
             params={"batch_no": _normalize_batch_no(batch_no), "include_exhausted": True},
         )
+        if _routing_fallback:
+            return resp
+        if isinstance(resp, dict) and resp.get("success"):
+            return resp
+        text = str(batch_no or "").strip()
+        looks_like_product = bool(re.search(r"[\u4e00-\u9fff]", text)) or not _BATCH_NO_RE.fullmatch(
+            _normalize_batch_no(text)
+        )
+        if looks_like_product:
+            stock_resp = self.query_stock(text, _routing_fallback=True)
+            if isinstance(stock_resp, dict) and stock_resp.get("success"):
+                return stock_resp
+        return resp
 
     def move_batch_location(self, batch_no, new_location, quantity=None,
                             from_location=None, product_name=None,
