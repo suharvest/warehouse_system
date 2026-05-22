@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["id", "class", "seed_profile", "user_turns", "expected"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-F]-\\d{3}$"},
+    "class": {
+      "enum": ["A_fuzzy_name", "B_sku_batch", "C_multi_constraint",
+               "D_write_ops", "E_irrelevance", "F_numeric_trap"]
+    },
+    "seed_profile": {"type": "string"},
+    "user_turns": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1
+    },
+    "expected": {
+      "type": "object",
+      "required": ["tool_calls", "final"],
+      "properties": {
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string"},
+              "args": {"type": "object"},
+              "args_match": {"enum": ["exact", "subset", "regex"], "default": "subset"},
+              "allow_routing_retry": {"type": "boolean", "default": false}
+            }
+          }
+        },
+        "no_tool": {"type": "boolean", "default": false},
+        "final": {
+          "type": "object",
+          "properties": {
+            "anchor_speak": {"type": "boolean", "default": true},
+            "must_contain": {"type": "array", "items": {"type": "string"}},
+            "must_not_contain": {"type": "array", "items": {"type": "string"}},
+            "must_not_match": {"type": "array", "items": {"type": "string"}},
+            "numeric_values": {"type": "array"}
+          }
+        },
+        "db_assertions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["table", "where", "expect"]
+          }
+        }
+      }
+    }
+  }
+}
