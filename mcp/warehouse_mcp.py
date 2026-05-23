@@ -263,13 +263,14 @@ def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
 # ============================================================================
 
 _RULES_FOOTER = """\
-反幻觉硬规则（六条）：
+反幻觉硬规则（七条）：
 1. 数字只能来自响应字段，不许口算或推测。
-2. say 必须照搬原文，不许改写/合并/增减数字。
+2. say 必须照搬原文，不许改写/合并/增减数字。回复=say。禁止在前面加"好的/Okay/让我看看"，禁止在后面加"大概/左右/估计"。
 3. executed=false 时禁止说"已/完成/成功/出库了/入库了"。
 4. say_kind=ask → 念候选、等用户选；say_kind=fail → 仅播报，禁止重试。
 5. awaiting_confirm 非空 → 先问用户，用户同意后才用 patch 重发；拒绝则结束。
 6. 用户问"现在/还剩/最新"必须重新调工具，不许引用历史结果。
+7. 不需要计算/闲聊/天气/数学时只回一句"我只负责仓库管理"（15字内），禁止展开解释。
 """
 
 # 写操作集合 — 只有这类在 success=true 时才被认为 executed=true
@@ -290,7 +291,10 @@ def _wrap_response(operation: str, resp: dict) -> dict:
 
     def _candidates(limit=3):
         return [
-            {"name": c.get("name", "")}
+            {"name": c.get("name", ""),
+             "sku": (c.get("extra") or {}).get("sku", "") or c.get("sku", ""),
+             "score": c.get("score"),
+             "stock": c.get("stock") or (c.get("extra") or {}).get("stock")}
             for c in (resp.get("candidates") or [])[:limit]
         ]
 
@@ -335,7 +339,17 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             if candidates:
                 data["candidates"] = candidates
             if err in ("ambiguous_name", "location_ambiguous"):
-                names = "、".join(c["name"] for c in candidates)
+                parts = []
+                for c in candidates:
+                    n = c["name"]
+                    sku = c.get("sku", "")
+                    stock = c.get("stock")
+                    if sku:
+                        n += f"（{sku}）"
+                    if stock is not None:
+                        n += f"库存{stock}"
+                    parts.append(n)
+                names = "、".join(parts)
                 say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
                 say_kind = "ask"
             elif err == "batch_insufficient_stock":
@@ -380,8 +394,14 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-                names = "、".join(c["name"] for c in candidates)
-                say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+                parts = []
+                for c in candidates:
+                    n = c["name"]
+                    sku, stock = c.get("sku", ""), c.get("stock")
+                    if sku: n += f"（{sku}）"
+                    if stock is not None: n += f"库存{stock}"
+                    parts.append(n)
+                say = f"我不确定你说的是哪一个，候选有：{'、'.join(parts)}。请告诉我具体是哪个。"
                 say_kind = "ask"
             else:
                 say = f"本次没有入库。{_fail_text('入库失败')}"
@@ -420,8 +440,14 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-                names = "、".join(c["name"] for c in candidates)
-                say = f"找到多个相似产品：{names}。请告诉我具体是哪个。"
+                parts = []
+                for c in candidates:
+                    n = c["name"]
+                    sku, stock = c.get("sku", ""), c.get("stock")
+                    if sku: n += f"（{sku}）"
+                    if stock is not None: n += f"库存{stock}"
+                    parts.append(n)
+                say = f"找到多个相似产品：{'、'.join(parts)}。请告诉我具体是哪个。"
                 say_kind = "ask"
             else:
                 say = _fail_text("查询失败，未找到该产品。")
@@ -455,8 +481,14 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         elif resp.get("candidates"):
             candidates = _candidates()
             data["candidates"] = candidates
-            names = "、".join(c["name"] for c in candidates)
-            say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+            parts = []
+            for c in candidates:
+                n = c["name"]
+                sku, stock = c.get("sku", ""), c.get("stock")
+                if sku: n += f"（{sku}）"
+                if stock is not None: n += f"库存{stock}"
+                parts.append(n)
+            say = f"我不确定你说的是哪一个，候选有：{'、'.join(parts)}。请告诉我具体是哪个。"
             say_kind = "ask"
         else:
             say = _fail_text("没有找到匹配的名称。")
@@ -725,10 +757,10 @@ def search(query: str = None, entity_type: str = "material",
 @_antihallucination("move_batch_location")
 def move_batch_location(batch_no: str, new_location: str,
                          quantity: int = None,
-                         from_location: str = None,
-                         product_name: str = None,
                          operator: str = "MCP系统") -> dict:
-    """批次移位；qty 不传则整批挪。"""
+    """批次库位移位。batch_no 精确指定批次，new_location 目标库位。
+    quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
+    注意：不需要传 product_name 或 from_location，batch_no 已足够定位。"""
     blocked = _enforce_face("move_batch_location")
     if blocked is not None:
         return blocked
