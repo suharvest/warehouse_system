@@ -292,3 +292,53 @@ class TestMCPSlimResponse:
 
         assert resp["success"] is True
         assert resp["batch"]["batch_no"] == "20250101-1"
+
+
+class TestMCPRequiresFaceMeta:
+    """方案 D: 写工具通过 tool.meta['requires_face'] 标记需要 face 校验，
+    供 MCP client (xiaozhi) 在调 call_tool 前自动注入摄像头数据。
+    对 LLM 不可见，纯客户端编排提示。"""
+
+    def test_write_tools_carry_requires_face_meta(self):
+        import asyncio
+        warehouse_mcp = _import_warehouse_mcp()
+        tools = asyncio.run(warehouse_mcp.mcp.get_tools())
+
+        EXPECTED = {"stock_in", "stock_out", "move_batch_location"}
+        marked = {
+            name for name, t in tools.items()
+            if t.to_mcp_tool().meta and t.to_mcp_tool().meta.get("requires_face")
+        }
+        assert EXPECTED.issubset(marked), (
+            f"写工具应该标 requires_face；缺: {EXPECTED - marked}"
+        )
+
+    def test_readonly_tools_do_not_carry_requires_face_meta(self):
+        import asyncio
+        warehouse_mcp = _import_warehouse_mcp()
+        tools = asyncio.run(warehouse_mcp.mcp.get_tools())
+
+        READONLY = {"resolve_name", "query_stock", "query_batch",
+                    "search", "get_today_statistics"}
+        for name in READONLY:
+            if name not in tools:
+                continue
+            meta = tools[name].to_mcp_tool().meta or {}
+            assert not meta.get("requires_face"), (
+                f"只读工具 {name} 不应标 requires_face"
+            )
+
+    def test_face_args_hidden_from_llm_schema(self):
+        """xiaozhi 注入的 face_* 参数必须从 inputSchema 里排除，
+        否则会塞进 LLM function calling schema，污染 token / 干扰决策。"""
+        import asyncio
+        warehouse_mcp = _import_warehouse_mcp()
+        tools = asyncio.run(warehouse_mcp.mcp.get_tools())
+
+        for name in ("stock_in", "stock_out", "move_batch_location"):
+            schema = tools[name].to_mcp_tool().inputSchema
+            props = (schema or {}).get("properties", {})
+            for hidden in ("face_image_b64", "face_embedding_b64", "face_model_tag"):
+                assert hidden not in props, (
+                    f"{name} 的 inputSchema 漏掉了排除 {hidden}，会泄露给 LLM"
+                )

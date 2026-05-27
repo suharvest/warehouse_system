@@ -171,6 +171,7 @@ def test_verify_skipped_when_disabled(conn):
     _set_rule(conn, require_face=True)
     decision = asyncio.run(verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="",
     ))
     assert decision.status == "skipped"
     assert decision.failure_reason == "feature_disabled"
@@ -182,8 +183,22 @@ def test_verify_skipped_when_rule_not_required(conn):
     _set_rule(conn, require_face=False)
     decision = asyncio.run(verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="",
     ))
     assert decision.status == "skipped"
+
+
+def test_verify_deny_when_image_missing(conn):
+    """Feature on + rule requires face + caller forgot to attach an image."""
+    from backend.face import verify_mcp_face
+    _set_config(conn, enabled=True)
+    _set_rule(conn, require_face=True)
+    decision = asyncio.run(verify_mcp_face(
+        conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="",
+    ))
+    assert decision.status == "deny"
+    assert decision.failure_reason == "no_image_provided"
 
 
 def test_verify_pass_when_subject_matches_and_allowed(conn, monkeypatch):
@@ -191,13 +206,9 @@ def test_verify_pass_when_subject_matches_and_allowed(conn, monkeypatch):
 
     target = [1.0, 0.0, 0.0]
 
-    async def fake_capture(cfg):
-        return {"image_b64": "snap", "ts": "now"}
-
     async def fake_infer(cfg, image_b64):
         return {"embedding": _emb_bytes(target), "model_tag": "fake-v1"}
 
-    monkeypatch.setattr(endpoint_client, "capture", fake_capture)
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True, min_confidence=0.5)
@@ -207,6 +218,7 @@ def test_verify_pass_when_subject_matches_and_allowed(conn, monkeypatch):
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="snap",
     ))
     assert decision.status == "pass", decision
     assert decision.matched_subject_id == sid
@@ -216,14 +228,10 @@ def test_verify_pass_when_subject_matches_and_allowed(conn, monkeypatch):
 def test_verify_deny_low_confidence(conn, monkeypatch):
     from backend.face import endpoint_client, orchestrator
 
-    async def fake_capture(cfg):
-        return {"image_b64": "snap", "ts": "now"}
-
     async def fake_infer(cfg, image_b64):
         # nearly orthogonal to enrolled vector -> very low cosine
         return {"embedding": _emb_bytes([0.0, 1.0, 0.0]), "model_tag": "fake-v1"}
 
-    monkeypatch.setattr(endpoint_client, "capture", fake_capture)
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True, min_confidence=0.65)
@@ -233,6 +241,7 @@ def test_verify_deny_low_confidence(conn, monkeypatch):
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="snap",
     ))
     assert decision.status == "deny"
     assert decision.failure_reason == "low_confidence"
@@ -241,13 +250,9 @@ def test_verify_deny_low_confidence(conn, monkeypatch):
 def test_verify_deny_subject_not_in_allow_list(conn, monkeypatch):
     from backend.face import endpoint_client, orchestrator
 
-    async def fake_capture(cfg):
-        return {"image_b64": "snap", "ts": "now"}
-
     async def fake_infer(cfg, image_b64):
         return {"embedding": _emb_bytes([0.0, 1.0, 0.0]), "model_tag": "fake-v1"}
 
-    monkeypatch.setattr(endpoint_client, "capture", fake_capture)
     monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True, min_confidence=0.5)
@@ -259,25 +264,72 @@ def test_verify_deny_subject_not_in_allow_list(conn, monkeypatch):
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="snap",
     ))
     assert decision.status == "deny"
     assert decision.failure_reason == "not_in_allow_list"
     assert decision.matched_subject_id == sid_b
 
 
+def test_enroll_face_with_precomputed_embeddings(conn):
+    """Device-side path (WE2): caller provides embeddings directly, no /infer."""
+    from backend.face import orchestrator
+    _set_config(conn, enabled=True)
+    sid = _create_subject(conn, "Person WE2")
+
+    out = asyncio.run(orchestrator.enroll_face(
+        conn,
+        subject_id=sid,
+        tenant_id=1,
+        precomputed=[
+            {"embedding_bytes": _emb_bytes([1.0, 0.0, 0.0]), "model_tag": "we2-mfn128-v1"},
+            {"embedding_bytes": _emb_bytes([0.99, 0.01, 0.0]), "model_tag": "we2-mfn128-v1"},
+        ],
+    ))
+    assert out["count"] == 2
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT model_tag, source_image_b64 FROM face_enrollments WHERE subject_id = ?",
+        (sid,),
+    )
+    rows = cur.fetchall()
+    assert len(rows) == 2
+    assert all(r["model_tag"] == "we2-mfn128-v1" for r in rows)
+    assert all(r["source_image_b64"] is None for r in rows)
+
+
+def test_verify_pass_with_precomputed_embedding(conn):
+    """Device-side path (WE2): match against pre-stored embedding without calling /infer."""
+    from backend.face import orchestrator
+    target = [1.0, 0.0, 0.0]
+    _set_config(conn, enabled=True, min_confidence=0.5)
+    sid = _create_subject(conn, "Person WE2")
+    _enroll(conn, sid, target, model_tag="we2-mfn128-v1")
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+
+    decision = asyncio.run(orchestrator.verify_mcp_face(
+        conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        embedding_bytes=_emb_bytes(target),
+        embedding_model_tag="we2-mfn128-v1",
+    ))
+    assert decision.status == "pass", decision
+    assert decision.matched_subject_id == sid
+
+
 def test_verify_deny_endpoint_unreachable(conn, monkeypatch):
     from backend.face import endpoint_client, orchestrator
 
-    async def fake_capture(cfg):
+    async def fake_infer(cfg, image_b64):
         raise endpoint_client.FaceEndpointError("endpoint_unreachable")
 
-    monkeypatch.setattr(endpoint_client, "capture", fake_capture)
+    monkeypatch.setattr(endpoint_client, "infer", fake_infer)
 
     _set_config(conn, enabled=True)
     _set_rule(conn, require_face=True)
 
     decision = asyncio.run(orchestrator.verify_mcp_face(
         conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="snap",
     ))
     assert decision.status == "deny"
     assert decision.failure_reason == "endpoint_unreachable"
