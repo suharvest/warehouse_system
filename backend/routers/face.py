@@ -57,9 +57,19 @@ class FaceRulePayload(BaseModel):
     allowed_subject_ids: Optional[List[int]] = None
     min_confidence_override: Optional[float] = None
 
+class FacePrecomputedEmbedding(BaseModel):
+    """Embedding already computed on-device (e.g. Himax WE2 NPU)."""
+    embedding_b64: str
+    model_tag: Optional[str] = None
+
+
 class FaceEnrollmentPayload(BaseModel):
     subject_id: int
+    # Server-inference path: warehouse calls /infer for each image.
     images_b64: List[str] = Field(default_factory=list)
+    # Device-inference path: caller already has the embedding (e.g. WE2).
+    # Mutually exclusive with images_b64.
+    embeddings: List[FacePrecomputedEmbedding] = Field(default_factory=list)
     applies_to_warehouse_ids: Optional[List[int]] = None
 
 class FaceSubjectPayload(BaseModel):
@@ -126,8 +136,13 @@ async def face_put_config(
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    if payload.mode is not None and payload.mode not in ("local", "hello", "jetson", "custom"):
-        raise HTTPException(status_code=400, detail="mode 必须是 local/hello/jetson/custom")
+    if payload.mode is not None and payload.mode not in (
+        "local", "hello", "jetson", "custom", "face_rec_api", "we2",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="mode 必须是 local/hello/jetson/custom/face_rec_api/we2",
+        )
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_engine().begin() as sa_conn:
         existing = sa_conn.execute(
@@ -329,8 +344,10 @@ async def face_create_enrollment(
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    if not payload.images_b64:
-        raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片")
+    if not payload.images_b64 and not payload.embeddings:
+        raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片或一个 embedding")
+    if payload.images_b64 and payload.embeddings:
+        raise HTTPException(status_code=400, detail="images_b64 与 embeddings 不能同时提供")
     with get_engine().connect() as sa_conn:
         load_or_404(
             sa_conn, _t_face_subjects, payload.subject_id,
@@ -339,6 +356,17 @@ async def face_create_enrollment(
             tenant_id=int(tid),
             forbidden="人员档案不属于该租户",
         )
+    # Decode b64 embeddings up front so we fail with a 400 (not 500) on
+    # malformed input.
+    precomputed: list[dict] = []
+    for item in payload.embeddings:
+        try:
+            precomputed.append({
+                "embedding_bytes": _face_base64.b64decode(item.embedding_b64),
+                "model_tag": item.model_tag,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"无效的 embedding_b64: {e}")
     # TODO: migrate to SA Core in a future pass — orchestrator currently
     # expects a sqlite-style ``conn`` for its internal writes.
     with get_db() as conn:
@@ -352,7 +380,8 @@ async def face_create_enrollment(
                 conn,
                 subject_id=payload.subject_id,
                 tenant_id=tid,
-                images_b64=payload.images_b64,
+                images_b64=payload.images_b64 or None,
+                precomputed=precomputed or None,
                 applies_to_warehouse_ids=payload.applies_to_warehouse_ids,
                 enrolled_by=current_user.id,
             )
@@ -449,6 +478,14 @@ class FaceVerifyMcpPayload(BaseModel):
     operation: str
     warehouse_id: Optional[int] = None
     request_id: Optional[str] = None
+    # One of these two when the rule actually requires face (skipped paths
+    # ignore both):
+    #   image_b64   — server-side path; warehouse calls /infer.
+    #   embedding_b64 + embedding_model_tag — device already inferred
+    #                 (Himax WE2 NPU); warehouse just matches.
+    image_b64: Optional[str] = None
+    embedding_b64: Optional[str] = None
+    embedding_model_tag: Optional[str] = None
 
 
 @router.post("/api/face/verify-mcp")
@@ -461,6 +498,12 @@ async def face_verify_mcp(
         return {"status": "skipped", "failure_reason": "no_tenant_context",
                 "confidence": None, "matched_subject_id": None}
     from face.orchestrator import verify_mcp_face as _verify
+    emb_bytes: Optional[bytes] = None
+    if payload.embedding_b64:
+        try:
+            emb_bytes = _face_base64.b64decode(payload.embedding_b64)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"无效的 embedding_b64: {e}")
     with get_db() as conn:
         decision = await _verify(
             conn,
@@ -468,6 +511,9 @@ async def face_verify_mcp(
             user_id=current_user.id,
             warehouse_id=payload.warehouse_id,
             operation=payload.operation,
+            image_b64=payload.image_b64 or "",
+            embedding_bytes=emb_bytes,
+            embedding_model_tag=payload.embedding_model_tag,
             request_id=payload.request_id,
         )
     return {
