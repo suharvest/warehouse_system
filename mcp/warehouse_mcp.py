@@ -197,7 +197,13 @@ _provider = _load_provider_from_db_or_default(_config)
 # 仅对 MCP tool 调用生效。通过后端 /api/face/verify-mcp 桥接到
 # backend.face.orchestrator.verify_mcp_face；后端用 X-API-Key 识别
 # 当前用户、租户与仓库上下文。
-def _face_guard(operation: str, warehouse_id: int = None) -> dict:
+def _face_guard(
+    operation: str,
+    warehouse_id: int = None,
+    image_b64: str = None,
+    embedding_b64: str = None,
+    embedding_model_tag: str = None,
+) -> dict:
     """Verify face for an MCP write operation. Returns the decision dict.
 
     Behavior:
@@ -209,6 +215,12 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
     - api_base unset -> skipped (face module not deployed in this MCP host)
     - HTTP 4xx/5xx   -> deny (server reachable but rejected; never silently bypass)
     - transport error (network, timeout) -> deny (treat as if face check failed)
+
+    ``image_b64`` is the caller-captured face frame (e.g. xiaozhi vision
+    snapshot). The unified face_rec_api backend is stateless so the
+    image must be supplied here; when None we still call the backend so
+    that disabled-feature / rule-not-required tenants short-circuit to
+    'skipped' instead of being blocked on missing camera input.
     """
     import requests as _r
     api_base = _config.get('api_base_url', '').rstrip('/')
@@ -221,6 +233,12 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
     elif auth.get('type') == 'bearer':
         headers['Authorization'] = f"Bearer {auth.get('token', '')}"
     body = {"operation": operation, "warehouse_id": warehouse_id}
+    if image_b64:
+        body["image_b64"] = image_b64
+    if embedding_b64:
+        body["embedding_b64"] = embedding_b64
+    if embedding_model_tag:
+        body["embedding_model_tag"] = embedding_model_tag
     try:
         resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
         if resp.status_code >= 400:
@@ -232,9 +250,20 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
         return {"status": "deny", "failure_reason": "transport_error"}
 
 
-def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
+def _enforce_face(
+    operation: str,
+    warehouse_id: int = None,
+    image_b64: str = None,
+    embedding_b64: str = None,
+    embedding_model_tag: str = None,
+) -> dict | None:
     """Run face guard; return a tool-error dict to surface, or None to proceed."""
-    decision = _face_guard(operation, warehouse_id)
+    decision = _face_guard(
+        operation, warehouse_id,
+        image_b64=image_b64,
+        embedding_b64=embedding_b64,
+        embedding_model_tag=embedding_model_tag,
+    )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
         return {
@@ -696,16 +725,33 @@ def query_batch(batch_no: str) -> dict:
     return resp
 
 
-@mcp.tool(exclude_args=["contact_id", "variant"])
+@mcp.tool(
+    exclude_args=["contact_id", "variant",
+                  "face_image_b64", "face_embedding_b64", "face_model_tag"],
+    meta={"requires_face": True},
+)
 @log_mcp_call
 @_antihallucination("stock_in")
 def stock_in(product_name: str, quantity: int,
              reason_category: str = "purchase", reason_note: str = "",
              operator: str = "MCP系统",
              location: str = None, contact_id: int = None,
-             variant: str = None) -> dict:
-    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。"""
-    blocked = _enforce_face("stock_in")
+             variant: str = None,
+             face_image_b64: str = None,
+             face_embedding_b64: str = None,
+             face_model_tag: str = None) -> dict:
+    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
+
+    face_* 参数由 xiaozhi runtime 注入（用户不可见）：
+      - 云端模式：face_image_b64（warehouse 调 /infer 算 embedding）
+      - 本机模式：face_embedding_b64 + face_model_tag（设备 NPU 已算好）
+    """
+    blocked = _enforce_face(
+        "stock_in",
+        image_b64=face_image_b64,
+        embedding_b64=face_embedding_b64,
+        embedding_model_tag=face_model_tag,
+    )
     if blocked is not None:
         return blocked
     try:
@@ -715,7 +761,11 @@ def stock_in(product_name: str, quantity: int,
         return _tool_error("入库", e)
 
 
-@mcp.tool(exclude_args=["allow_partial_fallback"])
+@mcp.tool(
+    exclude_args=["allow_partial_fallback",
+                  "face_image_b64", "face_embedding_b64", "face_model_tag"],
+    meta={"requires_face": True},
+)
 @log_mcp_call
 @_antihallucination("stock_out")
 def stock_out(product_name: str, quantity: int,
@@ -723,9 +773,20 @@ def stock_out(product_name: str, quantity: int,
               operator: str = "MCP系统",
               variant: str = None, location: str = None,
               batch_no: str = None,
-              allow_partial_fallback: bool = False) -> dict:
-    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。"""
-    blocked = _enforce_face("stock_out")
+              allow_partial_fallback: bool = False,
+              face_image_b64: str = None,
+              face_embedding_b64: str = None,
+              face_model_tag: str = None) -> dict:
+    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
+
+    face_* 参数由 xiaozhi runtime 注入（同 stock_in，对 LLM 隐藏）。
+    """
+    blocked = _enforce_face(
+        "stock_out",
+        image_b64=face_image_b64,
+        embedding_b64=face_embedding_b64,
+        embedding_model_tag=face_model_tag,
+    )
     if blocked is not None:
         return blocked
     try:
@@ -752,16 +813,30 @@ def search(query: str = None, entity_type: str = "material",
         return _tool_error("搜索", e)
 
 
-@mcp.tool()
+@mcp.tool(
+    exclude_args=["face_image_b64", "face_embedding_b64", "face_model_tag"],
+    meta={"requires_face": True},
+)
 @log_mcp_call
 @_antihallucination("move_batch_location")
 def move_batch_location(batch_no: str, new_location: str,
                          quantity: int = None,
-                         operator: str = "MCP系统") -> dict:
+                         operator: str = "MCP系统",
+                         face_image_b64: str = None,
+                         face_embedding_b64: str = None,
+                         face_model_tag: str = None) -> dict:
     """批次库位移位。batch_no 精确指定批次，new_location 目标库位。
     quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
-    注意：不需要传 product_name 或 from_location，batch_no 已足够定位。"""
-    blocked = _enforce_face("move_batch_location")
+    注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
+
+    face_* 参数由 xiaozhi runtime 注入（同 stock_in，对 LLM 隐藏）。
+    """
+    blocked = _enforce_face(
+        "move_batch_location",
+        image_b64=face_image_b64,
+        embedding_b64=face_embedding_b64,
+        embedding_model_tag=face_model_tag,
+    )
     if blocked is not None:
         return blocked
     try:
