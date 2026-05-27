@@ -6640,6 +6640,14 @@ from routers.face import router as face_router
 app.include_router(face_router)
 
 
+# ============ WE2 Face Inference Simulator (opt-in) ============
+# Enabled by `FACE_WE2_SIMULATOR_ENABLED=1`. When off, no router is mounted
+# and the heavy ai-edge-litert / model files are never touched at startup.
+if os.getenv("FACE_WE2_SIMULATOR_ENABLED", "0") == "1":
+    from routers.face_we2 import router as _face_we2_router
+    app.include_router(_face_we2_router)
+
+
 # ============ Factory 设备代理 API ============
 
 @app.get("/factory/devices")
