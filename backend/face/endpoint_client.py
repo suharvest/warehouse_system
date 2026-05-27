@@ -1,13 +1,18 @@
 """Async HTTP client for face recognition endpoints.
 
-Each tenant configures an endpoint that exposes:
-  POST /infer   {image_b64} -> {embedding: <base64 bytes>, model_tag}
-  POST /capture {} -> {image_b64, ts}
-  GET  /health  -> {status, model_tag, capabilities}
+The tenant-configured endpoint is expected to follow the unified
+``face_rec_api`` contract (Hailo / Jetson / RKNN / WE2-PC-simulator):
 
-The actual implementation runs on the operator's device (Hello-style
-local daemon, Jetson edge box, or custom). This client is intentionally
-transport-only — no business logic.
+  POST /infer   {image_b64}
+       -> {faces: [{embedding (b64 float32), det_score, bbox, ...}],
+           face_count, model_tag, backend, processing_time_ms}
+  GET  /health  -> {status, model_tag, backend, capabilities, ...}
+
+Stateless: there is no /capture. Upstream (frontend / MCP host) is
+responsible for providing the image. When multiple faces are present
+this client picks the one with the highest ``det_score`` (matches the
+service-side ``MULTIPLE_FACES_STRATEGY=largest`` default — det score
+correlates with face size).
 """
 from __future__ import annotations
 
@@ -58,8 +63,13 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
         logger.warning("face infer failed: %s", e)
         raise FaceEndpointError("endpoint_unreachable") from e
 
-    emb_b64 = data.get("embedding")
     model_tag = data.get("model_tag") or cfg.embedding_model_tag or "unknown"
+    faces = data.get("faces") or []
+    if not isinstance(faces, list) or not faces:
+        raise FaceEndpointError("no_face_detected")
+    # Pick highest-det-score face; fall back to first if score absent.
+    best = max(faces, key=lambda f: float(f.get("det_score") or 0.0))
+    emb_b64 = best.get("embedding")
     if not emb_b64:
         raise FaceEndpointError("infer_no_embedding")
     try:
@@ -67,30 +77,6 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
     except Exception as e:
         raise FaceEndpointError("infer_bad_embedding") from e
     return {"embedding": emb_bytes, "model_tag": model_tag}
-
-
-async def capture(cfg: FaceConfig) -> dict:
-    """Ask the endpoint to capture a fresh face snapshot.
-
-    Returns: {image_b64: str, ts: str}
-    Raises FaceEndpointError on failure.
-    """
-    if not cfg.endpoint:
-        raise FaceEndpointError("endpoint_not_configured")
-    url = cfg.endpoint.rstrip("/") + "/capture"
-    try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            resp = await client.post(url, json={}, headers=_headers(cfg.auth_token))
-            if resp.status_code >= 400:
-                raise FaceEndpointError(f"capture_http_{resp.status_code}")
-            data = resp.json()
-    except httpx.HTTPError as e:
-        logger.warning("face capture failed: %s", e)
-        raise FaceEndpointError("endpoint_unreachable") from e
-
-    if not data.get("image_b64"):
-        raise FaceEndpointError("capture_no_image")
-    return data
 
 
 async def health(endpoint: str, auth_token: Optional[str] = None) -> dict:
