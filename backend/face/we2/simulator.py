@@ -7,14 +7,19 @@ replays that pipeline on the host using ``ai-edge-litert`` with
 (verified at handoff via SHA256).
 
 Inputs:  RGB image (any size) decoded by PIL.
-Outputs: 128 raw INT8 bytes per detected face (no dequantize, no L2 normalize)
-         plus bbox / landmarks / det_score / aligned crop, packed in the same
-         shape as the ``face_rec_api`` ``/infer`` response.
+Outputs: 128-D float32 embedding (512 raw bytes) per detected face,
+         dequantized from the MFN INT8 tensor via the per-model
+         (scale, zero_point) metadata. Plus bbox / landmarks / det_score /
+         aligned crop, packed in the same shape as the ``face_rec_api``
+         ``/infer`` response.
 
 This module deliberately:
   * Does NOT depend on TensorFlow or OpenCV.
-  * Does NOT L2-normalize or dequantize the embedding — the warehouse matcher
-    consumes the raw INT8 bytes (cosine over INT8 vectors).
+  * Does NOT L2-normalize — the warehouse matcher normalizes on read.
+  * Dequantizes the MFN INT8 output to float32 raw bytes so it matches the
+    warehouse-wide float32 wire contract (face_rec_api /infer, matcher
+    ``_bytes_to_vec`` with ``dtype=np.float32``, watcher
+    ``face_bench`` ``format=float32_le_b64``).
   * Loads models lazily on the first ``infer()`` call, behind a process-wide
     ``threading.Lock``; subsequent calls reuse the cached interpreters.
 """
@@ -716,12 +721,20 @@ class WE2Simulator:
                 self._emb_interp.invoke()
                 emb_output = self._emb_interp.get_tensor(self._emb_output_idx)
 
-            # Raw int8 bytes — no dequantize, no L2 normalize. Matcher does
-            # cosine over int8 vectors.
+            # INT8 raw output → dequantize to float32 using model metadata.
+            # Wire contract across warehouse (face_rec_api /infer, matcher,
+            # watcher firmware face_bench): float32 little-endian raw bytes.
+            # Bit-exactness still holds: INT8 inference is BUILTIN_REF
+            # bit-exact, and dequantize uses scale/zero_point baked into the
+            # model file (identical on host + device).
             emb_int8 = np.asarray(emb_output, dtype=np.int8).flatten()
             if emb_int8.size > EMB_OUTPUT_DIM:
                 emb_int8 = emb_int8[:EMB_OUTPUT_DIM]
-            embedding_bytes = emb_int8.tobytes()
+            emb_float32 = (
+                (emb_int8.astype(np.float32) - float(self._emb_out_zp))
+                * float(self._emb_out_scale)
+            ).astype(np.float32)
+            embedding_bytes = emb_float32.tobytes()
 
             faces_out.append(
                 {
@@ -729,6 +742,9 @@ class WE2Simulator:
                     "landmarks": [[float(x), float(y)] for x, y in det["landmarks"]],
                     "det_score": float(det["score"]),
                     "embedding_bytes": embedding_bytes,
+                    # Raw int8 retained for cross-platform parity tests; not
+                    # consumed by the router or matcher.
+                    "embedding_int8_raw": emb_int8.tobytes(),
                     "aligned_face": aligned,  # numpy array, router decides if returned
                     "quality": _estimate_face_quality(det["landmarks"]),
                     "pose": _estimate_face_pose(det["landmarks"]),
