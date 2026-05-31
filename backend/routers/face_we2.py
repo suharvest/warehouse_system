@@ -11,7 +11,7 @@ Response shape mirrors ``face_rec_api``:
         {
           "bbox": [x, y, w, h],
           "landmarks": [[x,y], ...5 points],
-          "embedding": "<base64 of raw int8 bytes>",
+          "embedding": "<base64 of 128-D float32 LE raw bytes (512 bytes)>",
           "det_score": 0.93,
           "aligned_b64": "<base64 PNG>" | null,
           "quality": 0.87,
@@ -58,7 +58,7 @@ class PoseModel(BaseModel):
 class FaceResult(BaseModel):
     bbox: List[float]  # [x, y, w, h] in original image space
     landmarks: List[List[float]]  # 5 (x,y) points
-    embedding: str  # base64 of raw int8 bytes (no L2 normalize, no dequant)
+    embedding: str  # base64 of 128-D float32 LE raw bytes (512 bytes), no L2 normalize
     det_score: float
     aligned_b64: Optional[str] = None
     quality: float
@@ -160,5 +160,5 @@ def we2_health() -> HealthResponse:
         model_tag=MODEL_TAG,
         capabilities=["detect", "embed"],
         embedding_dim=128,
-        embedding_dtype="int8",
+        embedding_dtype="float32",
     )
