@@ -523,8 +523,15 @@ export async function registerSubmit() {
                 closeRegisterModal();
                 setCurrentUser(data.user);
                 setIsSystemInitialized(true);
+                // 注册即自动登录（后端已下发 session cookie），必须和登录走同一条
+                // user-scoped 数据加载路径：否则 allWarehouses 保持空、
+                // renderWarehouseSwitcher 从不触发，单仓用户的默认仓库不会被自动选中，
+                // 顶部仓库选择器不显示，导入时报"请选择仓库"却无从选起。
+                if (onLoginSuccessFn) await onLoginSuccessFn();
                 await updateUserDisplay();
                 updatePermissionUI();
+                if (switchTabFn) switchTabFn(getCurrentTab());
+                else if (refreshCurrentTabFn) refreshCurrentTabFn();
                 setTimeout(() => startOnboarding(), 500);
                 return;
             }
