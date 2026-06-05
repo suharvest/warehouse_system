@@ -25,12 +25,19 @@ dependencies = [
     "sqlalchemy>=2.0.49",
     "alembic>=1.18.4",
     "pymysql>=1.1.3",
-    # WE2 face embedding simulator (bit-exact mirror of on-device pipeline)
-    "ai-edge-litert>=2.1.5",
-    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
+# WE2 face embedding simulator (bit-exact mirror of on-device NPU pipeline).
+# Dev/test only — NOT installed in the production warehouse image. The router
+# is env-gated (FACE_WE2_SIMULATOR_ENABLED=1) so prod never imports these.
+# ai-edge-litert ships no musl wheel, so installing it in the Alpine prod
+# image breaks the whole venv; keep it out of the default dependency set.
+# Install for WE2 work with: uv sync --extra we2-sim
+we2-sim = [
+    "ai-edge-litert>=2.1.5",
+    "Pillow>=10.0",
+]
 test = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
