@@ -16,10 +16,17 @@ WORKDIR /app
 # 只复制依赖声明文件（不含业务代码 → 改 .py 不会破坏此层缓存）
 COPY pyproject.toml uv.lock ./
 
-# 用 uv 安装依赖，--no-install-project 跳过项目本身（无需源码）
+# 用 uv 安装依赖，--no-install-project 跳过项目本身（无需源码）。
+# 依赖安装单独成一个 RUN 且不接任何 `; true` —— sync 失败必须让 build 直接
+# 失败。曾踩坑：cleanup 的 find 用 `;` 拼接并以 `; true` 收尾，把前面 uv sync
+# 的非零退出码吞掉，导致 venv 装空（如某依赖无当前平台 wheel）的镜像仍被标记
+# DONE 并推送，运行时才 `ModuleNotFoundError: uvicorn` 崩溃。
 RUN pip install --no-cache-dir uv && \
-    uv sync --frozen --no-install-project && \
-    # 清理 .venv 中不需要的文件，节省空间
+    uv sync --frozen --no-install-project
+
+# 清理 .venv 中不需要的文件，节省空间。这些 find 是 best-effort（找不到/无权限
+# 不应让 build 失败），故单独成一个 RUN 并以 `|| true` 兜底，与上面的安装步骤隔离。
+RUN { \
     find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
     find .venv -type f -name "*.pyc" -delete 2>/dev/null; \
     find .venv -type f -name "*.pyo" -delete 2>/dev/null; \
@@ -27,7 +34,7 @@ RUN pip install --no-cache-dir uv && \
     find .venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null; \
     find .venv -type d -name "test" -exec rm -rf {} + 2>/dev/null; \
     find .venv -type f -name "*.so" -exec strip -s {} + 2>/dev/null; \
-    true
+    } || true
 
 # ---- Stage 2: 最终运行时镜像 ----
 FROM python:3.12-alpine
