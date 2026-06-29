@@ -10,7 +10,8 @@ const DEFAULT_CONFIG = {
     endpoint: '',
     auth_token: '',
     embedding_model_tag: '',
-    min_confidence: 0.7
+    min_confidence: 0.7,
+    verify_mode: 'interface'
 };
 const SUB_TABS = ['config', 'enroll', 'logs'];
 const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust'];
@@ -228,6 +229,11 @@ function renderConfigTab() {
     ];
     // 老数据可能是 hello/jetson/custom，统一归为 lan
     const currentMode = (c.mode === 'local') ? 'local' : 'lan';
+    const verifyModes = [
+        { v: 'interface', label: tt('verifyMode_interface', '接口校验（重比对）') },
+        { v: 'session', label: tt('verifyMode_session', '会话信任（设备本地匹配）') }
+    ];
+    const currentVerifyMode = (c.verify_mode === 'session') ? 'session' : 'interface';
     return `
         <div class="table-container face-config-card">
             <div class="section-header">
@@ -243,6 +249,12 @@ function renderConfigTab() {
                         <label>${tt('faceMode', '识别模式')}</label>
                         <select id="face-config-mode">
                             ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>${tt('faceVerifyMode', '鉴权强度')}</label>
+                        <select id="face-config-verify-mode">
+                            ${verifyModes.map(m => `<option value="${m.v}" ${currentVerifyMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
@@ -328,7 +340,8 @@ export async function saveFaceConfig() {
         endpoint: document.getElementById('face-config-endpoint').value.trim(),
         auth_token: document.getElementById('face-config-token').value,
         embedding_model_tag: document.getElementById('face-config-model-tag').value.trim(),
-        min_confidence: parseFloat(document.getElementById('face-config-min-confidence').value) || 0
+        min_confidence: parseFloat(document.getElementById('face-config-min-confidence').value) || 0,
+        verify_mode: document.getElementById('face-config-verify-mode').value
     };
     try {
         await faceApi.updateConfig(data, effectiveTenantId());
