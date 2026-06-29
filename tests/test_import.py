@@ -192,3 +192,51 @@ class TestImportConfirm:
                 "warehouse_id": default_warehouse_id
             })
             assert confirm_resp.status_code == 200
+
+
+class TestImportUnitSanitization:
+    """Imported cells must strip Excel formula residue (e.g. '=+VLOOKUP(...)').
+
+    The whole-DB import path (``_import_tenant_database``) is exercised in
+    ``test_import_fuzzy_invalidation.py`` (isolated to a throwaway tenant); here
+    we cover the pure sanitizer and the Excel preview wiring.
+    """
+
+    def test_sanitize_import_text_drops_formula(self):
+        """The shared sanitizer turns formula residue into None, keeps real text."""
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'))
+        from app import _sanitize_import_text
+        assert _sanitize_import_text("=+VLOOKUP(C1,[1]x!$B:$I,8,0)") is None
+        assert _sanitize_import_text("=SUM(A1:A2)") is None
+        assert _sanitize_import_text(None) is None
+        assert _sanitize_import_text("   ") is None
+        assert _sanitize_import_text("  Pcs ") == "Pcs"
+        assert _sanitize_import_text("个") == "个"
+
+    def test_excel_preview_strips_formula_unit(self, admin_client):
+        """An Excel cell that is actually a leftover formula must not become the unit."""
+        from openpyxl import Workbook
+        import uuid
+
+        sku = f"FX-{uuid.uuid4().hex[:6].upper()}"
+        wb = Workbook()
+        ws = wb.active
+        ws.append(['Name', 'SKU', 'Category', 'Quantity', 'Unit', 'Safe Stock', 'Location'])
+        ws.append([f'Formula Unit {sku}', sku, 'Cat', 10,
+                   '=+VLOOKUP(C4153,[1]back!$B:$I,8,0)', 5, 'A-01'])
+
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        resp = admin_client.post(
+            "/api/materials/import-excel/preview",
+            files={"file": ("f.xlsx", buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True
+        item = next(p for p in data['preview'] if p['sku'] == sku)
+        assert '=' not in (item['unit'] or ''), f"formula leaked into unit: {item['unit']!r}"
+        assert item['unit'] == '个'  # sanitized -> default unit
