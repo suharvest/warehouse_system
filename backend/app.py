@@ -2329,6 +2329,12 @@ async def import_database(
 
         import_conn.close()
 
+        # 整库导入写入了 materials/contacts/batches，必须让模糊匹配的常驻内存索引
+        # 失效，否则导入后的物料/联系方在 fuzzy=true 搜索（含智能体语音查询）里查不到，
+        # 直到进程重启才重建索引。与 Excel 导入路径（confirm_import_excel）保持一致。
+        get_fuzzy_matcher().invalidate_cache(entity_type="material")
+        get_fuzzy_matcher().invalidate_cache(entity_type="contact")
+
         if ENABLE_AUDIT_LOG:
             logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 导入了数据库")
 
@@ -2384,6 +2390,11 @@ async def clear_database(
         except Exception as e:
             conn.rollback()
             raise HTTPException(status_code=500, detail=f"清空失败: {str(e)}")
+
+    # 清空删除了 materials/contacts/batches，同样要让模糊索引失效，否则被删物料
+    # 仍会出现在 fuzzy 搜索结果里（指向已不存在的 id）。
+    get_fuzzy_matcher().invalidate_cache(entity_type="material")
+    get_fuzzy_matcher().invalidate_cache(entity_type="contact")
 
     if ENABLE_AUDIT_LOG:
         logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 清空了数据库")
