@@ -20,7 +20,7 @@ Create Date: 2026-06-29 10:00:00.000000
   1) 未加过列的库 — add_column + check constraint
   2) 已有该列的库 — 跳过（no-op）
 """
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
@@ -36,10 +36,11 @@ def _column_exists(inspector, table: str, column: str) -> bool:
 
 def upgrade():
     bind = op.get_bind()
-    inspector = inspect(bind)
-
-    if _column_exists(inspector, 'tenant_face_config', 'verify_mode'):
-        return  # 列已存在，幂等跳过
+    # offline (--sql) 模式下 bind 是 MockConnection，无法 introspect；跳过幂等检查直接发 DDL。
+    if not context.is_offline_mode():
+        inspector = inspect(bind)
+        if _column_exists(inspector, 'tenant_face_config', 'verify_mode'):
+            return  # 列已存在，幂等跳过
 
     with op.batch_alter_table('tenant_face_config') as batch_op:
         batch_op.add_column(
