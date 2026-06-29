@@ -373,7 +373,13 @@ def _seed_base_data() -> None:
     Docker 走纯 Alembic 路径，迁移只建表结构不插数据；
     本地 start.sh 走 init_database()，已有种子数据（INSERT OR IGNORE）。
     两条路径都调用此函数，冲突忽略保证幂等。
+
+    多租户部署除外：multi_tenant 从空白开始，由全局 admin 显式创建租户。强种
+    默认租户 1 会破坏"首个租户引导"流程（无租户时该引导永不触发），并在按租户
+    分组的仓库视图里多出一个幽灵"默认租户"分组。
     """
+    if get_deploy_mode() == "multi_tenant":
+        return
     try:
         sqlite = _is_sqlite()
         ignore_kw = "OR IGNORE" if sqlite else "IGNORE"
