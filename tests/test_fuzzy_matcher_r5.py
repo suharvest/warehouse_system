@@ -241,21 +241,34 @@ class TestPinyinCache:
 
 class TestPerformanceSmoke:
     def test_search_latency_under_threshold(self, admin_client, default_warehouse_id):
+        from database import get_db_connection
         m = _fresh_matcher()
         # seed a few hundred materials (1000 makes test slow on CI sqlite)
+        seeded_ids = []
         for i in range(300):
-            _seed_material(f"PerfMat{i:04d}-{uuid.uuid4().hex[:4]}",
-                           warehouse_id=default_warehouse_id)
-        m.invalidate_cache()
-        m.search("warmup", threshold=70)  # build index
+            seeded_ids.append(_seed_material(
+                f"PerfMat{i:04d}-{uuid.uuid4().hex[:4]}",
+                warehouse_id=default_warehouse_id,
+            ))
+        try:
+            m.invalidate_cache()
+            m.search("warmup", threshold=70)  # build index
 
-        import statistics
-        latencies = []
-        for _ in range(50):
-            t0 = time.perf_counter()
-            m.search("PerfMat0123", threshold=70)
-            latencies.append((time.perf_counter() - t0) * 1000)
-        latencies.sort()
-        p95 = latencies[int(len(latencies) * 0.95)]
-        # generous threshold; this is a sanity check
-        assert p95 < 500, f"p95 latency too high: {p95:.1f}ms (lat={latencies[-3:]})"
+            import statistics
+            latencies = []
+            for _ in range(50):
+                t0 = time.perf_counter()
+                m.search("PerfMat0123", threshold=70)
+                latencies.append((time.perf_counter() - t0) * 1000)
+            latencies.sort()
+            p95 = latencies[int(len(latencies) * 0.95)]
+            # generous threshold; this is a sanity check
+            assert p95 < 500, f"p95 latency too high: {p95:.1f}ms (lat={latencies[-3:]})"
+        finally:
+            # 清理这 300 条 PerfMat：会话级 sqlite 不做 per-test 截断，残留会污染
+            # 后续测试的模糊解析置信度（如 test_stock_out 的同名消歧）。
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.executemany("DELETE FROM materials WHERE id = ?", [(i,) for i in seeded_ids])
+            conn.commit()
+            conn.close()
