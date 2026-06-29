@@ -302,6 +302,7 @@ def init_database():
             slug TEXT UNIQUE NOT NULL,
             name TEXT NOT NULL,
             is_active INTEGER DEFAULT 1,
+            device_id TEXT UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -681,6 +682,13 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN device_id TEXT')
         cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_device_id ON mcp_connections(device_id)')
+
+    # tenants.device_id：旧库兜底补列（新库由上方 CREATE TABLE 带 UNIQUE）。
+    try:
+        cursor.execute('SELECT device_id FROM tenants LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE tenants ADD COLUMN device_id TEXT')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_device_id ON tenants(device_id)')
 
     # verify_mode（鉴权强度，与 mode 正交）：旧库兜底补列。CHECK 省略以规避
     # SQLite ALTER ADD COLUMN 的约束限制；新库由上方 CREATE TABLE 带 CHECK。

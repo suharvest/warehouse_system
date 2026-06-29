@@ -16,7 +16,7 @@ Create Date: 2026-05-15 14:00:00.000000
   2) Legacy init_database 跑过的库 — 跳过 add_column，跳过 unique（已有 idx）
   3) 部分升级（列存在但没 unique） — 只补 unique constraint
 """
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
@@ -48,10 +48,13 @@ def _unique_exists(inspector, table: str, column: str) -> bool:
 
 def upgrade():
     bind = op.get_bind()
-    inspector = inspect(bind)
-
-    has_column = _column_exists(inspector, 'mcp_connections', 'device_id')
-    has_unique = _unique_exists(inspector, 'mcp_connections', 'device_id') if has_column else False
+    # offline (--sql) 模式下 bind 是 MockConnection，无法 introspect；按全新库发完整 DDL。
+    if context.is_offline_mode():
+        has_column = has_unique = False
+    else:
+        inspector = inspect(bind)
+        has_column = _column_exists(inspector, 'mcp_connections', 'device_id')
+        has_unique = _unique_exists(inspector, 'mcp_connections', 'device_id') if has_column else False
 
     if has_column and has_unique:
         return  # legacy 库已完整，幂等跳过

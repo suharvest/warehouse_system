@@ -6,7 +6,7 @@ Create Date: 2026-05-13 19:00:00.000000
 
 provider_name uniqueness must be scoped to tenant, not global.
 """
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -17,6 +17,9 @@ depends_on = None
 
 
 def _index_exists(bind, index_name: str) -> bool:
+    # offline (--sql) 模式无法查 introspection；视作不存在，直接发 CREATE INDEX DDL。
+    if context.is_offline_mode():
+        return False
     if bind.dialect.name == 'sqlite':
         result = bind.execute(
             sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:n"),

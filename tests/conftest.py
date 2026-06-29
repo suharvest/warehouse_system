@@ -18,6 +18,21 @@ backend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.insert(0, backend_dir)
 
 
+def pytest_collection_modifyitems(items):
+    """Run Playwright e2e tests (tests/e2e/) LAST.
+
+    pytest-playwright's sync ``page`` fixture, under pytest-asyncio
+    ``asyncio_mode = auto``, leaves a *running* event loop on the main thread
+    after an e2e test. Any subsequent unit test that calls ``asyncio.run(...)``
+    (e.g. the MCP/face/mcp_pipe tests) then fails with "asyncio.run() cannot be
+    called from a running event loop". Since ``tests/e2e/`` collects before
+    ``tests/test_*.py`` alphabetically, this poisons ~25 unit tests. Ordering
+    e2e last contains the leak to the end of the session where nothing follows.
+    """
+    e2e_marker = os.path.join("tests", "e2e", "")
+    items.sort(key=lambda it: 1 if e2e_marker in str(getattr(it, "fspath", "")) else 0)
+
+
 @pytest.fixture(scope="session")
 def test_db():
     """Create a temporary test database, isolated from production.
