@@ -173,6 +173,25 @@ app = FastAPI(
 async def health_check():
     return {"status": "ok"}
 
+
+# Test-only: drain SQLAlchemy connection pool so eval framework can safely
+# overwrite the sqlite file (snapshot reset). Gated by EVAL_TEST_MODE=1.
+@app.post("/api/_test/drain_pool")
+async def _eval_drain_pool():
+    if os.environ.get("EVAL_TEST_MODE") != "1":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        from backend.db import get_engine
+    except ImportError:
+        from db import get_engine  # type: ignore
+    try:
+        get_engine().dispose()
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+    return {"ok": True}
+
+
 # 注册速率限制异常处理（带 CORS 头）
 app.state.limiter = limiter
 
@@ -6471,6 +6490,80 @@ async def add_inventory_record(
 # fresh instance under FastAPI ``TestClient`` (which skips lifespan events).
 
 
+_INITIAL_SCHEMA_REVISION = "1826e23835b6"
+
+
+def _recover_legacy_alembic_state(cfg) -> None:
+    """Auto-recover when ``alembic_version`` is empty but business tables exist.
+
+    Older deployments (pre-consolidated-initial-schema) end up with all tables
+    present but no row in ``alembic_version`` — either because the table was
+    truncated, or because tables were created via a now-removed bootstrap path.
+    In that state, ``alembic upgrade head`` re-runs ``initial_schema``, which
+    fails with ``table ... already exists`` and traps the container in a
+    restart loop.
+
+    Strategy:
+      * If ``alembic_version`` row already set → no-op.
+      * If DB looks empty (no business tables) → no-op; let alembic build from
+        scratch.
+      * If business tables exist AND schema is compatible with
+        ``1826e23835b6`` (face_auth_logs present, users has tenant_id) → stamp
+        to ``1826e23835b6`` so subsequent incremental migrations apply.
+      * If business tables exist but pre-multi-tenant (users missing
+        ``tenant_id``) → refuse to start with an actionable error pointing at
+        the manual migration script. We do NOT silently ALTER tables here; the
+        backfill needs a default tenant_id value which is a deployment-level
+        decision.
+    """
+    from sqlalchemy import inspect as sa_inspect
+    eng = get_engine()
+    insp = sa_inspect(eng)
+    tables = set(insp.get_table_names())
+    if "alembic_version" in tables:
+        with eng.begin() as conn:
+            current = conn.exec_driver_sql(
+                "SELECT version_num FROM alembic_version LIMIT 1"
+            ).first()
+        if current and current[0]:
+            return
+
+    # alembic_version is empty (or missing). Decide based on business tables.
+    legacy_marker = "users" in tables or "materials" in tables
+    if not legacy_marker:
+        return  # fresh DB — let alembic create everything
+
+    if "users" in tables:
+        user_cols = {c["name"] for c in insp.get_columns("users")}
+        if "tenant_id" not in user_cols:
+            raise RuntimeError(
+                "Legacy DB detected: users.tenant_id is missing. This DB "
+                "pre-dates the multi-tenant schema and cannot be auto-"
+                "migrated. From the host run:\n"
+                "  uv run python scripts/migrate_legacy_db.py "
+                "/path/to/warehouse.db\n"
+                "or from inside the container:\n"
+                "  /app/.venv/bin/python /app/scripts/migrate_legacy_db.py "
+                "/data/warehouse.db\n"
+                f"DB url: {eng.url}"
+            )
+
+    if "face_auth_logs" not in tables:
+        raise RuntimeError(
+            "Legacy DB detected: alembic_version empty, business tables "
+            "present, but face_auth_logs missing — schema is between "
+            "two known states. Manual intervention required."
+        )
+
+    logger.warning(
+        "Detected legacy DB with empty alembic_version but matching "
+        "post-initial_schema tables. Auto-stamping to %s.",
+        _INITIAL_SCHEMA_REVISION,
+    )
+    from alembic import command as alembic_command
+    alembic_command.stamp(cfg, _INITIAL_SCHEMA_REVISION)
+
+
 @app.on_event("startup")
 async def _run_migrations():
     """Run Alembic migrations on startup. Idempotent.
@@ -6486,6 +6579,7 @@ async def _run_migrations():
     cfg.set_main_option(
         "script_location", os.path.join(os.path.dirname(__file__), "alembic")
     )
+    _recover_legacy_alembic_state(cfg)
     alembic_command.upgrade(cfg, "head")
 
     # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。
