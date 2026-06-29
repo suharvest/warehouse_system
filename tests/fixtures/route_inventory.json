@@ -1,5 +1,13 @@
 [
   {
+    "method": "POST",
+    "name": "_eval_drain_pool",
+    "path": "/api/_test/drain_pool",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "GET",
     "name": "list_api_keys",
     "path": "/api/api-keys",
@@ -347,6 +355,14 @@
     "method": "DELETE",
     "name": "face_delete_enrollment",
     "path": "/api/face/enrollments/{enrollment_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "face_library",
+    "path": "/api/face/library",
     "response_model": null,
     "status_code": null,
     "tags": []

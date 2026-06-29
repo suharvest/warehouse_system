@@ -478,6 +478,7 @@ def _audit_routes() -> None:
         "/api/auth/reset-password",  # 凭设备ID重置密码
         "/api/system/mode",  # 部署元信息（single/multi tenant），前端在登录前就要据此渲染 UI
         "/factory/devices",  # 工厂设备代理使用 X-Factory-Key 做接口级鉴权
+        "/api/_test/",  # 测试/eval 专用端点，自身用 EVAL_TEST_MODE 门控，非生产安全面
         "/docs",
         "/openapi.json",
         "/redoc",
