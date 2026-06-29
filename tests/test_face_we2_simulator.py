@@ -28,6 +28,24 @@ sys.path.insert(0, str(BACKEND_DIR))
 FIXTURE_FACE = Path(__file__).resolve().parent / "fixtures" / "we2_test_face.jpg"
 
 
+@pytest.fixture(autouse=True)
+def _restore_app_module_after_we2_reload():
+    """Restore a clean ``app`` module after each test here.
+
+    These tests reload ``app`` (and ``routers.face_we2``) under a toggled
+    ``FACE_WE2_SIMULATOR_ENABLED`` env. Without restoring, sys.modules['app']
+    is left in the last-reloaded (we2-enabled) state, which pollutes later tests
+    that do ``from app import app`` — e.g. test_route_inventory's route snapshot
+    then sees the extra /api/face/we2/* routes. Re-import with the ambient
+    (default, we2-off) env so the canonical app is restored.
+    """
+    yield
+    for mod in ("app", "routers.face_we2"):
+        sys.modules.pop(mod, None)
+    os.environ.pop("FACE_WE2_SIMULATOR_ENABLED", None)
+    import app  # noqa: F401  re-import with default env -> we2 router not mounted
+
+
 def _reload_app_with_env(monkeypatch, enabled: bool):
     """Re-import `app` with the WE2 env var set/unset and return the FastAPI app."""
     if enabled:
