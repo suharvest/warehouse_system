@@ -433,7 +433,7 @@ def test_tenant_admin_cannot_cross_tenant_api_keys_or_mcp(admin_client, app_inst
 
     cross_mcp = client_a.post("/api/mcp/connections", json={
         "name": f"cross-mcp-{suffix}",
-        "mcp_endpoint": "http://127.0.0.1:9/mcp",
+        "mcp_endpoint": f"http://127.0.0.1:9/mcp/{suffix}/cross",
         "role": "operate",
         "auto_start": False,
         "warehouse_id": warehouse_b,
@@ -442,7 +442,7 @@ def test_tenant_admin_cannot_cross_tenant_api_keys_or_mcp(admin_client, app_inst
 
     own_mcp = client_a.post("/api/mcp/connections", json={
         "name": f"tenant-a-mcp-{suffix}",
-        "mcp_endpoint": "http://127.0.0.1:9/mcp",
+        "mcp_endpoint": f"http://127.0.0.1:9/mcp/{suffix}/own",
         "role": "operate",
         "auto_start": False,
         "warehouse_id": warehouse_a,
