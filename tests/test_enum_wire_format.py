@@ -100,7 +100,7 @@ def test_mcp_connections_role_is_string(admin_client, default_warehouse_id):
     name = f"r3-mcp-{uuid.uuid4().hex[:6]}"
     resp = admin_client.post("/api/mcp/connections", json={
         "name": name,
-        "mcp_endpoint": "wss://example.invalid/mcp",
+        "mcp_endpoint": f"wss://example.invalid/{name}/mcp",
         "role": "operate",
         "auto_start": False,
         "warehouse_id": default_warehouse_id,

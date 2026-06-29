@@ -725,7 +725,7 @@ class CreateMCPConnectionRequest(BaseModel):
     role: str = 'operate'  # 'admin' | 'operate' | 'view'
     auto_start: bool = True
     warehouse_id: Optional[int] = None  # 仓库ID（关联的MCP代理归属仓库）
-    device_id: Optional[str] = None  # 设备ID，全局唯一，用于设备去重
+    device_id: Optional[str] = None  # Legacy: 旧版设备级绑定字段；新配置以 mcp_endpoint 代表云端智能体入口
 
 
 class UpdateMCPConnectionRequest(BaseModel):
@@ -735,7 +735,7 @@ class UpdateMCPConnectionRequest(BaseModel):
     role: Optional[str] = None  # 'admin' | 'operate' | 'view'
     auto_start: Optional[bool] = None
     warehouse_id: Optional[int] = None
-    device_id: Optional[str] = None  # 设备ID，变更时同样做唯一校验
+    device_id: Optional[str] = None  # Legacy: 旧版设备级绑定字段；新配置以 mcp_endpoint 代表云端智能体入口
 
 
 class MCPConnectionItem(BaseModel):

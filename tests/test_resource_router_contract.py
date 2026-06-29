@@ -580,7 +580,7 @@ def test_contract_mcp(admin_client, default_warehouse_id):
 
     r = admin_client.post("/api/mcp/connections", json={
         "name": f"contract-mcp-{s}",
-        "mcp_endpoint": "http://127.0.0.1:9/mcp",
+        "mcp_endpoint": f"http://127.0.0.1:9/mcp/{s}",
         "role": "operate",
         "auto_start": False,
         "warehouse_id": default_warehouse_id,
@@ -617,7 +617,7 @@ def test_contract_mcp(admin_client, default_warehouse_id):
     for i in range(3):
         rr = admin_client.post("/api/mcp/connections", json={
             "name": f"mcp-{tag}-{i:02d}",
-            "mcp_endpoint": "http://127.0.0.1:9/mcp",
+            "mcp_endpoint": f"http://127.0.0.1:9/mcp/{tag}/{i}",
             "role": "operate",
             "auto_start": False,
             "warehouse_id": default_warehouse_id,
