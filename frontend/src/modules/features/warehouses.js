@@ -299,7 +299,7 @@ export async function toggleWarehouseStatus(id, isDisabled) {
 
 // ============ 删除仓库 ============
 export async function deleteWarehouse(id, name) {
-    if (!confirm(`${t('confirmDeleteWarehouse') || '确定删除仓库'}「${name}」？\n${t('deleteWarehouseWarning') || '该仓库下的所有物料和记录也会被删除！'}`)) {
+    if (!confirm(`${t('confirmDeleteWarehouse') || '确定删除仓库'}「${name}」？\n${t('deleteWarehouseWarning') || '若仓库内仍有物料，需先在物料管理中禁用或转移后才能删除。'}`)) {
         return;
     }
     try {
