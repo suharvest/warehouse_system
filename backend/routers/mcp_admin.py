@@ -209,6 +209,20 @@ async def create_mcp_connection(
         conn_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
 
     with get_engine().begin() as sa_conn:
+        # 兜底绑定仓库：agent key 是 operate 角色，若 warehouse_id 为空会触发
+        # build_authorized_scope_predicates 的“无授权仓库 → false()”，导致该 agent
+        # 查任何物料都返回空（智能体表现为“物料不存在”）。未显式指定仓库时，绑定到
+        # 该租户的默认仓库，保证 agent key 始终有可访问的仓库作用域。
+        if wh_id is None:
+            wh_id = sa_conn.execute(
+                select(_t_warehouses.c.id)
+                .where(and_(
+                    _t_warehouses.c.tenant_id == conn_tenant_id,
+                    _t_warehouses.c.is_default == 1,
+                ))
+                .order_by(_t_warehouses.c.id.asc())
+            ).scalar()
+
         # 创建关联的 API Key（is_system=1，不在用户管理中显示）
         sa_conn.execute(
             insert(_t_api_keys).values(

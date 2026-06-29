@@ -53,6 +53,35 @@ class TestMCPConnectionCRUD:
         # If it does show, that's also acceptable behavior
         assert keys_resp.status_code == 200
 
+    def test_create_without_warehouse_binds_default(self, admin_client, default_warehouse_id):
+        """Creating an agent without warehouse_id must bind it (and its api_key) to
+        the tenant's default warehouse.
+
+        Regression: an operate-role agent key with warehouse_id=NULL hits
+        build_authorized_scope_predicates' "no authorized warehouse -> false()"
+        path and can read no materials at all (agent reports "物料不存在").
+        """
+        name = f"NoWh Agent {uuid.uuid4().hex[:6]}"
+        resp = admin_client.post("/api/mcp/connections", json={
+            "name": name,
+            "mcp_endpoint": f"http://localhost:9000/{uuid.uuid4().hex[:6]}",
+            "role": "operate",
+            "auto_start": False,
+            # 故意不传 warehouse_id
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()['connection']['warehouse_id'] == default_warehouse_id
+
+        # 关联的 api_key 也必须绑定到默认仓库，否则 agent 查询作用域为空。
+        from database import get_db_connection
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT warehouse_id FROM api_keys WHERE name = ?", (f"Agent: {name}",))
+        row = cur.fetchone()
+        conn.close()
+        assert row is not None, "agent api_key not created"
+        assert row["warehouse_id"] == default_warehouse_id
+
     def test_update_connection(self, admin_client):
         """Update MCP connection name and role."""
         # Create

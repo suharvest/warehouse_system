@@ -1983,6 +1983,24 @@ def _clear_database_scope(cursor, tenant_id: Optional[int]) -> dict:
     return details
 
 
+def _sanitize_import_text(value):
+    """清洗导入文本单元格。
+
+    背景：从导出的 .xlsx / .db 灌进来的值里常混入 Excel 公式残渣，例如
+    ``=+VLOOKUP(C4153,[1]后台!$B:$I,8,0)``——这不是有效数据，而是导出时未求值的
+    公式字符串。统一视为缺失（返回 None）。同时这也防御 CSV/Excel 公式注入
+    （以 ``=`` 开头的单元格被表格软件当公式执行）。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s[0] == '=':
+        return None
+    return s
+
+
 def _insert_row_with_overrides(cursor, table: str, row, target_columns: set, overrides: dict = None, skip: set = None) -> int:
     overrides = overrides or {}
     skip = skip or set()
@@ -2061,9 +2079,19 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
     for row in rows:
         old_id = row['id'] if 'id' in row.keys() else None
         old_wh = row['warehouse_id'] if 'warehouse_id' in row.keys() else None
+        mat_overrides = {'tenant_id': tenant_id, 'warehouse_id': warehouse_map.get(old_wh, default_id)}
+        # 清洗 unit：导出库常把 Excel 公式残渣（=+VLOOKUP(...)）当作单位灌进来。
+        # 公式残渣清成 None 时落到默认单位“个”，避免写入 NULL（unit 在响应模型里是必填 str）；
+        # 原本就为空的保持原样（不臆造数据）。
+        if 'unit' in row.keys():
+            raw_unit = row['unit']
+            cleaned_unit = _sanitize_import_text(raw_unit)
+            if cleaned_unit is None and raw_unit not in (None, ''):
+                cleaned_unit = '个'
+            mat_overrides['unit'] = cleaned_unit
         new_id = _insert_row_with_overrides(
             cursor, 'materials', row, target_columns['materials'],
-            {'tenant_id': tenant_id, 'warehouse_id': warehouse_map.get(old_wh, default_id)},
+            mat_overrides,
             {'id'}
         )
         if old_id is not None:
@@ -5523,7 +5551,7 @@ async def preview_import_excel(
             name = _read_cell(row, 'name') or ""
             sku = _read_cell(row, 'sku')
             category = _read_cell(row, 'category') or "未分类"
-            unit = _read_cell(row, 'unit') or "个"
+            unit = _sanitize_import_text(_read_cell(row, 'unit')) or "个"
             location = _read_cell(row, 'location') or ""
             batch_no_val = _read_cell(row, 'batch_no') or ""
             contact_name_val = _read_cell(row, 'contact_name') or ""
