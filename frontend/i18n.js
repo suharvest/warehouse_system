@@ -256,8 +256,8 @@ const translations = {
         directClear: '直接清空',
         confirmImport: '确认导入',
         importing: '导入中...',
-        importFailed: '导入失败，请检查文件格式',
-        operationFailed: '操作失败，请重试',
+        importDatabaseFailed: '导入失败，请检查数据库文件格式',
+        databaseOperationFailed: '操作失败，请重试',
         confirmDirectClear: '确定要直接清空所有仓库数据吗？此操作不可撤销！',
 
         // 联系方管理
@@ -392,7 +392,7 @@ const translations = {
         editWarehouse: '编辑仓库',
         deleteWarehouse: '删除仓库',
         confirmDeleteWarehouse: '确定删除仓库',
-        deleteWarehouseWarning: '该仓库下的所有物料和记录也会被删除！',
+        deleteWarehouseWarning: '若仓库内仍有物料，需先在物料管理中禁用或转移后才能删除。',
         warehouseNameRequired: '请输入仓库名称',
         warehouseSlugRequired: '请输入仓库标识',
         slugHint: '用于 URL 路径，只能包含小写字母、数字和连字符',
@@ -794,8 +794,8 @@ const translations = {
         directClear: 'Clear Without Export',
         confirmImport: 'Confirm Import',
         importing: 'Importing...',
-        importFailed: 'Import failed, please check file format',
-        operationFailed: 'Operation failed, please try again',
+        importDatabaseFailed: 'Import failed, please check database file format',
+        databaseOperationFailed: 'Operation failed, please try again',
         confirmDirectClear: 'Are you sure you want to clear all warehouse data? This action cannot be undone!',
 
         // Contact Management
@@ -930,7 +930,7 @@ const translations = {
         editWarehouse: 'Edit Warehouse',
         deleteWarehouse: 'Delete Warehouse',
         confirmDeleteWarehouse: 'Confirm delete warehouse',
-        deleteWarehouseWarning: 'All materials and records in this warehouse will be deleted!',
+        deleteWarehouseWarning: 'If the warehouse still contains materials, disable or move them in Material Management before it can be deleted.',
         warehouseNameRequired: 'Please enter warehouse name',
         warehouseSlugRequired: 'Please enter warehouse slug',
         slugHint: 'Used in URL path, only lowercase letters, numbers and hyphens allowed',

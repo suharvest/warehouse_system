@@ -70,12 +70,12 @@ export async function confirmImportDatabase() {
             // 刷新页面以重新加载所有数据
             window.location.reload();
         } else {
-            errorDiv.textContent = data.detail || data.message || t('importFailed') || '导入失败';
+            errorDiv.textContent = data.detail || data.message || t('importDatabaseFailed') || '导入失败';
             errorDiv.style.display = 'block';
         }
     } catch (error) {
         console.error('Import failed:', error);
-        errorDiv.textContent = t('importFailed') || '导入失败，请检查文件格式';
+        errorDiv.textContent = t('importDatabaseFailed') || '导入失败，请检查数据库文件格式';
         errorDiv.style.display = 'block';
     } finally {
         confirmBtn.disabled = false;
@@ -137,12 +137,12 @@ async function executeClearDatabase() {
             // 刷新页面以重新加载所有数据
             window.location.reload();
         } else {
-            errorDiv.textContent = data.detail || data.message || t('operationFailed') || '操作失败';
+            errorDiv.textContent = data.detail || data.message || t('databaseOperationFailed') || '操作失败';
             errorDiv.style.display = 'block';
         }
     } catch (error) {
         console.error('Clear failed:', error);
-        errorDiv.textContent = t('operationFailed') || '操作失败，请重试';
+        errorDiv.textContent = t('databaseOperationFailed') || '操作失败，请重试';
         errorDiv.style.display = 'block';
     }
 }
