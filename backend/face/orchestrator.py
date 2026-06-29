@@ -32,6 +32,7 @@ def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
         tenant_face_config.c.auth_token,
         tenant_face_config.c.embedding_model_tag,
         tenant_face_config.c.min_confidence,
+        tenant_face_config.c.verify_mode,
     ).where(tenant_face_config.c.tenant_id == tenant_id)
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(stmt).first()
@@ -45,6 +46,7 @@ def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
         auth_token=row.auth_token,
         embedding_model_tag=row.embedding_model_tag,
         min_confidence=float(row.min_confidence or 0.65),
+        verify_mode=row.verify_mode or "interface",
     )
 
 
@@ -115,6 +117,42 @@ def _row_to_rule(row) -> FaceRule:
         allowed_subject_ids=_parse_id_list(row.allowed_subject_ids),
         min_confidence_override=row.min_confidence_override,
     )
+
+
+def _resolve_speaker_subject(
+    conn,
+    *,
+    tenant_id: int,
+    speaker_subject_id: Optional[int],
+    speaker_name: Optional[str],
+) -> Optional[int]:
+    """Resolve the session-mode speaker to a tenant-scoped face_subjects.id.
+
+    ``speaker_subject_id`` (exact, no ambiguity) wins; falls back to a
+    case-sensitive active-name lookup. Returns None when neither resolves
+    (e.g. device had no valid match) — the caller still proceeds (advisory),
+    just without a matched_subject_id in the audit log.
+    """
+    cur = conn.cursor()
+    if speaker_subject_id is not None:
+        cur.execute(
+            "SELECT id FROM face_subjects WHERE id = ? AND tenant_id = ?",
+            (speaker_subject_id, tenant_id),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row["id"])
+    if speaker_name:
+        cur.execute(
+            "SELECT id FROM face_subjects "
+            "WHERE tenant_id = ? AND name = ? AND is_active = 1 "
+            "ORDER BY id ASC LIMIT 1",
+            (tenant_id, speaker_name),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row["id"])
+    return None
 
 
 def _log_decision(
@@ -256,6 +294,8 @@ async def verify_mcp_face(
     image_b64: str = "",
     embedding_bytes: Optional[bytes] = None,
     embedding_model_tag: Optional[str] = None,
+    speaker_subject_id: Optional[int] = None,
+    speaker_name: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> Decision:
     """Short-circuit verification ladder for an MCP tool call.
@@ -291,6 +331,44 @@ async def verify_mcp_face(
         )
         return decision
 
+    # ── Session mode (advisory) ─────────────────────────────────────────
+    # Trust the device's on-board match (frozen on the conversation rising
+    # edge). We do NOT re-infer/re-match the embedding and we NEVER deny:
+    # the device identity is forwarded as hidden params, recorded for audit
+    # (decision=pass, advisory) and the call proceeds. Allow-list is still
+    # honoured when a resolvable subject falls outside it.
+    if cfg.verify_mode == "session":
+        matched = _resolve_speaker_subject(
+            conn, tenant_id=tenant_id,
+            speaker_subject_id=speaker_subject_id, speaker_name=speaker_name,
+        )
+        if (
+            matched is not None
+            and rule.allowed_subject_ids
+            and matched not in rule.allowed_subject_ids
+        ):
+            decision = Decision(
+                status="deny", failure_reason="not_in_allow_list",
+                matched_subject_id=matched,
+            )
+            _log_decision(
+                conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
+                tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+                confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+            )
+            return decision
+        decision = Decision(
+            status="pass", failure_reason="advisory_session",
+            matched_subject_id=matched,
+        )
+        _log_decision(
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
+            tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+            confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+        )
+        return decision
+
+    # ── Interface mode (default, fail-closed) ───────────────────────────
     # Obtain embedding: either supplied by device (WE2 path) or via /infer.
     if embedding_bytes:
         model_tag = embedding_model_tag or cfg.embedding_model_tag or "unknown"

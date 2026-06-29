@@ -377,9 +377,21 @@ tenant_face_config = Table(
     Column("auth_token", Text),
     Column("embedding_model_tag", String(64)),
     Column("min_confidence", Float, nullable=False, server_default="0.65"),
+    # Passive greeting (visual wake) on/off — independent of the out-of-stock
+    # auth switch (`enabled`). xiaozhi reads this on device connect / voice sync
+    # and aligns the device's local passive-recognition state via self.face.enable.
+    Column("greeting_enabled", Boolean, nullable=False, server_default="0"),
+    # 鉴权强度（与 mode 正交）：
+    #   interface — warehouse 重比对 embedding，fail-closed（默认，保留存量行为）
+    #   session   — 信任设备本地匹配，记 advisory 日志放行，不重比对
+    Column("verify_mode", String(16), nullable=False, server_default="interface"),
     Column("created_at", String(32), server_default=func.current_timestamp()),
     Column("updated_at", String(32), server_default=func.current_timestamp()),
     CheckConstraint("mode IN ('local','lan')", name="ck_tenant_face_config_mode"),
+    CheckConstraint(
+        "verify_mode IN ('session','interface')",
+        name="ck_tenant_face_config_verify_mode",
+    ),
     **MYSQL_TABLE_KW,
 )
 
