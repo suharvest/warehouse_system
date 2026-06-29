@@ -203,6 +203,8 @@ def _face_guard(
     image_b64: str = None,
     embedding_b64: str = None,
     embedding_model_tag: str = None,
+    speaker_subject_id: int = None,
+    speaker_name: str = None,
 ) -> dict:
     """Verify face for an MCP write operation. Returns the decision dict.
 
@@ -239,6 +241,15 @@ def _face_guard(
         body["embedding_b64"] = embedding_b64
     if embedding_model_tag:
         body["embedding_model_tag"] = embedding_model_tag
+    # Forward the LLM/server-supplied speaker identity too. The backend is the
+    # single authority: it consults these ONLY when the tenant's verify_mode is
+    # 'session', and ignores them under 'interface' (which re-matches embedding).
+    # We never decide the mode here, so a spoofed speaker_id cannot bypass the
+    # interface-mode hard check.
+    if speaker_subject_id is not None:
+        body["speaker_subject_id"] = speaker_subject_id
+    if speaker_name:
+        body["speaker_name"] = speaker_name
     try:
         resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
         if resp.status_code >= 400:
@@ -248,47 +259,6 @@ def _face_guard(
     except Exception as e:
         logger.warning("face verify transport error: %s", e)
         return {"status": "deny", "failure_reason": "transport_error"}
-
-
-def _face_advisory(
-    operation: str,
-    warehouse_id: int = None,
-    speaker_subject_id: int = None,
-    speaker_name: str = None,
-) -> dict:
-    """Session-mode (advisory) bridge — NEVER fail-closed.
-
-    Posts the device-resolved speaker identity to ``/face/verify-mcp`` so the
-    warehouse can resolve the subject and record an advisory ``face_auth_logs``
-    row (decision=pass). Distinct from ``_face_guard``: it never causes the
-    operation to be denied. Network / HTTP errors are swallowed (best-effort
-    audit) — the caller proceeds regardless because the device already matched
-    the speaker locally.
-    """
-    import requests as _r
-    api_base = _config.get('api_base_url', '').rstrip('/')
-    if not api_base:
-        return {"status": "skipped", "failure_reason": "no_api_base"}
-    headers = {}
-    auth = _config.get('auth') or {}
-    if auth.get('type') == 'api_key':
-        headers[auth.get('header', 'X-API-Key')] = auth.get('key', '')
-    elif auth.get('type') == 'bearer':
-        headers['Authorization'] = f"Bearer {auth.get('token', '')}"
-    body = {"operation": operation, "warehouse_id": warehouse_id}
-    if speaker_subject_id is not None:
-        body["speaker_subject_id"] = speaker_subject_id
-    if speaker_name:
-        body["speaker_name"] = speaker_name
-    try:
-        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
-        if resp.status_code >= 400:
-            logger.warning("face advisory returned %s: %s", resp.status_code, resp.text[:200])
-            return {"status": "skipped", "failure_reason": f"http_{resp.status_code}"}
-        return resp.json()
-    except Exception as e:
-        logger.warning("face advisory transport error: %s", e)
-        return {"status": "skipped", "failure_reason": "transport_error"}
 
 
 def _enforce_face(
@@ -302,30 +272,28 @@ def _enforce_face(
 ) -> dict | None:
     """Run the face gate; return a tool-error dict to surface, or None to proceed.
 
-    Two verify_mode branches (the tenant's verify_mode is authoritative on the
-    warehouse side; here we branch on which hidden params the server injected):
+    Single authoritative gate: forward EVERYTHING we have (server-injected
+    embedding AND LLM/device-supplied speaker identity) to ``/face/verify-mcp``
+    and honour whatever the backend decides. The backend is the sole authority
+    on ``verify_mode``:
 
-    * **session** (advisory): the server forwarded a device-resolved speaker
-      identity (``speaker_subject_id`` / ``speaker_name``). Trust the device's
-      local match — record an advisory log via ``_face_advisory`` and proceed.
-      NEVER calls ``_face_guard``; NEVER fail-closes.
-    * **interface** (default, fail-closed): no speaker identity → re-verify the
-      embedding through ``_face_guard``; a ``deny`` aborts the operation.
+    * **session**: backend trusts the device-resolved speaker, records an
+      advisory log and returns ``pass`` (allow-list still enforced → ``deny``).
+    * **interface** (default): backend ignores the speaker params and re-matches
+      the embedding, fail-closed.
+
+    Crucially we do NOT branch on which params are present — so a spoofed
+    ``speaker_subject_id`` from the (now LLM-visible) tool arg cannot short-
+    circuit the interface-mode hard check. ``deny`` (incl. HTTP/transport
+    errors → fail-closed) aborts; ``pass``/``skipped`` proceed.
     """
-    if speaker_subject_id is not None or speaker_name:
-        # Session / advisory path — best-effort audit, always proceed.
-        _face_advisory(
-            operation, warehouse_id,
-            speaker_subject_id=speaker_subject_id,
-            speaker_name=speaker_name,
-        )
-        return None
-
     decision = _face_guard(
         operation, warehouse_id,
         image_b64=image_b64,
         embedding_b64=embedding_b64,
         embedding_model_tag=embedding_model_tag,
+        speaker_subject_id=speaker_subject_id,
+        speaker_name=speaker_name,
     )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
@@ -790,8 +758,7 @@ def query_batch(batch_no: str) -> dict:
 
 @mcp.tool(
     exclude_args=["contact_id", "variant",
-                  "face_image_b64", "face_embedding_b64", "face_model_tag",
-                  "speaker_subject_id", "speaker_name"],
+                  "face_image_b64", "face_embedding_b64", "face_model_tag"],
     meta={"requires_face": True},
 )
 @log_mcp_call
@@ -808,9 +775,11 @@ def stock_in(product_name: str, quantity: int,
              speaker_name: str = None) -> dict:
     """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
 
-    face_* / speaker_* 参数由 xiaozhi runtime 注入（用户不可见）：
-      - interface 模式：face_image_b64（云端）或 face_embedding_b64 + face_model_tag（设备 NPU）
-      - session 模式：speaker_subject_id + speaker_name（设备本地匹配的说话人身份）
+    人脸鉴权 · session 模式：执行前先调用 self.conversation.speaker 获取当前说话人，把返回的
+    subject_id / name 填入 speaker_subject_id / speaker_name；valid=false（陌生人）则置空。
+    人脸鉴权 · interface 模式：face_image_b64 / face_embedding_b64 / face_model_tag 由 runtime
+    注入，对你不可见、无需填写。仓库按 verify_mode 裁决（session 信任设备身份；interface 忽略
+    speaker、改用 embedding 硬校验），你无法通过填写 speaker 参数绕过 interface。
     """
     blocked = _enforce_face(
         "stock_in",
@@ -831,8 +800,7 @@ def stock_in(product_name: str, quantity: int,
 
 @mcp.tool(
     exclude_args=["allow_partial_fallback",
-                  "face_image_b64", "face_embedding_b64", "face_model_tag",
-                  "speaker_subject_id", "speaker_name"],
+                  "face_image_b64", "face_embedding_b64", "face_model_tag"],
     meta={"requires_face": True},
 )
 @log_mcp_call
@@ -850,7 +818,9 @@ def stock_out(product_name: str, quantity: int,
               speaker_name: str = None) -> dict:
     """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
 
-    face_* / speaker_* 参数由 xiaozhi runtime 注入（同 stock_in，对 LLM 隐藏）。
+    人脸鉴权（同 stock_in）：session 模式先调 self.conversation.speaker 把 subject_id / name 填入
+    speaker_subject_id / speaker_name；interface 模式的 face_* 由 runtime 注入、不可见。仓库按
+    verify_mode 裁决，填 speaker 无法绕过 interface 硬校验。
     """
     blocked = _enforce_face(
         "stock_out",
@@ -887,8 +857,7 @@ def search(query: str = None, entity_type: str = "material",
 
 
 @mcp.tool(
-    exclude_args=["face_image_b64", "face_embedding_b64", "face_model_tag",
-                  "speaker_subject_id", "speaker_name"],
+    exclude_args=["face_image_b64", "face_embedding_b64", "face_model_tag"],
     meta={"requires_face": True},
 )
 @log_mcp_call
@@ -905,7 +874,9 @@ def move_batch_location(batch_no: str, new_location: str,
     quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
     注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
 
-    face_* / speaker_* 参数由 xiaozhi runtime 注入（同 stock_in，对 LLM 隐藏）。
+    人脸鉴权（同 stock_in）：session 模式先调 self.conversation.speaker 把 subject_id / name 填入
+    speaker_subject_id / speaker_name；interface 模式的 face_* 由 runtime 注入、不可见。仓库按
+    verify_mode 裁决，填 speaker 无法绕过 interface 硬校验。
     """
     blocked = _enforce_face(
         "move_batch_location",
