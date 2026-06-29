@@ -50,6 +50,41 @@ class MCPProcessManager:
         # （codex audit ad0265a253981469c HIGH）。
         self._locks: Dict[str, asyncio.Lock] = {}
         atexit.register(self._cleanup_on_exit)
+        # Kill any orphan mcp_pipe.py from a previous backend run before we
+        # spawn fresh ones. Without this, uvicorn reload / backend crash
+        # leaves the old pipe alive as a PID-1 orphan, the new backend
+        # spawns a second copy, and the cloud sees two clients with the
+        # same identity — observed as "云端连接失败" + multi-minute recovery.
+        self._kill_orphan_pipes()
+
+    @staticmethod
+    def _kill_orphan_pipes():
+        """SIGKILL any leftover mcp_pipe.py process groups not owned by this run."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ['pgrep', '-f', 'mcp_pipe.py'],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"Orphan mcp_pipe.py scan skipped: {e}")
+            return
+        my_pid = os.getpid()
+        killed = []
+        for token in result.stdout.split():
+            if not token.strip().isdigit():
+                continue
+            pid = int(token)
+            if pid == my_pid:
+                continue
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGKILL)
+                killed.append(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if killed:
+            logger.warning(f"Killed orphan mcp_pipe.py PIDs from previous run: {killed}")
 
     def _get_lock(self, conn_id: str) -> asyncio.Lock:
         """懒创建 per-connection 锁。"""
