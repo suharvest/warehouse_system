@@ -585,6 +585,7 @@ def init_database():
             auth_token TEXT,
             embedding_model_tag TEXT,
             min_confidence REAL NOT NULL DEFAULT 0.65,
+            greeting_enabled INTEGER NOT NULL DEFAULT 0,
             verify_mode TEXT NOT NULL DEFAULT 'interface' CHECK(verify_mode IN('session','interface')),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -687,6 +688,14 @@ def init_database():
         cursor.execute('SELECT verify_mode FROM tenant_face_config LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'interface'")
+
+    # greeting_enabled（被动问候开关）：旧库兜底补列。此列在 metadata 与 alembic
+    # 迁移(h7i8j9k0l1m2)中已有，但此前漏在 raw init_database 的 CREATE TABLE 里，
+    # 导致纯 init_database 建的 sqlite 库上 GET/PUT /api/face/config 500。
+    try:
+        cursor.execute('SELECT greeting_enabled FROM tenant_face_config LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN greeting_enabled INTEGER NOT NULL DEFAULT 0")
 
     # 检查并添加 warehouse_id 字段到各表（多仓库支持）
     for table in ('batches', 'inventory_records', 'api_keys', 'mcp_connections'):
