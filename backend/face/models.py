@@ -12,6 +12,9 @@ class FaceConfig:
     auth_token: Optional[str] = None
     embedding_model_tag: Optional[str] = None
     min_confidence: float = 0.65
+    # 鉴权强度（与 mode 正交）：'interface'（默认，fail-closed 重比对）或
+    # 'session'（信任设备本地匹配，advisory 放行）。
+    verify_mode: str = "interface"
 
 
 @dataclass

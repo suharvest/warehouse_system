@@ -585,6 +585,7 @@ def init_database():
             auth_token TEXT,
             embedding_model_tag TEXT,
             min_confidence REAL NOT NULL DEFAULT 0.65,
+            verify_mode TEXT NOT NULL DEFAULT 'interface' CHECK(verify_mode IN('session','interface')),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
@@ -679,6 +680,13 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN device_id TEXT')
         cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_device_id ON mcp_connections(device_id)')
+
+    # verify_mode（鉴权强度，与 mode 正交）：旧库兜底补列。CHECK 省略以规避
+    # SQLite ALTER ADD COLUMN 的约束限制；新库由上方 CREATE TABLE 带 CHECK。
+    try:
+        cursor.execute('SELECT verify_mode FROM tenant_face_config LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'interface'")
 
     # 检查并添加 warehouse_id 字段到各表（多仓库支持）
     for table in ('batches', 'inventory_records', 'api_keys', 'mcp_connections'):
