@@ -36,12 +36,15 @@ from deps import (
 )
 from metadata import (
     api_keys as _t_api_keys,
+    mcp_agent_devices as _t_mcp_agent_devices,
     mcp_connections as _t_mcp_connections,
     tenants as _t_tenants,
     warehouses as _t_warehouses,
 )
 from models import (
     CreateMCPConnectionRequest,
+    MCPAgentDeviceCreateRequest,
+    MCPAgentDeviceUpdateRequest,
     MCPConnectionItem,
     MCPConnectionResponse,
     RoleName,
@@ -643,3 +646,209 @@ async def get_mcp_connection_logs(
 
     logs = mcp_manager.get_logs(conn_id, lines)
     return {"logs": logs}
+
+
+# ============ 智能体下挂的物理设备（一对多子表）============
+#
+# 一个 mcp_connection（云端智能体端点）下可挂多个物理设备，每个设备配 LAN IP，
+# 供后续"云端下发人脸库到设备"使用。权限/租户隔离与上方连接 CRUD 完全一致：
+# require_permission(Resource.MCP, Action.ADMIN) + load_or_404 校验 conn 属于当前租户。
+
+
+def _assert_conn_in_tenant(conn_id: str, current_user: CurrentUser) -> None:
+    """校验目标连接存在且属于当前租户；否则 404/403（与连接 CRUD 同语义）。"""
+    with get_engine().connect() as sa_conn:
+        load_or_404(
+            sa_conn, _t_mcp_connections, conn_id,
+            columns=[_t_mcp_connections.c.id, _t_mcp_connections.c.tenant_id],
+            not_found="连接不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权访问其他租户的MCP连接",
+        )
+
+
+def _serialize_device(row) -> dict:
+    d = dict(row._mapping)
+    d['face_enabled'] = bool(d.get('face_enabled'))
+    return d
+
+
+def _validate_device_fields(ip, port):
+    """ip 非空、port 1-65535。返回归一化后的 (ip, port)。"""
+    ip = (ip or '').strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="设备 IP 不能为空")
+    if port is None:
+        port = 80
+    if not isinstance(port, int) or not (1 <= port <= 65535):
+        raise HTTPException(status_code=400, detail="端口号必须在 1-65535 之间")
+    return ip, port
+
+
+def _ensure_device_id_unique(conn_id: str, device_id: str, exclude_dev_id: Optional[int] = None) -> None:
+    """同一 connection 下 device_id 不可重复（device_id 为空不校验）。"""
+    if not device_id:
+        return
+    stmt = select(_t_mcp_agent_devices.c.id).where(
+        and_(
+            _t_mcp_agent_devices.c.connection_id == conn_id,
+            _t_mcp_agent_devices.c.device_id == device_id,
+        )
+    )
+    if exclude_dev_id is not None:
+        stmt = stmt.where(_t_mcp_agent_devices.c.id != exclude_dev_id)
+    with get_engine().connect() as sa_conn:
+        existing = sa_conn.execute(stmt).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"设备标识 {device_id} 在该智能体下已存在，不可重复",
+        )
+
+
+def _load_device_or_404(conn_id: str, dev_id: int):
+    with get_engine().connect() as sa_conn:
+        _r = sa_conn.execute(
+            select(_t_mcp_agent_devices).where(
+                and_(
+                    _t_mcp_agent_devices.c.id == dev_id,
+                    _t_mcp_agent_devices.c.connection_id == conn_id,
+                )
+            )
+        ).first()
+    if _r is None:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    return _r
+
+
+@router.get("/api/mcp/connections/{conn_id}/devices")
+async def list_mcp_agent_devices(
+    conn_id: str,
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
+):
+    """列出某智能体下挂的所有物理设备。"""
+    _assert_conn_in_tenant(conn_id, current_user)
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(
+            select(_t_mcp_agent_devices)
+            .where(_t_mcp_agent_devices.c.connection_id == conn_id)
+            .order_by(_t_mcp_agent_devices.c.id.asc())
+        ).fetchall()
+    return [_serialize_device(r) for r in rows]
+
+
+@router.post("/api/mcp/connections/{conn_id}/devices")
+async def create_mcp_agent_device(
+    conn_id: str,
+    request: MCPAgentDeviceCreateRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
+):
+    """为某智能体新增一个物理设备。"""
+    _assert_conn_in_tenant(conn_id, current_user)
+    ip, port = _validate_device_fields(request.ip, request.port)
+    device_id = request.device_id.strip() if request.device_id else None
+    _ensure_device_id_unique(conn_id, device_id)
+
+    now = datetime.now().isoformat()
+    with get_engine().begin() as sa_conn:
+        try:
+            res = sa_conn.execute(
+                insert(_t_mcp_agent_devices).values(
+                    connection_id=conn_id,
+                    device_id=device_id,
+                    name=(request.name.strip() if request.name else None),
+                    ip=ip,
+                    port=port,
+                    model_tag=(request.model_tag.strip() if request.model_tag else None),
+                    face_enabled=1 if request.face_enabled else 0,
+                    last_seen=request.last_seen,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        except IntegrityError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"设备标识 {device_id} 在该智能体下已存在，不可重复",
+            )
+    new_id = res.inserted_primary_key[0]
+    row = _load_device_or_404(conn_id, new_id)
+    return {"success": True, "message": "设备已添加", "device": _serialize_device(row)}
+
+
+@router.put("/api/mcp/connections/{conn_id}/devices/{dev_id}")
+async def update_mcp_agent_device(
+    conn_id: str,
+    dev_id: int,
+    request: MCPAgentDeviceUpdateRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
+):
+    """更新某智能体下挂的物理设备（仅更新提供的字段）。"""
+    _assert_conn_in_tenant(conn_id, current_user)
+    existing = _load_device_or_404(conn_id, dev_id)
+    cur = dict(existing._mapping)
+
+    values = {}
+    if request.device_id is not None:
+        new_device_id = request.device_id.strip() or None
+        _ensure_device_id_unique(conn_id, new_device_id, exclude_dev_id=dev_id)
+        values['device_id'] = new_device_id
+    if request.name is not None:
+        values['name'] = request.name.strip() or None
+    if request.ip is not None or request.port is not None:
+        # 任一改动都要保证 (ip, port) 仍合法；用现有值兜底未提供的一方。
+        ip = request.ip if request.ip is not None else cur.get('ip')
+        port = request.port if request.port is not None else cur.get('port')
+        ip, port = _validate_device_fields(ip, port)
+        values['ip'] = ip
+        values['port'] = port
+    if request.model_tag is not None:
+        values['model_tag'] = request.model_tag.strip() or None
+    if request.face_enabled is not None:
+        values['face_enabled'] = 1 if request.face_enabled else 0
+    if request.last_seen is not None:
+        values['last_seen'] = request.last_seen
+
+    if values:
+        values['updated_at'] = datetime.now().isoformat()
+        with get_engine().begin() as sa_conn:
+            try:
+                sa_conn.execute(
+                    update(_t_mcp_agent_devices)
+                    .where(
+                        and_(
+                            _t_mcp_agent_devices.c.id == dev_id,
+                            _t_mcp_agent_devices.c.connection_id == conn_id,
+                        )
+                    )
+                    .values(**values)
+                )
+            except IntegrityError:
+                raise HTTPException(
+                    status_code=409,
+                    detail="设备标识在该智能体下已存在，不可重复",
+                )
+
+    row = _load_device_or_404(conn_id, dev_id)
+    return {"success": True, "message": "设备已更新", "device": _serialize_device(row)}
+
+
+@router.delete("/api/mcp/connections/{conn_id}/devices/{dev_id}")
+async def delete_mcp_agent_device(
+    conn_id: str,
+    dev_id: int,
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
+):
+    """删除某智能体下挂的物理设备。"""
+    _assert_conn_in_tenant(conn_id, current_user)
+    _load_device_or_404(conn_id, dev_id)
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            delete(_t_mcp_agent_devices).where(
+                and_(
+                    _t_mcp_agent_devices.c.id == dev_id,
+                    _t_mcp_agent_devices.c.connection_id == conn_id,
+                )
+            )
+        )
+    return {"success": True, "message": "设备已删除"}

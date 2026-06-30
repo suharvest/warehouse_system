@@ -573,6 +573,28 @@ def init_database():
         )
     ''')
 
+    # 智能体下挂的物理设备子表（一对多）：每行一个物理设备，配 LAN IP / NPU 模型标签，
+    # 供后续"云端下发人脸库到设备"按 model_tag 过滤后推到 ip:port。
+    # connection_id ON DELETE CASCADE：智能体删了设备记录跟着删。
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mcp_agent_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id TEXT NOT NULL,
+            device_id TEXT,
+            name TEXT,
+            ip TEXT,
+            port INTEGER NOT NULL DEFAULT 80,
+            model_tag TEXT,
+            face_enabled INTEGER NOT NULL DEFAULT 0,
+            last_seen TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(connection_id) REFERENCES mcp_connections(id) ON DELETE CASCADE,
+            UNIQUE(connection_id, device_id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_agent_devices_connection ON mcp_agent_devices(connection_id)')
+
     # ============================================
     # 人脸识别 + 权限校验（Phase 1，仅对 MCP tool 生效）
     # ============================================
