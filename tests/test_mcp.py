@@ -431,13 +431,11 @@ class TestMCPAgentDeviceCRUD:
             "ip": "192.168.1.50",
             "port": 8080,
             "model_tag": "mobilefacenet_v1",
-            "face_enabled": True,
         })
         assert r.status_code == 200, r.text
         dev = r.json()["device"]
         assert dev["ip"] == "192.168.1.50"
         assert dev["port"] == 8080
-        assert dev["face_enabled"] is True
         dev_id = dev["id"]
 
         # 列表
@@ -446,12 +444,11 @@ class TestMCPAgentDeviceCRUD:
 
         # 更新
         r = admin_client.put(f"/api/mcp/connections/{conn_id}/devices/{dev_id}", json={
-            "ip": "10.0.0.9", "port": 80, "face_enabled": False,
+            "ip": "10.0.0.9", "port": 80,
         })
         assert r.status_code == 200, r.text
         dev = r.json()["device"]
         assert dev["ip"] == "10.0.0.9" and dev["port"] == 80
-        assert dev["face_enabled"] is False
 
         # 删除
         r = admin_client.delete(f"/api/mcp/connections/{conn_id}/devices/{dev_id}")
@@ -534,7 +531,8 @@ class TestPushFacesToDevice:
         return sid
 
     def _add_device(self, admin_client, conn_id, **kw):
-        body = {"ip": "127.0.0.1", "port": 80, "face_enabled": True}
+        # face_enabled gate 已移除：设备不带该字段也能下发（DB 列废弃，默认 0）。
+        body = {"ip": "127.0.0.1", "port": 80}
         body.update(kw)
         r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json=body)
         assert r.status_code == 200, r.text
@@ -651,11 +649,90 @@ class TestPushFacesToDevice:
         assert data["success"] is False
         assert data.get("error")
 
-    def test_push_face_disabled_rejected(self, admin_client):
-        conn_id = self._make_conn(admin_client)
-        dev_id = self._add_device(admin_client, conn_id, face_enabled=False)
-        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
-        assert r.status_code == 400
+    def test_push_allowed_for_any_device_no_face_gate(self, admin_client):
+        """face_enabled gate 已移除：任意设备（不带/曾经 disabled）都能下发。
+
+        以前 face_enabled=0 会被 400 拒；现在只要有 IP 就能推，且真的 POST 到设备。
+        """
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+        self._enroll(admin_client, "NoGate", DEVICE_FACE_MODEL_TAG, [1.0, 0.0, 0.0])
+
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                captured["body"] = _json.loads(self.rfile.read(n))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            conn_id = self._make_conn(admin_client)
+            # 设备不带 face_enabled（DB 列废弃，默认 0）——以前会被 400 拒。
+            dev_id = self._add_device(admin_client, conn_id, port=port)
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["success"] is True, data
+            th.join(timeout=5)
+            # 证明确实 POST 到了设备。
+            assert captured.get("body", {}).get("model_tag") == DEVICE_FACE_MODEL_TAG
+        finally:
+            srv.server_close()
+
+    def test_push_over_limit_rejected_without_posting(self, admin_client):
+        """人脸库 >20 张时服务端拒绝：success=false + 超限错误信息，且不 POST 到设备。"""
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG, MAX_PUSH_FACES
+        # 入库 MAX_PUSH_FACES + 1 张同 model_tag 的人脸，触发上限。
+        # 记录 subject id，测试末尾清理，避免 session 级 sqlite 共享库污染后续测试。
+        sids = []
+        for i in range(MAX_PUSH_FACES + 1):
+            vec = [0.0, 0.0, 0.0]
+            vec[i % 3] = 1.0 + i  # 互不相同，避免被去重/合并
+            sids.append(self._enroll(admin_client, f"Over-{uuid.uuid4().hex[:6]}", DEVICE_FACE_MODEL_TAG, vec))
+
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured["called"] = True
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            conn_id = self._make_conn(admin_client)
+            dev_id = self._add_device(admin_client, conn_id, port=port)
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["success"] is False, data
+            assert str(MAX_PUSH_FACES) in data.get("error", ""), data
+            assert "超过设备上限" in data.get("error", ""), data
+        finally:
+            srv.server_close()
+            # 清理本测试入库的人脸，避免污染 session 共享的 sqlite 人脸库。
+            for sid in sids:
+                admin_client.delete(f"/api/face/subjects/{sid}")
+        # 关键：拒绝发生在 POST 之前，设备从未被调用。
+        assert "called" not in captured, "over-limit push must NOT POST to device"
 
     def test_push_unknown_connection_404(self, admin_client):
         r = admin_client.post("/api/mcp/connections/nope1234/devices/1/push-faces")
