@@ -30,3 +30,43 @@ class TestFaceSmokeRoutes:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert isinstance(data, list)
+
+
+import base64 as _b64
+import struct as _struct
+
+
+def _emb_b64(vec):
+    return _b64.b64encode(b"".join(_struct.pack("<f", x) for x in vec)).decode()
+
+
+class TestFaceLibraryModelTagFilter:
+    """/api/face/library?model_tag=… returns only that model's enrollments."""
+
+    def _enroll(self, admin_client, name, model_tag, vec):
+        sid = admin_client.post("/api/face/subjects", json={"name": name}).json()["id"]
+        r = admin_client.post("/api/face/enrollments", json={
+            "subject_id": sid,
+            "embeddings": [{"embedding_b64": _emb_b64(vec), "model_tag": model_tag}],
+        })
+        assert r.status_code == 200, r.text
+        return sid
+
+    def test_library_unfiltered_returns_all_models(self, admin_client):
+        self._enroll(admin_client, "LibA", "lib-mt-A", [1.0, 0.0, 0.0])
+        self._enroll(admin_client, "LibB", "lib-mt-B", [0.0, 1.0, 0.0])
+        resp = admin_client.get("/api/face/library")
+        assert resp.status_code == 200, resp.text
+        tags = {e["model_tag"] for e in resp.json()}
+        assert "lib-mt-A" in tags and "lib-mt-B" in tags
+
+    def test_library_filtered_returns_one_model(self, admin_client):
+        self._enroll(admin_client, "LibA", "lib-mt-A", [1.0, 0.0, 0.0])
+        self._enroll(admin_client, "LibB", "lib-mt-B", [0.0, 1.0, 0.0])
+        resp = admin_client.get("/api/face/library?model_tag=lib-mt-A")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data, "expected at least one mt-A enrollment"
+        assert all(e["model_tag"] == "lib-mt-A" for e in data)
+        names = {e["name"] for e in data}
+        assert "LibA" in names and "LibB" not in names

@@ -356,23 +356,22 @@ async def face_list_enrollments(
     return out
 
 
-@router.get("/api/face/library")
-async def face_library(
-    tenant_id: Optional[int] = None,
-    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
-):
-    """Export the face library for on-device sync.
+def build_face_library(tid: int, model_tag: Optional[str] = None) -> List[dict]:
+    """Build the per-tenant face library (active subjects × active enrollments).
 
-    Returns ``[{name, subject_id, embedding_b64, model_tag}]`` — active subjects
-    joined with their active enrollments, embedding bytes base64-encoded. xiaozhi
-    pulls this and pushes each entry to the device-local DB via ``self.face.add``
-    so passive greeting recognizes the same people the face check authorizes. The
-    device persists ``subject_id`` alongside ``name`` and returns it via
-    ``self.conversation.speaker`` so session-mode verify can locate the subject
-    without name ambiguity. Same auth (FACE/WRITE) as verify-mcp, so the MCP
-    api_key can call it.
+    Returns ``[{name, subject_id, embedding_b64, model_tag}]``. When ``model_tag``
+    is given, only enrollments produced by that embedding model are returned —
+    embeddings live in different vector spaces per model, so mixing them across
+    model_tags would corrupt on-device matching. Shared by the ``/api/face/library``
+    export route and the MCP "push faces to device" flow.
     """
-    tid = _face_resolve_tenant(current_user, tenant_id)
+    preds = [
+        _t_face_enrollments.c.tenant_id == tid,
+        _t_face_enrollments.c.is_active == 1,
+        _t_face_subjects.c.is_active == 1,
+    ]
+    if model_tag is not None:
+        preds.append(_t_face_enrollments.c.model_tag == model_tag)
     stmt = (
         select(
             _t_face_subjects.c.name,
@@ -386,11 +385,7 @@ async def face_library(
                 _t_face_subjects.c.id == _t_face_enrollments.c.subject_id,
             )
         )
-        .where(and_(
-            _t_face_enrollments.c.tenant_id == tid,
-            _t_face_enrollments.c.is_active == 1,
-            _t_face_subjects.c.is_active == 1,
-        ))
+        .where(and_(*preds))
     )
     with get_engine().connect() as sa_conn:
         rows = sa_conn.execute(stmt).fetchall()
@@ -405,6 +400,30 @@ async def face_library(
             "model_tag": r.model_tag,
         })
     return out
+
+
+@router.get("/api/face/library")
+async def face_library(
+    tenant_id: Optional[int] = None,
+    model_tag: Optional[str] = None,
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
+):
+    """Export the face library for on-device sync.
+
+    Returns ``[{name, subject_id, embedding_b64, model_tag}]`` — active subjects
+    joined with their active enrollments, embedding bytes base64-encoded. xiaozhi
+    pulls this and pushes each entry to the device-local DB via ``self.face.add``
+    so passive greeting recognizes the same people the face check authorizes. The
+    device persists ``subject_id`` alongside ``name`` and returns it via
+    ``self.conversation.speaker`` so session-mode verify can locate the subject
+    without name ambiguity. Same auth (FACE/WRITE) as verify-mcp, so the MCP
+    api_key can call it.
+
+    Optional ``model_tag`` filters to enrollments from a single embedding model;
+    omit it to keep the legacy (unfiltered) behaviour.
+    """
+    tid = _face_resolve_tenant(current_user, tenant_id)
+    return build_face_library(tid, model_tag=model_tag)
 
 
 @router.post("/api/face/enrollments")

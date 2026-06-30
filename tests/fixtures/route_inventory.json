@@ -672,6 +672,14 @@
     "tags": []
   },
   {
+    "method": "POST",
+    "name": "push_faces_to_device",
+    "path": "/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "GET",
     "name": "get_mcp_connection_logs",
     "path": "/api/mcp/connections/{conn_id}/logs",

@@ -498,3 +498,112 @@ class TestMCPAgentDeviceCRUD:
         ).fetchone()[0]
         c.close()
         assert n == 0
+
+
+import base64 as _b64
+import json as _json
+import struct as _struct
+import threading as _threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+def _emb_b64(vec):
+    return _b64.b64encode(b"".join(_struct.pack("<f", x) for x in vec)).decode()
+
+
+class TestPushFacesToDevice:
+    """云端下发人脸库到设备：按 model_tag 过滤 + POST batch-update + 失败清晰。"""
+
+    def _make_conn(self, admin_client):
+        resp = admin_client.post("/api/mcp/connections", json={
+            "name": f"PushHost {uuid.uuid4().hex[:6]}",
+            "mcp_endpoint": f"http://localhost:9200/{uuid.uuid4().hex[:6]}",
+            "role": "operate",
+            "auto_start": False,
+        })
+        assert resp.status_code == 200, resp.text
+        return resp.json()["connection"]["id"]
+
+    def _enroll(self, admin_client, name, model_tag, vec):
+        sid = admin_client.post("/api/face/subjects", json={"name": name}).json()["id"]
+        r = admin_client.post("/api/face/enrollments", json={
+            "subject_id": sid,
+            "embeddings": [{"embedding_b64": _emb_b64(vec), "model_tag": model_tag}],
+        })
+        assert r.status_code == 200, r.text
+        return sid
+
+    def _add_device(self, admin_client, conn_id, **kw):
+        body = {"ip": "127.0.0.1", "port": 80, "face_enabled": True}
+        body.update(kw)
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json=body)
+        assert r.status_code == 200, r.text
+        return r.json()["device"]["id"]
+
+    def test_push_filters_by_model_tag_and_posts_payload(self, admin_client):
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+        # Only enrollments tagged with the fixed device model go out; the other
+        # vector space (push-other) must be excluded.
+        self._enroll(admin_client, "Alice", DEVICE_FACE_MODEL_TAG, [1.0, 0.0, 0.0])
+        self._enroll(admin_client, "Bob", "push-other", [0.0, 1.0, 0.0])
+
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                captured["path"] = self.path
+                captured["body"] = _json.loads(self.rfile.read(n))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true, "applied": 1}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+            conn_id = self._make_conn(admin_client)
+            # Device row carries a DIFFERENT model_tag on purpose — the endpoint
+            # must ignore it and use the fixed DEVICE_FACE_MODEL_TAG constant.
+            dev_id = self._add_device(admin_client, conn_id, port=port, model_tag="device-col-ignored")
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["success"] is True, data
+            assert data["pushed_count"] == 1, data
+            assert data["model_tag"] == DEVICE_FACE_MODEL_TAG, data
+            assert data["device_response"] == {"ok": True, "applied": 1}
+            th.join(timeout=5)
+            assert captured["path"] == "/api/face/batch-update"
+            assert captured["body"]["model_tag"] == DEVICE_FACE_MODEL_TAG
+            faces = captured["body"]["faces"]
+            assert [f["name"] for f in faces] == ["Alice"]
+            assert all({"name", "subject_id", "embedding_b64"} <= set(f) for f in faces)
+        finally:
+            srv.server_close()
+
+    def test_push_unreachable_device_returns_fail(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+        # Port 1 is not listening → connection refused → success:False, not silent.
+        dev_id = self._add_device(admin_client, conn_id, port=1, model_tag="push-mt-A")
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["success"] is False
+        assert data.get("error")
+
+    def test_push_face_disabled_rejected(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+        dev_id = self._add_device(admin_client, conn_id, face_enabled=False)
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+        assert r.status_code == 400
+
+    def test_push_unknown_connection_404(self, admin_client):
+        r = admin_client.post("/api/mcp/connections/nope1234/devices/1/push-faces")
+        assert r.status_code == 404
