@@ -30,6 +30,9 @@ async function mcpFetch(url, options = {}) {
 // 状态
 let connections = [];
 let refreshInterval = null;
+// 设备子面板状态：connId -> { devices: [...] }；openDevicePanels 记录哪些智能体的设备区已展开。
+let deviceState = {};
+const openDevicePanels = new Set();
 
 // ============ 加载连接列表 ============
 export async function loadMCPConnections() {
@@ -95,8 +98,22 @@ function renderConnections() {
                 <td class="text-sm text-gray-500">${conn.auto_start ? t('mcpAutoStartYes') : t('mcpAutoStartNo')}</td>
                 <td>${actions}</td>
             </tr>
+            <tr class="mcp-device-detail-row" id="mcp-devices-row-${conn.id}" style="display:none;">
+                <td colspan="${colSpan}" style="background:#f9fafb;padding:0;border-top:none;">
+                    <div id="mcp-devices-panel-${conn.id}" style="padding:12px 16px;"></div>
+                </td>
+            </tr>
         `;
     }).join('');
+
+    // 自动刷新会重建 tbody，把已展开的设备区抹掉。重新展开此前打开的面板。
+    openDevicePanels.forEach(cid => {
+        const row = document.getElementById(`mcp-devices-row-${cid}`);
+        if (!row) { openDevicePanels.delete(cid); return; }
+        row.style.display = '';
+        if (deviceState[cid]) renderDevicePanel(cid);
+        else loadDevices(cid);
+    });
 }
 
 function getStatusIcon(status) {
@@ -158,6 +175,9 @@ function getConnectionActions(conn) {
         actions.push(`<button class="action-btn delete-btn" data-action="mcpDelete" data-conn-id="${conn.id}" title="${t('delete')}">${t('delete')}</button>`);
     }
     actions.push(`<button class="action-btn" data-action="mcpEdit" data-conn-id="${conn.id}" title="${t('edit')}">${t('edit')}</button>`);
+    const devCount = deviceState[conn.id]?.devices?.length;
+    const devLabel = devCount ? `${t('mcpDevices')} (${devCount})` : t('mcpDevices');
+    actions.push(`<button class="action-btn" data-action="mcpDevices" data-conn-id="${conn.id}" title="${t('mcpDeviceList')}">${devLabel}</button>`);
     return `<div class="flex gap-2 flex-wrap">${actions.join('')}</div>`;
 }
 
@@ -364,10 +384,174 @@ export async function toggleMCPDebug(connId, enable) {
     }
 }
 
+// ============ 智能体下挂的物理设备（一对多子表）============
+async function deviceFetch(connId, path = '', options = {}) {
+    return mcpFetch(`/mcp/connections/${connId}/devices${path}`, options);
+}
+
+export async function toggleMCPDevices(connId) {
+    const row = document.getElementById(`mcp-devices-row-${connId}`);
+    if (!row) return;
+    const showing = row.style.display !== 'none';
+    if (showing) {
+        row.style.display = 'none';
+        openDevicePanels.delete(connId);
+        return;
+    }
+    row.style.display = '';
+    openDevicePanels.add(connId);
+    await loadDevices(connId);
+}
+
+async function loadDevices(connId) {
+    const panel = document.getElementById(`mcp-devices-panel-${connId}`);
+    if (!panel) return;
+    panel.innerHTML = `<div class="text-sm text-gray-400">...</div>`;
+    try {
+        const devices = await deviceFetch(connId);
+        deviceState[connId] = { devices };
+        renderDevicePanel(connId);
+        updateDeviceButtonCount(connId);
+    } catch (error) {
+        console.error('加载设备失败:', error);
+        panel.innerHTML = `<div class="text-sm" style="color:#ef4444;">${escapeHtml(error.message || t('loadError'))}</div>`;
+    }
+}
+
+// 设备增删后即时刷新该智能体行上"设备"按钮的计数，无需等整表重渲染。
+function updateDeviceButtonCount(connId) {
+    const btn = document.querySelector(`button[data-action="mcpDevices"][data-conn-id="${connId}"]`);
+    if (!btn) return;
+    const n = deviceState[connId]?.devices?.length;
+    btn.textContent = n ? `${t('mcpDevices')} (${n})` : t('mcpDevices');
+}
+
+function renderDevicePanel(connId) {
+    const panel = document.getElementById(`mcp-devices-panel-${connId}`);
+    if (!panel) return;
+    const devices = deviceState[connId]?.devices || [];
+
+    const listHtml = devices.length === 0
+        ? `<div class="text-sm text-gray-400" style="padding:8px 0;">${t('mcpDeviceNone')}</div>`
+        : `<table style="width:100%;font-size:13px;margin-bottom:8px;">
+            <thead><tr style="text-align:left;color:#6b7280;">
+                <th style="padding:4px 8px;">${t('mcpDeviceName')}</th>
+                <th style="padding:4px 8px;">${t('mcpDeviceId')}</th>
+                <th style="padding:4px 8px;">${t('mcpDeviceIp')}</th>
+                <th style="padding:4px 8px;">${t('mcpDeviceModelTag')}</th>
+                <th style="padding:4px 8px;">${t('mcpDeviceFaceEnabled')}</th>
+                <th style="padding:4px 8px;">${t('actions')}</th>
+            </tr></thead>
+            <tbody>${devices.map(d => `
+                <tr>
+                    <td style="padding:4px 8px;">${escapeHtml(d.name || '-')}</td>
+                    <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.device_id || '-')}</td>
+                    <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.ip || '-')}:${d.port}</td>
+                    <td style="padding:4px 8px;">${escapeHtml(d.model_tag || '-')}</td>
+                    <td style="padding:4px 8px;">
+                        <span class="mcp-status-badge ${d.face_enabled ? 'connected' : 'stopped'}">${d.face_enabled ? t('mcpDeviceFaceOn') : t('mcpDeviceFaceOff')}</span>
+                    </td>
+                    <td style="padding:4px 8px;">
+                        <button class="action-btn" data-action="mcpDeviceEdit" data-conn-id="${connId}" data-dev-id="${d.id}">${t('edit')}</button>
+                        <button class="action-btn delete-btn" data-action="mcpDeviceDelete" data-conn-id="${connId}" data-dev-id="${d.id}">${t('delete')}</button>
+                    </td>
+                </tr>`).join('')}</tbody>
+           </table>`;
+
+    panel.innerHTML = `
+        <div style="font-weight:600;margin-bottom:8px;">${t('mcpDeviceList')}</div>
+        ${listHtml}
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;border-top:1px dashed #e5e7eb;padding-top:8px;">
+            <input type="hidden" id="dev-${connId}-id">
+            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceId')}</label>
+                <input type="text" id="dev-${connId}-deviceId" style="width:130px;" placeholder="MAC/SN"></div>
+            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceName')}</label>
+                <input type="text" id="dev-${connId}-name" style="width:110px;"></div>
+            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceIp')} *</label>
+                <input type="text" id="dev-${connId}-ip" style="width:120px;" placeholder="192.168.1.x"></div>
+            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDevicePort')}</label>
+                <input type="number" id="dev-${connId}-port" style="width:70px;" value="80" min="1" max="65535"></div>
+            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceModelTag')}</label>
+                <input type="text" id="dev-${connId}-modelTag" style="width:120px;"></div>
+            <label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="dev-${connId}-faceEnabled"> ${t('mcpDeviceFaceEnabled')}</label>
+            <button class="action-btn add-btn" data-action="mcpDeviceSave" data-conn-id="${connId}">${t('mcpDeviceSave')}</button>
+            <button class="action-btn" data-action="mcpDeviceCancelEdit" data-conn-id="${connId}" id="dev-${connId}-cancel" style="display:none;">${t('mcpDeviceCancel')}</button>
+            <div class="form-error" id="dev-${connId}-error" style="display:none;width:100%;"></div>
+        </div>`;
+}
+
+function _devInput(connId, field) {
+    return document.getElementById(`dev-${connId}-${field}`);
+}
+
+export async function saveMCPDevice(connId) {
+    const errorDiv = _devInput(connId, 'error');
+    const devId = _devInput(connId, 'id').value;
+    const ip = _devInput(connId, 'ip').value.trim();
+    if (!ip) {
+        errorDiv.textContent = t('mcpDeviceIpRequired');
+        errorDiv.style.display = 'block';
+        return;
+    }
+    const payload = {
+        device_id: _devInput(connId, 'deviceId').value.trim() || null,
+        name: _devInput(connId, 'name').value.trim() || null,
+        ip,
+        port: parseInt(_devInput(connId, 'port').value, 10) || 80,
+        model_tag: _devInput(connId, 'modelTag').value.trim() || null,
+        face_enabled: _devInput(connId, 'faceEnabled').checked,
+    };
+    try {
+        if (devId) {
+            await deviceFetch(connId, `/${devId}`, { method: 'PUT', body: JSON.stringify(payload) });
+        } else {
+            await deviceFetch(connId, '', { method: 'POST', body: JSON.stringify(payload) });
+        }
+        await loadDevices(connId);
+    } catch (error) {
+        console.error('保存设备失败:', error);
+        errorDiv.textContent = error.data?.detail || t('operationFailed');
+        errorDiv.style.display = 'block';
+    }
+}
+
+export function editMCPDevice(connId, devId) {
+    const dev = (deviceState[connId]?.devices || []).find(d => String(d.id) === String(devId));
+    if (!dev) return;
+    _devInput(connId, 'id').value = dev.id;
+    _devInput(connId, 'deviceId').value = dev.device_id || '';
+    _devInput(connId, 'name').value = dev.name || '';
+    _devInput(connId, 'ip').value = dev.ip || '';
+    _devInput(connId, 'port').value = dev.port || 80;
+    _devInput(connId, 'modelTag').value = dev.model_tag || '';
+    _devInput(connId, 'faceEnabled').checked = !!dev.face_enabled;
+    const cancelBtn = _devInput(connId, 'cancel');
+    if (cancelBtn) cancelBtn.style.display = '';
+}
+
+export function cancelEditMCPDevice(connId) {
+    renderDevicePanel(connId);
+}
+
+export async function deleteMCPDevice(connId, devId) {
+    const dev = (deviceState[connId]?.devices || []).find(d => String(d.id) === String(devId));
+    const name = dev ? (dev.name || dev.device_id || dev.ip || devId) : devId;
+    if (!confirm(t('mcpDeviceConfirmDelete').replace('{name}', name))) return;
+    try {
+        await deviceFetch(connId, `/${devId}`, { method: 'DELETE' });
+        await loadDevices(connId);
+    } catch (error) {
+        console.error('删除设备失败:', error);
+        alert(error.data?.detail || t('operationFailed'));
+    }
+}
+
 // ============ 自动刷新 ============
 export function startMCPRefresh() {
     stopMCPRefresh();
     refreshInterval = setInterval(() => {
+        // 设备区展开时跳过刷新，避免重建 tbody 抹掉正在编辑的设备表单。
+        if (openDevicePanels.size > 0) return;
         loadMCPConnections();
     }, 10000); // 每10秒刷新
 }
