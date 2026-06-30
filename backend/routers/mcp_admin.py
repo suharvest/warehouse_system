@@ -61,6 +61,9 @@ router = APIRouter()
 # keep this module free of imports from app.
 _VALID_ROLE_VALUES = {r.value for r in RoleName}
 
+# xiaozhi 设备 httpd 固件写死监听 80 端口，不由用户配置。
+DEVICE_HTTP_PORT = 80
+
 
 # ============ MCP 连接管理 ============
 
@@ -945,7 +948,7 @@ async def push_faces_to_device(
     ip = (dev.get("ip") or "").strip()
     if not ip:
         raise HTTPException(status_code=400, detail="设备缺少 IP，无法下发")
-    port = dev.get("port") or 80
+    port = DEVICE_HTTP_PORT  # 固件写死 80，不读 device.port
     # 固定模型标签：全设备同模型，不读 mcp_agent_devices.model_tag。
     model_tag = DEVICE_FACE_MODEL_TAG
 

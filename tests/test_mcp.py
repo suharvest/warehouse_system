@@ -538,7 +538,7 @@ class TestPushFacesToDevice:
         assert r.status_code == 200, r.text
         return r.json()["device"]["id"]
 
-    def test_push_filters_by_model_tag_and_posts_payload(self, admin_client):
+    def test_push_filters_by_model_tag_and_posts_payload(self, admin_client, monkeypatch):
         from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
         # Only enrollments tagged with the fixed device model go out; the other
         # vector space (push-other) must be excluded.
@@ -562,6 +562,8 @@ class TestPushFacesToDevice:
 
         srv = HTTPServer(("127.0.0.1", 0), _Handler)
         port = srv.server_address[1]
+        # push 端口固件写死 80；测试服务器在随机高端口，重定向常量到它。
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", port)
         th = _threading.Thread(target=srv.handle_request, daemon=True)
         th.start()
         try:
@@ -589,7 +591,7 @@ class TestPushFacesToDevice:
         finally:
             srv.server_close()
 
-    def test_push_quantizes_embedding_to_fp16(self, admin_client):
+    def test_push_quantizes_embedding_to_fp16(self, admin_client, monkeypatch):
         """push 路径把 canonical float32 embedding 量化为 fp16（128 维 → 256 字节），
         数值在 fp16 误差内与原 float32 一致；DB/library 仍是 float32。"""
         import numpy as _np
@@ -616,6 +618,7 @@ class TestPushFacesToDevice:
 
         srv = HTTPServer(("127.0.0.1", 0), _Handler)
         port = srv.server_address[1]
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", port)
         th = _threading.Thread(target=srv.handle_request, daemon=True)
         th.start()
         try:
@@ -639,17 +642,18 @@ class TestPushFacesToDevice:
         finally:
             srv.server_close()
 
-    def test_push_unreachable_device_returns_fail(self, admin_client):
-        conn_id = self._make_conn(admin_client)
+    def test_push_unreachable_device_returns_fail(self, admin_client, monkeypatch):
         # Port 1 is not listening → connection refused → success:False, not silent.
-        dev_id = self._add_device(admin_client, conn_id, port=1, model_tag="push-mt-A")
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", 1)
+        conn_id = self._make_conn(admin_client)
+        dev_id = self._add_device(admin_client, conn_id, model_tag="push-mt-A")
         r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
         assert r.status_code == 200, r.text
         data = r.json()
         assert data["success"] is False
         assert data.get("error")
 
-    def test_push_allowed_for_any_device_no_face_gate(self, admin_client):
+    def test_push_allowed_for_any_device_no_face_gate(self, admin_client, monkeypatch):
         """face_enabled gate 已移除：任意设备（不带/曾经 disabled）都能下发。
 
         以前 face_enabled=0 会被 400 拒；现在只要有 IP 就能推，且真的 POST 到设备。
@@ -673,6 +677,7 @@ class TestPushFacesToDevice:
 
         srv = HTTPServer(("127.0.0.1", 0), _Handler)
         port = srv.server_address[1]
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", port)
         th = _threading.Thread(target=srv.handle_request, daemon=True)
         th.start()
         try:
