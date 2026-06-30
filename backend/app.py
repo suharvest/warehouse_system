@@ -1305,7 +1305,9 @@ async def setup_admin(request: SetupRequest, response: Response):
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-@limiter.limit("5/minute")  # 登录接口速率限制：每分钟5次
+@limiter.limit("20/minute")  # 登录限流：放宽到 20/分钟。原 5/分钟对多终端、同一出口 IP(NAT)
+# 下多操作员、以及会话过期后的页面自动重登 + 手动重试太严，正常使用就会撞 429；20/分钟
+# 仍能挡住暴力破解（每分钟至多 20 次猜测），同时不误伤正常登录。
 async def login(request: Request, login_data: LoginRequest, response: Response):
     """用户登录"""
     user_stmt = select(
