@@ -438,7 +438,6 @@ function renderDevicePanel(connId) {
                 <th style="padding:4px 8px;">${t('mcpDeviceName')}</th>
                 <th style="padding:4px 8px;">${t('mcpDeviceId')}</th>
                 <th style="padding:4px 8px;">${t('mcpDeviceIp')}</th>
-                <th style="padding:4px 8px;">${t('mcpDeviceFaceEnabled')}</th>
                 <th style="padding:4px 8px;">${t('actions')}</th>
             </tr></thead>
             <tbody>${devices.map(d => `
@@ -447,10 +446,7 @@ function renderDevicePanel(connId) {
                     <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.device_id || '-')}</td>
                     <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.ip || '-')}:${d.port}</td>
                     <td style="padding:4px 8px;">
-                        <span class="mcp-status-badge ${d.face_enabled ? 'connected' : 'stopped'}">${d.face_enabled ? t('mcpDeviceFaceOn') : t('mcpDeviceFaceOff')}</span>
-                    </td>
-                    <td style="padding:4px 8px;">
-                        ${d.face_enabled ? `<button class="action-btn add-btn" data-action="mcpDevicePushFaces" data-conn-id="${connId}" data-dev-id="${d.id}">${t('mcpDevicePushFaces')}</button>` : ''}
+                        <button class="action-btn add-btn" data-action="mcpDevicePushFaces" data-conn-id="${connId}" data-dev-id="${d.id}">${t('mcpDevicePushFaces')}</button>
                         <button class="action-btn" data-action="mcpDeviceEdit" data-conn-id="${connId}" data-dev-id="${d.id}">${t('edit')}</button>
                         <button class="action-btn delete-btn" data-action="mcpDeviceDelete" data-conn-id="${connId}" data-dev-id="${d.id}">${t('delete')}</button>
                     </td>
@@ -486,7 +482,6 @@ function openDeviceModal(connId, dev) {
     document.getElementById('mcp-device-name').value = dev?.name ?? '';
     document.getElementById('mcp-device-ip').value = dev?.ip ?? '';
     document.getElementById('mcp-device-port').value = dev?.port ?? 80;
-    document.getElementById('mcp-device-faceEnabled').checked = !!dev?.face_enabled;
     modal.classList.add('show');
 }
 
@@ -522,7 +517,6 @@ export async function saveMCPDevice() {
         name: document.getElementById('mcp-device-name').value.trim() || null,
         ip,
         port: parseInt(document.getElementById('mcp-device-port').value, 10) || 80,
-        face_enabled: document.getElementById('mcp-device-faceEnabled').checked,
     };
     try {
         if (devId) {
