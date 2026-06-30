@@ -315,7 +315,6 @@ const translations = {
         mcpDeviceName: '显示名',
         mcpDeviceIp: 'IP 地址',
         mcpDevicePort: '端口',
-        mcpDeviceModelTag: '模型标签',
         mcpDeviceFaceEnabled: '人脸下发',
         mcpDeviceFaceOn: '已开启',
         mcpDeviceFaceOff: '未开启',
@@ -324,6 +323,10 @@ const translations = {
         mcpDeviceCancel: '取消',
         mcpDeviceConfirmDelete: '确定删除设备 "{name}" 吗？',
         mcpDeviceIpRequired: 'IP 地址不能为空',
+        mcpDevicePushFaces: '下发人脸',
+        mcpDevicePushing: '下发中…',
+        mcpDevicePushSuccess: '已向设备 "{name}" 下发 {count} 条人脸',
+        mcpDevicePushFailed: '向设备 "{name}" 下发失败：{error}',
 
         // 批次
         batchDetail: '批次明细',
@@ -872,7 +875,6 @@ const translations = {
         mcpDeviceName: 'Display Name',
         mcpDeviceIp: 'IP Address',
         mcpDevicePort: 'Port',
-        mcpDeviceModelTag: 'Model Tag',
         mcpDeviceFaceEnabled: 'Face Sync',
         mcpDeviceFaceOn: 'On',
         mcpDeviceFaceOff: 'Off',
@@ -881,6 +883,10 @@ const translations = {
         mcpDeviceCancel: 'Cancel',
         mcpDeviceConfirmDelete: 'Delete device "{name}"?',
         mcpDeviceIpRequired: 'IP address is required',
+        mcpDevicePushFaces: 'Push Faces',
+        mcpDevicePushing: 'Pushing…',
+        mcpDevicePushSuccess: 'Pushed {count} face(s) to device "{name}"',
+        mcpDevicePushFailed: 'Failed to push to device "{name}": {error}',
 
         // Batch
         batchDetail: 'Batch Details',
