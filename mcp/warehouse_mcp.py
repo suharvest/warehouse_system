@@ -889,8 +889,11 @@ def move_batch_location(batch_no: str, new_location: str,
     if blocked is not None:
         return blocked
     try:
+        # 该工具有意不暴露 from_location / product_name（batch_no 已足够定位），
+        # provider 对应参数默认为 None。此前误传了未定义的 from_location/product_name
+        # 名字，触发 NameError → 批次移位永远失败。
         return _provider.move_batch_location(
-            batch_no, new_location, quantity, from_location, product_name, operator
+            batch_no, new_location, quantity, operator=operator
         )
     except Exception as e:
         return _tool_error("批次移位", e)
