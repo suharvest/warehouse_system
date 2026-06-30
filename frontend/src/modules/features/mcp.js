@@ -431,31 +431,40 @@ function renderDevicePanel(connId) {
     if (!panel) return;
     const devices = deviceState[connId]?.devices || [];
 
+    // 子表沿用全局表格基础样式（th/td 的 py-4 px-6、text-sm、分隔线、thead 背景），
+    // 不再用紧凑的硬编码内联 padding，以与父级智能体表保持一致的节奏。
     const listHtml = devices.length === 0
-        ? `<div class="text-sm text-gray-400" style="padding:8px 0;">${t('mcpDeviceNone')}</div>`
-        : `<table style="width:100%;font-size:13px;margin-bottom:8px;">
-            <thead><tr style="text-align:left;color:#6b7280;">
-                <th style="padding:4px 8px;">${t('mcpDeviceName')}</th>
-                <th style="padding:4px 8px;">${t('mcpDeviceId')}</th>
-                <th style="padding:4px 8px;">${t('mcpDeviceIp')}</th>
-                <th style="padding:4px 8px;">${t('actions')}</th>
+        ? `<div class="text-sm text-gray-400" style="padding:12px 0;">${t('mcpDeviceNone')}</div>`
+        : `<div class="table-container" style="margin-bottom:4px;background:transparent;box-shadow:none;">
+            <table style="table-layout:fixed;">
+            <colgroup>
+                <col style="width:24%;">
+                <col style="width:26%;">
+                <col style="width:22%;">
+                <col style="width:28%;">
+            </colgroup>
+            <thead><tr>
+                <th>${t('mcpDeviceName')}</th>
+                <th>${t('mcpDeviceId')}</th>
+                <th>${t('mcpDeviceIp')}</th>
+                <th>${t('actions')}</th>
             </tr></thead>
             <tbody>${devices.map(d => `
                 <tr>
-                    <td style="padding:4px 8px;">${escapeHtml(d.name || '-')}</td>
-                    <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.device_id || '-')}</td>
-                    <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.ip || '-')}:${d.port}</td>
-                    <td style="padding:4px 8px;">
+                    <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.name || '-')}</td>
+                    <td style="font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.device_id || '-')}</td>
+                    <td style="font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.ip || '-')}:${d.port}</td>
+                    <td style="white-space:nowrap;">
                         <button class="action-btn add-btn" data-action="mcpDevicePushFaces" data-conn-id="${connId}" data-dev-id="${d.id}">${t('mcpDevicePushFaces')}</button>
                         <button class="action-btn" data-action="mcpDeviceEdit" data-conn-id="${connId}" data-dev-id="${d.id}">${t('edit')}</button>
                         <button class="action-btn delete-btn" data-action="mcpDeviceDelete" data-conn-id="${connId}" data-dev-id="${d.id}">${t('delete')}</button>
                     </td>
                 </tr>`).join('')}</tbody>
-           </table>`;
+           </table></div>`;
 
     panel.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
-            <div style="font-weight:600;">${t('mcpDeviceList')}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px;">
+            <div class="font-medium" style="font-size:15px;">${t('mcpDeviceList')}</div>
             <button class="action-btn add-btn" data-action="mcpDeviceAdd" data-conn-id="${connId}">${t('mcpDeviceAdd')}</button>
         </div>
         ${listHtml}`;
