@@ -11,11 +11,13 @@ worker deployments stay isolated.
 
 Follow bare-module import style (no ``from backend.X``).
 """
+import base64
 import uuid
 from datetime import datetime
 from typing import Optional
 
 import httpx
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -872,6 +874,53 @@ _PUSH_FACES_TIMEOUT = 10.0
 # 保留作未来多模型扩展，现阶段不对用户暴露、不参与下发）。
 DEVICE_FACE_MODEL_TAG = "mobilefacenet-128-v1"
 
+# ---- Embedding 量化（仅 push 路径） -------------------------------------
+#
+# DB（face_enrollments.embedding）与 /api/face/library 始终是 **canonical 满精度
+# 源**：512 字节 float32 LE（128 维）。下发到设备时为省带宽/设备存储做量化，
+# 量化**只在此 push 路径发生**，不回写 DB、不改 library 默认输出。
+#
+# 线缆契约：payload 带 ``embedding_format`` 字段，设备据此解码：
+#   - "float32": 每条 512 字节 = 128 × IEEE-754 binary32 LE（原样，不量化）
+#   - "fp16":    每条 256 字节 = 128 × IEEE-754 binary16 LE
+#   - "int8":    （未来）每条 128 字节 + per-vector scale，尚未实现
+#
+# 一处切换：改 DEVICE_EMBEDDING_FORMAT 即可切换全设备下发格式（设备侧需同步）。
+DEVICE_EMBEDDING_FORMAT = "fp16"
+
+
+def quantize_embedding(f32_bytes: bytes, fmt: str) -> bytes:
+    """把 canonical float32 embedding 字节量化为目标线缆格式的字节。
+
+    可插拔 dispatch 设计：新增量化格式只需在此加一个分支并扩展上面的契约
+    注释 + 设备侧解码，push 路径与测试无需改动。
+
+    Args:
+        f32_bytes: 128 × IEEE-754 binary32 LE = 512 字节（DB canonical 源）。
+        fmt: 目标格式，见 DEVICE_EMBEDDING_FORMAT 注释。
+
+    Returns:
+        量化后的原始字节（小端）。
+
+    Raises:
+        NotImplementedError: 目标格式尚未实现（如 int8）。
+        ValueError: 未知格式。
+    """
+    if fmt == "float32":
+        # 原样透传：canonical 源已是 float32 LE。
+        return f32_bytes
+    if fmt == "fp16":
+        vec = np.frombuffer(f32_bytes, dtype="<f4")
+        return vec.astype("<f2").tobytes()
+    if fmt == "int8":
+        # 占位：int8 量化需要 per-vector scale（如 max(abs) / 127）随每条
+        # embedding 一起下发，设备侧反量化时 dequant = q.astype(f32) * scale。
+        # 线缆契约届时需扩展 face 项（embedding_b64=128 字节 + scale 字段）。
+        raise NotImplementedError(
+            "int8 量化尚未实现：需要 per-vector scale 且线缆契约要带 scale 字段"
+        )
+    raise ValueError(f"未知 embedding_format: {fmt!r}")
+
 
 @router.post("/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
 async def push_faces_to_device(
@@ -901,11 +950,19 @@ async def push_faces_to_device(
     from routers.face import build_face_library
     tid = conn_row.tenant_id if hasattr(conn_row, "tenant_id") else dict(conn_row._mapping).get("tenant_id")
     library = build_face_library(tid, model_tag=model_tag)
-    faces = [
-        {"name": e["name"], "subject_id": e["subject_id"], "embedding_b64": e["embedding_b64"]}
-        for e in library
-    ]
-    payload = {"model_tag": model_tag, "faces": faces}
+    # build_face_library 返回 canonical float32 的 embedding_b64；下发前按
+    # DEVICE_EMBEDDING_FORMAT 量化（解码 → 量化 → 重新 base64），library/DB 不变。
+    fmt = DEVICE_EMBEDDING_FORMAT
+    faces = []
+    for e in library:
+        f32_bytes = base64.b64decode(e["embedding_b64"])
+        emb_bytes = quantize_embedding(f32_bytes, fmt)
+        faces.append({
+            "name": e["name"],
+            "subject_id": e["subject_id"],
+            "embedding_b64": base64.b64encode(emb_bytes).decode(),
+        })
+    payload = {"model_tag": model_tag, "embedding_format": fmt, "faces": faces}
 
     url = f"http://{ip}:{port}/api/face/batch-update"
     # trust_env=False：设备在 LAN 内，必须直连其 IP，绝不能走系统/环境代理
