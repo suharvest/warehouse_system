@@ -582,9 +582,62 @@ class TestPushFacesToDevice:
             th.join(timeout=5)
             assert captured["path"] == "/api/face/batch-update"
             assert captured["body"]["model_tag"] == DEVICE_FACE_MODEL_TAG
+            # 下发线缆契约：必须声明 embedding_format（量化只在 push 路径发生）。
+            from routers.mcp_admin import DEVICE_EMBEDDING_FORMAT
+            assert captured["body"]["embedding_format"] == DEVICE_EMBEDDING_FORMAT == "fp16"
             faces = captured["body"]["faces"]
             assert [f["name"] for f in faces] == ["Alice"]
             assert all({"name", "subject_id", "embedding_b64"} <= set(f) for f in faces)
+        finally:
+            srv.server_close()
+
+    def test_push_quantizes_embedding_to_fp16(self, admin_client):
+        """push 路径把 canonical float32 embedding 量化为 fp16（128 维 → 256 字节），
+        数值在 fp16 误差内与原 float32 一致；DB/library 仍是 float32。"""
+        import numpy as _np
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG, DEVICE_EMBEDDING_FORMAT
+
+        # 已知 128 维 float32 向量（非平凡值，覆盖 fp16 舍入）。
+        rng = _np.random.default_rng(42)
+        known = rng.standard_normal(128).astype("<f4")
+        self._enroll(admin_client, "Quant", DEVICE_FACE_MODEL_TAG, known.tolist())
+
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                captured["body"] = _json.loads(self.rfile.read(n))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            conn_id = self._make_conn(admin_client)
+            dev_id = self._add_device(admin_client, conn_id, port=port)
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            assert r.json()["success"] is True
+            th.join(timeout=5)
+            body = captured["body"]
+            assert body["embedding_format"] == DEVICE_EMBEDDING_FORMAT == "fp16"
+            # 同 model_tag 下可能有其它测试残留的人脸，按名字精确取本测试这条。
+            face = next(f for f in body["faces"] if f["name"] == "Quant")
+            raw = _b64.b64decode(face["embedding_b64"])
+            # fp16: 128 × binary16 LE = 256 字节（float32 会是 512）。
+            assert len(raw) == 256, len(raw)
+            roundtrip = _np.frombuffer(raw, dtype="<f2").astype("<f4")
+            assert _np.allclose(roundtrip, known, rtol=1e-2, atol=1e-3), (
+                roundtrip[:4], known[:4],
+            )
         finally:
             srv.server_close()
 
