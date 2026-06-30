@@ -77,12 +77,12 @@ function renderConnections() {
 
         return `
             <tr>
-                <td>
+                <td style="max-width:220px;">
                     <div class="flex items-center gap-2">
                         <span class="mcp-status-dot ${conn.status}">${statusIcon}</span>
-                        <div>
-                            <div class="font-medium">${escapeHtml(conn.name)}</div>
-                            <div class="text-xs text-gray-400">${maskedEndpoint}</div>
+                        <div style="min-width:0;">
+                            <div class="font-medium" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(conn.name)}</div>
+                            <div class="text-xs text-gray-400" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(conn.mcp_endpoint || '')}">${maskedEndpoint}</div>
                         </div>
                     </div>
                 </td>
@@ -96,7 +96,7 @@ function renderConnections() {
                 </td>
                 <td class="text-sm text-gray-500">${conn.uptime_seconds ? formatUptime(conn.uptime_seconds) : '-'}</td>
                 <td class="text-sm text-gray-500">${conn.auto_start ? t('mcpAutoStartYes') : t('mcpAutoStartNo')}</td>
-                <td>${actions}</td>
+                <td style="white-space:nowrap;">${actions}</td>
             </tr>
             <tr class="mcp-device-detail-row" id="mcp-devices-row-${conn.id}" style="display:none;">
                 <td colspan="${colSpan}" style="background:#f9fafb;padding:0;border-top:none;">
@@ -178,7 +178,7 @@ function getConnectionActions(conn) {
     const devCount = deviceState[conn.id]?.devices?.length;
     const devLabel = devCount ? `${t('mcpDevices')} (${devCount})` : t('mcpDevices');
     actions.push(`<button class="action-btn" data-action="mcpDevices" data-conn-id="${conn.id}" title="${t('mcpDeviceList')}">${devLabel}</button>`);
-    return `<div class="flex gap-2 flex-wrap">${actions.join('')}</div>`;
+    return `<div class="flex gap-2" style="flex-wrap:nowrap;">${actions.join('')}</div>`;
 }
 
 function escapeHtml(str) {
@@ -462,7 +462,7 @@ function renderDevicePanel(connId) {
                 <tr>
                     <td style="${subTdEllip}">${escapeHtml(d.name || '-')}</td>
                     <td style="${subTdEllip}font-family:monospace;">${escapeHtml(d.device_id || '-')}</td>
-                    <td style="${subTdEllip}font-family:monospace;">${escapeHtml(d.ip || '-')}:${d.port}</td>
+                    <td style="${subTdEllip}font-family:monospace;">${escapeHtml(d.ip || '-')}</td>
                     <td style="${subTd}white-space:nowrap;">
                         <button class="action-btn add-btn" data-action="mcpDevicePushFaces" data-conn-id="${connId}" data-dev-id="${d.id}">${t('mcpDevicePushFaces')}</button>
                         <button class="action-btn" data-action="mcpDeviceEdit" data-conn-id="${connId}" data-dev-id="${d.id}">${t('edit')}</button>
@@ -499,7 +499,6 @@ function openDeviceModal(connId, dev) {
     document.getElementById('mcp-device-deviceId').value = dev?.device_id ?? '';
     document.getElementById('mcp-device-name').value = dev?.name ?? '';
     document.getElementById('mcp-device-ip').value = dev?.ip ?? '';
-    document.getElementById('mcp-device-port').value = dev?.port ?? 80;
     modal.classList.add('show');
 }
 
@@ -534,7 +533,6 @@ export async function saveMCPDevice() {
         device_id: document.getElementById('mcp-device-deviceId').value.trim() || null,
         name: document.getElementById('mcp-device-name').value.trim() || null,
         ip,
-        port: parseInt(document.getElementById('mcp-device-port').value, 10) || 80,
     };
     try {
         if (devId) {
