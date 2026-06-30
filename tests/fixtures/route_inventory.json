@@ -641,6 +641,38 @@
   },
   {
     "method": "GET",
+    "name": "list_mcp_agent_devices",
+    "path": "/api/mcp/connections/{conn_id}/devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "create_mcp_agent_device",
+    "path": "/api/mcp/connections/{conn_id}/devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_mcp_agent_device",
+    "path": "/api/mcp/connections/{conn_id}/devices/{dev_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "update_mcp_agent_device",
+    "path": "/api/mcp/connections/{conn_id}/devices/{dev_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
     "name": "get_mcp_connection_logs",
     "path": "/api/mcp/connections/{conn_id}/logs",
     "response_model": null,

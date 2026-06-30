@@ -402,3 +402,99 @@ class TestMCPMoveBatchTool:
         assert captured.get("call") == ("B-1", "A-2", None, "MCP系统"), captured
         # _antihallucination reshapes the dict into the ok/executed schema.
         assert resp.get("ok") is True and resp.get("executed") is True, resp
+
+
+class TestMCPAgentDeviceCRUD:
+    """智能体下挂物理设备子表（mcp_agent_devices）的 CRUD + 校验 + 租户隔离。"""
+
+    def _make_conn(self, admin_client):
+        resp = admin_client.post("/api/mcp/connections", json={
+            "name": f"DevHost {uuid.uuid4().hex[:6]}",
+            "mcp_endpoint": f"http://localhost:9100/{uuid.uuid4().hex[:6]}",
+            "role": "operate",
+            "auto_start": False,
+        })
+        assert resp.status_code == 200, resp.text
+        return resp.json()["connection"]["id"]
+
+    def test_device_full_lifecycle(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+
+        # 初始为空
+        r = admin_client.get(f"/api/mcp/connections/{conn_id}/devices")
+        assert r.status_code == 200 and r.json() == []
+
+        # 新增
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "device_id": "AA:BB:CC:00:11:22",
+            "name": "门口摄像头",
+            "ip": "192.168.1.50",
+            "port": 8080,
+            "model_tag": "mobilefacenet_v1",
+            "face_enabled": True,
+        })
+        assert r.status_code == 200, r.text
+        dev = r.json()["device"]
+        assert dev["ip"] == "192.168.1.50"
+        assert dev["port"] == 8080
+        assert dev["face_enabled"] is True
+        dev_id = dev["id"]
+
+        # 列表
+        r = admin_client.get(f"/api/mcp/connections/{conn_id}/devices")
+        assert r.status_code == 200 and len(r.json()) == 1
+
+        # 更新
+        r = admin_client.put(f"/api/mcp/connections/{conn_id}/devices/{dev_id}", json={
+            "ip": "10.0.0.9", "port": 80, "face_enabled": False,
+        })
+        assert r.status_code == 200, r.text
+        dev = r.json()["device"]
+        assert dev["ip"] == "10.0.0.9" and dev["port"] == 80
+        assert dev["face_enabled"] is False
+
+        # 删除
+        r = admin_client.delete(f"/api/mcp/connections/{conn_id}/devices/{dev_id}")
+        assert r.status_code == 200
+        r = admin_client.get(f"/api/mcp/connections/{conn_id}/devices")
+        assert r.json() == []
+
+    def test_device_ip_required(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "ip": "   ", "port": 80,
+        })
+        assert r.status_code == 400
+
+    def test_device_port_range(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "ip": "1.2.3.4", "port": 70000,
+        })
+        assert r.status_code == 400
+
+    def test_device_id_unique_within_connection(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+        body = {"device_id": "DUP-1", "ip": "1.2.3.4", "port": 80}
+        assert admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json=body).status_code == 200
+        r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json=body)
+        assert r.status_code == 409
+
+    def test_device_on_unknown_connection_404(self, admin_client):
+        r = admin_client.get("/api/mcp/connections/nope1234/devices")
+        assert r.status_code == 404
+
+    def test_device_cascade_on_connection_delete(self, admin_client):
+        conn_id = self._make_conn(admin_client)
+        admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "device_id": "CASCADE-1", "ip": "1.2.3.4", "port": 80,
+        })
+        # 删除连接后，设备子表记录应随之消失（连接已删 → 子设备列表 404）
+        assert admin_client.delete(f"/api/mcp/connections/{conn_id}").status_code == 200
+        from database import get_db_connection
+        c = get_db_connection()
+        n = c.execute(
+            "SELECT COUNT(*) FROM mcp_agent_devices WHERE connection_id = ?", (conn_id,)
+        ).fetchone()[0]
+        c.close()
+        assert n == 0
