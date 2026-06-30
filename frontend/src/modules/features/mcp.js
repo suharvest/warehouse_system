@@ -458,44 +458,112 @@ function renderDevicePanel(connId) {
            </table>`;
 
     panel.innerHTML = `
-        <div style="font-weight:600;margin-bottom:8px;">${t('mcpDeviceList')}</div>
-        ${listHtml}
-        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;border-top:1px dashed #e5e7eb;padding-top:8px;">
-            <input type="hidden" id="dev-${connId}-id">
-            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceId')}</label>
-                <input type="text" id="dev-${connId}-deviceId" style="width:130px;" placeholder="MAC/SN"></div>
-            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceName')}</label>
-                <input type="text" id="dev-${connId}-name" style="width:110px;"></div>
-            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceIp')} *</label>
-                <input type="text" id="dev-${connId}-ip" style="width:120px;" placeholder="192.168.1.x"></div>
-            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDevicePort')}</label>
-                <input type="number" id="dev-${connId}-port" style="width:70px;" value="80" min="1" max="65535"></div>
-            <label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="dev-${connId}-faceEnabled"> ${t('mcpDeviceFaceEnabled')}</label>
-            <button class="action-btn add-btn" data-action="mcpDeviceSave" data-conn-id="${connId}">${t('mcpDeviceSave')}</button>
-            <button class="action-btn" data-action="mcpDeviceCancelEdit" data-conn-id="${connId}" id="dev-${connId}-cancel" style="display:none;">${t('mcpDeviceCancel')}</button>
-            <div class="form-error" id="dev-${connId}-error" style="display:none;width:100%;"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+            <div style="font-weight:600;">${t('mcpDeviceList')}</div>
+            <button class="action-btn add-btn" data-action="mcpDeviceAdd" data-conn-id="${connId}">${t('mcpDeviceAdd')}</button>
+        </div>
+        ${listHtml}`;
+}
+
+// ---- 设备新增/编辑弹窗（对齐智能体编辑弹窗的视觉与交互） ----
+// index.html 不在可改范围内，故弹窗 DOM 在此动态注入并复用现有 modal 样式。
+let deviceModalConnId = null;
+
+function ensureDeviceModal() {
+    let modal = document.getElementById('mcp-device-modal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'mcp-device-modal';
+    modal.className = 'modal';
+    document.body.appendChild(modal);
+    return modal;
+}
+
+function openDeviceModal(connId, dev) {
+    deviceModalConnId = connId;
+    const modal = ensureDeviceModal();
+    const isEdit = !!dev;
+    modal.innerHTML = `
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 id="mcp-device-modal-title">${isEdit ? t('mcpEditDevice') : t('mcpDeviceAdd')}</h3>
+                <button class="close-btn" data-action="closeMCPDeviceModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="mcp-device-form">
+                    <input type="hidden" id="mcp-device-id">
+                    <div class="form-group">
+                        <label><span>${t('mcpDeviceId')}</span></label>
+                        <input type="text" id="mcp-device-deviceId" placeholder="MAC/SN">
+                    </div>
+                    <div class="form-group">
+                        <label><span>${t('mcpDeviceName')}</span></label>
+                        <input type="text" id="mcp-device-name">
+                    </div>
+                    <div class="form-group">
+                        <label><span>${t('mcpDeviceIp')}</span> <span class="required">*</span></label>
+                        <input type="text" id="mcp-device-ip" placeholder="192.168.1.x" required>
+                    </div>
+                    <div class="form-group">
+                        <label><span>${t('mcpDevicePort')}</span></label>
+                        <input type="number" id="mcp-device-port" value="80" min="1" max="65535">
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="mcp-device-faceEnabled">
+                            <span>${t('mcpDeviceFaceEnabled')}</span>
+                        </label>
+                    </div>
+                    <div class="form-error" id="mcp-device-modal-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" data-action="closeMCPDeviceModal">${t('mcpDeviceCancel')}</button>
+                <button class="btn confirm-btn" data-action="mcpDeviceSave">${t('mcpDeviceSave')}</button>
+            </div>
         </div>`;
+    document.getElementById('mcp-device-id').value = dev?.id ?? '';
+    document.getElementById('mcp-device-deviceId').value = dev?.device_id ?? '';
+    document.getElementById('mcp-device-name').value = dev?.name ?? '';
+    document.getElementById('mcp-device-ip').value = dev?.ip ?? '';
+    document.getElementById('mcp-device-port').value = dev?.port ?? 80;
+    document.getElementById('mcp-device-faceEnabled').checked = !!dev?.face_enabled;
+    modal.classList.add('show');
 }
 
-function _devInput(connId, field) {
-    return document.getElementById(`dev-${connId}-${field}`);
+export function showAddMCPDeviceModal(connId) {
+    openDeviceModal(connId, null);
 }
 
-export async function saveMCPDevice(connId) {
-    const errorDiv = _devInput(connId, 'error');
-    const devId = _devInput(connId, 'id').value;
-    const ip = _devInput(connId, 'ip').value.trim();
+export function editMCPDevice(connId, devId) {
+    const dev = (deviceState[connId]?.devices || []).find(d => String(d.id) === String(devId));
+    if (!dev) return;
+    openDeviceModal(connId, dev);
+}
+
+export function closeMCPDeviceModal() {
+    const modal = document.getElementById('mcp-device-modal');
+    if (modal) modal.classList.remove('show');
+    deviceModalConnId = null;
+}
+
+export async function saveMCPDevice() {
+    const connId = deviceModalConnId;
+    if (connId == null) return;
+    const errorDiv = document.getElementById('mcp-device-modal-error');
+    const devId = document.getElementById('mcp-device-id').value;
+    const ip = document.getElementById('mcp-device-ip').value.trim();
     if (!ip) {
         errorDiv.textContent = t('mcpDeviceIpRequired');
         errorDiv.style.display = 'block';
         return;
     }
     const payload = {
-        device_id: _devInput(connId, 'deviceId').value.trim() || null,
-        name: _devInput(connId, 'name').value.trim() || null,
+        device_id: document.getElementById('mcp-device-deviceId').value.trim() || null,
+        name: document.getElementById('mcp-device-name').value.trim() || null,
         ip,
-        port: parseInt(_devInput(connId, 'port').value, 10) || 80,
-        face_enabled: _devInput(connId, 'faceEnabled').checked,
+        port: parseInt(document.getElementById('mcp-device-port').value, 10) || 80,
+        face_enabled: document.getElementById('mcp-device-faceEnabled').checked,
     };
     try {
         if (devId) {
@@ -503,29 +571,13 @@ export async function saveMCPDevice(connId) {
         } else {
             await deviceFetch(connId, '', { method: 'POST', body: JSON.stringify(payload) });
         }
+        closeMCPDeviceModal();
         await loadDevices(connId);
     } catch (error) {
         console.error('保存设备失败:', error);
         errorDiv.textContent = error.data?.detail || t('operationFailed');
         errorDiv.style.display = 'block';
     }
-}
-
-export function editMCPDevice(connId, devId) {
-    const dev = (deviceState[connId]?.devices || []).find(d => String(d.id) === String(devId));
-    if (!dev) return;
-    _devInput(connId, 'id').value = dev.id;
-    _devInput(connId, 'deviceId').value = dev.device_id || '';
-    _devInput(connId, 'name').value = dev.name || '';
-    _devInput(connId, 'ip').value = dev.ip || '';
-    _devInput(connId, 'port').value = dev.port || 80;
-    _devInput(connId, 'faceEnabled').checked = !!dev.face_enabled;
-    const cancelBtn = _devInput(connId, 'cancel');
-    if (cancelBtn) cancelBtn.style.display = '';
-}
-
-export function cancelEditMCPDevice(connId) {
-    renderDevicePanel(connId);
 }
 
 export async function pushFacesToDevice(connId, devId) {
