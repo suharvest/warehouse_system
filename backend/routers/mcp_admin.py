@@ -766,7 +766,8 @@ async def create_mcp_agent_device(
                     ip=ip,
                     port=port,
                     model_tag=(request.model_tag.strip() if request.model_tag else None),
-                    face_enabled=1 if request.face_enabled else 0,
+                    # face_enabled 列已废弃（deprecated）：不再读写入参，DB 列 NOT NULL
+                    # server_default '0' 会自动填 0，省略即可。
                     last_seen=request.last_seen,
                     created_at=now,
                     updated_at=now,
@@ -810,8 +811,7 @@ async def update_mcp_agent_device(
         values['port'] = port
     if request.model_tag is not None:
         values['model_tag'] = request.model_tag.strip() or None
-    if request.face_enabled is not None:
-        values['face_enabled'] = 1 if request.face_enabled else 0
+    # face_enabled 列已废弃（deprecated）：不再读写入参，忽略任何传入值。
     if request.last_seen is not None:
         values['last_seen'] = request.last_seen
 
@@ -868,6 +868,10 @@ async def delete_mcp_agent_device(
 
 # 推送到设备的 HTTP 超时（秒）。设备在 LAN 内，10s 足够；超时即判定不可达。
 _PUSH_FACES_TIMEOUT = 10.0
+
+# 单台设备下发人脸数上限。与固件 FACE_MAX_COUNT=20 对齐：超出固件存储能力，
+# 必须在服务端拒绝，绝不截断或盲推。
+MAX_PUSH_FACES = 20
 
 # 设备固件写死的 embedding 模型标签。当前全设备同一模型，下发时用此固定常量
 # 过滤人脸库并作为 payload.model_tag，**不读** mcp_agent_devices.model_tag（该列
@@ -930,15 +934,14 @@ async def push_faces_to_device(
 ):
     """把本租户人脸库（按固定模型标签过滤）下发到该物理设备。
 
-    配置类错误（设备未开启人脸下发 / 缺 IP）返回 4xx；设备侧网络错误
+    配置类错误（缺 IP）返回 4xx；人脸库超过设备上限返回 success:false；设备侧网络错误
     （不可达 / 超时 / 4xx-5xx）以 ``{"success": false, "error": ...}`` 返回
     200，让前端能展示失败原因而不是静默成功。
     """
     conn_row = _assert_conn_in_tenant(conn_id, current_user)
     dev = dict(_load_device_or_404(conn_id, dev_id)._mapping)
 
-    if not dev.get("face_enabled"):
-        raise HTTPException(status_code=400, detail="该设备未开启人脸下发（face_enabled=0）")
+    # face_enabled gate 已移除：任何有 IP 的设备都可手动下发。
     ip = (dev.get("ip") or "").strip()
     if not ip:
         raise HTTPException(status_code=400, detail="设备缺少 IP，无法下发")
@@ -950,6 +953,13 @@ async def push_faces_to_device(
     from routers.face import build_face_library
     tid = conn_row.tenant_id if hasattr(conn_row, "tenant_id") else dict(conn_row._mapping).get("tenant_id")
     library = build_face_library(tid, model_tag=model_tag)
+    # 服务端强制上限：超过设备固件容量（FACE_MAX_COUNT=20）直接拒绝，不 POST、
+    # 不截断。错误信息用户友好，前端会 alert 出来。
+    if len(library) > MAX_PUSH_FACES:
+        return {
+            "success": False,
+            "error": f"人脸库共 {len(library)} 张，超过设备上限 {MAX_PUSH_FACES} 张，请减少启用的人脸后再下发",
+        }
     # build_face_library 返回 canonical float32 的 embedding_b64；下发前按
     # DEVICE_EMBEDDING_FORMAT 量化（解码 → 量化 → 重新 base64），library/DB 不变。
     fmt = DEVICE_EMBEDDING_FORMAT
