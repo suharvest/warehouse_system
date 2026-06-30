@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -655,10 +656,13 @@ async def get_mcp_connection_logs(
 # require_permission(Resource.MCP, Action.ADMIN) + load_or_404 校验 conn 属于当前租户。
 
 
-def _assert_conn_in_tenant(conn_id: str, current_user: CurrentUser) -> None:
-    """校验目标连接存在且属于当前租户；否则 404/403（与连接 CRUD 同语义）。"""
+def _assert_conn_in_tenant(conn_id: str, current_user: CurrentUser):
+    """校验目标连接存在且属于当前租户；否则 404/403（与连接 CRUD 同语义）。
+
+    返回加载到的连接行（含 id/tenant_id），供下游需要 tenant_id 的逻辑复用。
+    """
     with get_engine().connect() as sa_conn:
-        load_or_404(
+        return load_or_404(
             sa_conn, _t_mcp_connections, conn_id,
             columns=[_t_mcp_connections.c.id, _t_mcp_connections.c.tenant_id],
             not_found="连接不存在",
@@ -852,3 +856,80 @@ async def delete_mcp_agent_device(
             )
         )
     return {"success": True, "message": "设备已删除"}
+
+
+# ============ 云端下发人脸库到设备 ============
+#
+# 取本租户人脸库，按固定模型标签过滤（不同模型 embedding 在不同向量空间，
+# 混下去会污染设备本地匹配），HTTP POST 到设备 LAN 上的 batch-update 端点。
+# 本期同 LAN 直推、无 token；鉴权/租户隔离照搬设备 CRUD。
+
+# 推送到设备的 HTTP 超时（秒）。设备在 LAN 内，10s 足够；超时即判定不可达。
+_PUSH_FACES_TIMEOUT = 10.0
+
+# 设备固件写死的 embedding 模型标签。当前全设备同一模型，下发时用此固定常量
+# 过滤人脸库并作为 payload.model_tag，**不读** mcp_agent_devices.model_tag（该列
+# 保留作未来多模型扩展，现阶段不对用户暴露、不参与下发）。
+DEVICE_FACE_MODEL_TAG = "mobilefacenet-128-v1"
+
+
+@router.post("/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+async def push_faces_to_device(
+    conn_id: str,
+    dev_id: int,
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
+):
+    """把本租户人脸库（按固定模型标签过滤）下发到该物理设备。
+
+    配置类错误（设备未开启人脸下发 / 缺 IP）返回 4xx；设备侧网络错误
+    （不可达 / 超时 / 4xx-5xx）以 ``{"success": false, "error": ...}`` 返回
+    200，让前端能展示失败原因而不是静默成功。
+    """
+    conn_row = _assert_conn_in_tenant(conn_id, current_user)
+    dev = dict(_load_device_or_404(conn_id, dev_id)._mapping)
+
+    if not dev.get("face_enabled"):
+        raise HTTPException(status_code=400, detail="该设备未开启人脸下发（face_enabled=0）")
+    ip = (dev.get("ip") or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="设备缺少 IP，无法下发")
+    port = dev.get("port") or 80
+    # 固定模型标签：全设备同模型，不读 mcp_agent_devices.model_tag。
+    model_tag = DEVICE_FACE_MODEL_TAG
+
+    # 取本租户人脸库并按固定 model_tag 过滤（复用 face 路由的 library 逻辑）。
+    from routers.face import build_face_library
+    tid = conn_row.tenant_id if hasattr(conn_row, "tenant_id") else dict(conn_row._mapping).get("tenant_id")
+    library = build_face_library(tid, model_tag=model_tag)
+    faces = [
+        {"name": e["name"], "subject_id": e["subject_id"], "embedding_b64": e["embedding_b64"]}
+        for e in library
+    ]
+    payload = {"model_tag": model_tag, "faces": faces}
+
+    url = f"http://{ip}:{port}/api/face/batch-update"
+    # trust_env=False：设备在 LAN 内，必须直连其 IP，绝不能走系统/环境代理
+    # （走代理会把局域网地址发到外网代理，返回误导性的 4xx/5xx 或超时）。
+    try:
+        async with httpx.AsyncClient(timeout=_PUSH_FACES_TIMEOUT, trust_env=False) as client:
+            resp = await client.post(url, json=payload)
+    except httpx.TimeoutException:
+        return {"success": False, "error": f"设备响应超时（{int(_PUSH_FACES_TIMEOUT)}s）：{url}"}
+    except httpx.RequestError as e:
+        return {"success": False, "error": f"无法连接设备 {url}：{e}"}
+
+    if resp.status_code >= 400:
+        return {
+            "success": False,
+            "error": f"设备返回 HTTP {resp.status_code}: {resp.text[:300]}",
+        }
+    try:
+        device_response = resp.json()
+    except Exception:
+        device_response = resp.text[:300]
+    return {
+        "success": True,
+        "pushed_count": len(faces),
+        "model_tag": model_tag,
+        "device_response": device_response,
+    }
