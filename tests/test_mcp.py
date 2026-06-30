@@ -371,3 +371,34 @@ class TestMCPRequiresFaceMeta:
                 assert hidden not in props, (
                     f"{name} 的 inputSchema 漏掉了排除 {hidden}，会泄露给 LLM"
                 )
+
+
+class TestMCPMoveBatchTool:
+    """Regression: the move_batch_location tool must reach the provider.
+
+    It previously passed undefined names (from_location/product_name) to the
+    provider → NameError on every call → batch move silently failed for all
+    users. Verify the tool forwards only its real params and hits the provider.
+    """
+
+    def test_move_tool_forwards_to_provider_without_nameerror(self, monkeypatch):
+        warehouse_mcp = _import_warehouse_mcp()
+        captured = {}
+
+        def _stub_move(batch_no, new_location, quantity=None,
+                       from_location=None, product_name=None, operator="MCP系统"):
+            captured["call"] = (batch_no, new_location, quantity, operator)
+            return {"success": True, "message": "ok"}
+
+        # face disabled / allowed, and stub the provider so no HTTP is needed.
+        monkeypatch.setattr(warehouse_mcp, "_enforce_face", lambda *a, **k: None)
+        monkeypatch.setattr(warehouse_mcp._provider, "move_batch_location", _stub_move)
+
+        fn = getattr(warehouse_mcp.move_batch_location, "fn",
+                     warehouse_mcp.move_batch_location)
+        resp = fn(batch_no="B-1", new_location="A-2")
+
+        # The provider was reached with the right args → no NameError, correct forwarding.
+        assert captured.get("call") == ("B-1", "A-2", None, "MCP系统"), captured
+        # _antihallucination reshapes the dict into the ok/executed schema.
+        assert resp.get("ok") is True and resp.get("executed") is True, resp
