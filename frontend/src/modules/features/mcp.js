@@ -438,7 +438,6 @@ function renderDevicePanel(connId) {
                 <th style="padding:4px 8px;">${t('mcpDeviceName')}</th>
                 <th style="padding:4px 8px;">${t('mcpDeviceId')}</th>
                 <th style="padding:4px 8px;">${t('mcpDeviceIp')}</th>
-                <th style="padding:4px 8px;">${t('mcpDeviceModelTag')}</th>
                 <th style="padding:4px 8px;">${t('mcpDeviceFaceEnabled')}</th>
                 <th style="padding:4px 8px;">${t('actions')}</th>
             </tr></thead>
@@ -447,11 +446,11 @@ function renderDevicePanel(connId) {
                     <td style="padding:4px 8px;">${escapeHtml(d.name || '-')}</td>
                     <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.device_id || '-')}</td>
                     <td style="padding:4px 8px;font-family:monospace;">${escapeHtml(d.ip || '-')}:${d.port}</td>
-                    <td style="padding:4px 8px;">${escapeHtml(d.model_tag || '-')}</td>
                     <td style="padding:4px 8px;">
                         <span class="mcp-status-badge ${d.face_enabled ? 'connected' : 'stopped'}">${d.face_enabled ? t('mcpDeviceFaceOn') : t('mcpDeviceFaceOff')}</span>
                     </td>
                     <td style="padding:4px 8px;">
+                        ${d.face_enabled ? `<button class="action-btn add-btn" data-action="mcpDevicePushFaces" data-conn-id="${connId}" data-dev-id="${d.id}">${t('mcpDevicePushFaces')}</button>` : ''}
                         <button class="action-btn" data-action="mcpDeviceEdit" data-conn-id="${connId}" data-dev-id="${d.id}">${t('edit')}</button>
                         <button class="action-btn delete-btn" data-action="mcpDeviceDelete" data-conn-id="${connId}" data-dev-id="${d.id}">${t('delete')}</button>
                     </td>
@@ -471,8 +470,6 @@ function renderDevicePanel(connId) {
                 <input type="text" id="dev-${connId}-ip" style="width:120px;" placeholder="192.168.1.x"></div>
             <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDevicePort')}</label>
                 <input type="number" id="dev-${connId}-port" style="width:70px;" value="80" min="1" max="65535"></div>
-            <div><label style="display:block;font-size:11px;color:#6b7280;">${t('mcpDeviceModelTag')}</label>
-                <input type="text" id="dev-${connId}-modelTag" style="width:120px;"></div>
             <label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="dev-${connId}-faceEnabled"> ${t('mcpDeviceFaceEnabled')}</label>
             <button class="action-btn add-btn" data-action="mcpDeviceSave" data-conn-id="${connId}">${t('mcpDeviceSave')}</button>
             <button class="action-btn" data-action="mcpDeviceCancelEdit" data-conn-id="${connId}" id="dev-${connId}-cancel" style="display:none;">${t('mcpDeviceCancel')}</button>
@@ -498,7 +495,6 @@ export async function saveMCPDevice(connId) {
         name: _devInput(connId, 'name').value.trim() || null,
         ip,
         port: parseInt(_devInput(connId, 'port').value, 10) || 80,
-        model_tag: _devInput(connId, 'modelTag').value.trim() || null,
         face_enabled: _devInput(connId, 'faceEnabled').checked,
     };
     try {
@@ -523,7 +519,6 @@ export function editMCPDevice(connId, devId) {
     _devInput(connId, 'name').value = dev.name || '';
     _devInput(connId, 'ip').value = dev.ip || '';
     _devInput(connId, 'port').value = dev.port || 80;
-    _devInput(connId, 'modelTag').value = dev.model_tag || '';
     _devInput(connId, 'faceEnabled').checked = !!dev.face_enabled;
     const cancelBtn = _devInput(connId, 'cancel');
     if (cancelBtn) cancelBtn.style.display = '';
@@ -531,6 +526,27 @@ export function editMCPDevice(connId, devId) {
 
 export function cancelEditMCPDevice(connId) {
     renderDevicePanel(connId);
+}
+
+export async function pushFacesToDevice(connId, devId) {
+    const dev = (deviceState[connId]?.devices || []).find(d => String(d.id) === String(devId));
+    const name = dev ? (dev.name || dev.device_id || dev.ip || devId) : devId;
+    const btn = document.querySelector(`button[data-action="mcpDevicePushFaces"][data-conn-id="${connId}"][data-dev-id="${devId}"]`);
+    const origLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = t('mcpDevicePushing'); }
+    try {
+        const result = await deviceFetch(connId, `/${devId}/push-faces`, { method: 'POST' });
+        if (result && result.success) {
+            alert(t('mcpDevicePushSuccess').replace('{name}', name).replace('{count}', result.pushed_count ?? 0));
+        } else {
+            alert(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', (result && result.error) || t('operationFailed')));
+        }
+    } catch (error) {
+        console.error('下发人脸失败:', error);
+        alert(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', error.data?.detail || error.message || t('operationFailed')));
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = origLabel; }
+    }
 }
 
 export async function deleteMCPDevice(connId, devId) {
