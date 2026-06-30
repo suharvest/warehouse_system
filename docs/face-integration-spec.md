@@ -1,103 +1,90 @@
-# 语音设备人脸识别对接 — 实施 Spec
+# 语音设备人脸识别对接 — 架构与实现
 
-> 跨三库：设备固件 `xiaozhi-esp32` / 语音 server `xiaozhi-esp32-server` / 仓库后端 `warehouse_system`。
-> 本 spec 已根据**固件实际改动**修订（说话人身份已下沉到 watcher 板级并改为 MCP 工具 pull 范式）。
+> 本文反映**已落地**的实现(替代早期的 push/pull + 改 server 设计)。面向接手的工程师/agent。
+> 三库:仓库后端 `warehouse_system`(FastAPI + SQLAlchemy Core/Alembic)、语音 server `xiaozhi-esp32-server`、设备固件 `xiaozhi-esp32`(SenseCAP Watcher,esp32s3,Himax/ONNX NPU)。
 
-## 0. 两个正交维度（勿混淆）
+## 0. 两个版本
 
-| 维度 | 字段 | 取值 | 含义 |
-|---|---|---|---|
-| 推理拓扑 | `tenant_face_config.mode` | `local` / `lan` | 本机推理 vs LAN 设备（如 WE2） |
-| 鉴权强度 | `tenant_face_config.verify_mode`（**新增**） | `session` / `interface` | 软透传（信任设备本地匹配）vs 硬强制（warehouse 重比对 embedding，fail-closed） |
+| | 云端版(已实现) | 本地部署版(未来) |
+|---|---|---|
+| 鉴权强度 `verify_mode` | **session**(信任设备本地匹配,advisory) | interface(每次操作 warehouse 重比对 embedding,fail-closed) |
+| 改不改 xiaozhi server | **不改**(纯透传/MCP 路由器) | 需要改(server 注入 embedding) |
+| 人脸库下发 | warehouse **直推**设备 HTTP(绕开 server) | 同左 / 或受控 server 同步 |
+| 适用 | 任意 server(含改不了的别人/用户自部署的) | 自己可控 server |
 
-二者独立，互不影响。`verify_mode` 默认 **`interface`**（保留现有 fail-closed 行为，存量租户不被悄悄降级；如需开箱即用可改默认 `session`）。
+开关:`tenant_face_config.verify_mode`(`backend/metadata.py:387`,CheckConstraint `:392`)。默认 `interface`(保留 fail-closed 存量行为)。与推理拓扑 `mode`(local/lan)**正交**。
 
-## 1. 范式：PULL（已由固件确定）
+## 1. 三方角色与数据流(云端版)
 
-设备**不**把 speaker_id 推进 `listen` 消息。说话人身份在板级 `FaceRecognition` 维护，暴露为 MCP 工具供查询：
-
-- 工具：`self.conversation.speaker` → `{"valid":bool,"name":string,"similarity":float}`
-  （`xiaozhi-esp32/main/boards/sensecap-watcher/sscma_camera.cc` `InitializeFaceMcpTools` 内）
-- 身份在**对话上升沿冻结**、**15s 新鲜度**（`kSpeakerMaxAgeUs`）、**对话结束清除**
-  （`sscma_camera.cc` 相机任务 `is_voice_busy` 边沿触发 `CaptureCurrentSpeaker/ClearCurrentSpeaker`；`face_recognition.cc:332+`）
-- 旧的 `Application::CurrentSpeaker/SpeakerProvider` 通用框架**已删除**，不再引用。
-- 设备保持**模式无关**：不需要知道 warehouse 的 verify_mode，也无设备侧 NVS 开关。
-
-## 2. 端到端数据流
-
-**Session 模式**：设备 NPU 本地匹配 → 工具 `self.conversation.speaker` 返回 `{valid,name,subject_id,similarity}` → server 在转发 face-gated 工具调用时主动 call 该工具，把身份作为隐藏参注入 → warehouse 信任并记录、放行（advisory）。
-
-**Interface 模式**：server 走现有 `_inject_device_face`（`mcp_manager.py:134`）注入 `face_embedding_b64 + face_model_tag`（降级 `face_image_b64`）→ warehouse `/api/face/verify-mcp` 重比对 embedding，fail-closed → 落 `face_auth_logs`。
-
-## 3. 设备固件（已大部分完成，剩余 1 项）
-
-✅ 已完成：板级 SpeakerIdentity、15s 冻结、`self.conversation.speaker` 工具、状态栏视觉模式指示。
-
-⬜ **待补（因契约决策）**：身份键用 `subject_id` 而非仅 name。
-- `face_database` 入库时随 name 一起持久化 warehouse 下发的 `subject_id`（见 §4 库导出）。
-- `FaceRecognition::SpeakerIdentity` 增加 `int subject_id`（无匹配时为 0/-1）。
-- `self.conversation.speaker` 返回值增加 `"subject_id":int`。
-- `DecodeName`/匹配结果结构体串联 subject_id（`face_recognition.cc:299/348`）。
-
-## 4. Warehouse（可独立实施 + 验证，先做）
-
-### 4.1 schema
-`tenant_face_config` 增列（`backend/metadata.py:361-388`）：
-```python
-Column("verify_mode", String(16), nullable=False, server_default="interface"),
-CheckConstraint("verify_mode IN ('session','interface')", name="ck_tenant_face_config_verify_mode"),
 ```
-- **同步**改 `initial_schema.py` 的 create_table（全新 DB 不断链）。
-- **幂等 migration**：照 `greeting_enabled` 写法（inspector `_column_exists` guard + `batch_alter_table().add_column()`），全新 SQLite `alembic upgrade head` 验整链。
-
-### 4.2 库导出加身份键（契约决策：库导出加 subject_id）
-`/api/face/library`（`backend/routers/face.py:348-388`）响应每项增加 `subject_id`（可选 `employee_id`）：
+[warehouse] 录入人脸/管理库      [xiaozhi server] 纯透传 + LLM 编排     [设备] 本地 NPU 识别
+     │  ① 直推库(HTTP, 绕开 server)                                        │
+     ├─────────────────────────────────────────────────────────────────►  本地人脸库(NVS)
+     │                                                                      │ ② 对话时识别说话人
+     │                          ③ self.conversation.speaker (MCP)  ◄────────┤
+     │                          ④ LLM 把 speaker 填进 stock_in/out          │
+     │  ⑤ verify-mcp(session: advisory + allow-list)  ◄────────────────────┘
 ```
-{name, subject_id, embedding_b64, model_tag}
-```
-设备 face DB 随 name 一起存 subject_id，`self.conversation.speaker` 原样回传 → warehouse 用 subject_id 精确定位，避免 name 歧义。
+server 在云端版**不持有任何人脸逻辑**,只路由 MCP 工具调用 + 跑 LLM。
 
-### 4.3 verify-mcp 分叉
-`mcp/warehouse_mcp.py` `_enforce_face`（`200-274`）按 verify_mode 分叉：
-- `interface`：维持现有 `_face_guard` 硬校验，fail-closed（网络/HTTP 失败 → deny，`warehouse_mcp.py:214`）。
-- `session`：读隐藏参 `speaker_id`/`speaker_subject_id` → 解析 subject → 记 `face_auth_logs`（decision=pass, advisory）→ 放行。**绝不**调 `_face_guard`，**绝不**因默认继承走硬校验。
-- `/api/face/verify-mcp`（`face.py` FaceVerifyMcpPayload ~530，Decision 响应 ~572）接受可选 `speaker_subject_id` + `speaker_name`。
+## 2. 人脸库下发管线(核心,直推绕开 server)
 
-### 4.4 config API + 前端
-- `FaceConfigPayload`（`face.py:45`）、GET select（`face.py:109`）、PUT values（`face.py:137`）加 `verify_mode`。
-- 前端 `frontend/src/modules/features/face-recognition.js:225/324` 加 select 控件（参考 `face-config-mode` ID 风格 `:244/327`）。
+1. **录入**:warehouse UI 上传图片 → 推理端点出 embedding(float32, 512B/128维)→ 存 `face_enrollments.embedding`。⚠️ **录入存的 `model_tag` 必须 = `mobilefacenet-128-v1`**,否则下发过滤为空。
+2. **设备寻址**:`mcp_agent_devices` 子表(`backend/metadata.py:365`,迁移 `k0l1m2n3o4p5_add_mcp_agent_devices.py`)——智能体(mcp_connections)1:N 物理设备,每行存 `ip/port/face_enabled`(model_tag 列保留但写死、UI 不暴露)。前端在 `frontend/src/modules/features/mcp.js` 的设备二级区,「下发人脸」按钮仅 `face_enabled` 行显示。
+3. **下发端点**:`POST /api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces`(`backend/routers/mcp_admin.py`)——读设备 ip/port → 取本租户库(`build_face_library`,`backend/routers/face.py`,按 `DEVICE_FACE_MODEL_TAG="mobilefacenet-128-v1"` `mcp_admin.py:873` 过滤)→ **fp16 量化**(见 §5)→ POST 到 `http://<ip>:<port>/api/face/batch-update`。`httpx` 带 `trust_env=False`(否则系统代理拦 LAN IP 误报 502)。不可达/超时/4xx-5xx 一律 fail loud。
+4. **设备接收**:`POST /api/face/batch-update`(`remote_display_http_server.cc`)——按 `embedding_format` 分派解码 → `FaceDatabase::ReplaceAll`(`face_database.cc:407`)。
 
-### 4.5 voice_sessions 表（可选）
-pull 范式下身份随工具调用到达，**不再需要** `/api/face/session-identity` 推送端点。仅当需要追踪"整段对话是谁"时再建 `voice_sessions(id, tenant_id, device_id, session_id, subject_id, confidence, started_at, ended_at)`，唯一索引 `(tenant_id, device_id, session_id)`。MVP 可只靠 `face_auth_logs` 逐操作记录。
+## 3. 鉴权决定:本期无 token
 
-## 5. Server
+- 设备 batch-update 端点**无鉴权**:同 LAN 信任 + 设备 IP 手填(opt-in,只为人脸)。
+- 风险已知:同 LAN 任意主机可改/抹库(授权+审计+DoS)——可接受前提是可信内网/网络层隔离。
+- **未来无感鉴权**:走「设备自注册悄悄带 token」——设备开机 POST 注册(device 自生成 token、随注册交给 warehouse、存 NVS),HMAC+ts+nonce 签 push 请求。用户零手输,且同时解决寻址。**不改现有 UX**,故现在不做也不堵后路。
 
-- **Session 注入**：扩展 `_inject_device_face`（`mcp_manager.py:134/219/244`）或加同款 sibling：当 face-gated 工具被调用时，额外 call 设备 `self.conversation.speaker`，把 `subject_id`/`name`/`similarity` 作为隐藏参注入 warehouse 工具调用。与 embedding 注入并存，warehouse 按 verify_mode 取用 → server 也保持模式无关。
-- **补漏**：Endpoint MCP executor（`mcp_endpoint_executor.py:35/38`）当前不走 `_inject_device_face`，interface 模式需在此加同等 face 注入。
-- `receiveAudioHandle.py:49` 的 ASR voiceprint `speaker` 字段与本方案**无关**，不复用。
+## 4. 说话人身份链路(session)
 
-## 6. 字段命名契约（三库统一）
+- **设备**:`self.conversation.speaker` MCP 工具(`sscma_camera.cc` InitializeFaceMcpTools)返回 `{valid, name, subject_id, similarity}`。身份在对话上升沿冻结、**15s 新鲜度**(`face_recognition.cc` `kSpeakerMaxAgeUs`)、结束清除;`is_voice_busy` 边沿驱动(`sscma_camera.cc:597-628`)。
+- **server(不改)**:LLM 看到设备 `self.*` 工具 + warehouse `stock_in/out`,**自行编排**:先调 `self.conversation.speaker` → 把 `subject_id`/`name` 填进写操作。引导写在**工具描述**里(随 schema 走,不可控 server 也到 LLM),speaker 参数对 LLM **可见**(从 exclude_args 移出,`mcp/warehouse_mcp.py`)。
+- **warehouse 决策**:`/api/face/verify-mcp` → `verify_mcp_face`(`backend/face/orchestrator.py:287`)按 `verify_mode` 权威分叉——session(`:340`)用 speaker 解析 subject、记 advisory log、放行,**allow-list 仍强制**;interface(`:371`)无视 speaker、查 embedding、fail-closed。
+- **安全**:`_enforce_face`(`mcp/warehouse_mcp.py`)改为**单一权威 gate**——永远把 embedding+speaker 全发后端、听其裁决,不按参数存在与否分叉 → 填假 `speaker_subject_id` **绕不过** interface 硬校验(删了旧的 `_face_advisory` 捷径)。
 
-| 用途 | 字段名 |
+## 5. fp16 量化(canonical=float32,fp16 只在两个边界)
+
+- **真相源**:warehouse DB(`face_enrollments.embedding`)+ 设备内存 `faces_` 始终 **float32**。
+- **fp16 只出现在**:线缆(push 时量化)+ 设备 NVS blob。`fp16 = 256B = 128×IEEE-754 binary16 LE`。
+- **线缆契约**:`{"model_tag", "embedding_format":"fp16", "faces":[{name,subject_id,embedding_b64}]}`。设备按 `embedding_format` 分派(fp16=256B / float32=512B 兼容 / 未知→409)。
+- **warehouse 侧**:`quantize_embedding(f32_bytes, fmt)` dispatch + 常量 `DEVICE_EMBEDDING_FORMAT="fp16"`(`backend/routers/mcp_admin.py`);numpy `astype('<f2')`。
+- **设备侧**:NVS 存 256B(`FACE_EMBEDDING_NVS_SIZE`,`face_database.h`),内存仍 float32;`Float32ToHalf`/`HalfToFloat32` 软件 IEEE-754 转换;`db_ver` 升 **3**(`face_database.cc:163`),旧 512B(db_ver<3)记录**作废当空库**(等重推,绝不误读)。
+- **误差**:fp16 近乎无损(cosine 影响 <1e-3)。**int8 扩展点已留**:`quantize_embedding` 的 `"int8"` 分支占位(`NotImplementedError`),未来需 per-vector scale 且线缆 `embedding_format="int8"` 带 scale 字段。
+- **空间**:20 张人脸 float32 ~11KB(16KB NVS 紧)→ fp16 ~5.5KB(宽裕,给 WiFi/设置留够)。
+
+## 6. ReplaceAll / NVS 设计
+
+- `FaceDatabase::ReplaceAll`(`face_database.cc:407`):`mutex_`(`face_database.h:81`)下整体替换——新代在局部构建/校验,末尾**一次** NVS commit 后才 swap `faces_`,`Match()` 只见旧或新、**无半更新窗口**。
+- **崩溃安全(退化版,非双槽)**:16KB NVS 放不下两代(双槽峰值 ~24KB)且 NVS 非事务 → 单槽 + **`count` 先清零提交**:掉电中途只会留**空库**(服务端重推即恢复),绝不损坏/错认。
+- **隔离**:FaceDatabase 用独立命名空间 `"face_db"`(`face_database.cc:8`),清空用**按 key 删**(`nvs_erase_key`),无 `nvs_erase_all` → 永不动 WiFi/设置等其它 NVS 数据。
+- **model_tag 两侧写死一致**:warehouse `mcp_admin.py:873` ↔ 固件 `remote_display_http_server.cc:34` 都是 `"mobilefacenet-128-v1"`;不符整批 409。
+- 写入用 `PauseInference()/ResumeInference()`(`sscma_camera.cc:1844-1886`)包裹,finally 保证 Resume。
+
+## 7. 字段命名契约(三库统一)
+
+| 用途 | 字段 |
 |---|---|
-| 会话说话人显示名 | `speaker_name`（设备工具返回键 `name`） |
-| 会话说话人主键 | `speaker_subject_id`（设备工具返回键 `subject_id`） |
-| 推理 embedding（base64） | `embedding_b64` |
-| 推理模型标签 | `embedding_model_tag` / `model_tag` |
-| MCP 隐藏 face 参数 | `face_embedding_b64`, `face_model_tag`, `face_image_b64` |
+| 会话说话人主键 / 显示名 | `speaker_subject_id` / `speaker_name`(设备工具返回键 `subject_id`/`name`) |
+| 仓库 face_subjects 主键 | `subject_id` |
+| embedding(base64) | `embedding_b64` |
+| embedding 量化格式 | `embedding_format`(`float32`/`fp16`/未来 `int8`) |
+| 模型标签(写死) | `model_tag` = `mobilefacenet-128-v1` |
+| 鉴权强度 / 推理拓扑 | `verify_mode`(session/interface) / `mode`(local/lan)——**正交** |
 
-改任何字段名前做全链路检查：exports↔imports、HTML ID↔JS querySelector、后端硬编码字符串、测试 SQL（`tests/test_mcp.py`、`tests/test_face_wire_contract.py`、`tests/test_enum_wire_format.py`、`tests/contracts/mcp/`）。
+## 8. 已完成 commit
 
-## 7. 风险与坑
+**warehouse `feat/face-verify-mode`**:`d266b0c` verify_mode 列 · `043b464` 前端 select · `c7ae2b6` greeting raw-init 修复 · `507dfec` B回调(speaker 可见 + 权威 gate) · `91edc39` mcp_agent_devices 子表+CRUD · `6410968` 设备管理 UI · `85f1cca` push-faces · `00539b2` 下发按钮 · `7e0e36e` fp16 量化。
 
-- **Alembic 链断**：加列必须同时改 `initial_schema.py` + 写幂等迁移 + 全新库验整链（见 memory `project_alembic_chain_orphan_migration`）。
-- **Enum/wire-format**：`verify_mode` 值为字符串 `"session"/"interface"`，非整数；`tests/test_enum_wire_format.py` 断言字面值。
-- **Fail-closed 边界**：interface 网络/HTTP 失败必须 deny；session 必须显式 advisory，不得回退硬校验。
-- **name→subject 歧义**：已用库导出 subject_id 解决；务必保证设备入库与回传链路都带 subject_id。
-- **固件部署成本**：仅 SenseCAP Watcher 有摄像头/NPU 能产出有效身份；其他板 `valid=false`，server/warehouse 必须容忍缺失。补 subject_id 需重烧设备。
+**固件 xiaozhi-esp32**:`19533f1` subject_id 入 NVS · `d983756` 说话人身份 + `self.conversation.speaker` · `fe53f3f` batch-update + fp16/db_ver=3。
 
-## 8. 实施顺序
+## 9. 遗留 / 未来项
 
-1. **Warehouse**（独立验证）：schema+migration → 库导出加 subject_id → config API/前端 → `_enforce_face` 分叉。验证：`uv run pytest tests/test_mcp.py tests/test_face_wire_contract.py tests/test_enum_wire_format.py` + 全新 SQLite `alembic upgrade head`。
-2. **设备**：face DB 存 subject_id + 工具回传 subject_id。验证：串口日志确认工具返回含 subject_id。
-3. **Server**：session 注入 + endpoint MCP 路径 face 注入。验证：mock warehouse + tool call 参数断言。
+- **int8 量化**(+ 救回双槽原子):扩展点已留,需 per-vector scale + 线缆带 scale,且真机验匹配率。
+- **无感鉴权**:设备自注册悄悄带 token(HMAC),解决"无 token"风险且不改 UX。
+- **真机验证**:烧固件 → 录入(model_tag=mobilefacenet-128-v1)→ 填设备 IP/开人脸下发 → 下发 → 对话验 speaker;并验 20 张 + WiFi/设置共存不爆 NVS。
+- **录入 model_tag 对齐**:务必 = `mobilefacenet-128-v1`,否则 push 过滤为空、下发 0 条。
