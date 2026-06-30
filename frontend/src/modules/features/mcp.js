@@ -466,62 +466,21 @@ function renderDevicePanel(connId) {
 }
 
 // ---- 设备新增/编辑弹窗（对齐智能体编辑弹窗的视觉与交互） ----
-// index.html 不在可改范围内，故弹窗 DOM 在此动态注入并复用现有 modal 样式。
+// 弹窗 DOM 静态写在 index.html（#mcp-device-modal），此处仅引用并填充字段。
 let deviceModalConnId = null;
-
-function ensureDeviceModal() {
-    let modal = document.getElementById('mcp-device-modal');
-    if (modal) return modal;
-    modal = document.createElement('div');
-    modal.id = 'mcp-device-modal';
-    modal.className = 'modal';
-    document.body.appendChild(modal);
-    return modal;
-}
 
 function openDeviceModal(connId, dev) {
     deviceModalConnId = connId;
-    const modal = ensureDeviceModal();
+    const modal = document.getElementById('mcp-device-modal');
+    if (!modal) return;
     const isEdit = !!dev;
-    modal.innerHTML = `
-        <div class="modal-content modal-small">
-            <div class="modal-header">
-                <h3 id="mcp-device-modal-title">${isEdit ? t('mcpEditDevice') : t('mcpDeviceAdd')}</h3>
-                <button class="close-btn" data-action="closeMCPDeviceModal">&times;</button>
-            </div>
-            <div class="modal-body">
-                <form id="mcp-device-form">
-                    <input type="hidden" id="mcp-device-id">
-                    <div class="form-group">
-                        <label><span>${t('mcpDeviceId')}</span></label>
-                        <input type="text" id="mcp-device-deviceId" placeholder="MAC/SN">
-                    </div>
-                    <div class="form-group">
-                        <label><span>${t('mcpDeviceName')}</span></label>
-                        <input type="text" id="mcp-device-name">
-                    </div>
-                    <div class="form-group">
-                        <label><span>${t('mcpDeviceIp')}</span> <span class="required">*</span></label>
-                        <input type="text" id="mcp-device-ip" placeholder="192.168.1.x" required>
-                    </div>
-                    <div class="form-group">
-                        <label><span>${t('mcpDevicePort')}</span></label>
-                        <input type="number" id="mcp-device-port" value="80" min="1" max="65535">
-                    </div>
-                    <div class="form-group">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="mcp-device-faceEnabled">
-                            <span>${t('mcpDeviceFaceEnabled')}</span>
-                        </label>
-                    </div>
-                    <div class="form-error" id="mcp-device-modal-error" style="display:none;"></div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn cancel-btn" data-action="closeMCPDeviceModal">${t('mcpDeviceCancel')}</button>
-                <button class="btn confirm-btn" data-action="mcpDeviceSave">${t('mcpDeviceSave')}</button>
-            </div>
-        </div>`;
+    const titleEl = document.getElementById('mcp-device-modal-title');
+    if (titleEl) titleEl.textContent = isEdit ? t('mcpEditDevice') : t('mcpDeviceAdd');
+    const errorDiv = document.getElementById('mcp-device-modal-error');
+    if (errorDiv) {
+        errorDiv.textContent = '';
+        errorDiv.style.display = 'none';
+    }
     document.getElementById('mcp-device-id').value = dev?.id ?? '';
     document.getElementById('mcp-device-deviceId').value = dev?.device_id ?? '';
     document.getElementById('mcp-device-name').value = dev?.name ?? '';
