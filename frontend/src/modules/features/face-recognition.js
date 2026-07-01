@@ -247,7 +247,7 @@ function renderConfigTab() {
                 <div class="face-config-grid">
                     <div class="form-group">
                         <label>${tt('faceMode', '识别模式')}</label>
-                        <select id="face-config-mode">
+                        <select id="face-config-mode" data-action-change="onFaceModeChange">
                             ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
                         </select>
                     </div>
@@ -261,11 +261,11 @@ function renderConfigTab() {
                         <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span></label>
                         <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
                     </div>
-                    <div class="form-group span-2">
+                    <div class="form-group span-2" id="face-config-endpoint-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
                         <label>${tt('faceEndpoint', '远端服务地址')}</label>
                         <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
                     </div>
-                    <div class="form-group span-2">
+                    <div class="form-group span-2" id="face-config-token-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
                         <label>${tt('faceAuthToken', '认证 Token')}</label>
                         <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
                     </div>
@@ -331,6 +331,18 @@ function renderRulesRows() {
             </tr>
         `;
     }).join('');
+}
+
+// mode=local 进程内推理,不需要远端地址/Token → 隐藏这两个字段;
+// mode=lan 走外部 face_rec_api 端点 → 显示。
+export function onFaceModeChange() {
+    const modeEl = document.getElementById('face-config-mode');
+    if (!modeEl) return;
+    const isLocal = modeEl.value === 'local';
+    const endpointGroup = document.getElementById('face-config-endpoint-group');
+    const tokenGroup = document.getElementById('face-config-token-group');
+    if (endpointGroup) endpointGroup.style.display = isLocal ? 'none' : '';
+    if (tokenGroup) tokenGroup.style.display = isLocal ? 'none' : '';
 }
 
 export async function saveFaceConfig() {
