@@ -29,9 +29,9 @@ server 在云端版**不持有任何人脸逻辑**,只路由 MCP 工具调用 + 
 
 ## 2. 人脸库下发管线(核心,直推绕开 server)
 
-1. **录入**:warehouse UI 上传图片 → 推理端点出 embedding(float32, 512B/128维)→ 存 `face_enrollments.embedding`。⚠️ **录入存的 `model_tag` 必须 = `mobilefacenet-128-v1`**,否则下发过滤为空。
+1. **录入**:warehouse UI 上传图片 → 推理端点出 embedding(float32, 512B/128维)→ 存 `face_enrollments.embedding`。⚠️ **录入存的 `model_tag` 必须 = `we2-mfn128-v1`**,否则下发过滤为空。
 2. **设备寻址**:`mcp_agent_devices` 子表(`backend/metadata.py:365`,迁移 `k0l1m2n3o4p5_add_mcp_agent_devices.py`)——智能体(mcp_connections)1:N 物理设备,每行存 `ip/port/face_enabled`(model_tag 列保留但写死、UI 不暴露)。前端在 `frontend/src/modules/features/mcp.js` 的设备二级区,「下发人脸」按钮仅 `face_enabled` 行显示。
-3. **下发端点**:`POST /api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces`(`backend/routers/mcp_admin.py`)——读设备 ip/port → 取本租户库(`build_face_library`,`backend/routers/face.py`,按 `DEVICE_FACE_MODEL_TAG="mobilefacenet-128-v1"` `mcp_admin.py:873` 过滤)→ **fp16 量化**(见 §5)→ POST 到 `http://<ip>:<port>/api/face/batch-update`。`httpx` 带 `trust_env=False`(否则系统代理拦 LAN IP 误报 502)。不可达/超时/4xx-5xx 一律 fail loud。
+3. **下发端点**:`POST /api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces`(`backend/routers/mcp_admin.py`)——读设备 ip/port → 取本租户库(`build_face_library`,`backend/routers/face.py`,按 `DEVICE_FACE_MODEL_TAG="we2-mfn128-v1"` `mcp_admin.py:873` 过滤)→ **fp16 量化**(见 §5)→ POST 到 `http://<ip>:<port>/api/face/batch-update`。`httpx` 带 `trust_env=False`(否则系统代理拦 LAN IP 误报 502)。不可达/超时/4xx-5xx 一律 fail loud。
 4. **设备接收**:`POST /api/face/batch-update`(`remote_display_http_server.cc`)——按 `embedding_format` 分派解码 → `FaceDatabase::ReplaceAll`(`face_database.cc:407`)。
 
 ## 3. 鉴权决定:本期无 token
@@ -62,7 +62,7 @@ server 在云端版**不持有任何人脸逻辑**,只路由 MCP 工具调用 + 
 - `FaceDatabase::ReplaceAll`(`face_database.cc:407`):`mutex_`(`face_database.h:81`)下整体替换——新代在局部构建/校验,末尾**一次** NVS commit 后才 swap `faces_`,`Match()` 只见旧或新、**无半更新窗口**。
 - **崩溃安全(退化版,非双槽)**:16KB NVS 放不下两代(双槽峰值 ~24KB)且 NVS 非事务 → 单槽 + **`count` 先清零提交**:掉电中途只会留**空库**(服务端重推即恢复),绝不损坏/错认。
 - **隔离**:FaceDatabase 用独立命名空间 `"face_db"`(`face_database.cc:8`),清空用**按 key 删**(`nvs_erase_key`),无 `nvs_erase_all` → 永不动 WiFi/设置等其它 NVS 数据。
-- **model_tag 两侧写死一致**:warehouse `mcp_admin.py:873` ↔ 固件 `remote_display_http_server.cc:34` 都是 `"mobilefacenet-128-v1"`;不符整批 409。
+- **model_tag 两侧写死一致**:warehouse `mcp_admin.py:873` ↔ 固件 `remote_display_http_server.cc:34` 都是 `"we2-mfn128-v1"`;不符整批 409。
 - 写入用 `PauseInference()/ResumeInference()`(`sscma_camera.cc:1844-1886`)包裹,finally 保证 Resume。
 
 ## 7. 字段命名契约(三库统一)
@@ -73,7 +73,7 @@ server 在云端版**不持有任何人脸逻辑**,只路由 MCP 工具调用 + 
 | 仓库 face_subjects 主键 | `subject_id` |
 | embedding(base64) | `embedding_b64` |
 | embedding 量化格式 | `embedding_format`(`float32`/`fp16`/未来 `int8`) |
-| 模型标签(写死) | `model_tag` = `mobilefacenet-128-v1` |
+| 模型标签(写死) | `model_tag` = `we2-mfn128-v1` |
 | 鉴权强度 / 推理拓扑 | `verify_mode`(session/interface) / `mode`(local/lan)——**正交** |
 
 ## 8. 已完成 commit
@@ -86,5 +86,5 @@ server 在云端版**不持有任何人脸逻辑**,只路由 MCP 工具调用 + 
 
 - **int8 量化**(+ 救回双槽原子):扩展点已留,需 per-vector scale + 线缆带 scale,且真机验匹配率。
 - **无感鉴权**:设备自注册悄悄带 token(HMAC),解决"无 token"风险且不改 UX。
-- **真机验证**:烧固件 → 录入(model_tag=mobilefacenet-128-v1)→ 填设备 IP/开人脸下发 → 下发 → 对话验 speaker;并验 20 张 + WiFi/设置共存不爆 NVS。
-- **录入 model_tag 对齐**:务必 = `mobilefacenet-128-v1`,否则 push 过滤为空、下发 0 条。
+- **真机验证**:烧固件 → 录入(model_tag=we2-mfn128-v1)→ 填设备 IP/开人脸下发 → 下发 → 对话验 speaker;并验 20 张 + WiFi/设置共存不爆 NVS。
+- **录入 model_tag 对齐**:务必 = `we2-mfn128-v1`,否则 push 过滤为空、下发 0 条。

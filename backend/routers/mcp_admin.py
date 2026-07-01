@@ -879,7 +879,7 @@ MAX_PUSH_FACES = 20
 # 设备固件写死的 embedding 模型标签。当前全设备同一模型，下发时用此固定常量
 # 过滤人脸库并作为 payload.model_tag，**不读** mcp_agent_devices.model_tag（该列
 # 保留作未来多模型扩展，现阶段不对用户暴露、不参与下发）。
-DEVICE_FACE_MODEL_TAG = "mobilefacenet-128-v1"
+DEVICE_FACE_MODEL_TAG = "we2-mfn128-v1"
 
 # ---- Embedding 量化（仅 push 路径） -------------------------------------
 #

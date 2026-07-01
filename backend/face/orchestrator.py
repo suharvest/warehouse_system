@@ -231,8 +231,11 @@ async def enroll_face(
 
     cfg = _load_config(conn, tenant_id)
     if images_b64:
-        # Server-side inference requires a configured endpoint.
-        if cfg is None or not cfg.endpoint:
+        # Server-side inference: local mode runs the bundled WE2 simulator
+        # in-process (no endpoint); any other mode needs a configured endpoint.
+        if cfg is None:
+            raise FaceEndpointError("endpoint_not_configured")
+        if cfg.mode != "local" and not cfg.endpoint:
             raise FaceEndpointError("endpoint_not_configured")
 
     # Verify the subject belongs to this tenant
