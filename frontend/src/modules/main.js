@@ -36,7 +36,7 @@ import {
     selectFaceSubject, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
     showAddFaceSubjectModal, showEditFaceSubjectModal, closeFaceSubjectModal, saveFaceSubject, deleteFaceSubject,
     applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
-    getFaceModalsHTML, onFaceTenantChange
+    getFaceModalsHTML, onFaceTenantChange, onFaceModeChange
 } from './features/face-recognition.js';
 
 // 新人引导
@@ -395,6 +395,7 @@ const actionHandlers = {
     'faceLogsPrevPage': faceLogsPrevPage,
     'faceLogsNextPage': faceLogsNextPage,
     'onFaceTenantChange': onFaceTenantChange,
+    'onFaceModeChange': onFaceModeChange,
 
     // 仓库管理
     'showAddWarehouseModal': (el) => showAddWarehouseModal(el?.dataset?.tenantId),
