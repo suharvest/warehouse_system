@@ -34,6 +34,7 @@ import {
     saveFaceConfig, testFaceConnection,
     showAddFaceRuleModal, editFaceRule, closeFaceRuleModal, saveFaceRule, deleteFaceRule,
     selectFaceSubject, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
+    showFacePushModal, closeFacePushModal, submitFacePush,
     showAddFaceSubjectModal, showEditFaceSubjectModal, closeFaceSubjectModal, saveFaceSubject, deleteFaceSubject,
     applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
     getFaceModalsHTML, onFaceTenantChange, onFaceModeChange
@@ -390,6 +391,9 @@ const actionHandlers = {
     'closeFaceEnrollModal': closeFaceEnrollModal,
     'submitFaceEnroll': submitFaceEnroll,
     'deleteFaceEnrollment': deleteFaceEnrollment,
+    'showFacePushModal': showFacePushModal,
+    'closeFacePushModal': closeFacePushModal,
+    'submitFacePush': submitFacePush,
     'applyFaceLogsFilter': applyFaceLogsFilter,
     'resetFaceLogsFilter': resetFaceLogsFilter,
     'faceLogsPrevPage': faceLogsPrevPage,
