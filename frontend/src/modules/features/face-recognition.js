@@ -2,7 +2,7 @@
 import { t } from '../../../i18n.js';
 import { faceApi, warehousesApi } from '../api.js';
 import { showToast } from '../ui-components.js';
-import { getCurrentUser } from '../state.js';
+import { getCurrentUser, API_BASE_URL } from '../state.js';
 
 const DEFAULT_CONFIG = {
     enabled: false,
@@ -521,10 +521,16 @@ function renderEnrollTab() {
         <div class="table-container face-enroll-card">
             <div class="section-header">
                 <div class="section-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
-                <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                    ${tt('faceSubjectAdd', '新增人员')}
-                </button>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button class="btn" data-action="showFacePushModal" title="${tt('facePushHint', '把整个人脸库下发到指定设备')}">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><path d="M12 19V5"></path><path d="M5 12l7-7 7 7"></path></svg>
+                        ${tt('facePushLibrary', '下发')}
+                    </button>
+                    <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        ${tt('faceSubjectAdd', '新增人员')}
+                    </button>
+                </div>
             </div>
             <div class="face-enroll-grid">
                 <aside class="face-enroll-users">
@@ -594,27 +600,152 @@ function renderEnrollDetail() {
         </div>
         ${count === 0
             ? `<div class="panel-empty-state" style="padding:32px 16px;"><div class="empty-message">${tt('faceEnrollNoItems', '该人员尚未录入人脸')}</div></div>`
-            : `<div class="face-enroll-list">${enrollmentItems.map(renderEnrollmentCard).join('')}</div>`
+            : renderEnrollmentTable()
         }
     `;
 }
 
-function renderEnrollmentCard(item) {
+// 录入条目改为紧凑表格（对齐智能体物理设备子表 renderDevicePanel 的视觉）：
+// 表头浅灰弱化，行分隔线极浅，字号 13px，从属感明显，不再是层级感重的卡片。
+function renderEnrollmentTable() {
+    const th = 'padding:6px 11px;font-size:11px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;color:#9a9a9a;background:#f7f8f6;border-bottom:1px solid #ededed;text-align:left;';
+    const td = 'padding:7px 11px;font-size:13px;color:#555;border-bottom:1px solid #f5f5f5;';
+    return `
+        <div class="table-container" style="margin-top:4px;background:transparent;box-shadow:none;border:none;">
+            <table style="width:100%;">
+                <thead style="background:transparent;"><tr>
+                    <th style="${th}width:64px;">#</th>
+                    <th style="${th}">${tt('faceAppliesToWarehouses', '生效仓库')}</th>
+                    <th style="${th}width:120px;">${tt('faceEnrollCreatedAt', '录入时间')}</th>
+                    <th style="${th}width:80px;">${tt('actions', '操作')}</th>
+                </tr></thead>
+                <tbody>${enrollmentItems.map(renderEnrollmentRow).join('')}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderEnrollmentRow(item) {
+    const td = 'padding:7px 11px;font-size:13px;color:#555;border-bottom:1px solid #f5f5f5;';
     const whIds = Array.isArray(item.applies_to_warehouse_ids) ? item.applies_to_warehouse_ids : [];
     const whText = whIds.length === 0
         ? tt('faceAppliesAll', '全部仓库')
         : whIds.map(id => (allWarehouses.find(w => w.id === id) || {}).name || `#${id}`).join(', ');
-    const created = (item.created_at || '').split('T')[0] || '-';
+    const created = ((item.enrolled_at || item.created_at || '').split('T')[0]) || '-';
     return `
-        <div class="mini-card">
-            <div class="mini-card-title">#${escapeHtml(item.id)}</div>
-            <div class="mini-card-subtitle">${escapeHtml(created)}</div>
-            <div style="margin-top:6px;font-size:12px;color:#666;">${tt('faceAppliesToWarehouses', '生效仓库')}: ${escapeHtml(whText)}</div>
-            <div style="margin-top:8px;">
+        <tr>
+            <td style="${td}font-family:monospace;">#${escapeHtml(item.id)}</td>
+            <td style="${td}">${escapeHtml(whText)}</td>
+            <td style="${td}">${escapeHtml(created)}</td>
+            <td style="${td}white-space:nowrap;">
                 <button class="action-btn-small danger" data-action="deleteFaceEnrollment" data-enrollment-id="${item.id}">${t('delete') || '删除'}</button>
+            </td>
+        </tr>
+    `;
+}
+
+// ============ 人脸库下发（库级动作：整库推到所选设备）============
+// 复用后端 push-faces 端点（与智能体配置里的「下发」同一接口、同样行为），
+// 差别只是本页多一步「选设备」。设备列表来自新扁平接口 GET /api/mcp/agent-devices。
+async function mcpAdminFetch(path, options = {}) {
+    const resp = await fetch(`${API_BASE_URL}${path}`, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+    });
+    if (!resp.ok) {
+        const err = new Error(`HTTP ${resp.status}`);
+        try { err.data = await resp.json(); } catch {}
+        err.status = resp.status;
+        throw err;
+    }
+    return resp.json();
+}
+
+export async function showFacePushModal() {
+    const modal = document.getElementById('face-push-modal');
+    if (!modal) return;
+    modal.innerHTML = `
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3>${tt('facePushTitle', '下发人脸库到设备')}</h3>
+                <button class="close-btn" data-action="closeFacePushModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-hint" style="margin-bottom:10px;">${tt('facePushDesc', '将当前租户已录入的整个人脸库下发到所选设备。')}</div>
+                <div id="face-push-body">${renderLoading()}</div>
+                <div class="form-error" id="face-push-error" hidden></div>
+                <div id="face-push-result" style="margin-top:10px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" data-action="closeFacePushModal">${t('cancel') || '取消'}</button>
+                <button class="btn confirm-btn" id="face-push-submit" data-action="submitFacePush" disabled>${tt('facePushLibrary', '下发')}</button>
             </div>
         </div>
     `;
+    modal.classList.add('show');
+    const bodyEl = document.getElementById('face-push-body');
+    const submitBtn = document.getElementById('face-push-submit');
+    try {
+        const devices = await mcpAdminFetch('/mcp/agent-devices');
+        if (!Array.isArray(devices) || devices.length === 0) {
+            bodyEl.innerHTML = `<div class="panel-empty-state" style="padding:20px 8px;"><div class="empty-message">${tt('facePushNoDevices', '暂无设备。请先在「智能体配置」里为智能体添加物理设备。')}</div></div>`;
+            return;
+        }
+        const opts = devices.map(d => {
+            const label = `${d.name || d.ip || ('#' + d.id)} · ${d.ip || '-'} · ${d.connection_name || ''}`;
+            return `<option value="${d.connection_id}::${d.id}">${escapeHtml(label)}</option>`;
+        }).join('');
+        bodyEl.innerHTML = `
+            <div class="form-group">
+                <label>${tt('facePushSelectDevice', '选择目标设备')}</label>
+                <select id="face-push-device" class="form-control">${opts}</select>
+            </div>
+        `;
+        if (submitBtn) submitBtn.disabled = false;
+    } catch (error) {
+        if (bodyEl) bodyEl.innerHTML = '';
+        const errEl = document.getElementById('face-push-error');
+        if (errEl) { errEl.hidden = false; errEl.textContent = getErrorMessage(error, 'facePushLoadFailed', '加载设备列表失败'); }
+    }
+}
+
+export function closeFacePushModal() {
+    const modal = document.getElementById('face-push-modal');
+    if (modal) modal.classList.remove('show');
+}
+
+export async function submitFacePush() {
+    const select = document.getElementById('face-push-device');
+    const submitBtn = document.getElementById('face-push-submit');
+    const resultEl = document.getElementById('face-push-result');
+    const errEl = document.getElementById('face-push-error');
+    if (errEl) errEl.hidden = true;
+    if (!select || !select.value) return;
+    const [connId, devId] = select.value.split('::');
+    const label = select.options[select.selectedIndex]?.textContent || devId;
+    const orig = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = tt('mcpDevicePushing', '下发中…'); }
+    if (resultEl) resultEl.innerHTML = '';
+    try {
+        const result = await mcpAdminFetch(`/mcp/connections/${connId}/devices/${devId}/push-faces`, { method: 'POST' });
+        if (result && result.success) {
+            const msg = tt('mcpDevicePushSuccess', '已向设备 "{name}" 下发 {count} 条人脸')
+                .replace('{name}', label).replace('{count}', result.pushed_count ?? 0);
+            if (resultEl) resultEl.innerHTML = `<div style="padding:8px 10px;border-radius:6px;background:#eef7ee;color:#2e7d32;font-size:13px;">${escapeHtml(msg)}</div>`;
+            showToast(msg);
+        } else {
+            const msg = tt('mcpDevicePushFailed', '向设备 "{name}" 下发失败：{error}')
+                .replace('{name}', label).replace('{error}', (result && result.error) || tt('operationFailed', '操作失败'));
+            if (resultEl) resultEl.innerHTML = `<div style="padding:8px 10px;border-radius:6px;background:#fdecec;color:#c00;font-size:13px;">${escapeHtml(msg)}</div>`;
+        }
+    } catch (error) {
+        const msg = tt('mcpDevicePushFailed', '向设备 "{name}" 下发失败：{error}')
+            .replace('{name}', label).replace('{error}', getErrorMessage(error, 'operationFailed', '操作失败'));
+        if (resultEl) resultEl.innerHTML = `<div style="padding:8px 10px;border-radius:6px;background:#fdecec;color:#c00;font-size:13px;">${escapeHtml(msg)}</div>`;
+    } finally {
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = orig; }
+    }
 }
 
 export async function selectFaceSubject(el) {
@@ -1034,5 +1165,6 @@ export function getFaceModalsHTML() {
         <div id="face-rule-modal" class="modal"></div>
         <div id="face-enroll-modal" class="modal"></div>
         <div id="face-subject-modal" class="modal"></div>
+        <div id="face-push-modal" class="modal"></div>
     `;
 }
