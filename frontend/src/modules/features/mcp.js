@@ -587,8 +587,9 @@ export async function deleteMCPDevice(connId, devId) {
 export function startMCPRefresh() {
     stopMCPRefresh();
     refreshInterval = setInterval(() => {
-        // 设备区展开时跳过刷新，避免重建 tbody 抹掉正在编辑的设备表单。
-        if (openDevicePanels.size > 0) return;
+        // 无条件刷新。设备编辑已改为弹窗 modal，重建 tbody 不会抹掉正在编辑的表单；
+        // renderConnections 会在重建后自动重开已展开的设备面板。此前"有面板展开就
+        // 跳过刷新"会把云端连接/状态冻住，只有切页才更新 —— 已移除。
         loadMCPConnections();
     }, 10000); // 每10秒刷新
 }
