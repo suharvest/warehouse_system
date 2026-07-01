@@ -40,12 +40,67 @@ class FaceEndpointError(Exception):
     """Raised when the face endpoint is unreachable or returns an error."""
 
 
+def _infer_local(image_b64: str) -> dict:
+    """In-process inference via the bundled WE2 simulator (mode=local).
+
+    No HTTP, no endpoint required. Decodes the base64 image, runs the
+    process-wide ``WE2Simulator`` singleton, and returns the same
+    ``{embedding: bytes, model_tag: str}`` shape as the HTTP path. Picks the
+    highest ``det_score`` face to match the remote-endpoint selection rule.
+    """
+    import base64 as _b64
+    import io
+
+    from PIL import Image
+
+    try:
+        raw = _b64.b64decode(image_b64, validate=False)
+    except Exception as e:
+        raise FaceEndpointError("infer_bad_image") from e
+    if not raw:
+        raise FaceEndpointError("infer_bad_image")
+    try:
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception as e:
+        raise FaceEndpointError("infer_bad_image") from e
+
+    try:
+        from face.we2 import get_simulator
+    except Exception as e:  # we2-sim extra not installed
+        logger.warning("local face simulator unavailable: %s", e)
+        raise FaceEndpointError("local_simulator_unavailable") from e
+
+    try:
+        result = get_simulator().infer(image)
+    except FileNotFoundError as e:
+        raise FaceEndpointError("local_model_missing") from e
+    except Exception as e:
+        logger.warning("local face infer failed: %s", e)
+        raise FaceEndpointError("local_infer_failed") from e
+
+    faces = result.get("faces") or []
+    if not faces:
+        raise FaceEndpointError("no_face_detected")
+    best = max(faces, key=lambda f: float(f.get("det_score") or 0.0))
+    emb_bytes = best.get("embedding_bytes")
+    if not emb_bytes:
+        raise FaceEndpointError("infer_no_embedding")
+    model_tag = result.get("model_tag") or "we2-mfn128-v1"
+    return {"embedding": emb_bytes, "model_tag": model_tag}
+
+
 async def infer(cfg: FaceConfig, image_b64: str) -> dict:
     """Send an image to the endpoint, get back an embedding.
 
     Returns: {embedding: bytes, model_tag: str}
     Raises FaceEndpointError on connection / protocol failure.
+
+    ``cfg.mode == "local"`` runs the bundled WE2 simulator in-process (no
+    endpoint needed). Any other mode (``lan``) uses the external HTTP
+    endpoint per the face_rec_api contract.
     """
+    if cfg.mode == "local":
+        return _infer_local(image_b64)
     if not cfg.endpoint:
         raise FaceEndpointError("endpoint_not_configured")
     url = cfg.endpoint.rstrip("/") + "/infer"
