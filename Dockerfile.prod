@@ -6,10 +6,15 @@
 # 运行: docker run -p 1025:1025 -e PORT=1025 -v data:/data warehouse
 
 # ---- Stage 1: 构建 Python 依赖（不含业务代码） ----
-FROM python:3.12-alpine AS python-builder
+# glibc 基础镜像（Debian bookworm, glibc 2.36）：we2-sim 的 ai-edge-litert
+# 只提供 manylinux_2_27 wheel（无 musllinux），Alpine(musl) 装不了 → 必须 glibc。
+FROM python:3.12-slim AS python-builder
 
-# 安装编译依赖（bcrypt、rapidfuzz 等 C 扩展需要）
-RUN apk add --no-cache gcc musl-dev libffi-dev make
+# 安装编译依赖（多数依赖有 manylinux wheel，保底装 gcc/libffi-dev 以防个别包需编译；
+# binutils 提供 strip 供后续 cleanup 精简 .so）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libffi-dev make binutils && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -22,7 +27,7 @@ COPY pyproject.toml uv.lock ./
 # 的非零退出码吞掉，导致 venv 装空（如某依赖无当前平台 wheel）的镜像仍被标记
 # DONE 并推送，运行时才 `ModuleNotFoundError: uvicorn` 崩溃。
 RUN pip install --no-cache-dir uv && \
-    uv sync --frozen --no-install-project
+    uv sync --frozen --no-install-project --extra we2-sim
 
 # 清理 .venv 中不需要的文件，节省空间。这些 find 是 best-effort（找不到/无权限
 # 不应让 build 失败），故单独成一个 RUN 并以 `|| true` 兜底，与上面的安装步骤隔离。
@@ -37,14 +42,16 @@ RUN { \
     } || true
 
 # ---- Stage 2: 最终运行时镜像 ----
-FROM python:3.12-alpine
+FROM python:3.12-slim
 
-# libffi: cffi/cryptography 运行时需要
-# libgcc: bcrypt 等 C 扩展需要
+# libffi8: cffi/cryptography 运行时需要
 # ca-certificates: requests/websockets HTTPS 连接需要
-RUN apk add --no-cache libffi libgcc ca-certificates
+# (libgcc/libstdc++ 由 Debian 基础镜像自带，ai-edge-litert 运行时依赖已满足)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libffi8 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN adduser -D -u 1000 appuser && mkdir -p /data
+RUN useradd -m -u 1000 appuser && mkdir -p /data
 WORKDIR /app
 
 # Layer 1: Python 依赖（最稳定，几乎不变）
@@ -72,6 +79,8 @@ ENV INIT_MOCK_DATA=false
 ENV BCRYPT_ENABLED=true
 ENV ENABLE_AUDIT_LOG=true
 ENV LOG_LEVEL=INFO
+# 启用 WE2 本地人脸推理路径（we2-sim extra 已装入镜像）
+ENV FACE_WE2_SIMULATOR_ENABLED=1
 
 EXPOSE ${PORT}
 
