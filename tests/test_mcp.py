@@ -481,6 +481,29 @@ class TestMCPAgentDeviceCRUD:
         r = admin_client.get("/api/mcp/connections/nope1234/devices")
         assert r.status_code == 404
 
+    def test_flat_agent_devices_list(self, admin_client):
+        """GET /api/mcp/agent-devices 扁平列出本租户所有设备（join 连接拿名称）。"""
+        conn_id = self._make_conn(admin_client)
+        # 该连接下挂两个设备
+        for i, ip in enumerate(("192.168.1.10", "192.168.1.11")):
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+                "device_id": f"FLAT-{i}", "name": f"Cam {i}", "ip": ip, "port": 80,
+            })
+            assert r.status_code == 200, r.text
+
+        r = admin_client.get("/api/mcp/agent-devices")
+        assert r.status_code == 200, r.text
+        rows = r.json()
+        assert isinstance(rows, list)
+        mine = [d for d in rows if d["connection_id"] == conn_id]
+        assert len(mine) == 2
+        # 契约字段齐全：connection_id / connection_name / id / name / ip
+        for d in mine:
+            assert set(d.keys()) == {"connection_id", "connection_name", "id", "name", "ip"}
+            assert d["connection_name"]  # join 到连接名
+        ips = sorted(d["ip"] for d in mine)
+        assert ips == ["192.168.1.10", "192.168.1.11"]
+
     def test_device_cascade_on_connection_delete(self, admin_client):
         conn_id = self._make_conn(admin_client)
         admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={

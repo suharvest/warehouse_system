@@ -746,6 +746,48 @@ async def list_mcp_agent_devices(
     return [_serialize_device(r) for r in rows]
 
 
+@router.get("/api/mcp/agent-devices")
+async def list_all_agent_devices(
+    current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
+):
+    """扁平列出本租户所有物理设备（join 智能体连接拿名称）。
+
+    供「人脸库下发」的设备选择器用：一处拿到全部设备，无需先遍历每个智能体。
+    租户隔离与设备 CRUD 一致——按所属 mcp_connection 的 tenant_id 过滤；全局
+    管理员（tenant_id 为 None）不加租户约束，可见所有设备。
+    """
+    stmt = (
+        select(
+            _t_mcp_agent_devices.c.id,
+            _t_mcp_agent_devices.c.name,
+            _t_mcp_agent_devices.c.ip,
+            _t_mcp_agent_devices.c.connection_id,
+            _t_mcp_connections.c.name.label("connection_name"),
+        )
+        .select_from(
+            _t_mcp_agent_devices.join(
+                _t_mcp_connections,
+                _t_mcp_agent_devices.c.connection_id == _t_mcp_connections.c.id,
+            )
+        )
+        .order_by(_t_mcp_connections.c.name.asc(), _t_mcp_agent_devices.c.id.asc())
+    )
+    if current_user.tenant_id is not None:
+        stmt = stmt.where(_t_mcp_connections.c.tenant_id == current_user.tenant_id)
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    return [
+        {
+            "connection_id": r.connection_id,
+            "connection_name": r.connection_name,
+            "id": r.id,
+            "name": r.name,
+            "ip": r.ip,
+        }
+        for r in rows
+    ]
+
+
 @router.post("/api/mcp/connections/{conn_id}/devices")
 async def create_mcp_agent_device(
     conn_id: str,
