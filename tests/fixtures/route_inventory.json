@@ -601,6 +601,14 @@
   },
   {
     "method": "GET",
+    "name": "list_all_agent_devices",
+    "path": "/api/mcp/agent-devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
     "name": "list_mcp_connections",
     "path": "/api/mcp/connections",
     "response_model": null,
