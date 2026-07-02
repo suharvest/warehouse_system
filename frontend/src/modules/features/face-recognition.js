@@ -3,6 +3,7 @@ import { t } from '../../../i18n.js';
 import { faceApi, warehousesApi } from '../api.js';
 import { showToast } from '../ui-components.js';
 import { getCurrentUser, API_BASE_URL } from '../state.js';
+import { initFilterDrawers } from '../ui/filter-drawer.js';
 
 const DEFAULT_CONFIG = {
     enabled: false,
@@ -56,6 +57,12 @@ function escapeHtml(value) {
     return div.innerHTML;
 }
 
+// stock_in 等操作枚举 → 本地化文案（faceOp_* 键，缺失时退回原值）
+function opLabel(op) {
+    if (!op) return '-';
+    return tt(`faceOp_${op}`, op);
+}
+
 function getErrorMessage(error, fallbackKey, fallbackText) {
     if (!error) return tt(fallbackKey, fallbackText);
     if (error.data && (error.data.detail || error.data.error)) {
@@ -99,6 +106,10 @@ export async function onFaceTenantChange(el) {
     const v = parseInt(el.value, 10);
     selectedTenantId = Number.isFinite(v) ? v : null;
     allWarehouses = []; allSubjects = []; enrollmentItems = []; selectedSubjectId = null;
+    logsState.page = 1;
+    logsState.total = 0;
+    logsState.items = [];
+    logsState.filters = { operation: '', start: '', end: '' };
     await renderFaceRecognitionPanel();
 }
 
@@ -164,7 +175,6 @@ export async function switchFaceSubTab(subTab) {
             }
         } else if (subTab === 'logs') {
             await loadSubjectsAndWarehouses();
-            content.innerHTML = renderLogsTab();
             await reloadLogs();
         }
     } catch (error) {
@@ -190,7 +200,7 @@ function renderErrorState(container, error) {
             </svg>
             <div class="error-title">${tt('loadFailed', '加载失败')}</div>
             <div class="error-message">${escapeHtml(getErrorMessage(error, 'loadFailed', '加载失败'))}</div>
-            <button class="btn cancel-btn" data-action="refreshFacePanel">${tt('retry', '重试')}</button>
+            <button class="btn confirm-btn" data-action="refreshFacePanel">${tt('retry', '重试')}</button>
         </div>
     `;
 }
@@ -272,7 +282,7 @@ function renderConfigTab() {
                     <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
                 </div>
                 <div class="face-config-actions">
-                    <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', t('submit') || '保存')}</button>
+                    <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', '保存')}</button>
                     <button class="btn cancel-btn" data-action="testFaceConnection">${tt('faceTestConnection', '测试连接')}</button>
                     <span id="face-config-test-result" class="form-hint"></span>
                 </div>
@@ -306,7 +316,7 @@ function renderConfigTab() {
 
 function renderRulesRows() {
     if (!currentRules.length) {
-        return `<tr><td colspan="6" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
+        return `<tr><td colspan="6" class="table-empty-cell">${t('noData')}</td></tr>`;
     }
     return currentRules.map(rule => {
         const wh = rule.warehouse_id ? (allWarehouses.find(w => w.id === rule.warehouse_id) || {}).name : null;
@@ -320,7 +330,7 @@ function renderRulesRows() {
         return `
             <tr>
                 <td>${escapeHtml(wh || tt('faceAppliesAll', '全部仓库'))}</td>
-                <td>${escapeHtml(rule.operation || '-')}</td>
+                <td>${escapeHtml(opLabel(rule.operation))}</td>
                 <td><span class="status-badge ${rule.require_face ? 'status-normal' : 'status-disabled'}">${rule.require_face ? tt('enabled', t('enabled') || '启用') : tt('disabled', t('disabled') || '停用')}</span></td>
                 <td>${escapeHtml(allowedNames || '-')}</td>
                 <td>${rule.min_confidence_override == null ? '-' : escapeHtml(String(rule.min_confidence_override))}</td>
@@ -423,7 +433,7 @@ function openRuleModal(rule) {
                     <div class="form-group">
                         <label>${tt('operation', '操作')} <span class="required">*</span></label>
                         <select id="face-rule-operation">
-                            ${operations.map(op => `<option value="${op}" ${r.operation === op ? 'selected' : ''}>${escapeHtml(op)}</option>`).join('')}
+                            ${operations.map(op => `<option value="${op}" ${r.operation === op ? 'selected' : ''}>${escapeHtml(opLabel(op))}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
@@ -434,11 +444,11 @@ function openRuleModal(rule) {
                     </div>
                     <div class="form-group">
                         <label>${tt('faceAllowedSubjects', '允许人员')}</label>
-                        <div id="face-rule-subjects" style="max-height:160px;overflow:auto;border:1px solid var(--border-color, #e5e7eb);border-radius:4px;padding:8px;">
-                            ${allSubjects.length === 0 ? `<div style="color:#999;">${tt('faceSubjectsEmpty', '暂无人员，请先到「人员与录入」新增')}</div>` : allSubjects.map(s => `
-                                <label class="checkbox-label" style="display:block;">
+                        <div id="face-rule-subjects" class="face-enroll-wh-list">
+                            ${allSubjects.length === 0 ? `<div class="face-enroll-wh-empty">${tt('faceSubjectsEmpty', '暂无人员，请先到「人员与录入」新增')}</div>` : allSubjects.map(s => `
+                                <label class="checkbox-label face-enroll-wh-item">
                                     <input type="checkbox" value="${s.id}" ${(r.allowed_subject_ids || []).includes(s.id) ? 'checked' : ''} ${!s.is_active ? 'disabled' : ''}>
-                                    <span>${escapeHtml(s.name)}${s.employee_id ? ` <span style="color:#999;">(${escapeHtml(s.employee_id)})</span>` : ''}${!s.is_active ? ` <span style="color:#c00;font-size:11px;">[${tt('disabled', '已停用')}]</span>` : ''}</span>
+                                    <span>${escapeHtml(s.name)}${s.employee_id ? ` <span class="face-inline-hint">(${escapeHtml(s.employee_id)})</span>` : ''}${!s.is_active ? ` <span class="face-enroll-user-role is-inactive">${tt('disabled', '已停用')}</span>` : ''}</span>
                                 </label>
                             `).join('')}
                         </div>
@@ -521,8 +531,8 @@ function renderEnrollTab() {
         <div class="table-container face-enroll-card">
             <div class="section-header">
                 <div class="section-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
-                <div style="display:flex;gap:8px;align-items:center;">
-                    <button class="btn" data-action="showFacePushModal" title="${tt('facePushHint', '把整个人脸库下发到指定设备')}">
+                <div class="action-buttons">
+                    <button class="btn cancel-btn" data-action="showFacePushModal" title="${tt('facePushHint', '把整个人脸库下发到指定设备')}">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><path d="M12 19V5"></path><path d="M5 12l7-7 7 7"></path></svg>
                         ${tt('facePushLibrary', '下发')}
                     </button>
@@ -556,7 +566,7 @@ function renderSubjectItem(s) {
     const active = selectedSubjectId === s.id ? 'is-active' : '';
     return `
         <button class="face-enroll-user-item ${active}" data-action="selectFaceSubject" data-subject-id="${s.id}">
-            <div class="face-enroll-user-name">${escapeHtml(name)}${inactive ? ` <span class="face-enroll-user-role" style="position:static;background:#fee;color:#c00;">${tt('disabled', '已停用')}</span>` : ''}</div>
+            <div class="face-enroll-user-name">${escapeHtml(name)}${inactive ? ` <span class="face-enroll-user-role is-inactive">${tt('disabled', '已停用')}</span>` : ''}</div>
             ${sub ? `<div class="face-enroll-user-sub">${escapeHtml(sub)}</div>` : ''}
             ${typeof s.enrollment_count === 'number' ? `<span class="face-enroll-user-role">${s.enrollment_count} ${tt('faceEnrolledItems', '条')}</span>` : ''}
         </button>
@@ -589,7 +599,7 @@ function renderEnrollDetail() {
                     ${tt('faceEnrolledCount', '已录入')} <strong>${count}</strong> ${tt('faceEnrolledItems', '条')}
                 </div>
             </div>
-            <div style="display:flex;gap:8px;">
+            <div class="action-buttons">
                 <button class="action-btn-small" data-action="showEditFaceSubjectModal" data-subject-id="${subject.id}">${tt('edit', '编辑')}</button>
                 <button class="action-btn-small danger" data-action="deleteFaceSubject" data-subject-id="${subject.id}">${tt('delete', '删除')}</button>
                 <button class="btn confirm-btn" data-action="showFaceEnrollModal">
@@ -599,25 +609,23 @@ function renderEnrollDetail() {
             </div>
         </div>
         ${count === 0
-            ? `<div class="panel-empty-state" style="padding:32px 16px;"><div class="empty-message">${tt('faceEnrollNoItems', '该人员尚未录入人脸')}</div></div>`
+            ? `<div class="panel-empty-state"><div class="empty-message">${tt('faceEnrollNoItems', '该人员尚未录入人脸')}</div></div>`
             : renderEnrollmentTable()
         }
     `;
 }
 
-// 录入条目改为紧凑表格（对齐智能体物理设备子表 renderDevicePanel 的视觉）：
+// 录入条目用紧凑从属表格（.sub-table，与智能体物理设备子表同一组件）：
 // 表头浅灰弱化，行分隔线极浅，字号 13px，从属感明显，不再是层级感重的卡片。
 function renderEnrollmentTable() {
-    const th = 'padding:6px 11px;font-size:11px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;color:#9a9a9a;background:#f7f8f6;border-bottom:1px solid #ededed;text-align:left;';
-    const td = 'padding:7px 11px;font-size:13px;color:#555;border-bottom:1px solid #f5f5f5;';
     return `
-        <div class="table-container" style="margin-top:4px;background:transparent;box-shadow:none;border:none;">
-            <table style="width:100%;">
-                <thead style="background:transparent;"><tr>
-                    <th style="${th}width:64px;">#</th>
-                    <th style="${th}">${tt('faceAppliesToWarehouses', '生效仓库')}</th>
-                    <th style="${th}width:120px;">${tt('faceEnrollCreatedAt', '录入时间')}</th>
-                    <th style="${th}width:80px;">${tt('actions', '操作')}</th>
+        <div class="sub-table-container" style="margin-top:4px;">
+            <table class="sub-table">
+                <thead><tr>
+                    <th style="width:64px;">#</th>
+                    <th>${tt('faceAppliesToWarehouses', '生效仓库')}</th>
+                    <th style="width:120px;">${tt('faceEnrollCreatedAt', '录入时间')}</th>
+                    <th style="width:80px;">${tt('actions', '操作')}</th>
                 </tr></thead>
                 <tbody>${enrollmentItems.map(renderEnrollmentRow).join('')}</tbody>
             </table>
@@ -626,18 +634,18 @@ function renderEnrollmentTable() {
 }
 
 function renderEnrollmentRow(item) {
-    const td = 'padding:7px 11px;font-size:13px;color:#555;border-bottom:1px solid #f5f5f5;';
     const whIds = Array.isArray(item.applies_to_warehouse_ids) ? item.applies_to_warehouse_ids : [];
     const whText = whIds.length === 0
         ? tt('faceAppliesAll', '全部仓库')
         : whIds.map(id => (allWarehouses.find(w => w.id === id) || {}).name || `#${id}`).join(', ');
-    const created = ((item.enrolled_at || item.created_at || '').split('T')[0]) || '-';
+    // 后端时间可能是 "2026-07-01T08:35:57" 或 "2026-07-01 08:35:57"，只取日期部分
+    const created = String(item.enrolled_at || item.created_at || '').slice(0, 10) || '-';
     return `
         <tr>
-            <td style="${td}font-family:monospace;">#${escapeHtml(item.id)}</td>
-            <td style="${td}">${escapeHtml(whText)}</td>
-            <td style="${td}">${escapeHtml(created)}</td>
-            <td style="${td}white-space:nowrap;">
+            <td class="is-mono">#${escapeHtml(item.id)}</td>
+            <td>${escapeHtml(whText)}</td>
+            <td>${escapeHtml(created)}</td>
+            <td class="is-nowrap">
                 <button class="action-btn-small danger" data-action="deleteFaceEnrollment" data-enrollment-id="${item.id}">${t('delete') || '删除'}</button>
             </td>
         </tr>
@@ -689,11 +697,11 @@ export async function showFacePushModal() {
     try {
         const devices = await mcpAdminFetch('/mcp/agent-devices');
         if (!Array.isArray(devices) || devices.length === 0) {
-            bodyEl.innerHTML = `<div class="panel-empty-state" style="padding:20px 8px;"><div class="empty-message">${tt('facePushNoDevices', '暂无设备。请先在「智能体配置」里为智能体添加物理设备。')}</div></div>`;
+            bodyEl.innerHTML = `<div class="panel-empty-state"><div class="empty-message">${tt('facePushNoDevices', '暂无设备。请先在「智能体配置」里为智能体添加物理设备。')}</div></div>`;
             return;
         }
         const opts = devices.map(d => {
-            const label = `${d.name || d.ip || ('#' + d.id)} · ${d.ip || '-'} · ${d.connection_name || ''}`;
+            const label = [d.name || d.ip || ('#' + d.id), d.ip, d.connection_name].filter(Boolean).join(' · ');
             return `<option value="${d.connection_id}::${d.id}">${escapeHtml(label)}</option>`;
         }).join('');
         bodyEl.innerHTML = `
@@ -732,17 +740,17 @@ export async function submitFacePush() {
         if (result && result.success) {
             const msg = tt('mcpDevicePushSuccess', '已向设备 "{name}" 下发 {count} 条人脸')
                 .replace('{name}', label).replace('{count}', result.pushed_count ?? 0);
-            if (resultEl) resultEl.innerHTML = `<div style="padding:8px 10px;border-radius:6px;background:#eef7ee;color:#2e7d32;font-size:13px;">${escapeHtml(msg)}</div>`;
+            if (resultEl) resultEl.innerHTML = `<div class="result-banner success">${escapeHtml(msg)}</div>`;
             showToast(msg);
         } else {
             const msg = tt('mcpDevicePushFailed', '向设备 "{name}" 下发失败：{error}')
                 .replace('{name}', label).replace('{error}', (result && result.error) || tt('operationFailed', '操作失败'));
-            if (resultEl) resultEl.innerHTML = `<div style="padding:8px 10px;border-radius:6px;background:#fdecec;color:#c00;font-size:13px;">${escapeHtml(msg)}</div>`;
+            if (resultEl) resultEl.innerHTML = `<div class="result-banner error">${escapeHtml(msg)}</div>`;
         }
     } catch (error) {
         const msg = tt('mcpDevicePushFailed', '向设备 "{name}" 下发失败：{error}')
             .replace('{name}', label).replace('{error}', getErrorMessage(error, 'operationFailed', '操作失败'));
-        if (resultEl) resultEl.innerHTML = `<div style="padding:8px 10px;border-radius:6px;background:#fdecec;color:#c00;font-size:13px;">${escapeHtml(msg)}</div>`;
+        if (resultEl) resultEl.innerHTML = `<div class="result-banner error">${escapeHtml(msg)}</div>`;
     } finally {
         if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = orig; }
     }
@@ -764,12 +772,17 @@ async function loadEnrollmentsForSelected() {
         enrollmentItems = [];
         return;
     }
+    // 守卫竞态：快速连点两个人员时，先发出的慢请求返回后不得覆盖后选中人员的数据
+    const requestedSubjectId = selectedSubjectId;
+    let items;
     try {
-        const result = await faceApi.getEnrollments({ subjectId: selectedSubjectId, tenantId: effectiveTenantId() });
-        enrollmentItems = Array.isArray(result) ? result : (result.items || []);
+        const result = await faceApi.getEnrollments({ subjectId: requestedSubjectId, tenantId: effectiveTenantId() });
+        items = Array.isArray(result) ? result : (result.items || []);
     } catch {
-        enrollmentItems = [];
+        items = [];
     }
+    if (selectedSubjectId !== requestedSubjectId) return;  // stale response, discard
+    enrollmentItems = items;
     const detail = document.getElementById('face-enroll-detail');
     if (detail) detail.innerHTML = renderEnrollDetail();
 }
@@ -879,7 +892,10 @@ export async function deleteFaceEnrollment(el) {
     try {
         await faceApi.deleteEnrollment(id, effectiveTenantId());
         showToast(tt('faceEnrollDeleted', '录入条目已删除'));
+        await loadSubjectsAndWarehouses(true);  // refresh enrollment counts
         await loadEnrollmentsForSelected();
+        const list = document.getElementById('face-enroll-subject-list');
+        if (list) list.innerHTML = allSubjects.map(renderSubjectItem).join('');
     } catch (error) {
         showToast(getErrorMessage(error, 'faceEnrollDeleteFailed', '删除失败'), 'error');
     }
@@ -889,30 +905,30 @@ export async function deleteFaceEnrollment(el) {
 function renderLogsTab() {
     const f = logsState.filters;
     return `
+        <div class="filter-bar">
+            <div class="filter-group">
+                <label>${tt('operation', '操作')}</label>
+                <select id="face-logs-operation">
+                    <option value="">${tt('all', '全部')}</option>
+                    ${FACE_OPERATIONS.map(op => `<option value="${op}" ${f.operation === op ? 'selected' : ''}>${escapeHtml(opLabel(op))}</option>`).join('')}
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>${tt('startDate', '开始日期')}</label>
+                <input type="date" id="face-logs-start" value="${escapeHtml(f.start || '')}">
+            </div>
+            <div class="filter-group">
+                <label>${tt('endDate', '结束日期')}</label>
+                <input type="date" id="face-logs-end" value="${escapeHtml(f.end || '')}">
+            </div>
+            <div class="filter-actions">
+                <button class="filter-btn primary" data-action="applyFaceLogsFilter">${tt('apply', '应用')}</button>
+                <button class="filter-btn secondary" data-action="resetFaceLogsFilter">${tt('reset', '重置')}</button>
+            </div>
+        </div>
         <div class="table-container">
             <div class="section-header">
                 <div class="section-title">${tt('faceLogs', '审计日志')}</div>
-            </div>
-            <div style="padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
-                <div class="form-group">
-                    <label>${tt('operation', '操作')}</label>
-                    <select id="face-logs-operation">
-                        <option value="">${tt('all', '全部')}</option>
-                        ${FACE_OPERATIONS.map(op => `<option value="${op}" ${f.operation === op ? 'selected' : ''}>${escapeHtml(op)}</option>`).join('')}
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>${tt('startDate', '开始日期')}</label>
-                    <input type="date" id="face-logs-start" value="${escapeHtml(f.start || '')}">
-                </div>
-                <div class="form-group">
-                    <label>${tt('endDate', '结束日期')}</label>
-                    <input type="date" id="face-logs-end" value="${escapeHtml(f.end || '')}">
-                </div>
-                <div class="form-group" style="display:flex;align-items:flex-end;gap:8px;">
-                    <button class="btn confirm-btn" data-action="applyFaceLogsFilter">${tt('apply', '应用')}</button>
-                    <button class="btn cancel-btn" data-action="resetFaceLogsFilter">${tt('reset', '重置')}</button>
-                </div>
             </div>
             <table id="face-logs-table">
                 <thead>
@@ -930,9 +946,9 @@ function renderLogsTab() {
             </table>
             <div class="pagination">
                 <div>
-                    <span>${tt('total', t('total') || '共')}</span>
+                    <span>${t('totalRecords') || '共'}</span>
                     <span id="face-logs-total">${logsState.total}</span>
-                    <span>${t('recordsUnit') || '条'}</span>
+                    <span>${t('recordsUnit') || '条记录'}</span>
                 </div>
                 <div class="pagination-controls">
                     <button data-action="faceLogsPrevPage" ${logsState.page <= 1 ? 'disabled' : ''}>${t('prevPage') || '上一页'}</button>
@@ -946,7 +962,7 @@ function renderLogsTab() {
 
 function renderLogsRows() {
     if (!logsState.items.length) {
-        return `<tr><td colspan="7" style="text-align:center;color:#999;">${t('noData')}</td></tr>`;
+        return `<tr><td colspan="7" class="table-empty-cell">${t('noData')}</td></tr>`;
     }
     return logsState.items.map(item => {
         const matched = item.matched_subject_id ? (allSubjects.find(s => s.id === item.matched_subject_id) || {}) : null;
@@ -961,7 +977,7 @@ function renderLogsRows() {
             <tr>
                 <td>${escapeHtml((item.created_at || '').replace('T', ' ').slice(0, 19))}</td>
                 <td>${escapeHtml(callerText)}</td>
-                <td>${escapeHtml(item.operation || '-')}</td>
+                <td>${escapeHtml(opLabel(item.operation))}</td>
                 <td>${escapeHtml(matchedName)}</td>
                 <td>${item.confidence == null ? '-' : escapeHtml(Number(item.confidence).toFixed(3))}</td>
                 <td><span class="status-badge ${decisionClass}">${escapeHtml(decisionText)}</span></td>
@@ -971,6 +987,8 @@ function renderLogsRows() {
     }).join('');
 }
 
+// 拉取当前筛选/页码的日志到 logsState，然后整体重渲日志页
+// （分页按钮的 disabled 态、页码指示都依赖 logsState，局部 patch tbody 会漏掉它们）。
 async function reloadLogs() {
     try {
         const f = logsState.filters;
@@ -988,10 +1006,12 @@ async function reloadLogs() {
         logsState.items = [];
         logsState.total = 0;
     }
-    const tbody = document.getElementById('face-logs-tbody');
-    if (tbody) tbody.innerHTML = renderLogsRows();
-    const totalEl = document.getElementById('face-logs-total');
-    if (totalEl) totalEl.textContent = String(logsState.total);
+    const content = document.getElementById('face-content');
+    if (content && currentSubTab === 'logs') {
+        content.innerHTML = renderLogsTab();
+        // 动态渲染的 filter-bar 需要补挂移动端筛选抽屉（幂等，桌面端无影响）
+        initFilterDrawers(content);
+    }
 }
 
 export async function applyFaceLogsFilter() {
@@ -1007,8 +1027,6 @@ export async function applyFaceLogsFilter() {
 export async function resetFaceLogsFilter() {
     logsState.filters = { operation: '', start: '', end: '' };
     logsState.page = 1;
-    const content = document.getElementById('face-content');
-    if (content) content.innerHTML = renderLogsTab();
     await reloadLogs();
 }
 
@@ -1016,8 +1034,6 @@ export async function faceLogsPrevPage() {
     if (logsState.page > 1) {
         logsState.page--;
         await reloadLogs();
-        const content = document.getElementById('face-content');
-        if (content) content.innerHTML = renderLogsTab();
     }
 }
 
@@ -1026,8 +1042,6 @@ export async function faceLogsNextPage() {
     if (logsState.page < totalPages) {
         logsState.page++;
         await reloadLogs();
-        const content = document.getElementById('face-content');
-        if (content) content.innerHTML = renderLogsTab();
     }
 }
 

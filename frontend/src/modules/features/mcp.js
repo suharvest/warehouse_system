@@ -3,6 +3,7 @@ import { t } from '../../../i18n.js';
 import { API_BASE_URL } from '../state.js';
 import { getCurrentWarehouseId, warehousesApi } from '../api.js';
 import { getCurrentUser } from '../state.js';
+import { showToast } from '../ui-components.js';
 
 // API 封装
 async function mcpFetch(url, options = {}) {
@@ -431,39 +432,32 @@ function renderDevicePanel(connId) {
     if (!panel) return;
     const devices = deviceState[connId]?.devices || [];
 
-    // 设备子表是“智能体 → 物理设备”的嵌套明细，刻意做得比父级智能体表更紧凑、视觉更弱，
-    // 让人一眼看出它从属于父表，而不是又一个平级表：
-    //   · 单元格 padding 更小（约 7/11px）、字号 13px（父表 14px）。
-    //   · 表头不用父表那种醒目绿底（#e9f0e1），改成几乎无色的浅灰 + 弱化的灰色小字。
-    //   · 行分隔线用很轻的浅色（#f5f5f5）。
-    // 注意：以下内联样式会覆盖全局 @layer base 的 th/td 规则（内联优先级更高）。
+    // 设备子表是“智能体 → 物理设备”的嵌套明细，用 .sub-table（design-system 共享组件，
+    // face 录入条目表同款）：紧凑字号、浅灰表头、极浅分隔线，从属感明显。
     // table-layout:fixed + colgroup 固定列宽（24/26/22/28%）保留，保证不同智能体下逐列一致；
     // 单元格 ellipsis 截断也保留。
-    const subTh = 'padding:6px 11px;font-size:11px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;color:#9a9a9a;background:#f7f8f6;border-bottom:1px solid #ededed;';
-    const subTd = 'padding:7px 11px;font-size:13px;color:#555;border-bottom:1px solid #f5f5f5;';
-    const subTdEllip = subTd + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     const listHtml = devices.length === 0
         ? `<div class="text-sm text-gray-400" style="padding:10px 0;font-size:13px;">${t('mcpDeviceNone')}</div>`
-        : `<div class="table-container" style="margin-bottom:4px;background:transparent;box-shadow:none;border:none;">
-            <table style="table-layout:fixed;">
+        : `<div class="sub-table-container" style="margin-bottom:4px;">
+            <table class="sub-table" style="table-layout:fixed;">
             <colgroup>
                 <col style="width:24%;">
                 <col style="width:26%;">
                 <col style="width:22%;">
                 <col style="width:28%;">
             </colgroup>
-            <thead style="background:transparent;"><tr>
-                <th style="${subTh}">${t('mcpDeviceName')}</th>
-                <th style="${subTh}">${t('mcpDeviceId')}</th>
-                <th style="${subTh}">${t('mcpDeviceIp')}</th>
-                <th style="${subTh}">${t('actions')}</th>
+            <thead><tr>
+                <th>${t('mcpDeviceName')}</th>
+                <th>${t('mcpDeviceId')}</th>
+                <th>${t('mcpDeviceIp')}</th>
+                <th>${t('actions')}</th>
             </tr></thead>
             <tbody>${devices.map(d => `
                 <tr>
-                    <td style="${subTdEllip}">${escapeHtml(d.name || '-')}</td>
-                    <td style="${subTdEllip}font-family:monospace;">${escapeHtml(d.device_id || '-')}</td>
-                    <td style="${subTdEllip}font-family:monospace;">${escapeHtml(d.ip || '-')}</td>
-                    <td style="${subTd}white-space:nowrap;">
+                    <td class="is-ellip">${escapeHtml(d.name || '-')}</td>
+                    <td class="is-ellip is-mono">${escapeHtml(d.device_id || '-')}</td>
+                    <td class="is-ellip is-mono">${escapeHtml(d.ip || '-')}</td>
+                    <td class="is-nowrap">
                         <button class="action-btn add-btn" data-action="mcpDevicePushFaces" data-conn-id="${connId}" data-dev-id="${d.id}">${t('mcpDevicePushFaces')}</button>
                         <button class="action-btn" data-action="mcpDeviceEdit" data-conn-id="${connId}" data-dev-id="${d.id}">${t('edit')}</button>
                         <button class="action-btn delete-btn" data-action="mcpDeviceDelete" data-conn-id="${connId}" data-dev-id="${d.id}">${t('delete')}</button>
@@ -558,13 +552,13 @@ export async function pushFacesToDevice(connId, devId) {
     try {
         const result = await deviceFetch(connId, `/${devId}/push-faces`, { method: 'POST' });
         if (result && result.success) {
-            alert(t('mcpDevicePushSuccess').replace('{name}', name).replace('{count}', result.pushed_count ?? 0));
+            showToast(t('mcpDevicePushSuccess').replace('{name}', name).replace('{count}', result.pushed_count ?? 0));
         } else {
-            alert(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', (result && result.error) || t('operationFailed')));
+            showToast(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', (result && result.error) || t('operationFailed')), 'error');
         }
     } catch (error) {
         console.error('下发人脸失败:', error);
-        alert(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', error.data?.detail || error.message || t('operationFailed')));
+        showToast(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', error.data?.detail || error.message || t('operationFailed')), 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = origLabel; }
     }
