@@ -70,3 +70,41 @@ class TestFaceLibraryModelTagFilter:
         assert all(e["model_tag"] == "lib-mt-A" for e in data)
         names = {e["name"] for e in data}
         assert "LibA" in names and "LibB" not in names
+
+
+class TestFaceConfigModeValidation:
+    """PUT /api/face/config mode 校验须与 tenant_face_config 的
+    CHECK(mode IN('local','lan')) 约束一致：UI 发送的 lan 必须能存；
+    历史值 hello/jetson/custom/face_rec_api/we2 归一化为 lan 而非撞约束 500。"""
+
+    _BASE = {
+        "enabled": True,
+        "endpoint": "http://example.local/face",
+        "auth_token": "",
+        "embedding_model_tag": "",
+        "min_confidence": 0.7,
+        "verify_mode": "interface",
+    }
+
+    def _put(self, admin_client, mode):
+        return admin_client.put("/api/face/config", json={**self._BASE, "mode": mode})
+
+    def test_mode_lan_accepted(self, admin_client):
+        resp = self._put(admin_client, "lan")
+        assert resp.status_code == 200, resp.text
+        assert admin_client.get("/api/face/config").json()["mode"] == "lan"
+
+    def test_mode_local_accepted(self, admin_client):
+        resp = self._put(admin_client, "local")
+        assert resp.status_code == 200, resp.text
+        assert admin_client.get("/api/face/config").json()["mode"] == "local"
+
+    def test_legacy_modes_normalized_to_lan(self, admin_client):
+        for legacy in ("hello", "jetson", "custom", "face_rec_api", "we2"):
+            resp = self._put(admin_client, legacy)
+            assert resp.status_code == 200, f"{legacy}: {resp.text}"
+            assert admin_client.get("/api/face/config").json()["mode"] == "lan", legacy
+
+    def test_unknown_mode_rejected_400(self, admin_client):
+        resp = self._put(admin_client, "bogus")
+        assert resp.status_code == 400, resp.text

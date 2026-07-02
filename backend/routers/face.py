@@ -146,12 +146,16 @@ async def face_put_config(
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    if payload.mode is not None and payload.mode not in (
-        "local", "hello", "jetson", "custom", "face_rec_api", "we2",
-    ):
+    # 当前合法值只有 local/lan（与 tenant_face_config 的 CHECK 约束一致）。
+    # 历史 API 调用方可能还在传 hello/jetson/custom/face_rec_api/we2 —— 这些
+    # 都是"外部端点"形态，统一归一化为 lan，避免撞 DB 约束 500。
+    _LEGACY_LAN_MODES = ("hello", "jetson", "custom", "face_rec_api", "we2")
+    if payload.mode in _LEGACY_LAN_MODES:
+        payload.mode = "lan"
+    if payload.mode is not None and payload.mode not in ("local", "lan"):
         raise HTTPException(
             status_code=400,
-            detail="mode 必须是 local/hello/jetson/custom/face_rec_api/we2",
+            detail="mode 必须是 local 或 lan",
         )
     if payload.verify_mode not in ("session", "interface"):
         raise HTTPException(
