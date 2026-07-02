@@ -1349,6 +1349,82 @@
 }
 
 /* ============================================
+   SUB TABLE (嵌套明细表：父面板内的从属表格)
+   父表醒目绿底表头，子表刻意弱化：小字号、浅灰表头、极浅分隔线，
+   一眼可见其从属关系。供 mcp 设备子表与 face 录入条目表共用。
+   ============================================ */
+
+.sub-table-container {
+  background: transparent;
+  box-shadow: none;
+  border: none;
+}
+
+.sub-table {
+  width: 100%;
+}
+
+.sub-table thead {
+  background: transparent;
+}
+
+.sub-table th {
+  padding: 6px 11px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: #9a9a9a;
+  background: #f7f8f6;
+  border-bottom: 1px solid #ededed;
+  text-align: left;
+}
+
+.sub-table td {
+  padding: 7px 11px;
+  font-size: 13px;
+  color: #555;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.sub-table td.is-ellip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sub-table td.is-mono {
+  font-family: monospace;
+}
+
+.sub-table td.is-nowrap {
+  white-space: nowrap;
+}
+
+/* 表格空态单元格（td 内居中弱化文字，各表共用） */
+.table-empty-cell {
+  text-align: center;
+  color: var(--color-text-muted, #999);
+}
+
+/* 操作结果横幅（弹窗内的成功/失败反馈） */
+.result-banner {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.result-banner.success {
+  background: #e8f5d6;
+  color: #3f6212;
+}
+
+.result-banner.error {
+  background: #fdecec;
+  color: #cf1322;
+}
+
+/* ============================================
    FACE RECOGNITION
    ============================================ */
 
@@ -1527,8 +1603,8 @@
 }
 
 .face-enroll-user-item.is-active {
-  background: #f0f9ec;
-  box-shadow: inset 3px 0 0 #84cc16;
+  background: #f0f7e6;
+  box-shadow: inset 3px 0 0 var(--color-primary, #8cc63f);
 }
 
 .face-enroll-user-name {
@@ -1556,7 +1632,13 @@
 
 .face-enroll-user-item.is-active .face-enroll-user-role {
   background: #fff;
-  color: #65a30d;
+  color: #7ab32f;
+}
+
+.face-enroll-user-role.is-inactive {
+  position: static;
+  background: #fdecec;
+  color: #cf1322;
 }
 
 .face-enroll-detail {
