@@ -113,14 +113,23 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
             )
             if resp.status_code >= 400:
                 raise FaceEndpointError(f"infer_http_{resp.status_code}")
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError as e:
+                # HTTP 200 但响应体不是合法 JSON —— 协议错误而非网络错误
+                raise FaceEndpointError("infer_bad_response") from e
     except httpx.HTTPError as e:
         logger.warning("face infer failed: %s", e)
         raise FaceEndpointError("endpoint_unreachable") from e
+    if not isinstance(data, dict):
+        raise FaceEndpointError("infer_bad_response")
 
     model_tag = data.get("model_tag") or cfg.embedding_model_tag or "unknown"
     faces = data.get("faces") or []
-    if not isinstance(faces, list) or not faces:
+    if not isinstance(faces, list):
+        raise FaceEndpointError("infer_bad_response")
+    faces = [f for f in faces if isinstance(f, dict)]
+    if not faces:
         raise FaceEndpointError("no_face_detected")
     # Pick highest-det-score face; fall back to first if score absent.
     best = max(faces, key=lambda f: float(f.get("det_score") or 0.0))
