@@ -98,27 +98,40 @@ def _normalize_mcp_endpoint(endpoint: str) -> str:
     return (endpoint or '').strip()
 
 
-def _ensure_unique_mcp_endpoint(endpoint: str, exclude_conn_id: Optional[str] = None) -> None:
+def _ensure_unique_mcp_endpoint(
+    endpoint: str,
+    exclude_conn_id: Optional[str] = None,
+    caller_tenant_id: Optional[int] = None,
+) -> None:
     """Prevent duplicate local configs for the same cloud agent endpoint.
 
     SenseCraft/Xiaozhi endpoints identify one cloud-side agent entry. Multiple
     physical devices may be attached to that cloud agent, but the warehouse
     system only needs one local MCP connection for that endpoint.
+
+    Uniqueness is intentionally global (one cloud entry = one local config),
+    but the conflicting connection's name is only revealed to callers of the
+    same tenant — cross-tenant the 409 stays generic to avoid leaking names.
     """
     if not endpoint:
         raise HTTPException(status_code=400, detail="云端链接不能为空")
-    stmt = select(_t_mcp_connections.c.id, _t_mcp_connections.c.name).where(
-        _t_mcp_connections.c.mcp_endpoint == endpoint
-    )
+    stmt = select(
+        _t_mcp_connections.c.id,
+        _t_mcp_connections.c.name,
+        _t_mcp_connections.c.tenant_id,
+    ).where(_t_mcp_connections.c.mcp_endpoint == endpoint)
     if exclude_conn_id is not None:
         stmt = stmt.where(_t_mcp_connections.c.id != exclude_conn_id)
     with get_engine().connect() as sa_conn:
         existing = sa_conn.execute(stmt).first()
     if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"云端链接已被「{existing.name}」使用。同一个云端智能体入口只需配置一次。",
+        same_tenant = caller_tenant_id is None or existing.tenant_id == caller_tenant_id
+        detail = (
+            f"云端链接已被「{existing.name}」使用。同一个云端智能体入口只需配置一次。"
+            if same_tenant
+            else "云端链接已被其他租户使用。同一个云端智能体入口只需配置一次。"
         )
+        raise HTTPException(status_code=409, detail=detail)
 
 
 @router.get("/api/mcp/connections")
@@ -183,7 +196,7 @@ async def create_mcp_connection(
     now_dt = datetime.now()
     now = now_dt.isoformat()
     mcp_endpoint = _normalize_mcp_endpoint(request.mcp_endpoint)
-    _ensure_unique_mcp_endpoint(mcp_endpoint)
+    _ensure_unique_mcp_endpoint(mcp_endpoint, caller_tenant_id=current_user.tenant_id)
 
     # 验证角色
     role = request.role if request.role in _VALID_ROLE_VALUES else RoleName.OPERATE.value
@@ -317,7 +330,11 @@ async def update_mcp_connection(
     new_endpoint = None
     if request.mcp_endpoint is not None:
         new_endpoint = _normalize_mcp_endpoint(request.mcp_endpoint)
-        _ensure_unique_mcp_endpoint(new_endpoint, exclude_conn_id=conn_id)
+        _ensure_unique_mcp_endpoint(
+            new_endpoint,
+            exclude_conn_id=conn_id,
+            caller_tenant_id=current_user.tenant_id,
+        )
 
     # Resolve warehouse access (helper retains ``conn`` arg for signature
     # compatibility but reads via SA Core internally).
