@@ -463,6 +463,22 @@ class TestMCPAgentDeviceCRUD:
         })
         assert r.status_code == 400
 
+    def test_device_ip_must_be_ip_literal_and_safe(self, admin_client):
+        """SSRF 防线：ip 必须是 IP 字面量，回环/链路本地(含云元数据)/组播拒绝。"""
+        conn_id = self._make_conn(admin_client)
+        for bad_ip in ("localhost", "device.lan", "127.0.0.1", "::1",
+                       "169.254.169.254", "224.0.0.1", "0.0.0.0"):
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+                "ip": bad_ip, "port": 80,
+            })
+            assert r.status_code == 400, f"{bad_ip}: {r.status_code} {r.text}"
+        # 私网与公网字面量放行
+        for ok_ip in ("192.168.1.99", "8.8.8.8"):
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+                "ip": ok_ip, "port": 80,
+            })
+            assert r.status_code == 200, f"{ok_ip}: {r.text}"
+
     def test_device_port_range(self, admin_client):
         conn_id = self._make_conn(admin_client)
         r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
@@ -533,6 +549,11 @@ def _emb_b64(vec):
 
 class TestPushFacesToDevice:
     """云端下发人脸库到设备：按 model_tag 过滤 + POST batch-update + 失败清晰。"""
+
+    @pytest.fixture(autouse=True)
+    def _allow_loopback_device_ip(self, monkeypatch):
+        # 测试用 127.0.0.1 起假设备服务器；生产默认封禁回环（SSRF 防线）
+        monkeypatch.setenv("MCP_DEVICE_ALLOW_LOOPBACK", "1")
 
     def _make_conn(self, admin_client):
         resp = admin_client.post("/api/mcp/connections", json={

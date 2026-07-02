@@ -82,16 +82,16 @@ def conn(monkeypatch):
         pass
 
 
-def _set_config(conn, *, enabled: bool, min_confidence: float = 0.65):
+def _set_config(conn, *, enabled: bool, min_confidence: float = 0.65, verify_mode: str = "interface"):
     cur = conn.cursor()
     cur.execute("DELETE FROM tenant_face_config WHERE tenant_id = 1")
     cur.execute(
         """
         INSERT INTO tenant_face_config
-            (tenant_id, enabled, mode, endpoint, embedding_model_tag, min_confidence)
-        VALUES (1, ?, 'lan', 'http://fake.local', 'fake-v1', ?)
+            (tenant_id, enabled, mode, endpoint, embedding_model_tag, min_confidence, verify_mode)
+        VALUES (1, ?, 'lan', 'http://fake.local', 'fake-v1', ?, ?)
         """,
-        (1 if enabled else 0, min_confidence),
+        (1 if enabled else 0, min_confidence, verify_mode),
     )
     conn.commit()
 
@@ -333,3 +333,71 @@ def test_verify_deny_endpoint_unreachable(conn, monkeypatch):
     ))
     assert decision.status == "deny"
     assert decision.failure_reason == "endpoint_unreachable"
+
+
+# ── Session mode (advisory) allow-list enforcement ──────────────────────────
+# session 模式信任设备本地匹配、不重比对，但配了 allowed_subject_ids 的规则是
+# 硬性限制：说话人未解析（设备没认出人 / 传了停用或跨租户 ID）也必须 deny，
+# 否则"谁都不是"反而能通过专门限制操作人的规则。
+
+def _verify_session(conn, **kw):
+    from backend.face import orchestrator
+    return asyncio.run(orchestrator.verify_mcp_face(
+        conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out", **kw
+    ))
+
+
+def test_session_allow_list_denies_unresolved_speaker(conn):
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "Session Allowed")
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+
+    decision = _verify_session(conn)  # no speaker at all
+    assert decision.status == "deny"
+    assert decision.failure_reason == "speaker_unresolved"
+
+
+def test_session_allow_list_denies_other_subject(conn):
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid_allowed = _create_subject(conn, "Session Allowed")
+    sid_other = _create_subject(conn, "Session Other")
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid_allowed])
+
+    decision = _verify_session(conn, speaker_subject_id=sid_other)
+    assert decision.status == "deny"
+    assert decision.failure_reason == "not_in_allow_list"
+    assert decision.matched_subject_id == sid_other
+
+
+def test_session_allow_list_passes_allowed_subject(conn):
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "Session Allowed")
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+
+    decision = _verify_session(conn, speaker_subject_id=sid)
+    assert decision.status == "pass"
+    assert decision.matched_subject_id == sid
+
+
+def test_session_no_allow_list_passes_unresolved(conn):
+    """无白名单的规则保持 advisory 语义：未识别也放行，仅记审计。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(conn)
+    assert decision.status == "pass"
+    assert decision.matched_subject_id is None
+
+
+def test_session_inactive_subject_id_not_resolved(conn):
+    """停用人员的 speaker_subject_id 不再解析成功（等同未识别）。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "Session Inactive")
+    cur = conn.cursor()
+    cur.execute("UPDATE face_subjects SET is_active = 0 WHERE id = ?", (sid,))
+    conn.commit()
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+
+    decision = _verify_session(conn, speaker_subject_id=sid)
+    assert decision.status == "deny"
+    assert decision.failure_reason == "speaker_unresolved"

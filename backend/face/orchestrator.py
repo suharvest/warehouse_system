@@ -129,14 +129,15 @@ def _resolve_speaker_subject(
     """Resolve the session-mode speaker to a tenant-scoped face_subjects.id.
 
     ``speaker_subject_id`` (exact, no ambiguity) wins; falls back to a
-    case-sensitive active-name lookup. Returns None when neither resolves
-    (e.g. device had no valid match) — the caller still proceeds (advisory),
-    just without a matched_subject_id in the audit log.
+    case-sensitive name lookup. Both paths require the subject to be active —
+    a deactivated subject must not authenticate via a stale device entry.
+    Returns None when neither resolves (e.g. device had no valid match).
     """
     cur = conn.cursor()
     if speaker_subject_id is not None:
         cur.execute(
-            "SELECT id FROM face_subjects WHERE id = ? AND tenant_id = ?",
+            "SELECT id FROM face_subjects "
+            "WHERE id = ? AND tenant_id = ? AND is_active = 1",
             (speaker_subject_id, tenant_id),
         )
         row = cur.fetchone()
@@ -336,22 +337,25 @@ async def verify_mcp_face(
 
     # ── Session mode (advisory) ─────────────────────────────────────────
     # Trust the device's on-board match (frozen on the conversation rising
-    # edge). We do NOT re-infer/re-match the embedding and we NEVER deny:
-    # the device identity is forwarded as hidden params, recorded for audit
-    # (decision=pass, advisory) and the call proceeds. Allow-list is still
-    # honoured when a resolvable subject falls outside it.
+    # edge). We do NOT re-infer/re-match the embedding; the device identity
+    # is recorded for audit (decision=pass, advisory) and the call proceeds.
+    # Exception: a rule with an allow-list is a hard restriction even in
+    # session mode — an unresolved speaker must NOT pass it (otherwise
+    # "nobody recognized" would bypass the very rule meant to limit who can
+    # perform the operation).
     if cfg.verify_mode == "session":
         matched = _resolve_speaker_subject(
             conn, tenant_id=tenant_id,
             speaker_subject_id=speaker_subject_id, speaker_name=speaker_name,
         )
-        if (
-            matched is not None
-            and rule.allowed_subject_ids
-            and matched not in rule.allowed_subject_ids
+        if rule.allowed_subject_ids and (
+            matched is None or matched not in rule.allowed_subject_ids
         ):
             decision = Decision(
-                status="deny", failure_reason="not_in_allow_list",
+                status="deny",
+                failure_reason=(
+                    "not_in_allow_list" if matched is not None else "speaker_unresolved"
+                ),
                 matched_subject_id=matched,
             )
             _log_decision(

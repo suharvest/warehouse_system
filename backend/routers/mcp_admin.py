@@ -12,6 +12,8 @@ worker deployments stay isolated.
 Follow bare-module import style (no ``from backend.X``).
 """
 import base64
+import ipaddress
+import os
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -701,10 +703,27 @@ def _serialize_device(row) -> dict:
 
 
 def _validate_device_fields(ip, port):
-    """ip 非空、port 1-65535。返回归一化后的 (ip, port)。"""
+    """ip 必须是合法 IP 字面量且不在危险网段、port 1-65535。返回归一化后的 (ip, port)。
+
+    设备 ip 会被后端直接用于服务端 HTTP 请求（人脸下发等），必须挡住 SSRF 面：
+    回环（本机管理端点）、链路本地（169.254.169.254 云元数据）、组播/保留/未指定
+    一律拒绝。私网与公网地址均放行——设备既可能在 LAN 也可能有可路由地址。
+    """
     ip = (ip or '').strip()
     if not ip:
         raise HTTPException(status_code=400, detail="设备 IP 不能为空")
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="设备 IP 必须是合法的 IP 地址")
+    # MCP_DEVICE_ALLOW_LOOPBACK=1：显式豁免回环（本机跑设备模拟器的开发/测试场景）
+    allow_loopback = os.environ.get("MCP_DEVICE_ALLOW_LOOPBACK") == "1"
+    if (
+        (addr.is_loopback and not allow_loopback)
+        or addr.is_link_local or addr.is_multicast
+        or addr.is_unspecified or addr.is_reserved
+    ):
+        raise HTTPException(status_code=400, detail="设备 IP 不在允许范围（禁止回环/链路本地/组播/保留地址）")
     if port is None:
         port = 80
     if not isinstance(port, int) or not (1 <= port <= 65535):
@@ -1005,9 +1024,8 @@ async def push_faces_to_device(
     dev = dict(_load_device_or_404(conn_id, dev_id)._mapping)
 
     # face_enabled gate 已移除：任何有 IP 的设备都可手动下发。
-    ip = (dev.get("ip") or "").strip()
-    if not ip:
-        raise HTTPException(status_code=400, detail="设备缺少 IP，无法下发")
+    # 重新过一遍 IP 校验（SSRF 防线）：存量数据可能早于写入时校验。
+    ip, _ = _validate_device_fields(dev.get("ip"), None)
     port = DEVICE_HTTP_PORT  # 固件写死 80，不读 device.port
     # 固定模型标签：全设备同模型，不读 mcp_agent_devices.model_tag。
     model_tag = DEVICE_FACE_MODEL_TAG
