@@ -1354,16 +1354,6 @@
    一眼可见其从属关系。供 mcp 设备子表与 face 录入条目表共用。
    ============================================ */
 
-.sub-table-container {
-  background: transparent;
-  box-shadow: none;
-  border: none;
-}
-
-.sub-table {
-  width: 100%;
-}
-
 .sub-table thead {
   background: transparent;
 }

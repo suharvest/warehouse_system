@@ -438,7 +438,7 @@ function renderDevicePanel(connId) {
     // 单元格 ellipsis 截断也保留。
     const listHtml = devices.length === 0
         ? `<div class="text-sm text-gray-400" style="padding:10px 0;font-size:13px;">${t('mcpDeviceNone')}</div>`
-        : `<div class="sub-table-container" style="margin-bottom:4px;">
+        : `<div style="margin-bottom:4px;">
             <table class="sub-table" style="table-layout:fixed;">
             <colgroup>
                 <col style="width:24%;">

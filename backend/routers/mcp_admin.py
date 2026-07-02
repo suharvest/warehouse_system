@@ -100,8 +100,9 @@ def _normalize_mcp_endpoint(endpoint: str) -> str:
 
 def _ensure_unique_mcp_endpoint(
     endpoint: str,
+    *,
+    caller_tenant_id: Optional[int],
     exclude_conn_id: Optional[str] = None,
-    caller_tenant_id: Optional[int] = None,
 ) -> None:
     """Prevent duplicate local configs for the same cloud agent endpoint.
 

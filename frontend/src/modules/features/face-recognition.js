@@ -37,12 +37,15 @@ function effectiveTenantId() {
     const u = getCurrentUser();
     return u ? u.tenant_id : null;
 }
+function emptyLogsFilters() {
+    return { operation: '', start: '', end: '' };
+}
 let logsState = {
     page: 1,
     pageSize: 20,
     total: 0,
     items: [],
-    filters: { operation: '', start: '', end: '' }
+    filters: emptyLogsFilters()
 };
 
 // ============ 工具函数 ============
@@ -57,10 +60,17 @@ function escapeHtml(value) {
     return div.innerHTML;
 }
 
-// stock_in 等操作枚举 → 本地化文案（faceOp_* 键，缺失时退回原值）
+// stock_in 等操作枚举 → 本地化文案。入库/出库复用全站 inbound/outbound 键，
+// 避免同一业务概念两套叫法；transfer/adjust 无既有独立键，用 faceOp_*。
+const FACE_OP_I18N_KEYS = {
+    stock_in: 'inbound',
+    stock_out: 'outbound',
+    transfer: 'faceOp_transfer',
+    adjust: 'faceOp_adjust',
+};
 function opLabel(op) {
     if (!op) return '-';
-    return tt(`faceOp_${op}`, op);
+    return tt(FACE_OP_I18N_KEYS[op] || `faceOp_${op}`, op);
 }
 
 function getErrorMessage(error, fallbackKey, fallbackText) {
@@ -107,9 +117,7 @@ export async function onFaceTenantChange(el) {
     selectedTenantId = Number.isFinite(v) ? v : null;
     allWarehouses = []; allSubjects = []; enrollmentItems = []; selectedSubjectId = null;
     logsState.page = 1;
-    logsState.total = 0;
-    logsState.items = [];
-    logsState.filters = { operation: '', start: '', end: '' };
+    logsState.filters = emptyLogsFilters();
     await renderFaceRecognitionPanel();
 }
 
@@ -175,6 +183,8 @@ export async function switchFaceSubTab(subTab) {
             }
         } else if (subTab === 'logs') {
             await loadSubjectsAndWarehouses();
+            content.innerHTML = renderLogsTab();
+            initFilterDrawers(content);  // 动态渲染的 filter-bar 补挂移动端筛选抽屉
             await reloadLogs();
         }
     } catch (error) {
@@ -227,6 +237,18 @@ async function loadSubjectsAndWarehouses(force = false) {
     }
     if (allWarehouses.length === 0) {
         try { allWarehouses = await warehousesApi.getList(true); } catch { allWarehouses = []; }
+    }
+}
+
+// 强刷人员数据并重渲左侧人员列表（含空态）。人员/录入的增删改后统一走这里，
+// 保证计数徽章与空态在所有入口一致。
+async function refreshSubjectList() {
+    await loadSubjectsAndWarehouses(true);
+    const list = document.getElementById('face-enroll-subject-list');
+    if (list) {
+        list.innerHTML = allSubjects.length === 0
+            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
+            : allSubjects.map(renderSubjectItem).join('');
     }
 }
 
@@ -619,7 +641,7 @@ function renderEnrollDetail() {
 // 表头浅灰弱化，行分隔线极浅，字号 13px，从属感明显，不再是层级感重的卡片。
 function renderEnrollmentTable() {
     return `
-        <div class="sub-table-container" style="margin-top:4px;">
+        <div style="margin-top:4px;">
             <table class="sub-table">
                 <thead><tr>
                     <th style="width:64px;">#</th>
@@ -876,11 +898,8 @@ export async function submitFaceEnroll() {
         await faceApi.createEnrollment(payload, effectiveTenantId());
         showToast(tt('faceEnrollSuccess', '录入成功'));
         closeFaceEnrollModal();
-        await loadSubjectsAndWarehouses(true);  // refresh enrollment counts
-        await loadEnrollmentsForSelected();
-        // re-render left list to update count badge
-        const list = document.getElementById('face-enroll-subject-list');
-        if (list) list.innerHTML = allSubjects.map(renderSubjectItem).join('');
+        // 人员计数徽章与右侧详情互相独立，可并行刷新
+        await Promise.all([refreshSubjectList(), loadEnrollmentsForSelected()]);
     } catch (error) {
         if (errEl) { errEl.hidden = false; errEl.textContent = getErrorMessage(error, 'faceEnrollFailed', '录入失败'); }
     }
@@ -892,16 +911,16 @@ export async function deleteFaceEnrollment(el) {
     try {
         await faceApi.deleteEnrollment(id, effectiveTenantId());
         showToast(tt('faceEnrollDeleted', '录入条目已删除'));
-        await loadSubjectsAndWarehouses(true);  // refresh enrollment counts
-        await loadEnrollmentsForSelected();
-        const list = document.getElementById('face-enroll-subject-list');
-        if (list) list.innerHTML = allSubjects.map(renderSubjectItem).join('');
+        await Promise.all([refreshSubjectList(), loadEnrollmentsForSelected()]);
     } catch (error) {
         showToast(getErrorMessage(error, 'faceEnrollDeleteFailed', '删除失败'), 'error');
     }
 }
 
 // ============ 子页签 C: 审计日志 ============
+// 日志页 = 静态筛选栏 + 动态主体（#face-logs-main）。筛选栏只在进入页签时渲染
+// 一次：移动端抽屉增强（initFilterDrawers）挂在这些节点上，反复重建会丢监听、
+// 丢输入焦点；翻页/筛选只需刷新表格与分页。
 function renderLogsTab() {
     const f = logsState.filters;
     return `
@@ -926,6 +945,12 @@ function renderLogsTab() {
                 <button class="filter-btn secondary" data-action="resetFaceLogsFilter">${tt('reset', '重置')}</button>
             </div>
         </div>
+        <div id="face-logs-main">${renderLogsMain()}</div>
+    `;
+}
+
+function renderLogsMain() {
+    return `
         <div class="table-container">
             <div class="section-header">
                 <div class="section-title">${tt('faceLogs', '审计日志')}</div>
@@ -987,8 +1012,8 @@ function renderLogsRows() {
     }).join('');
 }
 
-// 拉取当前筛选/页码的日志到 logsState，然后整体重渲日志页
-// （分页按钮的 disabled 态、页码指示都依赖 logsState，局部 patch tbody 会漏掉它们）。
+// 拉取当前筛选/页码的日志到 logsState，然后重渲表格+分页主体
+// （分页按钮的 disabled 态、页码指示都依赖 logsState，只 patch tbody 会漏掉它们）。
 async function reloadLogs() {
     try {
         const f = logsState.filters;
@@ -1006,12 +1031,8 @@ async function reloadLogs() {
         logsState.items = [];
         logsState.total = 0;
     }
-    const content = document.getElementById('face-content');
-    if (content && currentSubTab === 'logs') {
-        content.innerHTML = renderLogsTab();
-        // 动态渲染的 filter-bar 需要补挂移动端筛选抽屉（幂等，桌面端无影响）
-        initFilterDrawers(content);
-    }
+    const main = document.getElementById('face-logs-main');
+    if (main) main.innerHTML = renderLogsMain();
 }
 
 export async function applyFaceLogsFilter() {
@@ -1025,8 +1046,13 @@ export async function applyFaceLogsFilter() {
 }
 
 export async function resetFaceLogsFilter() {
-    logsState.filters = { operation: '', start: '', end: '' };
+    logsState.filters = emptyLogsFilters();
     logsState.page = 1;
+    // 筛选栏是静态的，输入框需要显式清空
+    ['face-logs-operation', 'face-logs-start', 'face-logs-end'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
     await reloadLogs();
 }
 
@@ -1133,11 +1159,7 @@ export async function saveFaceSubject() {
         }
         closeFaceSubjectModal();
         showToast(tt('faceSubjectSaved', '人员档案已保存'));
-        await loadSubjectsAndWarehouses(true);
-        const list = document.getElementById('face-enroll-subject-list');
-        if (list) list.innerHTML = allSubjects.length === 0
-            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
-            : allSubjects.map(renderSubjectItem).join('');
+        await refreshSubjectList();
         // refresh detail if currently viewing the edited subject
         if (idVal && parseInt(idVal, 10) === selectedSubjectId) {
             const detail = document.getElementById('face-enroll-detail');
@@ -1160,11 +1182,7 @@ export async function deleteFaceSubject(el) {
             selectedSubjectId = null;
             enrollmentItems = [];
         }
-        await loadSubjectsAndWarehouses(true);
-        const list = document.getElementById('face-enroll-subject-list');
-        if (list) list.innerHTML = allSubjects.length === 0
-            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
-            : allSubjects.map(renderSubjectItem).join('');
+        await refreshSubjectList();
         const detail = document.getElementById('face-enroll-detail');
         if (detail) detail.innerHTML = renderEnrollPlaceholder();
     } catch (error) {
