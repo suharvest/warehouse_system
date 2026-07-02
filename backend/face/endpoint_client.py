@@ -89,6 +89,20 @@ def _infer_local(image_b64: str) -> dict:
     return {"embedding": emb_bytes, "model_tag": model_tag}
 
 
+def _parse_json_response(resp: "httpx.Response", prefix: str) -> dict:
+    """协议校验统一收口：非 2xx、非法 JSON、非 dict 都归为 FaceEndpointError，
+    避免解析异常逃出 FaceEndpointError 错误处理变 500。"""
+    if resp.status_code >= 400:
+        raise FaceEndpointError(f"{prefix}_http_{resp.status_code}")
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise FaceEndpointError(f"{prefix}_bad_response") from e
+    if not isinstance(data, dict):
+        raise FaceEndpointError(f"{prefix}_bad_response")
+    return data
+
+
 async def infer(cfg: FaceConfig, image_b64: str) -> dict:
     """Send an image to the endpoint, get back an embedding.
 
@@ -111,18 +125,10 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
                 json={"image_b64": image_b64},
                 headers=_headers(cfg.auth_token),
             )
-            if resp.status_code >= 400:
-                raise FaceEndpointError(f"infer_http_{resp.status_code}")
-            try:
-                data = resp.json()
-            except ValueError as e:
-                # HTTP 200 但响应体不是合法 JSON —— 协议错误而非网络错误
-                raise FaceEndpointError("infer_bad_response") from e
+            data = _parse_json_response(resp, "infer")
     except httpx.HTTPError as e:
         logger.warning("face infer failed: %s", e)
         raise FaceEndpointError("endpoint_unreachable") from e
-    if not isinstance(data, dict):
-        raise FaceEndpointError("infer_bad_response")
 
     model_tag = data.get("model_tag") or cfg.embedding_model_tag or "unknown"
     faces = data.get("faces") or []
@@ -151,8 +157,6 @@ async def health(endpoint: str, auth_token: Optional[str] = None) -> dict:
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             resp = await client.get(url, headers=_headers(auth_token))
-            if resp.status_code >= 400:
-                raise FaceEndpointError(f"health_http_{resp.status_code}")
-            return resp.json()
+            return _parse_json_response(resp, "health")
     except httpx.HTTPError as e:
         raise FaceEndpointError("endpoint_unreachable") from e
