@@ -21,6 +21,7 @@ Env overrides:
 """
 
 import asyncio
+import time
 import websockets
 import subprocess
 import logging
@@ -40,13 +41,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger('MCP_PIPE')
 
+# File sink so docker logs misses don't blind ops
+_log_dir = os.environ.get('MCP_PIPE_LOG_DIR', '/app/logs')
+try:
+    os.makedirs(_log_dir, exist_ok=True)
+    _fh = logging.FileHandler(os.path.join(_log_dir, 'mcp_pipe.log'))
+    _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(_fh)
+except OSError:
+    pass
+
 # Reconnection settings
 INITIAL_BACKOFF = 1  # Initial wait time in seconds
-MAX_BACKOFF = 600  # Maximum wait time in seconds
+MAX_BACKOFF = 60  # Cap reconnect interval at 60s (was 600s — 2-5 min recovery felt broken)
 
 # Timeout settings
 TOOL_CALL_TIMEOUT = 60   # Max seconds to wait for warehouse_mcp to produce one response line
-WS_PING_INTERVAL = 20    # WebSocket keepalive ping interval (seconds)
+WS_PING_INTERVAL = 10    # WebSocket keepalive ping interval (seconds) — shorter to survive NAT idle
 WS_PING_TIMEOUT = 10     # WebSocket ping response deadline (seconds)
 
 async def connect_with_retry(uri, target):
@@ -55,9 +66,13 @@ async def connect_with_retry(uri, target):
     backoff = INITIAL_BACKOFF
     while True:  # Infinite reconnection
         try:
-            if reconnect_attempt > 0:
+            # First retry after a failure: immediate (transient blips recover instantly).
+            # Subsequent retries: exponential backoff capped at MAX_BACKOFF.
+            if reconnect_attempt > 1:
                 logger.info(f"[{target}] Waiting {backoff}s before reconnection attempt {reconnect_attempt}...")
                 await asyncio.sleep(backoff)
+            elif reconnect_attempt == 1:
+                logger.info(f"[{target}] Immediate reconnect attempt {reconnect_attempt}")
 
             # Attempt to connect
             await connect_to_server(uri, target)
@@ -77,6 +92,7 @@ async def connect_to_server(uri, target):
             open_timeout=10,
             ping_interval=WS_PING_INTERVAL,
             ping_timeout=WS_PING_TIMEOUT,
+            max_size=None,  # cloud pushes inventory/tool catalog > 1 MiB default → 1009 close
         ) as websocket:
             logger.info(f"[{target}] Successfully connected to WebSocket server")
 
@@ -93,13 +109,16 @@ async def connect_to_server(uri, target):
             )
             logger.info(f"[{target}] Started server process: {' '.join(cmd)}")
             
-            # Shared slot for the latest JSON-RPC request id (used to build timeout error)
-            last_request_id = [None]
+            # Outstanding JSON-RPC requests: id -> monotonic timestamp when forwarded
+            # to subprocess. Used so TOOL_CALL_TIMEOUT only fires when there's actually
+            # a request waiting on a response — idle periods between cloud requests
+            # must not kill the subprocess (was the cause of the ~60s reconnect cycle).
+            pending_requests: dict = {}
 
             # Create two tasks: read from WebSocket and write to process, read from process and write to WebSocket
             await asyncio.gather(
-                pipe_websocket_to_process(websocket, process, target, last_request_id),
-                pipe_process_to_websocket(process, websocket, target, last_request_id),
+                pipe_websocket_to_process(websocket, process, target, pending_requests),
+                pipe_process_to_websocket(process, websocket, target, pending_requests),
                 pipe_process_stderr_to_terminal(process, target)
             )
     except websockets.exceptions.ConnectionClosed as e:
@@ -119,10 +138,29 @@ async def connect_to_server(uri, target):
                 process.kill()
             logger.info(f"[{target}] Server process terminated")
 
-async def pipe_websocket_to_process(websocket, process, target, last_request_id: list):
+def _classify_json_rpc(parsed):
+    """Return ('request', id) | ('response', id) | ('notification', None) | (None, None).
+
+    Per JSON-RPC 2.0: requests have method+id; notifications have method but no id;
+    responses have result|error and id. We treat only requests as "needs response".
+    """
+    if not isinstance(parsed, dict):
+        return (None, None)
+    has_id = 'id' in parsed
+    has_method = 'method' in parsed
+    if has_method and has_id:
+        return ('request', parsed['id'])
+    if has_method and not has_id:
+        return ('notification', None)
+    if has_id and ('result' in parsed or 'error' in parsed):
+        return ('response', parsed['id'])
+    return (None, None)
+
+
+async def pipe_websocket_to_process(websocket, process, target, pending_requests: dict):
     """Read data from WebSocket and write to process stdin.
-    Stores the most recent JSON-RPC request id in last_request_id[0] so the
-    timeout handler can send a proper error response.
+    Records each JSON-RPC request id into pending_requests so the timeout handler
+    only fires when a response is actually expected.
     """
     try:
         while True:
@@ -130,13 +168,13 @@ async def pipe_websocket_to_process(websocket, process, target, last_request_id:
             message = await websocket.recv()
             logger.debug(f"[{target}] << {message[:120]}...")
 
-            # Track the latest request id for timeout error reporting
             if isinstance(message, bytes):
                 message = message.decode('utf-8')
             try:
                 parsed = json.loads(message)
-                if 'id' in parsed:
-                    last_request_id[0] = parsed['id']
+                kind, rid = _classify_json_rpc(parsed)
+                if kind == 'request':
+                    pending_requests[rid] = time.monotonic()
             except Exception:
                 pass
 
@@ -150,46 +188,70 @@ async def pipe_websocket_to_process(websocket, process, target, last_request_id:
         if not process.stdin.closed:
             process.stdin.close()
 
-async def pipe_process_to_websocket(process, websocket, target, last_request_id: list):
+async def pipe_process_to_websocket(process, websocket, target, pending_requests: dict):
     """Read data from process stdout and send to WebSocket.
-    On timeout, sends a JSON-RPC error back before killing the subprocess so the
-    AI client receives a human-readable message instead of a silent disconnect.
+
+    Timeout policy: only enforce TOOL_CALL_TIMEOUT when there's an outstanding request
+    in pending_requests. When idle (no pending request), block on readline forever —
+    the cloud's keepalive ping interval (~60s) used to race the readline timeout and
+    kill the subprocess during idle periods, causing a reconnect storm.
     """
     try:
         while True:
-            try:
-                data = await asyncio.wait_for(
-                    asyncio.to_thread(process.stdout.readline),
-                    timeout=TOOL_CALL_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    f"[{target}] Tool call timed out after {TOOL_CALL_TIMEOUT}s — "
-                    "sending error to client, then killing subprocess"
-                )
-                # Send a proper JSON-RPC error so the AI can tell the user to retry
-                req_id = last_request_id[0]
-                error_resp = json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {
-                        "code": -32001,
-                        "message": (
-                            f"工具调用超时（>{TOOL_CALL_TIMEOUT}s），后端服务可能暂时繁忙。"
-                            "请稍后重试。"
-                        ),
-                    },
-                }, ensure_ascii=False)
+            if pending_requests:
+                # Per-request deadline: kill only when the *oldest* request has
+                # actually been outstanding for TOOL_CALL_TIMEOUT, not when any
+                # 60s gap appears in stdout. A fast ping reply doesn't reset
+                # the clock on a slow tool call that's still pending.
+                pending_snapshot = dict(pending_requests)  # defensive copy
+                oldest_id = min(pending_snapshot, key=lambda k: pending_snapshot[k])
+                deadline = pending_snapshot[oldest_id] + TOOL_CALL_TIMEOUT
+                remaining = max(0.0, deadline - time.monotonic())
                 try:
-                    await websocket.send(error_resp)
-                except Exception:
-                    pass
-                process.kill()
-                raise  # propagates to connect_to_server → triggers reconnect
+                    data = await asyncio.wait_for(
+                        asyncio.to_thread(process.stdout.readline),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    age = time.monotonic() - pending_snapshot[oldest_id]
+                    logger.error(
+                        f"[{target}] No response for request id={oldest_id} "
+                        f"after {age:.0f}s (pending: {list(pending_snapshot)}) — "
+                        f"sending error to client, then killing subprocess"
+                    )
+                    error_resp = json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": oldest_id,
+                        "error": {
+                            "code": -32001,
+                            "message": (
+                                f"工具调用超时（>{TOOL_CALL_TIMEOUT}s），后端服务可能暂时繁忙。"
+                                "请稍后重试。"
+                            ),
+                        },
+                    }, ensure_ascii=False)
+                    try:
+                        await websocket.send(error_resp)
+                    except Exception:
+                        pass
+                    process.kill()
+                    raise  # propagates to connect_to_server → triggers reconnect
+            else:
+                # Idle: no outstanding request, block indefinitely
+                data = await asyncio.to_thread(process.stdout.readline)
 
             if not data:  # If no data, the process may have ended
                 logger.info(f"[{target}] Process has ended output")
                 break
+
+            # Clear pending entry when its response goes out
+            try:
+                parsed = json.loads(data)
+                kind, rid = _classify_json_rpc(parsed)
+                if kind == 'response':
+                    pending_requests.pop(rid, None)
+            except Exception:
+                pass
 
             # Send data to WebSocket
             logger.debug(f"[{target}] >> {data[:120]}...")

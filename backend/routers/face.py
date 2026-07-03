@@ -49,6 +49,10 @@ class FaceConfigPayload(BaseModel):
     auth_token: Optional[str] = None
     embedding_model_tag: Optional[str] = None
     min_confidence: float = 0.65
+    greeting_enabled: bool = False
+    # 鉴权强度（与推理拓扑 mode 正交）：'interface'（默认，fail-closed 重比对）
+    # 或 'session'（信任设备本地匹配，advisory 放行）。
+    verify_mode: str = "interface"
 
 class FaceRulePayload(BaseModel):
     warehouse_id: Optional[int] = None
@@ -57,9 +61,19 @@ class FaceRulePayload(BaseModel):
     allowed_subject_ids: Optional[List[int]] = None
     min_confidence_override: Optional[float] = None
 
+class FacePrecomputedEmbedding(BaseModel):
+    """Embedding already computed on-device (e.g. Himax WE2 NPU)."""
+    embedding_b64: str
+    model_tag: Optional[str] = None
+
+
 class FaceEnrollmentPayload(BaseModel):
     subject_id: int
+    # Server-inference path: warehouse calls /infer for each image.
     images_b64: List[str] = Field(default_factory=list)
+    # Device-inference path: caller already has the embedding (e.g. WE2).
+    # Mutually exclusive with images_b64.
+    embeddings: List[FacePrecomputedEmbedding] = Field(default_factory=list)
     applies_to_warehouse_ids: Optional[List[int]] = None
 
 class FaceSubjectPayload(BaseModel):
@@ -99,13 +113,17 @@ async def face_get_config(
                 _t_tenant_face_config.c.tenant_id, _t_tenant_face_config.c.enabled,
                 _t_tenant_face_config.c.mode, _t_tenant_face_config.c.endpoint,
                 _t_tenant_face_config.c.auth_token, _t_tenant_face_config.c.embedding_model_tag,
-                _t_tenant_face_config.c.min_confidence, _t_tenant_face_config.c.created_at,
+                _t_tenant_face_config.c.min_confidence,
+                _t_tenant_face_config.c.greeting_enabled,
+                _t_tenant_face_config.c.verify_mode,
+                _t_tenant_face_config.c.created_at,
                 _t_tenant_face_config.c.updated_at,
             ).where(_t_tenant_face_config.c.tenant_id == tid)
         ).first()
     if not row:
         return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
-                "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65}
+                "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65,
+                "greeting_enabled": False, "verify_mode": "interface"}
     return {
         "tenant_id": row.tenant_id,
         "enabled": bool(row.enabled),
@@ -114,6 +132,8 @@ async def face_get_config(
         "auth_token": row.auth_token,
         "embedding_model_tag": row.embedding_model_tag,
         "min_confidence": row.min_confidence,
+        "greeting_enabled": bool(row.greeting_enabled),
+        "verify_mode": row.verify_mode or "interface",
         "created_at": row.created_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.created_at, datetime) else row.created_at,
         "updated_at": row.updated_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.updated_at, datetime) else row.updated_at,
     }
@@ -126,8 +146,22 @@ async def face_put_config(
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    if payload.mode is not None and payload.mode not in ("local", "hello", "jetson", "custom"):
-        raise HTTPException(status_code=400, detail="mode 必须是 local/hello/jetson/custom")
+    # 当前合法值只有 local/lan（与 tenant_face_config 的 CHECK 约束一致）。
+    # 历史 API 调用方可能还在传 hello/jetson/custom/face_rec_api/we2 —— 这些
+    # 都是"外部端点"形态，统一归一化为 lan，避免撞 DB 约束 500。
+    _LEGACY_LAN_MODES = ("hello", "jetson", "custom", "face_rec_api", "we2")
+    if payload.mode in _LEGACY_LAN_MODES:
+        payload.mode = "lan"
+    if payload.mode is not None and payload.mode not in ("local", "lan"):
+        raise HTTPException(
+            status_code=400,
+            detail="mode 必须是 local 或 lan",
+        )
+    if payload.verify_mode not in ("session", "interface"):
+        raise HTTPException(
+            status_code=400,
+            detail="verify_mode 必须是 session 或 interface",
+        )
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_engine().begin() as sa_conn:
         existing = sa_conn.execute(
@@ -144,6 +178,8 @@ async def face_put_config(
                     auth_token=payload.auth_token,
                     embedding_model_tag=payload.embedding_model_tag,
                     min_confidence=payload.min_confidence,
+                    greeting_enabled=1 if payload.greeting_enabled else 0,
+                    verify_mode=payload.verify_mode,
                     updated_at=now,
                 )
             )
@@ -157,6 +193,8 @@ async def face_put_config(
                     auth_token=payload.auth_token,
                     embedding_model_tag=payload.embedding_model_tag,
                     min_confidence=payload.min_confidence,
+                    greeting_enabled=1 if payload.greeting_enabled else 0,
+                    verify_mode=payload.verify_mode,
                     created_at=now,
                     updated_at=now,
                 )
@@ -322,6 +360,76 @@ async def face_list_enrollments(
     return out
 
 
+def build_face_library(tid: int, model_tag: Optional[str] = None) -> List[dict]:
+    """Build the per-tenant face library (active subjects × active enrollments).
+
+    Returns ``[{name, subject_id, embedding_b64, model_tag}]``. When ``model_tag``
+    is given, only enrollments produced by that embedding model are returned —
+    embeddings live in different vector spaces per model, so mixing them across
+    model_tags would corrupt on-device matching. Shared by the ``/api/face/library``
+    export route and the MCP "push faces to device" flow.
+    """
+    preds = [
+        _t_face_enrollments.c.tenant_id == tid,
+        _t_face_enrollments.c.is_active == 1,
+        _t_face_subjects.c.is_active == 1,
+    ]
+    if model_tag is not None:
+        preds.append(_t_face_enrollments.c.model_tag == model_tag)
+    stmt = (
+        select(
+            _t_face_subjects.c.name,
+            _t_face_subjects.c.id.label("subject_id"),
+            _t_face_enrollments.c.embedding,
+            _t_face_enrollments.c.model_tag,
+        )
+        .select_from(
+            _t_face_enrollments.join(
+                _t_face_subjects,
+                _t_face_subjects.c.id == _t_face_enrollments.c.subject_id,
+            )
+        )
+        .where(and_(*preds))
+    )
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(stmt).fetchall()
+    out = []
+    for r in rows:
+        if r.embedding is None:
+            continue
+        out.append({
+            "name": r.name,
+            "subject_id": r.subject_id,
+            "embedding_b64": _face_base64.b64encode(r.embedding).decode(),
+            "model_tag": r.model_tag,
+        })
+    return out
+
+
+@router.get("/api/face/library")
+async def face_library(
+    tenant_id: Optional[int] = None,
+    model_tag: Optional[str] = None,
+    current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
+):
+    """Export the face library for on-device sync.
+
+    Returns ``[{name, subject_id, embedding_b64, model_tag}]`` — active subjects
+    joined with their active enrollments, embedding bytes base64-encoded. xiaozhi
+    pulls this and pushes each entry to the device-local DB via ``self.face.add``
+    so passive greeting recognizes the same people the face check authorizes. The
+    device persists ``subject_id`` alongside ``name`` and returns it via
+    ``self.conversation.speaker`` so session-mode verify can locate the subject
+    without name ambiguity. Same auth (FACE/WRITE) as verify-mcp, so the MCP
+    api_key can call it.
+
+    Optional ``model_tag`` filters to enrollments from a single embedding model;
+    omit it to keep the legacy (unfiltered) behaviour.
+    """
+    tid = _face_resolve_tenant(current_user, tenant_id)
+    return build_face_library(tid, model_tag=model_tag)
+
+
 @router.post("/api/face/enrollments")
 async def face_create_enrollment(
     payload: FaceEnrollmentPayload,
@@ -329,8 +437,10 @@ async def face_create_enrollment(
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.ADMIN)),
 ):
     tid = _face_resolve_tenant(current_user, tenant_id)
-    if not payload.images_b64:
-        raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片")
+    if not payload.images_b64 and not payload.embeddings:
+        raise HTTPException(status_code=400, detail="必须提供至少一张人脸图片或一个 embedding")
+    if payload.images_b64 and payload.embeddings:
+        raise HTTPException(status_code=400, detail="images_b64 与 embeddings 不能同时提供")
     with get_engine().connect() as sa_conn:
         load_or_404(
             sa_conn, _t_face_subjects, payload.subject_id,
@@ -339,6 +449,17 @@ async def face_create_enrollment(
             tenant_id=int(tid),
             forbidden="人员档案不属于该租户",
         )
+    # Decode b64 embeddings up front so we fail with a 400 (not 500) on
+    # malformed input.
+    precomputed: list[dict] = []
+    for item in payload.embeddings:
+        try:
+            precomputed.append({
+                "embedding_bytes": _face_base64.b64decode(item.embedding_b64),
+                "model_tag": item.model_tag,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"无效的 embedding_b64: {e}")
     # TODO: migrate to SA Core in a future pass — orchestrator currently
     # expects a sqlite-style ``conn`` for its internal writes.
     with get_db() as conn:
@@ -352,7 +473,8 @@ async def face_create_enrollment(
                 conn,
                 subject_id=payload.subject_id,
                 tenant_id=tid,
-                images_b64=payload.images_b64,
+                images_b64=payload.images_b64 or None,
+                precomputed=precomputed or None,
                 applies_to_warehouse_ids=payload.applies_to_warehouse_ids,
                 enrolled_by=current_user.id,
             )
@@ -449,6 +571,19 @@ class FaceVerifyMcpPayload(BaseModel):
     operation: str
     warehouse_id: Optional[int] = None
     request_id: Optional[str] = None
+    # One of these two when the rule actually requires face (skipped paths
+    # ignore both):
+    #   image_b64   — server-side path; warehouse calls /infer.
+    #   embedding_b64 + embedding_model_tag — device already inferred
+    #                 (Himax WE2 NPU); warehouse just matches.
+    image_b64: Optional[str] = None
+    embedding_b64: Optional[str] = None
+    embedding_model_tag: Optional[str] = None
+    # Session-mode (advisory) identity, resolved on-device and forwarded by the
+    # server as hidden params. Consulted only when the tenant's verify_mode is
+    # 'session'; ignored under 'interface' (which re-matches the embedding).
+    speaker_subject_id: Optional[int] = None
+    speaker_name: Optional[str] = None
 
 
 @router.post("/api/face/verify-mcp")
@@ -461,6 +596,12 @@ async def face_verify_mcp(
         return {"status": "skipped", "failure_reason": "no_tenant_context",
                 "confidence": None, "matched_subject_id": None}
     from face.orchestrator import verify_mcp_face as _verify
+    emb_bytes: Optional[bytes] = None
+    if payload.embedding_b64:
+        try:
+            emb_bytes = _face_base64.b64decode(payload.embedding_b64)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"无效的 embedding_b64: {e}")
     with get_db() as conn:
         decision = await _verify(
             conn,
@@ -468,6 +609,11 @@ async def face_verify_mcp(
             user_id=current_user.id,
             warehouse_id=payload.warehouse_id,
             operation=payload.operation,
+            image_b64=payload.image_b64 or "",
+            embedding_bytes=emb_bytes,
+            embedding_model_tag=payload.embedding_model_tag,
+            speaker_subject_id=payload.speaker_subject_id,
+            speaker_name=payload.speaker_name,
             request_id=payload.request_id,
         )
     return {

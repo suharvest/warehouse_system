@@ -155,7 +155,7 @@ def _seed_contact_b(env):
 def _seed_mcp_b(env):
     resp = env["b"]["client"].post("/api/mcp/connections", json={
         "name": f"r1-mcp-b-{env['suffix']}",
-        "mcp_endpoint": "http://127.0.0.1:9/mcp",
+        "mcp_endpoint": f"http://127.0.0.1:9/mcp/{env['suffix']}/b",
         "role": "operate",
         "auto_start": False,
         "warehouse_id": env["b"]["warehouse_id"],

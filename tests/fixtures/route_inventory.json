@@ -1,5 +1,13 @@
 [
   {
+    "method": "POST",
+    "name": "_eval_drain_pool",
+    "path": "/api/_test/drain_pool",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "GET",
     "name": "list_api_keys",
     "path": "/api/api-keys",
@@ -353,6 +361,14 @@
   },
   {
     "method": "GET",
+    "name": "face_library",
+    "path": "/api/face/library",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
     "name": "face_list_logs",
     "path": "/api/face/logs",
     "response_model": null,
@@ -585,6 +601,14 @@
   },
   {
     "method": "GET",
+    "name": "list_all_agent_devices",
+    "path": "/api/mcp/agent-devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
     "name": "list_mcp_connections",
     "path": "/api/mcp/connections",
     "response_model": null,
@@ -620,6 +644,46 @@
     "name": "toggle_mcp_debug",
     "path": "/api/mcp/connections/{conn_id}/debug",
     "response_model": "MCPConnectionResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "list_mcp_agent_devices",
+    "path": "/api/mcp/connections/{conn_id}/devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "create_mcp_agent_device",
+    "path": "/api/mcp/connections/{conn_id}/devices",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "DELETE",
+    "name": "delete_mcp_agent_device",
+    "path": "/api/mcp/connections/{conn_id}/devices/{dev_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "PUT",
+    "name": "update_mcp_agent_device",
+    "path": "/api/mcp/connections/{conn_id}/devices/{dev_id}",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "POST",
+    "name": "push_faces_to_device",
+    "path": "/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces",
+    "response_model": null,
     "status_code": null,
     "tags": []
   },

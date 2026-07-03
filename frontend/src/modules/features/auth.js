@@ -252,6 +252,17 @@ export async function handleLogin(event) {
         return;
     }
 
+    // 请求期间禁用提交按钮：避免连点同时发多个登录请求（会更快撞限流），
+    // 并给出明确的"登录中"反馈，免得用户以为"没反应"继续点。
+    const submitBtn = document.querySelector('[data-action="handleLogin"]');
+    if (submitBtn && submitBtn.disabled) return;  // 已有请求在途，忽略重复点击
+    const originalBtnText = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = t('loggingIn');
+    }
+    errorDiv.style.display = 'none';
+
     try {
         const data = await authApi.login(username, password);
 
@@ -272,8 +283,20 @@ export async function handleLogin(event) {
         }
     } catch (error) {
         console.error('登录失败:', error);
-        errorDiv.textContent = t('operationFailed');
+        // 429 限流：给出明确提示，而不是泛化的"操作失败"。
+        if (error && error.status === 429) {
+            errorDiv.textContent = t('tooManyLoginAttempts');
+        } else if (error && error.data && error.data.message) {
+            errorDiv.textContent = error.data.message;
+        } else {
+            errorDiv.textContent = t('operationFailed');
+        }
         errorDiv.style.display = 'block';
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalBtnText;
+        }
     }
 }
 
@@ -523,8 +546,15 @@ export async function registerSubmit() {
                 closeRegisterModal();
                 setCurrentUser(data.user);
                 setIsSystemInitialized(true);
+                // 注册即自动登录（后端已下发 session cookie），必须和登录走同一条
+                // user-scoped 数据加载路径：否则 allWarehouses 保持空、
+                // renderWarehouseSwitcher 从不触发，单仓用户的默认仓库不会被自动选中，
+                // 顶部仓库选择器不显示，导入时报"请选择仓库"却无从选起。
+                if (onLoginSuccessFn) await onLoginSuccessFn();
                 await updateUserDisplay();
                 updatePermissionUI();
+                if (switchTabFn) switchTabFn(getCurrentTab());
+                else if (refreshCurrentTabFn) refreshCurrentTabFn();
                 setTimeout(() => startOnboarding(), 500);
                 return;
             }

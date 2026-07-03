@@ -197,7 +197,15 @@ _provider = _load_provider_from_db_or_default(_config)
 # 仅对 MCP tool 调用生效。通过后端 /api/face/verify-mcp 桥接到
 # backend.face.orchestrator.verify_mcp_face；后端用 X-API-Key 识别
 # 当前用户、租户与仓库上下文。
-def _face_guard(operation: str, warehouse_id: int = None) -> dict:
+def _face_guard(
+    operation: str,
+    warehouse_id: int = None,
+    image_b64: str = None,
+    embedding_b64: str = None,
+    embedding_model_tag: str = None,
+    speaker_subject_id: int = None,
+    speaker_name: str = None,
+) -> dict:
     """Verify face for an MCP write operation. Returns the decision dict.
 
     Behavior:
@@ -209,6 +217,12 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
     - api_base unset -> skipped (face module not deployed in this MCP host)
     - HTTP 4xx/5xx   -> deny (server reachable but rejected; never silently bypass)
     - transport error (network, timeout) -> deny (treat as if face check failed)
+
+    ``image_b64`` is the caller-captured face frame (e.g. xiaozhi vision
+    snapshot). The unified face_rec_api backend is stateless so the
+    image must be supplied here; when None we still call the backend so
+    that disabled-feature / rule-not-required tenants short-circuit to
+    'skipped' instead of being blocked on missing camera input.
     """
     import requests as _r
     api_base = _config.get('api_base_url', '').rstrip('/')
@@ -221,6 +235,21 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
     elif auth.get('type') == 'bearer':
         headers['Authorization'] = f"Bearer {auth.get('token', '')}"
     body = {"operation": operation, "warehouse_id": warehouse_id}
+    if image_b64:
+        body["image_b64"] = image_b64
+    if embedding_b64:
+        body["embedding_b64"] = embedding_b64
+    if embedding_model_tag:
+        body["embedding_model_tag"] = embedding_model_tag
+    # Forward the LLM/server-supplied speaker identity too. The backend is the
+    # single authority: it consults these ONLY when the tenant's verify_mode is
+    # 'session', and ignores them under 'interface' (which re-matches embedding).
+    # We never decide the mode here, so a spoofed speaker_id cannot bypass the
+    # interface-mode hard check.
+    if speaker_subject_id is not None:
+        body["speaker_subject_id"] = speaker_subject_id
+    if speaker_name:
+        body["speaker_name"] = speaker_name
     try:
         resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
         if resp.status_code >= 400:
@@ -232,9 +261,40 @@ def _face_guard(operation: str, warehouse_id: int = None) -> dict:
         return {"status": "deny", "failure_reason": "transport_error"}
 
 
-def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
-    """Run face guard; return a tool-error dict to surface, or None to proceed."""
-    decision = _face_guard(operation, warehouse_id)
+def _enforce_face(
+    operation: str,
+    warehouse_id: int = None,
+    image_b64: str = None,
+    embedding_b64: str = None,
+    embedding_model_tag: str = None,
+    speaker_subject_id: int = None,
+    speaker_name: str = None,
+) -> dict | None:
+    """Run the face gate; return a tool-error dict to surface, or None to proceed.
+
+    Single authoritative gate: forward EVERYTHING we have (server-injected
+    embedding AND LLM/device-supplied speaker identity) to ``/face/verify-mcp``
+    and honour whatever the backend decides. The backend is the sole authority
+    on ``verify_mode``:
+
+    * **session**: backend trusts the device-resolved speaker, records an
+      advisory log and returns ``pass`` (allow-list still enforced → ``deny``).
+    * **interface** (default): backend ignores the speaker params and re-matches
+      the embedding, fail-closed.
+
+    Crucially we do NOT branch on which params are present — so a spoofed
+    ``speaker_subject_id`` from the (now LLM-visible) tool arg cannot short-
+    circuit the interface-mode hard check. ``deny`` (incl. HTTP/transport
+    errors → fail-closed) aborts; ``pass``/``skipped`` proceed.
+    """
+    decision = _face_guard(
+        operation, warehouse_id,
+        image_b64=image_b64,
+        embedding_b64=embedding_b64,
+        embedding_model_tag=embedding_model_tag,
+        speaker_subject_id=speaker_subject_id,
+        speaker_name=speaker_name,
+    )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
         return {
@@ -263,13 +323,14 @@ def _enforce_face(operation: str, warehouse_id: int = None) -> dict | None:
 # ============================================================================
 
 _RULES_FOOTER = """\
-反幻觉硬规则（六条）：
+反幻觉硬规则（七条）：
 1. 数字只能来自响应字段，不许口算或推测。
-2. say 必须照搬原文，不许改写/合并/增减数字。
+2. say 必须照搬原文，不许改写/合并/增减数字。回复=say。禁止在前面加"好的/Okay/让我看看"，禁止在后面加"大概/左右/估计"。
 3. executed=false 时禁止说"已/完成/成功/出库了/入库了"。
 4. say_kind=ask → 念候选、等用户选；say_kind=fail → 仅播报，禁止重试。
 5. awaiting_confirm 非空 → 先问用户，用户同意后才用 patch 重发；拒绝则结束。
 6. 用户问"现在/还剩/最新"必须重新调工具，不许引用历史结果。
+7. 不需要计算/闲聊/天气/数学时只回一句"我只负责仓库管理"（15字内），禁止展开解释。
 """
 
 # 写操作集合 — 只有这类在 success=true 时才被认为 executed=true
@@ -290,7 +351,10 @@ def _wrap_response(operation: str, resp: dict) -> dict:
 
     def _candidates(limit=3):
         return [
-            {"name": c.get("name", "")}
+            {"name": c.get("name", ""),
+             "sku": (c.get("extra") or {}).get("sku", "") or c.get("sku", ""),
+             "score": c.get("score"),
+             "stock": c.get("stock") or (c.get("extra") or {}).get("stock")}
             for c in (resp.get("candidates") or [])[:limit]
         ]
 
@@ -335,7 +399,17 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             if candidates:
                 data["candidates"] = candidates
             if err in ("ambiguous_name", "location_ambiguous"):
-                names = "、".join(c["name"] for c in candidates)
+                parts = []
+                for c in candidates:
+                    n = c["name"]
+                    sku = c.get("sku", "")
+                    stock = c.get("stock")
+                    if sku:
+                        n += f"（{sku}）"
+                    if stock is not None:
+                        n += f"库存{stock}"
+                    parts.append(n)
+                names = "、".join(parts)
                 say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
                 say_kind = "ask"
             elif err == "batch_insufficient_stock":
@@ -380,8 +454,14 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-                names = "、".join(c["name"] for c in candidates)
-                say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+                parts = []
+                for c in candidates:
+                    n = c["name"]
+                    sku, stock = c.get("sku", ""), c.get("stock")
+                    if sku: n += f"（{sku}）"
+                    if stock is not None: n += f"库存{stock}"
+                    parts.append(n)
+                say = f"我不确定你说的是哪一个，候选有：{'、'.join(parts)}。请告诉我具体是哪个。"
                 say_kind = "ask"
             else:
                 say = f"本次没有入库。{_fail_text('入库失败')}"
@@ -420,8 +500,14 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-                names = "、".join(c["name"] for c in candidates)
-                say = f"找到多个相似产品：{names}。请告诉我具体是哪个。"
+                parts = []
+                for c in candidates:
+                    n = c["name"]
+                    sku, stock = c.get("sku", ""), c.get("stock")
+                    if sku: n += f"（{sku}）"
+                    if stock is not None: n += f"库存{stock}"
+                    parts.append(n)
+                say = f"找到多个相似产品：{'、'.join(parts)}。请告诉我具体是哪个。"
                 say_kind = "ask"
             else:
                 say = _fail_text("查询失败，未找到该产品。")
@@ -455,8 +541,14 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         elif resp.get("candidates"):
             candidates = _candidates()
             data["candidates"] = candidates
-            names = "、".join(c["name"] for c in candidates)
-            say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+            parts = []
+            for c in candidates:
+                n = c["name"]
+                sku, stock = c.get("sku", ""), c.get("stock")
+                if sku: n += f"（{sku}）"
+                if stock is not None: n += f"库存{stock}"
+                parts.append(n)
+            say = f"我不确定你说的是哪一个，候选有：{'、'.join(parts)}。请告诉我具体是哪个。"
             say_kind = "ask"
         else:
             say = _fail_text("没有找到匹配的名称。")
@@ -664,16 +756,39 @@ def query_batch(batch_no: str) -> dict:
     return resp
 
 
-@mcp.tool(exclude_args=["contact_id", "variant"])
+@mcp.tool(
+    exclude_args=["contact_id", "variant",
+                  "face_image_b64", "face_embedding_b64", "face_model_tag"],
+    meta={"requires_face": True},
+)
 @log_mcp_call
 @_antihallucination("stock_in")
 def stock_in(product_name: str, quantity: int,
              reason_category: str = "purchase", reason_note: str = "",
              operator: str = "MCP系统",
              location: str = None, contact_id: int = None,
-             variant: str = None) -> dict:
-    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。"""
-    blocked = _enforce_face("stock_in")
+             variant: str = None,
+             face_image_b64: str = None,
+             face_embedding_b64: str = None,
+             face_model_tag: str = None,
+             speaker_subject_id: int = None,
+             speaker_name: str = None) -> dict:
+    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
+
+    人脸鉴权 · session 模式：执行前先调用 self.conversation.speaker 获取当前说话人，把返回的
+    subject_id / name 填入 speaker_subject_id / speaker_name；valid=false（陌生人）则置空。
+    人脸鉴权 · interface 模式：face_image_b64 / face_embedding_b64 / face_model_tag 由 runtime
+    注入，对你不可见、无需填写。仓库按 verify_mode 裁决（session 信任设备身份；interface 忽略
+    speaker、改用 embedding 硬校验），你无法通过填写 speaker 参数绕过 interface。
+    """
+    blocked = _enforce_face(
+        "stock_in",
+        image_b64=face_image_b64,
+        embedding_b64=face_embedding_b64,
+        embedding_model_tag=face_model_tag,
+        speaker_subject_id=speaker_subject_id,
+        speaker_name=speaker_name,
+    )
     if blocked is not None:
         return blocked
     try:
@@ -683,7 +798,11 @@ def stock_in(product_name: str, quantity: int,
         return _tool_error("入库", e)
 
 
-@mcp.tool(exclude_args=["allow_partial_fallback"])
+@mcp.tool(
+    exclude_args=["allow_partial_fallback",
+                  "face_image_b64", "face_embedding_b64", "face_model_tag"],
+    meta={"requires_face": True},
+)
 @log_mcp_call
 @_antihallucination("stock_out")
 def stock_out(product_name: str, quantity: int,
@@ -691,9 +810,26 @@ def stock_out(product_name: str, quantity: int,
               operator: str = "MCP系统",
               variant: str = None, location: str = None,
               batch_no: str = None,
-              allow_partial_fallback: bool = False) -> dict:
-    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。"""
-    blocked = _enforce_face("stock_out")
+              allow_partial_fallback: bool = False,
+              face_image_b64: str = None,
+              face_embedding_b64: str = None,
+              face_model_tag: str = None,
+              speaker_subject_id: int = None,
+              speaker_name: str = None) -> dict:
+    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
+
+    人脸鉴权（同 stock_in）：session 模式先调 self.conversation.speaker 把 subject_id / name 填入
+    speaker_subject_id / speaker_name；interface 模式的 face_* 由 runtime 注入、不可见。仓库按
+    verify_mode 裁决，填 speaker 无法绕过 interface 硬校验。
+    """
+    blocked = _enforce_face(
+        "stock_out",
+        image_b64=face_image_b64,
+        embedding_b64=face_embedding_b64,
+        embedding_model_tag=face_model_tag,
+        speaker_subject_id=speaker_subject_id,
+        speaker_name=speaker_name,
+    )
     if blocked is not None:
         return blocked
     try:
@@ -720,21 +856,44 @@ def search(query: str = None, entity_type: str = "material",
         return _tool_error("搜索", e)
 
 
-@mcp.tool()
+@mcp.tool(
+    exclude_args=["face_image_b64", "face_embedding_b64", "face_model_tag"],
+    meta={"requires_face": True},
+)
 @log_mcp_call
 @_antihallucination("move_batch_location")
 def move_batch_location(batch_no: str, new_location: str,
                          quantity: int = None,
-                         from_location: str = None,
-                         product_name: str = None,
-                         operator: str = "MCP系统") -> dict:
-    """批次移位；qty 不传则整批挪。"""
-    blocked = _enforce_face("move_batch_location")
+                         operator: str = "MCP系统",
+                         face_image_b64: str = None,
+                         face_embedding_b64: str = None,
+                         face_model_tag: str = None,
+                         speaker_subject_id: int = None,
+                         speaker_name: str = None) -> dict:
+    """批次库位移位。batch_no 精确指定批次，new_location 目标库位。
+    quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
+    注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
+
+    人脸鉴权（同 stock_in）：session 模式先调 self.conversation.speaker 把 subject_id / name 填入
+    speaker_subject_id / speaker_name；interface 模式的 face_* 由 runtime 注入、不可见。仓库按
+    verify_mode 裁决，填 speaker 无法绕过 interface 硬校验。
+    """
+    blocked = _enforce_face(
+        "move_batch_location",
+        image_b64=face_image_b64,
+        embedding_b64=face_embedding_b64,
+        embedding_model_tag=face_model_tag,
+        speaker_subject_id=speaker_subject_id,
+        speaker_name=speaker_name,
+    )
     if blocked is not None:
         return blocked
     try:
+        # 该工具有意不暴露 from_location / product_name（batch_no 已足够定位），
+        # provider 对应参数默认为 None。此前误传了未定义的 from_location/product_name
+        # 名字，触发 NameError → 批次移位永远失败。
         return _provider.move_batch_location(
-            batch_no, new_location, quantity, from_location, product_name, operator
+            batch_no, new_location, quantity, operator=operator
         )
     except Exception as e:
         return _tool_error("批次移位", e)

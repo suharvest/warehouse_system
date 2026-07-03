@@ -15,7 +15,7 @@ x-warehouse: &warehouse-base
     resources:
       limits:
         cpus: '1'
-        memory: 512M
+        memory: 1G                      # 1G：为 mode=local WE2 本地人脸推理留足内存（ai-edge-litert + tflite 模型进程内懒加载）；不用本地推理也无害
 
 services:
   warehouse-a:

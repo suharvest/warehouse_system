@@ -1303,6 +1303,38 @@
         </div>
     </div>
 
+    <!-- 设备新增/编辑模态框 -->
+    <div id="mcp-device-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 id="mcp-device-modal-title" data-i18n="mcpDeviceAdd">添加设备</h3>
+                <button class="close-btn" data-action="closeMCPDeviceModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="mcp-device-form">
+                    <input type="hidden" id="mcp-device-id">
+                    <div class="form-group">
+                        <label><span data-i18n="mcpDeviceId">设备标识</span></label>
+                        <input type="text" id="mcp-device-deviceId" placeholder="MAC/SN">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="mcpDeviceName">显示名</span></label>
+                        <input type="text" id="mcp-device-name">
+                    </div>
+                    <div class="form-group">
+                        <label><span data-i18n="mcpDeviceIp">IP 地址</span> <span class="required">*</span></label>
+                        <input type="text" id="mcp-device-ip" placeholder="192.168.1.x" required>
+                    </div>
+                    <div class="form-error" id="mcp-device-modal-error" style="display:none;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn cancel-btn" data-action="closeMCPDeviceModal" data-i18n="mcpDeviceCancel">取消</button>
+                <button class="btn confirm-btn" data-action="mcpDeviceSave" data-i18n="mcpDeviceSave">保存</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 导入模态框 -->
     <div id="import-modal" class="modal">
         <div class="modal-content modal-large">

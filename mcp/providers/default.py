@@ -55,14 +55,40 @@ _REASON_ALIAS = {
 }
 
 
-def _normalize_reason_category(value):
+# 跨枚举误传映射：LLM 可能把 stock_in 的枚举值传给 stock_out（反之亦然）。
+# 在语义上做最佳匹配。例如 produce（入库枚举）在出库语境下 → consume（领用）。
+_CROSS_ENUM_ALIAS = {
+    # IN → OUT
+    ("produce", "stock_out"): "consume",
+    ("purchase", "stock_out"): "other_out",
+    ("refund", "stock_out"): "other_out",
+    # OUT → IN
+    ("consume", "stock_in"): "produce",
+    ("sell", "stock_in"): "other_in",
+    ("lend", "stock_in"): "transfer_in",
+    ("loss", "stock_in"): "other_in",
+    ("report_loss", "stock_in"): "other_in",
+}
+
+
+def _normalize_reason_category(value, operation: str | None = None):
     """把 LLM/用户传来的 reason_category 归一化为后端合法枚举值。
 
-    未命中映射时返回原值，由后端做最终拒绝（fail-closed）。"""
+    未命中映射时返回原值，由后端做最终拒绝（fail-closed）。
+    operation 可选 "stock_in" / "stock_out"，用于解决跨枚举误传。"""
     if value is None:
         return value
     key = str(value).strip().lower()
-    return _REASON_ALIAS.get(key, value)
+    # 先查通用别名
+    mapped = _REASON_ALIAS.get(key)
+    if mapped is not None:
+        # 检查是否跨枚举误传：当前枚举里没有映射后的值，但另一个枚举里有
+        if operation and mapped == key:
+            cross = _CROSS_ENUM_ALIAS.get((key, operation))
+            if cross is not None:
+                return cross
+        return mapped
+    return value
 
 
 def _normalize_batch_no(batch_no: str) -> str:
@@ -270,7 +296,7 @@ class DefaultProvider(BaseProvider):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
-            "reason_category": _normalize_reason_category(reason_category),
+            "reason_category": _normalize_reason_category(reason_category, "stock_in"),
             "reason_note": reason_note or None,
             "operator": operator,
             "fuzzy": fuzzy,
@@ -291,7 +317,7 @@ class DefaultProvider(BaseProvider):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
-            "reason_category": _normalize_reason_category(reason_category),
+            "reason_category": _normalize_reason_category(reason_category, "stock_out"),
             "reason_note": reason_note or None,
             "operator": operator,
             "fuzzy": fuzzy,

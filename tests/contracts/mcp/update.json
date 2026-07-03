@@ -3,6 +3,8 @@
     "connection": {
       "auto_start": false,
       "created_at": "<masked>",
+      "debug_mode": false,
+      "device_id": null,
       "error_message": null,
       "id": "<masked>",
       "mcp_endpoint": "<masked>",

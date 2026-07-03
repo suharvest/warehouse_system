@@ -25,7 +25,7 @@ import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEdit
 import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
-import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug } from './features/mcp.js';
+import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
 import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
 import { loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
 import { fetchDeployMode, renderTenantsPanel, showAddTenantModal, closeAddTenantModal, handleAddTenant, showEditTenantModal, closeEditTenantModal, handleEditTenant, handleDeleteTenant, tenantsPrevPage, tenantsNextPage, getTenantModalsHTML, setTenantsPage } from './features/tenants.js';
@@ -34,9 +34,10 @@ import {
     saveFaceConfig, testFaceConnection,
     showAddFaceRuleModal, editFaceRule, closeFaceRuleModal, saveFaceRule, deleteFaceRule,
     selectFaceSubject, showFaceEnrollModal, closeFaceEnrollModal, submitFaceEnroll, deleteFaceEnrollment,
+    showFacePushModal, closeFacePushModal, submitFacePush,
     showAddFaceSubjectModal, showEditFaceSubjectModal, closeFaceSubjectModal, saveFaceSubject, deleteFaceSubject,
     applyFaceLogsFilter, resetFaceLogsFilter, faceLogsPrevPage, faceLogsNextPage,
-    getFaceModalsHTML, onFaceTenantChange
+    getFaceModalsHTML, onFaceTenantChange, onFaceModeChange
 } from './features/face-recognition.js';
 
 // 新人引导
@@ -390,11 +391,15 @@ const actionHandlers = {
     'closeFaceEnrollModal': closeFaceEnrollModal,
     'submitFaceEnroll': submitFaceEnroll,
     'deleteFaceEnrollment': deleteFaceEnrollment,
+    'showFacePushModal': showFacePushModal,
+    'closeFacePushModal': closeFacePushModal,
+    'submitFacePush': submitFacePush,
     'applyFaceLogsFilter': applyFaceLogsFilter,
     'resetFaceLogsFilter': resetFaceLogsFilter,
     'faceLogsPrevPage': faceLogsPrevPage,
     'faceLogsNextPage': faceLogsNextPage,
     'onFaceTenantChange': onFaceTenantChange,
+    'onFaceModeChange': onFaceModeChange,
 
     // 仓库管理
     'showAddWarehouseModal': (el) => showAddWarehouseModal(el?.dataset?.tenantId),
@@ -551,6 +556,14 @@ const actionHandlers = {
     'mcpDelete': (el) => deleteMCPConnection(el.dataset.connId),
     'mcpLogs': (el) => showMCPLogs(el.dataset.connId),
     'mcpDebug': (el) => toggleMCPDebug(el.dataset.connId, el.dataset.debugEnable),
+    // 智能体下挂物理设备
+    'mcpDevices': (el) => toggleMCPDevices(el.dataset.connId),
+    'mcpDeviceAdd': (el) => showAddMCPDeviceModal(el.dataset.connId),
+    'mcpDeviceSave': () => saveMCPDevice(),
+    'closeMCPDeviceModal': () => closeMCPDeviceModal(),
+    'mcpDeviceEdit': (el) => editMCPDevice(el.dataset.connId, el.dataset.devId),
+    'mcpDeviceDelete': (el) => deleteMCPDevice(el.dataset.connId, el.dataset.devId),
+    'mcpDevicePushFaces': (el) => pushFacesToDevice(el.dataset.connId, el.dataset.devId),
 };
 
 // 事件委托监听

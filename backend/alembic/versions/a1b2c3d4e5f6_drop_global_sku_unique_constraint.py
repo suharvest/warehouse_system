@@ -13,7 +13,7 @@ Correct constraints:
   - warehouses: UNIQUE(slug, tenant_id)    [was: UNIQUE(slug)]
   - batches:    UNIQUE(batch_no, warehouse_id) [was: UNIQUE(batch_no)]
 """
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
@@ -24,6 +24,10 @@ depends_on = None
 
 
 def _index_exists(bind, table_name, index_name):
+    # offline (--sql) 模式下 bind 是 MockConnection，无法 introspect；
+    # 视作不存在，让迁移直接发 CREATE INDEX 的 DDL。
+    if context.is_offline_mode():
+        return False
     insp = sa_inspect(bind)
     return any(idx['name'] == index_name for idx in insp.get_indexes(table_name))
 

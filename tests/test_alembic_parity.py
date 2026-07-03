@@ -55,11 +55,13 @@ def _build_init_database_schema(tmpdir: Path) -> dict[str, dict]:
     env["DATABASE_PATH"] = str(db_file)
     env["DEPLOY_MODE"] = "single_tenant"
     # Run init_database in a subprocess so the module-level DATABASE_PATH
-    # captures the temp path.
+    # captures the temp path. Import with ``backend/`` on sys.path (``from
+    # database``) to match how the app/conftest import — ``backend.database``
+    # would then fail on database.py's internal ``from models import ...``.
     code = (
         "import sys; sys.path.insert(0, %r);"
-        "from backend.database import init_database; init_database()"
-        % str(REPO_ROOT)
+        "from database import init_database; init_database()"
+        % str(BACKEND_DIR)
     )
     subprocess.run(
         [sys.executable, "-c", code], env=env, cwd=str(REPO_ROOT), check=True

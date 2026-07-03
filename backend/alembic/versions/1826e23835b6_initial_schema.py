@@ -106,9 +106,11 @@ def upgrade() -> None:
     sa.Column('auth_token', sa.String(length=255), nullable=True),
     sa.Column('embedding_model_tag', sa.String(length=64), nullable=True),
     sa.Column('min_confidence', sa.Float(), server_default='0.65', nullable=False),
+    sa.Column('verify_mode', sa.String(length=16), server_default='interface', nullable=False),
     sa.Column('created_at', sa.String(length=32), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=True),
     sa.Column('updated_at', sa.String(length=32), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=True),
     sa.CheckConstraint("mode IN ('local','lan')", name='ck_tenant_face_config_mode'),
+    sa.CheckConstraint("verify_mode IN ('session','interface')", name='ck_tenant_face_config_verify_mode'),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], name=op.f('fk_tenant_face_config_tenant_id_tenants'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_tenant_face_config')),
     sa.UniqueConstraint('tenant_id', name=op.f('uq_tenant_face_config_tenant_id')),
@@ -267,6 +269,27 @@ def upgrade() -> None:
     with op.batch_alter_table('mcp_connections', schema=None) as batch_op:
         batch_op.create_index('idx_mcp_connections_tenant', ['tenant_id'], unique=False)
 
+    op.create_table('mcp_agent_devices',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('connection_id', sa.String(length=64), nullable=False),
+    sa.Column('device_id', sa.String(length=128), nullable=True),
+    sa.Column('name', sa.String(length=255), nullable=True),
+    sa.Column('ip', sa.String(length=64), nullable=True),
+    sa.Column('port', sa.Integer(), server_default='80', nullable=False),
+    sa.Column('model_tag', sa.String(length=64), nullable=True),
+    sa.Column('face_enabled', sa.Integer(), server_default='0', nullable=False),
+    sa.Column('last_seen', sa.String(length=32), nullable=True),
+    sa.Column('created_at', sa.String(length=32), nullable=True),
+    sa.Column('updated_at', sa.String(length=32), nullable=True),
+    sa.ForeignKeyConstraint(['connection_id'], ['mcp_connections.id'], name=op.f('fk_mcp_agent_devices_connection_id_mcp_connections'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_mcp_agent_devices')),
+    sa.UniqueConstraint('connection_id', 'device_id', name='uq_mcp_agent_devices_connection_id_device_id'),
+    mysql_charset='utf8mb4',
+    mysql_collate='utf8mb4_0900_ai_ci'
+    )
+    with op.batch_alter_table('mcp_agent_devices', schema=None) as batch_op:
+        batch_op.create_index('idx_mcp_agent_devices_connection', ['connection_id'], unique=False)
+
     op.create_table('sessions',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=False),
@@ -398,6 +421,10 @@ def downgrade() -> None:
 
     op.drop_table('tenant_face_operation_rules')
     op.drop_table('sessions')
+    with op.batch_alter_table('mcp_agent_devices', schema=None) as batch_op:
+        batch_op.drop_index('idx_mcp_agent_devices_connection')
+
+    op.drop_table('mcp_agent_devices')
     with op.batch_alter_table('mcp_connections', schema=None) as batch_op:
         batch_op.drop_index('idx_mcp_connections_tenant')
 

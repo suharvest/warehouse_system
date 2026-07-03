@@ -5,8 +5,10 @@
 # 切换不同 WMS 后端，只需修改此字段并实现对应 Provider
 # provider: "default"
 
-# ── 后端 API 地址 ──
-api_base_url: "http://localhost:2124/api"
+# ── 后端 API 地址（可选）──
+# 默认自动按 PORT 环境变量推导为 http://localhost:${PORT}/api（默认 2124），
+# 容器内由 mcp_manager 注入 WAREHOUSE_API_URL。仅在独立运行且端口非默认时才需覆盖：
+# api_base_url: "http://localhost:2124/api"
 
 # ── 认证配置 ──
 # 支持多种认证方式，根据 WMS 后端选择
