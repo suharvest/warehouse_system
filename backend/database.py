@@ -302,6 +302,7 @@ def init_database():
             slug TEXT UNIQUE NOT NULL,
             name TEXT NOT NULL,
             is_active INTEGER DEFAULT 1,
+            device_id TEXT UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -572,6 +573,28 @@ def init_database():
         )
     ''')
 
+    # 智能体下挂的物理设备子表（一对多）：每行一个物理设备，配 LAN IP / NPU 模型标签，
+    # 供后续"云端下发人脸库到设备"按 model_tag 过滤后推到 ip:port。
+    # connection_id ON DELETE CASCADE：智能体删了设备记录跟着删。
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mcp_agent_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id TEXT NOT NULL,
+            device_id TEXT,
+            name TEXT,
+            ip TEXT,
+            port INTEGER NOT NULL DEFAULT 80,
+            model_tag TEXT,
+            face_enabled INTEGER NOT NULL DEFAULT 0,
+            last_seen TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(connection_id) REFERENCES mcp_connections(id) ON DELETE CASCADE,
+            UNIQUE(connection_id, device_id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_agent_devices_connection ON mcp_agent_devices(connection_id)')
+
     # ============================================
     # 人脸识别 + 权限校验（Phase 1，仅对 MCP tool 生效）
     # ============================================
@@ -585,6 +608,8 @@ def init_database():
             auth_token TEXT,
             embedding_model_tag TEXT,
             min_confidence REAL NOT NULL DEFAULT 0.65,
+            greeting_enabled INTEGER NOT NULL DEFAULT 0,
+            verify_mode TEXT NOT NULL DEFAULT 'interface' CHECK(verify_mode IN('session','interface')),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
@@ -679,6 +704,28 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN device_id TEXT')
         cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_device_id ON mcp_connections(device_id)')
+
+    # tenants.device_id：旧库兜底补列（新库由上方 CREATE TABLE 带 UNIQUE）。
+    try:
+        cursor.execute('SELECT device_id FROM tenants LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE tenants ADD COLUMN device_id TEXT')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_device_id ON tenants(device_id)')
+
+    # verify_mode（鉴权强度，与 mode 正交）：旧库兜底补列。CHECK 省略以规避
+    # SQLite ALTER ADD COLUMN 的约束限制；新库由上方 CREATE TABLE 带 CHECK。
+    try:
+        cursor.execute('SELECT verify_mode FROM tenant_face_config LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'interface'")
+
+    # greeting_enabled（被动问候开关）：旧库兜底补列。此列在 metadata 与 alembic
+    # 迁移(h7i8j9k0l1m2)中已有，但此前漏在 raw init_database 的 CREATE TABLE 里，
+    # 导致纯 init_database 建的 sqlite 库上 GET/PUT /api/face/config 500。
+    try:
+        cursor.execute('SELECT greeting_enabled FROM tenant_face_config LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN greeting_enabled INTEGER NOT NULL DEFAULT 0")
 
     # 检查并添加 warehouse_id 字段到各表（多仓库支持）
     for table in ('batches', 'inventory_records', 'api_keys', 'mcp_connections'):

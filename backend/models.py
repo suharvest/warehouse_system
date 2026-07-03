@@ -725,7 +725,7 @@ class CreateMCPConnectionRequest(BaseModel):
     role: str = 'operate'  # 'admin' | 'operate' | 'view'
     auto_start: bool = True
     warehouse_id: Optional[int] = None  # 仓库ID（关联的MCP代理归属仓库）
-    device_id: Optional[str] = None  # 设备ID，全局唯一，用于设备去重
+    device_id: Optional[str] = None  # Legacy: 旧版设备级绑定字段；新配置以 mcp_endpoint 代表云端智能体入口
 
 
 class UpdateMCPConnectionRequest(BaseModel):
@@ -735,7 +735,7 @@ class UpdateMCPConnectionRequest(BaseModel):
     role: Optional[str] = None  # 'admin' | 'operate' | 'view'
     auto_start: Optional[bool] = None
     warehouse_id: Optional[int] = None
-    device_id: Optional[str] = None  # 设备ID，变更时同样做唯一校验
+    device_id: Optional[str] = None  # Legacy: 旧版设备级绑定字段；新配置以 mcp_endpoint 代表云端智能体入口
 
 
 class MCPConnectionItem(BaseModel):
@@ -767,6 +767,34 @@ class MCPConnectionResponse(BaseModel):
     success: bool
     message: str
     connection: Optional[MCPConnectionItem] = None
+
+
+# ============ MCP Agent Device (一对多子表) Models ============
+
+class MCPAgentDeviceCreateRequest(BaseModel):
+    """新增智能体下挂的物理设备请求。
+
+    一个智能体（mcp_connection）下可挂多个物理设备，每个设备配 LAN IP，
+    供后续云端下发人脸库到设备使用。ip 必填，port 默认 80。
+    """
+    device_id: Optional[str] = None  # 物理设备标识（MAC/序列号），同一智能体下不可重复
+    name: Optional[str] = None
+    ip: str
+    port: int = 80
+    model_tag: Optional[str] = None  # 设备 NPU embedding 模型标签（下发时按它过滤人脸库）
+    face_enabled: bool = False       # opt-in 人脸：是否向该设备下发人脸库
+    last_seen: Optional[str] = None
+
+
+class MCPAgentDeviceUpdateRequest(BaseModel):
+    """更新智能体下挂物理设备请求（所有字段可选，仅更新提供的字段）。"""
+    device_id: Optional[str] = None
+    name: Optional[str] = None
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    model_tag: Optional[str] = None
+    face_enabled: Optional[bool] = None
+    last_seen: Optional[str] = None
 
 
 # ============ Fuzzy Match Models ============

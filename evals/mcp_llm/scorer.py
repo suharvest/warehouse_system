@@ -184,6 +184,13 @@ def score_nf(
         # 没有 final 也不算 NF 违规（TSA 会扣）
         return 1.0, ["nf: empty final_text"]
 
+    # Strip <think>...</think> blocks before NF checks (Qwen3 on edgellm
+    # may output thinking even with enable_thinking=false)
+    clean_final = re.sub(r'<think>.*?</think>', '', final_text, flags=re.DOTALL).strip()
+    if not clean_final:
+        return 1.0, ["nf: empty final_text (think only)"]
+    final_text = clean_final
+
     allowed: set[str] = set()
     for tr in tool_results:
         collect_numbers(tr, allowed)

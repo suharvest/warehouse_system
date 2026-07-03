@@ -32,6 +32,7 @@ def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
         tenant_face_config.c.auth_token,
         tenant_face_config.c.embedding_model_tag,
         tenant_face_config.c.min_confidence,
+        tenant_face_config.c.verify_mode,
     ).where(tenant_face_config.c.tenant_id == tenant_id)
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(stmt).first()
@@ -45,6 +46,7 @@ def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
         auth_token=row.auth_token,
         embedding_model_tag=row.embedding_model_tag,
         min_confidence=float(row.min_confidence or 0.65),
+        verify_mode=row.verify_mode or "interface",
     )
 
 
@@ -117,6 +119,43 @@ def _row_to_rule(row) -> FaceRule:
     )
 
 
+def _resolve_speaker_subject(
+    conn,
+    *,
+    tenant_id: int,
+    speaker_subject_id: Optional[int],
+    speaker_name: Optional[str],
+) -> Optional[int]:
+    """Resolve the session-mode speaker to a tenant-scoped face_subjects.id.
+
+    ``speaker_subject_id`` (exact, no ambiguity) wins; falls back to a
+    case-sensitive name lookup. Both paths require the subject to be active —
+    a deactivated subject must not authenticate via a stale device entry.
+    Returns None when neither resolves (e.g. device had no valid match).
+    """
+    cur = conn.cursor()
+    if speaker_subject_id is not None:
+        cur.execute(
+            "SELECT id FROM face_subjects "
+            "WHERE id = ? AND tenant_id = ? AND is_active = 1",
+            (speaker_subject_id, tenant_id),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row["id"])
+    if speaker_name:
+        cur.execute(
+            "SELECT id FROM face_subjects "
+            "WHERE tenant_id = ? AND name = ? AND is_active = 1 "
+            "ORDER BY id ASC LIMIT 1",
+            (tenant_id, speaker_name),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row["id"])
+    return None
+
+
 def _log_decision(
     conn,
     *,
@@ -164,20 +203,41 @@ async def enroll_face(
     *,
     subject_id: int,
     tenant_id: int,
-    images_b64: List[str],
+    images_b64: Optional[List[str]] = None,
+    precomputed: Optional[List[dict]] = None,
     applies_to_warehouse_ids: Optional[List[int]] = None,
     enrolled_by: Optional[int] = None,
 ) -> dict:
-    """Run each image through endpoint /infer, persist embeddings for a subject.
+    """Persist face enrollments for a subject.
 
-    Returns: {count, ids}
-    Raises FaceEndpointError if config missing / endpoint unreachable.
+    Two ingress paths (pick one — pass both raises):
+
+    * ``images_b64``: server-side path. Warehouse posts each image to the
+      tenant's ``/infer`` (face_rec_api Hailo/Jetson/RKNN) and stores the
+      returned embedding.
+    * ``precomputed``: device-side path (e.g. Himax WE2). Each item is
+      ``{"embedding_bytes": <bytes>, "model_tag": <str>}`` already computed
+      on the device's NPU; warehouse just persists it. No /infer call,
+      and ``cfg.endpoint`` is not required.
+
+    Returns: ``{count, ids}``.
+    Raises FaceEndpointError on config / subject / endpoint failures.
     """
-    cfg = _load_config(conn, tenant_id)
-    if cfg is None or not cfg.endpoint:
-        raise FaceEndpointError("endpoint_not_configured")
-    if not images_b64:
+    if images_b64 and precomputed:
+        raise FaceEndpointError("ambiguous_enroll_input")
+    images_b64 = images_b64 or []
+    precomputed = precomputed or []
+    if not images_b64 and not precomputed:
         return {"count": 0, "ids": []}
+
+    cfg = _load_config(conn, tenant_id)
+    if images_b64:
+        # Server-side inference: local mode runs the bundled WE2 simulator
+        # in-process (no endpoint); any other mode needs a configured endpoint.
+        if cfg is None:
+            raise FaceEndpointError("endpoint_not_configured")
+        if cfg.mode != "local" and not cfg.endpoint:
+            raise FaceEndpointError("endpoint_not_configured")
 
     # Verify the subject belongs to this tenant
     cur = conn.cursor()
@@ -191,6 +251,8 @@ async def enroll_face(
 
     applies_raw = json.dumps(applies_to_warehouse_ids) if applies_to_warehouse_ids else None
     inserted_ids: List[int] = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     for img in images_b64:
         result = await endpoint_client.infer(cfg, img)
         cur.execute(
@@ -200,18 +262,28 @@ async def enroll_face(
                  applies_to_warehouse_ids, is_active, enrolled_at, enrolled_by)
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (
-                subject_id,
-                tenant_id,
-                result["model_tag"],
-                result["embedding"],
-                img,
-                applies_raw,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                enrolled_by,
-            ),
+            (subject_id, tenant_id, result["model_tag"], result["embedding"],
+             img, applies_raw, now, enrolled_by),
         )
         inserted_ids.append(cur.lastrowid)
+
+    for item in precomputed:
+        emb_bytes = item.get("embedding_bytes")
+        model_tag = item.get("model_tag") or (cfg.embedding_model_tag if cfg else None) or "unknown"
+        if not emb_bytes:
+            raise FaceEndpointError("precomputed_missing_embedding")
+        cur.execute(
+            """
+            INSERT INTO face_enrollments
+                (subject_id, tenant_id, model_tag, embedding, source_image_b64,
+                 applies_to_warehouse_ids, is_active, enrolled_at, enrolled_by)
+            VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?)
+            """,
+            (subject_id, tenant_id, model_tag, emb_bytes,
+             applies_raw, now, enrolled_by),
+        )
+        inserted_ids.append(cur.lastrowid)
+
     conn.commit()
     return {"count": len(inserted_ids), "ids": inserted_ids}
 
@@ -223,13 +295,25 @@ async def verify_mcp_face(
     user_id: int,
     warehouse_id: Optional[int],
     operation: str,
+    image_b64: str = "",
+    embedding_bytes: Optional[bytes] = None,
+    embedding_model_tag: Optional[str] = None,
+    speaker_subject_id: Optional[int] = None,
+    speaker_name: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> Decision:
     """Short-circuit verification ladder for an MCP tool call.
 
-    Order: config -> rule -> capture -> infer -> match -> threshold ->
+    Order: config -> rule -> obtain embedding -> match -> threshold ->
     allow-list. The matched **subject** is the authorization unit; the
     calling system user is just identified for audit purposes.
+
+    Two ingress paths for the embedding (pick one):
+
+    * ``image_b64``: warehouse calls the tenant's ``/infer`` (face_rec_api).
+    * ``embedding_bytes`` + ``embedding_model_tag``: device already ran
+      inference on its own NPU (e.g. Himax WE2) and posts the result
+      directly. ``cfg.endpoint`` is not consulted on this path.
     """
     cfg = _load_config(conn, tenant_id)
     if cfg is None or not cfg.enabled:
@@ -251,13 +335,67 @@ async def verify_mcp_face(
         )
         return decision
 
-    # capture + infer
-    try:
-        snap = await endpoint_client.capture(cfg)
-        result = await endpoint_client.infer(cfg, snap["image_b64"])
-    except FaceEndpointError as e:
-        reason = str(e) if str(e) else "endpoint_unreachable"
-        decision = Decision(status="deny", failure_reason=reason)
+    # ── Session mode (advisory) ─────────────────────────────────────────
+    # Trust the device's on-board match (frozen on the conversation rising
+    # edge). We do NOT re-infer/re-match the embedding; the device identity
+    # is recorded for audit (decision=pass, advisory) and the call proceeds.
+    # Exception: a rule with an allow-list is a hard restriction even in
+    # session mode — an unresolved speaker must NOT pass it (otherwise
+    # "nobody recognized" would bypass the very rule meant to limit who can
+    # perform the operation).
+    if cfg.verify_mode == "session":
+        matched = _resolve_speaker_subject(
+            conn, tenant_id=tenant_id,
+            speaker_subject_id=speaker_subject_id, speaker_name=speaker_name,
+        )
+        if rule.allowed_subject_ids and (
+            matched is None or matched not in rule.allowed_subject_ids
+        ):
+            decision = Decision(
+                status="deny",
+                failure_reason=(
+                    "not_in_allow_list" if matched is not None else "speaker_unresolved"
+                ),
+                matched_subject_id=matched,
+            )
+            _log_decision(
+                conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
+                tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+                confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+            )
+            return decision
+        decision = Decision(
+            status="pass", failure_reason="advisory_session",
+            matched_subject_id=matched,
+        )
+        _log_decision(
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
+            tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+            confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+        )
+        return decision
+
+    # ── Interface mode (default, fail-closed) ───────────────────────────
+    # Obtain embedding: either supplied by device (WE2 path) or via /infer.
+    if embedding_bytes:
+        model_tag = embedding_model_tag or cfg.embedding_model_tag or "unknown"
+        query_bytes = embedding_bytes
+    elif image_b64:
+        try:
+            result = await endpoint_client.infer(cfg, image_b64)
+        except FaceEndpointError as e:
+            reason = str(e) if str(e) else "endpoint_unreachable"
+            decision = Decision(status="deny", failure_reason=reason)
+            _log_decision(
+                conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
+                tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+                confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+            )
+            return decision
+        model_tag = result["model_tag"]
+        query_bytes = result["embedding"]
+    else:
+        decision = Decision(status="deny", failure_reason="no_image_provided")
         _log_decision(
             conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
@@ -269,8 +407,8 @@ async def verify_mcp_face(
         conn,
         tenant_id=tenant_id,
         warehouse_id=warehouse_id,
-        model_tag=result["model_tag"],
-        query_emb_bytes=result["embedding"],
+        model_tag=model_tag,
+        query_emb_bytes=query_bytes,
         k=1,
     )
     if not matches:

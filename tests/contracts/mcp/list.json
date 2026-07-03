@@ -3,6 +3,8 @@
     {
       "auto_start": "<any>",
       "created_at": "<any>",
+      "debug_mode": "<any>",
+      "device_id": "<any>",
       "error_message": "<any>",
       "id": "<any>",
       "mcp_endpoint": "<any>",

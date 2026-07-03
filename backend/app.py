@@ -173,6 +173,25 @@ app = FastAPI(
 async def health_check():
     return {"status": "ok"}
 
+
+# Test-only: drain SQLAlchemy connection pool so eval framework can safely
+# overwrite the sqlite file (snapshot reset). Gated by EVAL_TEST_MODE=1.
+@app.post("/api/_test/drain_pool")
+async def _eval_drain_pool():
+    if os.environ.get("EVAL_TEST_MODE") != "1":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        from backend.db import get_engine
+    except ImportError:
+        from db import get_engine  # type: ignore
+    try:
+        get_engine().dispose()
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+    return {"ok": True}
+
+
 # 注册速率限制异常处理（带 CORS 头）
 app.state.limiter = limiter
 
@@ -354,7 +373,13 @@ def _seed_base_data() -> None:
     Docker 走纯 Alembic 路径，迁移只建表结构不插数据；
     本地 start.sh 走 init_database()，已有种子数据（INSERT OR IGNORE）。
     两条路径都调用此函数，冲突忽略保证幂等。
+
+    多租户部署除外：multi_tenant 从空白开始，由全局 admin 显式创建租户。强种
+    默认租户 1 会破坏"首个租户引导"流程（无租户时该引导永不触发），并在按租户
+    分组的仓库视图里多出一个幽灵"默认租户"分组。
     """
+    if get_deploy_mode() == "multi_tenant":
+        return
     try:
         sqlite = _is_sqlite()
         ignore_kw = "OR IGNORE" if sqlite else "IGNORE"
@@ -459,6 +484,7 @@ def _audit_routes() -> None:
         "/api/auth/reset-password",  # 凭设备ID重置密码
         "/api/system/mode",  # 部署元信息（single/multi tenant），前端在登录前就要据此渲染 UI
         "/factory/devices",  # 工厂设备代理使用 X-Factory-Key 做接口级鉴权
+        "/api/_test/",  # 测试/eval 专用端点，自身用 EVAL_TEST_MODE 门控，非生产安全面
         "/docs",
         "/openapi.json",
         "/redoc",
@@ -1279,7 +1305,9 @@ async def setup_admin(request: SetupRequest, response: Response):
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-@limiter.limit("5/minute")  # 登录接口速率限制：每分钟5次
+@limiter.limit("20/minute")  # 登录限流：放宽到 20/分钟。原 5/分钟对多终端、同一出口 IP(NAT)
+# 下多操作员、以及会话过期后的页面自动重登 + 手动重试太严，正常使用就会撞 429；20/分钟
+# 仍能挡住暴力破解（每分钟至多 20 次猜测），同时不误伤正常登录。
 async def login(request: Request, login_data: LoginRequest, response: Response):
     """用户登录"""
     user_stmt = select(
@@ -1963,6 +1991,24 @@ def _clear_database_scope(cursor, tenant_id: Optional[int]) -> dict:
     return details
 
 
+def _sanitize_import_text(value):
+    """清洗导入文本单元格。
+
+    背景：从导出的 .xlsx / .db 灌进来的值里常混入 Excel 公式残渣，例如
+    ``=+VLOOKUP(C4153,[1]后台!$B:$I,8,0)``——这不是有效数据，而是导出时未求值的
+    公式字符串。统一视为缺失（返回 None）。同时这也防御 CSV/Excel 公式注入
+    （以 ``=`` 开头的单元格被表格软件当公式执行）。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s[0] == '=':
+        return None
+    return s
+
+
 def _insert_row_with_overrides(cursor, table: str, row, target_columns: set, overrides: dict = None, skip: set = None) -> int:
     overrides = overrides or {}
     skip = skip or set()
@@ -2041,9 +2087,19 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
     for row in rows:
         old_id = row['id'] if 'id' in row.keys() else None
         old_wh = row['warehouse_id'] if 'warehouse_id' in row.keys() else None
+        mat_overrides = {'tenant_id': tenant_id, 'warehouse_id': warehouse_map.get(old_wh, default_id)}
+        # 清洗 unit：导出库常把 Excel 公式残渣（=+VLOOKUP(...)）当作单位灌进来。
+        # 公式残渣清成 None 时落到默认单位“个”，避免写入 NULL（unit 在响应模型里是必填 str）；
+        # 原本就为空的保持原样（不臆造数据）。
+        if 'unit' in row.keys():
+            raw_unit = row['unit']
+            cleaned_unit = _sanitize_import_text(raw_unit)
+            if cleaned_unit is None and raw_unit not in (None, ''):
+                cleaned_unit = '个'
+            mat_overrides['unit'] = cleaned_unit
         new_id = _insert_row_with_overrides(
             cursor, 'materials', row, target_columns['materials'],
-            {'tenant_id': tenant_id, 'warehouse_id': warehouse_map.get(old_wh, default_id)},
+            mat_overrides,
             {'id'}
         )
         if old_id is not None:
@@ -2310,6 +2366,12 @@ async def import_database(
 
         import_conn.close()
 
+        # 整库导入写入了 materials/contacts/batches，必须让模糊匹配的常驻内存索引
+        # 失效，否则导入后的物料/联系方在 fuzzy=true 搜索（含智能体语音查询）里查不到，
+        # 直到进程重启才重建索引。与 Excel 导入路径（confirm_import_excel）保持一致。
+        get_fuzzy_matcher().invalidate_cache(entity_type="material")
+        get_fuzzy_matcher().invalidate_cache(entity_type="contact")
+
         if ENABLE_AUDIT_LOG:
             logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 导入了数据库")
 
@@ -2365,6 +2427,11 @@ async def clear_database(
         except Exception as e:
             conn.rollback()
             raise HTTPException(status_code=500, detail=f"清空失败: {str(e)}")
+
+    # 清空删除了 materials/contacts/batches，同样要让模糊索引失效，否则被删物料
+    # 仍会出现在 fuzzy 搜索结果里（指向已不存在的 id）。
+    get_fuzzy_matcher().invalidate_cache(entity_type="material")
+    get_fuzzy_matcher().invalidate_cache(entity_type="contact")
 
     if ENABLE_AUDIT_LOG:
         logger.info(f"[AUDIT] 用户 {current_user.username or 'unknown'} 清空了数据库")
@@ -5492,7 +5559,7 @@ async def preview_import_excel(
             name = _read_cell(row, 'name') or ""
             sku = _read_cell(row, 'sku')
             category = _read_cell(row, 'category') or "未分类"
-            unit = _read_cell(row, 'unit') or "个"
+            unit = _sanitize_import_text(_read_cell(row, 'unit')) or "个"
             location = _read_cell(row, 'location') or ""
             batch_no_val = _read_cell(row, 'batch_no') or ""
             contact_name_val = _read_cell(row, 'contact_name') or ""
@@ -6471,6 +6538,80 @@ async def add_inventory_record(
 # fresh instance under FastAPI ``TestClient`` (which skips lifespan events).
 
 
+_INITIAL_SCHEMA_REVISION = "1826e23835b6"
+
+
+def _recover_legacy_alembic_state(cfg) -> None:
+    """Auto-recover when ``alembic_version`` is empty but business tables exist.
+
+    Older deployments (pre-consolidated-initial-schema) end up with all tables
+    present but no row in ``alembic_version`` — either because the table was
+    truncated, or because tables were created via a now-removed bootstrap path.
+    In that state, ``alembic upgrade head`` re-runs ``initial_schema``, which
+    fails with ``table ... already exists`` and traps the container in a
+    restart loop.
+
+    Strategy:
+      * If ``alembic_version`` row already set → no-op.
+      * If DB looks empty (no business tables) → no-op; let alembic build from
+        scratch.
+      * If business tables exist AND schema is compatible with
+        ``1826e23835b6`` (face_auth_logs present, users has tenant_id) → stamp
+        to ``1826e23835b6`` so subsequent incremental migrations apply.
+      * If business tables exist but pre-multi-tenant (users missing
+        ``tenant_id``) → refuse to start with an actionable error pointing at
+        the manual migration script. We do NOT silently ALTER tables here; the
+        backfill needs a default tenant_id value which is a deployment-level
+        decision.
+    """
+    from sqlalchemy import inspect as sa_inspect
+    eng = get_engine()
+    insp = sa_inspect(eng)
+    tables = set(insp.get_table_names())
+    if "alembic_version" in tables:
+        with eng.begin() as conn:
+            current = conn.exec_driver_sql(
+                "SELECT version_num FROM alembic_version LIMIT 1"
+            ).first()
+        if current and current[0]:
+            return
+
+    # alembic_version is empty (or missing). Decide based on business tables.
+    legacy_marker = "users" in tables or "materials" in tables
+    if not legacy_marker:
+        return  # fresh DB — let alembic create everything
+
+    if "users" in tables:
+        user_cols = {c["name"] for c in insp.get_columns("users")}
+        if "tenant_id" not in user_cols:
+            raise RuntimeError(
+                "Legacy DB detected: users.tenant_id is missing. This DB "
+                "pre-dates the multi-tenant schema and cannot be auto-"
+                "migrated. From the host run:\n"
+                "  uv run python scripts/migrate_legacy_db.py "
+                "/path/to/warehouse.db\n"
+                "or from inside the container:\n"
+                "  /app/.venv/bin/python /app/scripts/migrate_legacy_db.py "
+                "/data/warehouse.db\n"
+                f"DB url: {eng.url}"
+            )
+
+    if "face_auth_logs" not in tables:
+        raise RuntimeError(
+            "Legacy DB detected: alembic_version empty, business tables "
+            "present, but face_auth_logs missing — schema is between "
+            "two known states. Manual intervention required."
+        )
+
+    logger.warning(
+        "Detected legacy DB with empty alembic_version but matching "
+        "post-initial_schema tables. Auto-stamping to %s.",
+        _INITIAL_SCHEMA_REVISION,
+    )
+    from alembic import command as alembic_command
+    alembic_command.stamp(cfg, _INITIAL_SCHEMA_REVISION)
+
+
 @app.on_event("startup")
 async def _run_migrations():
     """Run Alembic migrations on startup. Idempotent.
@@ -6486,6 +6627,7 @@ async def _run_migrations():
     cfg.set_main_option(
         "script_location", os.path.join(os.path.dirname(__file__), "alembic")
     )
+    _recover_legacy_alembic_state(cfg)
     alembic_command.upgrade(cfg, "head")
 
     # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。
@@ -6638,6 +6780,14 @@ async def set_system_mode(
 # Moved to backend/routers/face.py (Phase 1 split, task #5).
 from routers.face import router as face_router
 app.include_router(face_router)
+
+
+# ============ WE2 Face Inference Simulator (opt-in) ============
+# Enabled by `FACE_WE2_SIMULATOR_ENABLED=1`. When off, no router is mounted
+# and the heavy ai-edge-litert / model files are never touched at startup.
+if os.getenv("FACE_WE2_SIMULATOR_ENABLED", "0") == "1":
+    from routers.face_we2 import router as _face_we2_router
+    app.include_router(_face_we2_router)
 
 
 # ============ Factory 设备代理 API ============

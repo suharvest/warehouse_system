@@ -19,6 +19,15 @@ def _login_and_open_warehouses(page: Page, fixture: dict) -> None:
     expect(page.locator("#login-modal")).not_to_be_visible()
     expect(page.locator('[data-tab="users"]')).to_be_visible()
 
+    # Dismiss the first-login onboarding tour if present (its overlay intercepts clicks).
+    skip = page.locator('[data-ob-action="skip"]')
+    try:
+        skip.wait_for(state="visible", timeout=2000)
+        skip.click()
+        expect(skip).not_to_be_visible()
+    except Exception:
+        pass
+
     page.click('[data-tab="users"]')
     page.wait_for_timeout(200)
     page.click('[data-action="switchSettingsSubTab"][data-sub-tab="warehouses"]')

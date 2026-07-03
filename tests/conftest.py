@@ -18,6 +18,45 @@ backend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.insert(0, backend_dir)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_module_reloads():
+    """Restore reloaded modules after each test.
+
+    Several tests reload core modules to exercise env-dependent behavior:
+    test_face / test_tenants reload ``database`` (with a temp DATABASE_PATH),
+    test_face_we2_simulator reloads ``app`` (toggling the WE2 router). Because
+    ``del sys.modules[...] + import`` installs a NEW module object, any later
+    test doing ``from app import get_fuzzy_matcher`` / ``from database import
+    get_db_connection`` can bind to a different instance than the one the
+    session app_instance (admin_client) uses — so cache invalidation misses and
+    the fuzzy index is served stale (e.g. test_stock_out resolves "产品不存在",
+    test_route_inventory sees drifted routes). Snapshot these modules before the
+    test and restore them after, containing each reload to its own test.
+    """
+    saved = {m: sys.modules.get(m) for m in ("app", "database", "routers.face_we2")}
+    yield
+    for name, mod in saved.items():
+        if mod is not None:
+            sys.modules[name] = mod
+        else:
+            sys.modules.pop(name, None)
+
+
+def pytest_collection_modifyitems(items):
+    """Run Playwright e2e tests (tests/e2e/) LAST.
+
+    pytest-playwright's sync ``page`` fixture, under pytest-asyncio
+    ``asyncio_mode = auto``, leaves a *running* event loop on the main thread
+    after an e2e test. Any subsequent unit test that calls ``asyncio.run(...)``
+    (e.g. the MCP/face/mcp_pipe tests) then fails with "asyncio.run() cannot be
+    called from a running event loop". Since ``tests/e2e/`` collects before
+    ``tests/test_*.py`` alphabetically, this poisons ~25 unit tests. Ordering
+    e2e last contains the leak to the end of the session where nothing follows.
+    """
+    e2e_marker = os.path.join("tests", "e2e", "")
+    items.sort(key=lambda it: 1 if e2e_marker in str(getattr(it, "fspath", "")) else 0)
+
+
 @pytest.fixture(scope="session")
 def test_db():
     """Create a temporary test database, isolated from production.

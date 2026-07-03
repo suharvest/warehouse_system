@@ -10,6 +10,22 @@ import pytest
 from playwright.sync_api import Page, expect
 
 
+def _dismiss_onboarding(page: Page) -> None:
+    """Dismiss the first-login onboarding tour if it appears.
+
+    On the first login of a fresh admin the backend returns is_first_login=true
+    and the frontend pops a 5-step onboarding tour (~500ms later) whose overlay
+    intercepts clicks. It must be skipped before interacting with the page.
+    """
+    skip = page.locator('[data-ob-action="skip"]')
+    try:
+        skip.wait_for(state="visible", timeout=2000)
+        skip.click()
+        expect(skip).not_to_be_visible()
+    except Exception:
+        pass  # tour not shown (e.g. not first login) — nothing to dismiss
+
+
 def _login_global_admin(page: Page, base_url: str, creds: dict) -> None:
     page.goto(base_url)
     page.click("#login-btn")
@@ -18,6 +34,7 @@ def _login_global_admin(page: Page, base_url: str, creds: dict) -> None:
     page.click('[data-action="handleLogin"]')
     expect(page.locator("#login-modal")).not_to_be_visible()
     expect(page.locator('[data-tab="users"]')).to_be_visible()
+    _dismiss_onboarding(page)
 
 
 def _open_warehouse_subtab(page: Page) -> None:

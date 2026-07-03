@@ -356,6 +356,46 @@ mcp_connections = Table(
 
 
 # ---------------------------------------------------------------------------
+# mcp_agent_devices — physical devices attached to one cloud agent
+# ---------------------------------------------------------------------------
+# 一个 mcp_connections 行 = 一个云端智能体端点；其下可挂多个物理设备。
+# 这张一对多子表存每个设备的 LAN IP / NPU 模型标签等，供后续"云端下发人脸库
+# 到设备"按 model_tag 过滤后下发到 ip:port。connection_id ondelete CASCADE：
+# 智能体删了，挂在它下面的设备记录跟着删。
+mcp_agent_devices = Table(
+    "mcp_agent_devices",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "connection_id",
+        String(64),
+        ForeignKey("mcp_connections.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # 物理设备标识（MAC / 序列号），可空；同一智能体下不可重复（见 UniqueConstraint）。
+    Column("device_id", String(128), nullable=True),
+    Column("name", String(255), nullable=True),
+    # LAN IP — DB 层可空，API 层校验非空（与 port 一起做 1-65535 校验）。
+    Column("ip", String(64), nullable=True),
+    Column("port", Integer, nullable=False, server_default="80"),
+    # 设备 NPU embedding 模型标签；下发人脸库时按它过滤可用的 enrollment。
+    Column("model_tag", String(64), nullable=True),
+    # opt-in 人脸：0=不下发人脸库到该设备，1=下发。存 0/1（sqlite/MySQL 通用）。
+    Column("face_enabled", Integer, nullable=False, server_default="0"),
+    Column("last_seen", String(32), nullable=True),
+    Column("created_at", String(32)),
+    Column("updated_at", String(32)),
+    Index("idx_mcp_agent_devices_connection", "connection_id"),
+    UniqueConstraint(
+        "connection_id",
+        "device_id",
+        name="uq_mcp_agent_devices_connection_id_device_id",
+    ),
+    **MYSQL_TABLE_KW,
+)
+
+
+# ---------------------------------------------------------------------------
 # Face recognition tables
 # ---------------------------------------------------------------------------
 tenant_face_config = Table(
@@ -377,9 +417,21 @@ tenant_face_config = Table(
     Column("auth_token", Text),
     Column("embedding_model_tag", String(64)),
     Column("min_confidence", Float, nullable=False, server_default="0.65"),
+    # Passive greeting (visual wake) on/off — independent of the out-of-stock
+    # auth switch (`enabled`). xiaozhi reads this on device connect / voice sync
+    # and aligns the device's local passive-recognition state via self.face.enable.
+    Column("greeting_enabled", Boolean, nullable=False, server_default="0"),
+    # 鉴权强度（与 mode 正交）：
+    #   interface — warehouse 重比对 embedding，fail-closed（默认，保留存量行为）
+    #   session   — 信任设备本地匹配，记 advisory 日志放行，不重比对
+    Column("verify_mode", String(16), nullable=False, server_default="interface"),
     Column("created_at", String(32), server_default=func.current_timestamp()),
     Column("updated_at", String(32), server_default=func.current_timestamp()),
     CheckConstraint("mode IN ('local','lan')", name="ck_tenant_face_config_mode"),
+    CheckConstraint(
+        "verify_mode IN ('session','interface')",
+        name="ck_tenant_face_config_verify_mode",
+    ),
     **MYSQL_TABLE_KW,
 )
 
@@ -525,6 +577,7 @@ __all__ = [
     "system_settings",
     "erp_providers",
     "mcp_connections",
+    "mcp_agent_devices",
     "tenant_face_config",
     "face_subjects",
     "tenant_face_operation_rules",
