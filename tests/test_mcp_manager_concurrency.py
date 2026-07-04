@@ -151,3 +151,57 @@ def test_proc_scan_finds_mcp_pipe_without_pgrep(monkeypatch, tmp_path):
     )
 
     assert mcp_manager.MCPProcessManager._scan_mcp_pipe_pids_from_proc(int(self_pid)) == [pipe_pid]
+
+
+@pytest.mark.asyncio
+async def test_start_connection_forwards_safe_log_context(monkeypatch, tmp_path):
+    """mcp_pipe logs need row labels, but must not receive endpoint/API key labels."""
+    import mcp_manager
+
+    mgr = mcp_manager.MCPProcessManager()
+    pipe = tmp_path / "mcp_pipe.py"
+    pipe.write_text("# fake")
+    monkeypatch.setattr(mgr, "_get_mcp_pipe_path", lambda: str(pipe))
+    monkeypatch.setattr(mgr, "_load_log_context", lambda conn_id: {})
+
+    captured_env = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured_env.update(kwargs["env"])
+        return _FakeProcess()
+
+    monkeypatch.setattr(
+        mcp_manager.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    ok = await mgr.start_connection(
+        "conn-1",
+        "wss://example.com/path?token=secret",
+        "api-secret",
+        log_context={
+            "name": "天津\n连接",
+            "tenant_id": 2246124,
+            "tenant_name": "租户-2246124",
+            "warehouse_id": 1,
+            "warehouse_name": "默认仓库",
+        },
+    )
+
+    assert ok is True
+    assert captured_env["MCP_LOG_CONN_ID"] == "conn-1"
+    assert captured_env["MCP_LOG_NAME"] == "天津 连接"
+    assert captured_env["MCP_LOG_TENANT_ID"] == "2246124"
+    assert captured_env["MCP_LOG_TENANT_NAME"] == "租户-2246124"
+    assert captured_env["MCP_LOG_WAREHOUSE_NAME"] == "默认仓库"
+    assert "MCP_LOG_ENDPOINT" not in captured_env
+    assert "MCP_LOG_API_KEY" not in captured_env
+
+    proc = mgr.connections.get("conn-1")
+    if proc and proc._log_task and not proc._log_task.done():
+        proc._log_task.cancel()
+        try:
+            await proc._log_task
+        except (asyncio.CancelledError, Exception):
+            pass

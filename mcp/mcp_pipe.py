@@ -60,8 +60,32 @@ TOOL_CALL_TIMEOUT = 60   # Max seconds to wait for warehouse_mcp to produce one 
 WS_PING_INTERVAL = 10    # WebSocket keepalive ping interval (seconds) — shorter to survive NAT idle
 WS_PING_TIMEOUT = 10     # WebSocket ping response deadline (seconds)
 
-async def connect_with_retry(uri, target):
+
+def _safe_label(value, limit=160):
+    text = str(value or '').replace('\n', ' ').replace('\r', ' ').strip()
+    return text[:limit]
+
+
+def build_log_target(target):
+    """Build a non-secret log label for one MCP connection."""
+    fields = [
+        ('conn_id', os.environ.get('MCP_LOG_CONN_ID')),
+        ('name', os.environ.get('MCP_LOG_NAME')),
+        ('tenant_id', os.environ.get('MCP_LOG_TENANT_ID')),
+        ('tenant', os.environ.get('MCP_LOG_TENANT_NAME')),
+        ('warehouse_id', os.environ.get('MCP_LOG_WAREHOUSE_ID')),
+        ('warehouse', os.environ.get('MCP_LOG_WAREHOUSE_NAME')),
+    ]
+    parts = [f"{key}={_safe_label(value)}" for key, value in fields if _safe_label(value)]
+    target_name = os.path.basename(target) if target and os.path.exists(target) else target
+    if target_name:
+        parts.append(f"target={_safe_label(target_name)}")
+    return ' '.join(parts) or _safe_label(target) or 'mcp'
+
+
+async def connect_with_retry(uri, target, log_target=None):
     """Connect to WebSocket server with retry mechanism for a given server target."""
+    log_target = log_target or build_log_target(target)
     reconnect_attempt = 0
     backoff = INITIAL_BACKOFF
     while True:  # Infinite reconnection
@@ -69,24 +93,25 @@ async def connect_with_retry(uri, target):
             # First retry after a failure: immediate (transient blips recover instantly).
             # Subsequent retries: exponential backoff capped at MAX_BACKOFF.
             if reconnect_attempt > 1:
-                logger.info(f"[{target}] Waiting {backoff}s before reconnection attempt {reconnect_attempt}...")
+                logger.info(f"[{log_target}] Waiting {backoff}s before reconnection attempt {reconnect_attempt}...")
                 await asyncio.sleep(backoff)
             elif reconnect_attempt == 1:
-                logger.info(f"[{target}] Immediate reconnect attempt {reconnect_attempt}")
+                logger.info(f"[{log_target}] Immediate reconnect attempt {reconnect_attempt}")
 
             # Attempt to connect
-            await connect_to_server(uri, target)
+            await connect_to_server(uri, target, log_target)
 
         except Exception as e:
             reconnect_attempt += 1
-            logger.warning(f"[{target}] Connection closed (attempt {reconnect_attempt}): {e}")
+            logger.warning(f"[{log_target}] Connection closed (attempt {reconnect_attempt}): {e}")
             # Calculate wait time for next reconnection (exponential backoff)
             backoff = min(backoff * 2, MAX_BACKOFF)
 
-async def connect_to_server(uri, target):
+async def connect_to_server(uri, target, log_target=None):
     """Connect to WebSocket server and pipe stdio for the given server target."""
+    log_target = log_target or build_log_target(target)
     try:
-        logger.info(f"[{target}] Connecting to WebSocket server...")
+        logger.info(f"[{log_target}] Connecting to WebSocket server...")
         async with websockets.connect(
             uri,
             open_timeout=10,
@@ -94,7 +119,7 @@ async def connect_to_server(uri, target):
             ping_timeout=WS_PING_TIMEOUT,
             max_size=None,  # cloud pushes inventory/tool catalog > 1 MiB default → 1009 close
         ) as websocket:
-            logger.info(f"[{target}] Successfully connected to WebSocket server")
+            logger.info(f"[{log_target}] Successfully connected to WebSocket server")
 
             # Start server process (built from CLI arg or config)
             cmd, env = build_server_command(target)
@@ -107,7 +132,7 @@ async def connect_to_server(uri, target):
                 text=True,
                 env=env
             )
-            logger.info(f"[{target}] Started server process: {' '.join(cmd)}")
+            logger.info(f"[{log_target}] Started server process: {' '.join(cmd)}")
             
             # Outstanding JSON-RPC requests: id -> monotonic timestamp when forwarded
             # to subprocess. Used so TOOL_CALL_TIMEOUT only fires when there's actually
@@ -117,26 +142,26 @@ async def connect_to_server(uri, target):
 
             # Create two tasks: read from WebSocket and write to process, read from process and write to WebSocket
             await asyncio.gather(
-                pipe_websocket_to_process(websocket, process, target, pending_requests),
-                pipe_process_to_websocket(process, websocket, target, pending_requests),
-                pipe_process_stderr_to_terminal(process, target)
+                pipe_websocket_to_process(websocket, process, log_target, pending_requests),
+                pipe_process_to_websocket(process, websocket, log_target, pending_requests),
+                pipe_process_stderr_to_terminal(process, log_target)
             )
     except websockets.exceptions.ConnectionClosed as e:
-        logger.error(f"[{target}] WebSocket connection closed: {e}")
+        logger.error(f"[{log_target}] WebSocket connection closed: {e}")
         raise  # Re-throw exception to trigger reconnection
     except Exception as e:
-        logger.error(f"[{target}] Connection error: {e}")
+        logger.error(f"[{log_target}] Connection error: {e}")
         raise  # Re-throw exception
     finally:
         # Ensure the child process is properly terminated
         if 'process' in locals():
-            logger.info(f"[{target}] Terminating server process")
+            logger.info(f"[{log_target}] Terminating server process")
             try:
                 process.terminate()
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-            logger.info(f"[{target}] Server process terminated")
+            logger.info(f"[{log_target}] Server process terminated")
 
 def _classify_json_rpc(parsed):
     """Return ('request', id) | ('response', id) | ('notification', None) | (None, None).
@@ -378,12 +403,15 @@ if __name__ == "__main__":
             if not enabled:
                 raise RuntimeError("No enabled mcpServers found in config")
             logger.info(f"Starting servers: {', '.join(enabled)}")
-            tasks = [asyncio.create_task(connect_with_retry(endpoint_url, t)) for t in enabled]
+            tasks = [
+                asyncio.create_task(connect_with_retry(endpoint_url, t, build_log_target(t)))
+                for t in enabled
+            ]
             # Run all forever; if any crashes it will auto-retry inside
             await asyncio.gather(*tasks)
         else:
             if os.path.exists(target_arg):
-                await connect_with_retry(endpoint_url, target_arg)
+                await connect_with_retry(endpoint_url, target_arg, build_log_target(target_arg))
             else:
                 logger.error("Argument must be a local Python script path. To run configured servers, run without arguments.")
                 sys.exit(1)

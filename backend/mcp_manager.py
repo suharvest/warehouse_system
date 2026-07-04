@@ -33,6 +33,7 @@ class MCPProcess:
     error_message: Optional[str] = None
     restart_count: int = 0
     debug_mode: bool = False
+    log_context: dict = field(default_factory=dict)
     started_at: Optional[datetime] = None
     logs: deque = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
     _log_task: Optional[asyncio.Task] = None
@@ -136,15 +137,17 @@ class MCPProcessManager:
             logger.info("MCP process monitor stopped")
 
     async def start_connection(self, conn_id: str, endpoint: str, api_key: str,
-                                auto_start: bool = True, debug_mode: bool = False) -> bool:
+                                auto_start: bool = True, debug_mode: bool = False,
+                                log_context: Optional[dict] = None) -> bool:
         """启动一个 MCP 连接（子进程）。串行化同 conn_id 的状态变更。"""
         async with self._get_lock(conn_id):
             return await self._start_connection_locked(
-                conn_id, endpoint, api_key, auto_start, debug_mode
+                conn_id, endpoint, api_key, auto_start, debug_mode, log_context
             )
 
     async def _start_connection_locked(self, conn_id: str, endpoint: str, api_key: str,
-                                        auto_start: bool = True, debug_mode: bool = False) -> bool:
+                                        auto_start: bool = True, debug_mode: bool = False,
+                                        log_context: Optional[dict] = None) -> bool:
         """start_connection 的内部实现，**调用者必须已持有 self._get_lock(conn_id)**。
         给 restart / toggle_debug 复用以避免锁重入死锁。"""
         # 如果已经有运行中的进程，先停止（同样 unlocked，避免锁重入）
@@ -170,6 +173,11 @@ class MCPProcessManager:
         env['WAREHOUSE_API_URL'] = f'http://localhost:{port}/api'
         effective_debug = debug_mode or os.environ.get('MCP_DEBUG') == '1'
         env['MCP_DEBUG'] = '1' if effective_debug else '0'
+        log_context = self._normalize_log_context(
+            conn_id, log_context or self._load_log_context(conn_id)
+        )
+        for key, value in log_context.items():
+            env[f"MCP_LOG_{key.upper()}"] = str(value)
 
         try:
             # 传 warehouse_mcp.py 路径作为参数，避免依赖 mcp_config.json 的硬编码路径
@@ -192,6 +200,7 @@ class MCPProcessManager:
                 started_at=datetime.now(),
                 restart_count=0,
                 debug_mode=effective_debug,
+                log_context=log_context,
             )
             self.connections[conn_id] = mcp_proc
 
@@ -212,9 +221,64 @@ class MCPProcessManager:
                 status='error',
                 websocket_status='error',
                 websocket_error=str(e),
-                error_message=str(e)
+                error_message=str(e),
+                log_context=log_context,
             )
             return False
+
+    @staticmethod
+    def _normalize_log_context(conn_id: str, context: Optional[dict]) -> dict:
+        """Build safe, non-secret context forwarded to mcp_pipe logs."""
+        context = dict(context or {})
+        context.setdefault('conn_id', conn_id)
+        allowed = (
+            'conn_id', 'name', 'tenant_id', 'tenant_name',
+            'warehouse_id', 'warehouse_name',
+        )
+        clean = {}
+        for key in allowed:
+            value = context.get(key)
+            if value is None:
+                continue
+            text = str(value).replace('\n', ' ').replace('\r', ' ').strip()
+            if text:
+                clean[key] = text[:160]
+        return clean
+
+    @staticmethod
+    def _load_log_context(conn_id: str) -> dict:
+        """Load connection labels for logs without exposing endpoint/API secrets."""
+        try:
+            from db import get_engine
+            from metadata import (
+                mcp_connections as _t_mcp,
+                tenants as _t_tenants,
+                warehouses as _t_warehouses,
+            )
+            from sqlalchemy import select as _sa_select
+
+            stmt = (
+                _sa_select(
+                    _t_mcp.c.id.label('conn_id'),
+                    _t_mcp.c.name,
+                    _t_mcp.c.tenant_id,
+                    _t_tenants.c.name.label('tenant_name'),
+                    _t_mcp.c.warehouse_id,
+                    _t_warehouses.c.name.label('warehouse_name'),
+                )
+                .select_from(
+                    _t_mcp
+                    .outerjoin(_t_tenants, _t_mcp.c.tenant_id == _t_tenants.c.id)
+                    .outerjoin(_t_warehouses, _t_mcp.c.warehouse_id == _t_warehouses.c.id)
+                )
+                .where(_t_mcp.c.id == conn_id)
+            )
+            with get_engine().connect() as conn:
+                row = conn.execute(stmt).first()
+            return dict(row._mapping) if row else {}
+        except Exception as e:
+            logger.debug(f"Failed to load MCP log context for '{conn_id}': {e}")
+            return {}
 
     async def stop_connection(self, conn_id: str) -> bool:
         """停止一个 MCP 连接。串行化同 conn_id 的状态变更。"""
@@ -256,20 +320,24 @@ class MCPProcessManager:
         return True
 
     async def restart_connection(self, conn_id: str, endpoint: str = None,
-                                  api_key: str = None) -> bool:
+                                  api_key: str = None,
+                                  log_context: Optional[dict] = None) -> bool:
         """重启一个 MCP 连接（重置计数器，保留原 debug_mode 设置）。一次性持锁
         覆盖 stop + start，避免别人插队改状态。"""
         async with self._get_lock(conn_id):
             old_debug = False
+            old_log_context = log_context
             if conn_id in self.connections:
                 proc = self.connections[conn_id]
                 endpoint = endpoint or proc.endpoint
                 api_key = api_key or proc.api_key
                 old_debug = proc.debug_mode
+                old_log_context = old_log_context or proc.log_context
                 await self._stop_connection_locked(conn_id)
 
             return await self._start_connection_locked(
-                conn_id, endpoint, api_key, debug_mode=old_debug
+                conn_id, endpoint, api_key, debug_mode=old_debug,
+                log_context=old_log_context,
             )
 
     async def toggle_debug(self, conn_id: str, endpoint: str, api_key: str, enable: bool) -> bool:
@@ -458,7 +526,9 @@ class MCPProcessManager:
         )
 
         success = await self.start_connection(
-            conn_id, proc.endpoint, proc.api_key
+            conn_id, proc.endpoint, proc.api_key,
+            debug_mode=proc.debug_mode,
+            log_context=proc.log_context,
         )
         if success:
             # 保留 restart_count
