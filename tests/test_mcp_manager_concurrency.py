@@ -12,6 +12,7 @@ We mock ``asyncio.create_subprocess_exec`` so we don't fork real
 processes during the test.
 """
 import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -103,3 +104,50 @@ async def test_concurrent_start_stop_same_conn_serialized(monkeypatch, tmp_path)
             await proc._log_task
         except (asyncio.CancelledError, Exception):
             pass
+
+
+def test_proc_scan_finds_mcp_pipe_without_pgrep(monkeypatch, tmp_path):
+    """Slim images may not have procps/pgrep; /proc fallback must still work."""
+    import mcp_manager
+
+    fake_proc = tmp_path / "proc"
+    fake_proc.mkdir()
+
+    self_pid = "100"
+    current = fake_proc / self_pid
+    current.mkdir()
+    (current / "cmdline").write_bytes(b"python\x00/app/backend/run_backend.py")
+
+    pipe_pid = "200"
+    pipe = fake_proc / pipe_pid
+    pipe.mkdir()
+    (pipe / "cmdline").write_bytes(
+        b"/app/.venv/bin/python\x00/app/mcp/mcp_pipe.py\x00/app/mcp/warehouse_mcp.py"
+    )
+
+    other_pid = "300"
+    other = fake_proc / other_pid
+    other.mkdir()
+    (other / "cmdline").write_bytes(b"python\x00not_the_pipe.py")
+
+    real_isdir = os.path.isdir
+    real_listdir = os.listdir
+    real_join = os.path.join
+
+    monkeypatch.setattr(
+        mcp_manager.os.path,
+        "isdir",
+        lambda path: True if path == "/proc" else real_isdir(path),
+    )
+    monkeypatch.setattr(
+        mcp_manager.os,
+        "listdir",
+        lambda path: real_listdir(fake_proc) if path == "/proc" else real_listdir(path),
+    )
+    monkeypatch.setattr(
+        mcp_manager.os.path,
+        "join",
+        lambda path, *parts: real_join(fake_proc, *parts) if path == "/proc" else real_join(path, *parts),
+    )
+
+    assert mcp_manager.MCPProcessManager._scan_mcp_pipe_pids_from_proc(int(self_pid)) == [pipe_pid]

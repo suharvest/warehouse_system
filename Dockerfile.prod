@@ -46,9 +46,10 @@ FROM python:3.12-slim
 
 # libffi8: cffi/cryptography 运行时需要
 # ca-certificates: requests/websockets HTTPS 连接需要
+# procps: pgrep/ps，MCPProcessManager 启动时清理孤儿 mcp_pipe.py 需要
 # (libgcc/libstdc++ 由 Debian 基础镜像自带，ai-edge-litert 运行时依赖已满足)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libffi8 ca-certificates && \
+    apt-get install -y --no-install-recommends libffi8 ca-certificates procps && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 appuser && mkdir -p /data
