@@ -52,6 +52,33 @@ def test_classify_garbage():
     assert mcp_pipe._classify_json_rpc({"only": "stuff"}) == (None, None)
 
 
+def test_build_log_target_includes_connection_labels(monkeypatch, tmp_path):
+    target = tmp_path / "warehouse_mcp.py"
+    target.write_text("# fake")
+    labels = {
+        "MCP_LOG_CONN_ID": "conn-1",
+        "MCP_LOG_NAME": "天津\n连接",
+        "MCP_LOG_TENANT_ID": "2246124",
+        "MCP_LOG_TENANT_NAME": "租户-2246124",
+        "MCP_LOG_WAREHOUSE_ID": "1",
+        "MCP_LOG_WAREHOUSE_NAME": "默认仓库",
+    }
+    for key, value in labels.items():
+        monkeypatch.setenv(key, value)
+
+    log_target = mcp_pipe.build_log_target(str(target))
+
+    assert "conn_id=conn-1" in log_target
+    assert "name=天津 连接" in log_target
+    assert "tenant_id=2246124" in log_target
+    assert "tenant=租户-2246124" in log_target
+    assert "warehouse_id=1" in log_target
+    assert "warehouse=默认仓库" in log_target
+    assert "target=warehouse_mcp.py" in log_target
+    assert "\n" not in log_target
+    assert "token=" not in log_target
+
+
 # ---------------------------- ws-to-process --------------------------------
 
 class FakeWebSocket:
