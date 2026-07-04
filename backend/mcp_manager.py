@@ -61,17 +61,23 @@ class MCPProcessManager:
     def _kill_orphan_pipes():
         """SIGKILL any leftover mcp_pipe.py process groups not owned by this run."""
         import subprocess
+        my_pid = os.getpid()
         try:
             result = subprocess.run(
                 ['pgrep', '-f', 'mcp_pipe.py'],
                 capture_output=True, text=True, timeout=5,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            pid_tokens = result.stdout.split()
+        except FileNotFoundError:
+            pid_tokens = MCPProcessManager._scan_mcp_pipe_pids_from_proc(my_pid)
+            if pid_tokens is None:
+                logger.warning("Orphan mcp_pipe.py scan skipped: pgrep missing and /proc unavailable")
+                return
+        except subprocess.TimeoutExpired as e:
             logger.warning(f"Orphan mcp_pipe.py scan skipped: {e}")
             return
-        my_pid = os.getpid()
         killed = []
-        for token in result.stdout.split():
+        for token in pid_tokens:
             if not token.strip().isdigit():
                 continue
             pid = int(token)
@@ -85,6 +91,27 @@ class MCPProcessManager:
                 pass
         if killed:
             logger.warning(f"Killed orphan mcp_pipe.py PIDs from previous run: {killed}")
+
+    @staticmethod
+    def _scan_mcp_pipe_pids_from_proc(my_pid: int) -> list[str] | None:
+        """Fallback for slim images without procps/pgrep."""
+        proc_dir = "/proc"
+        if not os.path.isdir(proc_dir):
+            return None
+
+        pids: list[str] = []
+        for name in os.listdir(proc_dir):
+            if not name.isdigit() or int(name) == my_pid:
+                continue
+            cmdline_path = os.path.join(proc_dir, name, "cmdline")
+            try:
+                with open(cmdline_path, "rb") as fh:
+                    cmdline = fh.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+                continue
+            if "mcp_pipe.py" in cmdline:
+                pids.append(name)
+        return pids
 
     def _get_lock(self, conn_id: str) -> asyncio.Lock:
         """懒创建 per-connection 锁。"""

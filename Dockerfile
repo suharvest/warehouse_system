@@ -43,7 +43,8 @@ FROM python:3.12-alpine
 # libffi: cffi/cryptography 运行时需要
 # libgcc: bcrypt 等 C 扩展需要
 # ca-certificates: requests/websockets HTTPS 连接需要
-RUN apk add --no-cache libffi libgcc ca-certificates
+# procps: pgrep/ps，MCPProcessManager 启动时清理孤儿 mcp_pipe.py 需要
+RUN apk add --no-cache libffi libgcc ca-certificates procps
 
 RUN adduser -D -u 1000 appuser && mkdir -p /data
 WORKDIR /app
