@@ -25,6 +25,7 @@ import time
 import websockets
 import subprocess
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import signal
 import sys
@@ -45,10 +46,16 @@ logger = logging.getLogger('MCP_PIPE')
 _log_dir = os.environ.get('MCP_PIPE_LOG_DIR', '/app/logs')
 try:
     os.makedirs(_log_dir, exist_ok=True)
-    _fh = logging.FileHandler(os.path.join(_log_dir, 'mcp_pipe.log'))
+    _max_bytes = int(os.environ.get('MCP_PIPE_LOG_MAX_BYTES', str(10 * 1024 * 1024)))
+    _backup_count = int(os.environ.get('MCP_PIPE_LOG_BACKUP_COUNT', '5'))
+    _fh = RotatingFileHandler(
+        os.path.join(_log_dir, 'mcp_pipe.log'),
+        maxBytes=_max_bytes,
+        backupCount=_backup_count,
+    )
     _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(_fh)
-except OSError:
+except (OSError, ValueError):
     pass
 
 # Reconnection settings
