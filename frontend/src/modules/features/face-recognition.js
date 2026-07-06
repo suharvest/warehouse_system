@@ -269,13 +269,17 @@ function renderConfigTab() {
     return `
         <div class="table-container face-config-card">
             <div class="section-header">
-                <div class="section-title">${tt('faceConfig', '人脸识别配置')}</div>
+                <div class="section-title">${tt('faceConfigCardTitle', '识别设置')}</div>
                 <label class="face-enable-toggle">
-                    <input type="checkbox" id="face-config-enabled" ${c.enabled ? 'checked' : ''}>
+                    <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
                     <span>${tt('faceEnabled', '启用人脸识别')}</span>
                 </label>
             </div>
             <div class="face-config-body">
+                <div class="face-config-disabled-note" id="face-config-disabled-note" ${c.enabled ? 'hidden' : ''}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                    <span>${tt('faceDisabledNote', '当前未启用人脸识别，下方识别设置与所有操作规则均不生效')}</span>
+                </div>
                 <div class="face-config-grid">
                     <div class="form-group">
                         <label>${tt('faceMode', '识别模式')}</label>
@@ -324,7 +328,7 @@ function renderConfigTab() {
                     <tr>
                         <th>${tt('warehouse', t('warehouseName') || '仓库')}</th>
                         <th>${tt('faceRuleOperation', '操作类型')}</th>
-                        <th>${tt('faceRequireFace', '启用人脸')}</th>
+                        <th>${tt('faceRuleStatus', '状态')}</th>
                         <th>${tt('faceAllowedUsers', '允许用户')}</th>
                         <th>${tt('faceMinConfidenceOverride', '自定义阈值')}</th>
                         <th style="width:140px;">${t('actions') || '管理'}</th>
@@ -375,6 +379,13 @@ export function onFaceModeChange() {
     const tokenGroup = document.getElementById('face-config-token-group');
     if (endpointGroup) endpointGroup.style.display = isLocal ? 'none' : '';
     if (tokenGroup) tokenGroup.style.display = isLocal ? 'none' : '';
+}
+
+// 总开关关闭时,配置与规则均不生效 → 顶部提醒条随开关显隐(不置灰,仍可编辑配置)
+export function onFaceConfigEnabledChange() {
+    const box = document.getElementById('face-config-enabled');
+    const note = document.getElementById('face-config-disabled-note');
+    if (box && note) note.hidden = box.checked;
 }
 
 export async function saveFaceConfig() {
@@ -461,9 +472,11 @@ function openRuleModal(rule) {
                     <div class="form-group">
                         <label class="checkbox-label">
                             <input type="checkbox" id="face-rule-require" ${r.require_face ? 'checked' : ''}>
-                            <span>${tt('faceRequireFace', '启用人脸')}</span>
+                            <span>${tt('faceRuleEnabled', '启用此规则')}</span>
                         </label>
+                        <div class="form-hint">${tt('faceRuleEnabledHint', '停用后，此仓库 + 操作不做人脸校验（等同于删除这条规则）')}</div>
                     </div>
+                    <div id="face-rule-dependent" class="face-rule-dependent">
                     <div class="form-group">
                         <label>${tt('faceAllowedSubjects', '允许人员')}</label>
                         <div id="face-rule-subjects" class="face-enroll-wh-list">
@@ -480,6 +493,7 @@ function openRuleModal(rule) {
                         <label>${tt('faceMinConfidenceOverride', '自定义阈值')}</label>
                         <input type="number" id="face-rule-confidence" min="0" max="1" step="0.01" value="${r.min_confidence_override == null ? '' : r.min_confidence_override}" placeholder="${tt('faceLeaveBlankInherit', '留空则继承全局')}">
                     </div>
+                    </div>
                     <div class="form-error" id="face-rule-error" hidden></div>
                 </form>
             </div>
@@ -490,6 +504,14 @@ function openRuleModal(rule) {
         </div>
     `;
     modal.classList.add('show');
+    // 规则停用时,"允许人员/自定义阈值"无意义 → 置灰(与录入弹窗同款联动)
+    const requireBox = document.getElementById('face-rule-require');
+    const dependent = document.getElementById('face-rule-dependent');
+    if (requireBox && dependent) {
+        const sync = () => dependent.classList.toggle('is-disabled', !requireBox.checked);
+        requireBox.addEventListener('change', sync);
+        sync();
+    }
 }
 
 export function closeFaceRuleModal() {
