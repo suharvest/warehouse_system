@@ -470,7 +470,7 @@ function openRuleModal(rule) {
                         </select>
                     </div>
                     <div class="form-group">
-                        <label class="checkbox-label">
+                        <label class="face-enable-toggle">
                             <input type="checkbox" id="face-rule-require" ${r.require_face ? 'checked' : ''}>
                             <span>${tt('faceRuleEnabled', '启用此规则')}</span>
                         </label>
@@ -1132,7 +1132,7 @@ function openSubjectModal(subject) {
                         <input type="text" id="face-subject-note" value="${escapeHtml(s.note || '')}" maxlength="200">
                     </div>
                     <div class="form-group">
-                        <label class="checkbox-label">
+                        <label class="face-enable-toggle">
                             <input type="checkbox" id="face-subject-active" ${s.is_active !== false ? 'checked' : ''}>
                             <span>${tt('faceSubjectActive', '启用')}</span>
                         </label>
