@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import List, Optional
 import base64 as _face_base64  # retained for parity with the previous in-line imports
 import json as _face_json
+import os as _os
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -580,9 +581,14 @@ class FaceVerifyMcpPayload(BaseModel):
     image_b64: Optional[str] = None
     embedding_b64: Optional[str] = None
     embedding_model_tag: Optional[str] = None
-    # Session-mode (advisory) identity, resolved on-device and forwarded by the
-    # server as hidden params. Consulted only when the tenant's verify_mode is
-    # 'session'; ignored under 'interface' (which re-matches the embedding).
+    # Session-mode (advisory) identity. Design: the LLM calls the device tool
+    # ``self.conversation.speaker`` (the on-board face-match result) and forwards
+    # subject_id / name here as LLM-visible tool args — NOT server-injected. So a
+    # spoken self-introduction is a distinct thing from the device's verified
+    # speaker; the P1-2 probe (e2e_voice_mcp/test_face_speaker_injection.py)
+    # confirms the official LLM does not populate these from a mere spoken claim.
+    # Consulted only when verify_mode == 'session'; ignored under 'interface'
+    # (which re-matches the embedding, fail-closed).
     speaker_subject_id: Optional[int] = None
     speaker_name: Optional[str] = None
 
@@ -592,6 +598,19 @@ async def face_verify_mcp(
     payload: FaceVerifyMcpPayload,
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
 ):
+    # Observability (opt-in via FACE_VERIFY_MCP_TRACE=1): record the caller-supplied
+    # identity params as they arrive — the observation point for the P1-2 probe
+    # (e2e_voice_mcp/test_face_speaker_injection.py reads this from the backend log).
+    # Off by default to keep prod stdout quiet. Use print(flush) not a logger:
+    # alembic's startup fileConfig disables existing loggers
+    # (disable_existing_loggers=True), so a module logger would be silenced.
+    if _os.environ.get("FACE_VERIFY_MCP_TRACE"):
+        print(
+            f"[FACE-VERIFY-MCP] tenant={current_user.tenant_id} op={payload.operation} "
+            f"speaker_subject_id={payload.speaker_subject_id!r} speaker_name={payload.speaker_name!r} "
+            f"has_image={bool(payload.image_b64)} has_embedding={bool(payload.embedding_b64)}",
+            flush=True,
+        )
     # tenant_id must be concrete; global admin without tenant has no rules to evaluate
     if current_user.tenant_id is None:
         return {"status": "skipped", "failure_reason": "no_tenant_context",
