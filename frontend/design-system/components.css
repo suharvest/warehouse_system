@@ -1466,6 +1466,9 @@
 
 .face-enable-toggle input[type="checkbox"] {
   margin: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary, #8cc63f);
 }
 
 /* 规则弹窗：停用规则时,其依赖字段(允许人员/自定义阈值)整体置灰 */
@@ -1476,6 +1479,19 @@
 .face-rule-dependent.is-disabled {
   opacity: 0.45;
   pointer-events: none;
+}
+
+/* 操作规则表:压缩单元格横向内边距(默认 px-6=24px 过宽),把富余宽度让给操作列;
+   操作列(编辑/删除)保持同一行,不因列宽被挤成竖排 */
+#face-rules-table th,
+#face-rules-table td {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+#face-rules-table th:last-child,
+#face-rules-table td:last-child {
+  white-space: nowrap;
 }
 
 .face-config-body {

@@ -331,7 +331,7 @@ function renderConfigTab() {
                         <th>${tt('faceRuleStatus', '状态')}</th>
                         <th>${tt('faceAllowedUsers', '允许用户')}</th>
                         <th>${tt('faceMinConfidenceOverride', '自定义阈值')}</th>
-                        <th style="width:140px;">${t('actions') || '管理'}</th>
+                        <th style="width:160px;">${t('actions') || '管理'}</th>
                     </tr>
                 </thead>
                 <tbody id="face-rules-tbody">${renderRulesRows()}</tbody>
