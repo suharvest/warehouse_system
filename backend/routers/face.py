@@ -26,6 +26,7 @@ from deps import (
     get_db,
     load_or_404,
     require_permission,
+    resolve_warehouse_id,
 )
 from metadata import (
     face_auth_logs as _t_face_auth_logs,
@@ -596,6 +597,7 @@ async def face_verify_mcp(
         return {"status": "skipped", "failure_reason": "no_tenant_context",
                 "confidence": None, "matched_subject_id": None}
     from face.orchestrator import verify_mcp_face as _verify
+    warehouse_id = resolve_warehouse_id(current_user, payload.warehouse_id)
     emb_bytes: Optional[bytes] = None
     if payload.embedding_b64:
         try:
@@ -607,7 +609,7 @@ async def face_verify_mcp(
             conn,
             tenant_id=current_user.tenant_id,
             user_id=current_user.id,
-            warehouse_id=payload.warehouse_id,
+            warehouse_id=warehouse_id,
             operation=payload.operation,
             image_b64=payload.image_b64 or "",
             embedding_bytes=emb_bytes,
