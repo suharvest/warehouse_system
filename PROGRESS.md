@@ -5,6 +5,20 @@ Each entry: short title + date + context + takeaway.
 
 ---
 
+## 2026-07-06 — MCP 人脸校验必须继承 API Key 仓库作用域
+
+排查 session 级 MCP 人脸链路时发现：`/api/face/verify-mcp` 原本只把 `payload.warehouse_id` 传给 `verify_mcp_face`。但 warehouse MCP wrapper 默认不传 `warehouse_id`，库存写接口是在后续 provider 调用里才通过 API key 推导仓库；因此人脸 gate 先执行时会使用 `warehouse_id=None`，只命中租户默认规则，可能跳过仓库级 `require_face` / `allowed_subject_ids`。
+
+修复方式：在 `face_verify_mcp` 路由层调用 `resolve_warehouse_id(current_user, payload.warehouse_id)`，让 API key 绑定仓库也成为人脸规则上下文。新增 `tests/test_face_routes.py::TestFaceVerifyMcpWarehouseScope` 覆盖“API key 绑定仓库 + payload 不带 warehouse_id 时仍命中仓库级规则”。
+
+## 2026-07-04 — 根目录临时产物整理
+
+根目录散落了大量未跟踪的 Playwright 验证截图、页面快照 `*.yml`、`frontend/` 下的临时截图/脚本、`.playwright-cli` 缓存、`exec` 字节码文件和 `warehouse.db.bak.*` 备份。为避免误删，把这些高置信度临时产物移入 `.local-artifacts/root-cleanup-20260704/` 归档，而不是直接删除。
+
+新增 `.gitignore` 规则忽略 `.playwright-cli/`、`.local-artifacts/`、根目录/`frontend/` 的临时截图快照、`warehouse.db.bak.*` 和 `/exec`。保留 `AGENTS.md`、`.agents/`、`.claude/`、`.superpowers/`、本地配置和当前数据库，因为它们可能是协作环境或运行态需要的上下文。
+
+注意：本地 `progress-write` 命令不可用；并且当前 worktree 报告的分支是 `feat/face-verify-mode`，和 `AGENTS.md` 中写的 `wt/task-55--api-fuzzy-match-search-xiaozhi` 不一致，因此未执行任何分支操作。
+
 ## 2026-04-20 — 出库指定仓库/库位/批次 功能 & 前端部署踩坑
 
 ### 功能
