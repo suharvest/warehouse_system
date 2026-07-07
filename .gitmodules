@@ -1,0 +1,3 @@
+[submodule "e2e_voice_mcp/vendor/py-xiaozhi"]
+	path = e2e_voice_mcp/vendor/py-xiaozhi
+	url = https://github.com/huangjunsen0406/py-xiaozhi.git
