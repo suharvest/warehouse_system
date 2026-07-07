@@ -108,3 +108,51 @@ class TestFaceConfigModeValidation:
     def test_unknown_mode_rejected_400(self, admin_client):
         resp = self._put(admin_client, "bogus")
         assert resp.status_code == 400, resp.text
+
+
+class TestFaceVerifyMcpWarehouseScope:
+    """MCP API keys bind to one warehouse; face rules must use that scope too."""
+
+    def test_api_key_bound_warehouse_rule_applies_without_payload_warehouse(
+        self, admin_client, client, default_warehouse_id
+    ):
+        cfg = {
+            "enabled": True,
+            "mode": "lan",
+            "endpoint": "http://example.local/face",
+            "auth_token": "",
+            "embedding_model_tag": "fake-v1",
+            "min_confidence": 0.7,
+            "verify_mode": "session",
+        }
+        resp = admin_client.put("/api/face/config", json=cfg)
+        assert resp.status_code == 200, resp.text
+
+        sid_resp = admin_client.post("/api/face/subjects", json={"name": "Scoped Speaker"})
+        assert sid_resp.status_code == 200, sid_resp.text
+        sid = sid_resp.json()["id"]
+
+        rule_resp = admin_client.post("/api/face/rules", json={
+            "warehouse_id": default_warehouse_id,
+            "operation": "stock_out",
+            "require_face": True,
+            "allowed_subject_ids": [sid],
+        })
+        assert rule_resp.status_code == 200, rule_resp.text
+
+        key_resp = admin_client.post("/api/api-keys", json={
+            "name": "face-mcp-scope",
+            "role": "operate",
+            "warehouse_id": default_warehouse_id,
+        })
+        assert key_resp.status_code == 200, key_resp.text
+
+        verify = client.post(
+            "/api/face/verify-mcp",
+            headers={"X-API-Key": key_resp.json()["key"]},
+            json={"operation": "stock_out"},
+        )
+        assert verify.status_code == 200, verify.text
+        body = verify.json()
+        assert body["status"] == "deny", body
+        assert body["failure_reason"] == "speaker_unresolved", body
