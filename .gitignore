@@ -5,10 +5,14 @@ backend/.DS_Store
 backend/__pycache__/
 __pycache__/
 *.pyc
+.playwright-cli/
+.local-artifacts/
+.agents/
 
 # 数据库文件
 backend/warehouse.db
 warehouse.db
+warehouse.db.bak.*
 *.db-wal
 *.db-shm
 
@@ -43,6 +47,10 @@ logs/
 # Node.js / npm
 frontend/node_modules/
 frontend/dist/
+frontend/.playwright-cli/
+/frontend/*.png
+/frontend/*.yml
+/frontend/*.mjs
 CLAUDE.md
 
 # Worktrees
@@ -53,3 +61,8 @@ backend/Dockerfile.prod
 frontend/Dockerfile.prod
 frontend/stock-out-modal-*-mobile.png
 stock-out-modal-*-mobile.png
+
+# Local verification artifacts commonly created by playwright-cli
+/*.png
+/*.yml
+/exec
