@@ -1164,12 +1164,35 @@ def generate_mock_data():
     default_wh = cursor.fetchone()
     default_wh_id = default_wh['id'] if default_wh else 1
 
-    # 插入物料数据
-    for material in materials_data:
+    # 插入物料数据 + 初始批次
+    # 单一真相源：库存由 batches 聚合派生，materials.quantity 只是废弃的过渡
+    # 缓存列（与 import-excel 路径一致写 0）。每个 mock 物料建一条初始批次
+    # 承载库存，并配套一条带 batch_id 的入库记录——保证 mock 环境与真实
+    # 业务入口（stock-in / import-excel）产出的数据形态一致，不存在无批次物料。
+    seed_date = datetime.now() - timedelta(days=30)
+    seed_batch_prefix = seed_date.strftime('%Y%m%d')
+    seed_time_str = seed_date.replace(hour=10, minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
+    for seq, material in enumerate(materials_data, start=1):
+        name, sku, category, qty, unit, safe_stock, location = material
         cursor.execute('''
             INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (*material, default_wh_id))
+            VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+        ''', (name, sku, category, unit, safe_stock, location, default_wh_id))
+        material_id = cursor.lastrowid
+        cursor.execute('''
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity,
+                                 is_exhausted, warehouse_id, location, created_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+        ''', (f'{seed_batch_prefix}-{seq:03d}', material_id, qty, qty,
+              default_wh_id, location, seed_time_str))
+        batch_id = cursor.lastrowid
+        cursor.execute('''
+            INSERT INTO inventory_records (material_id, type, quantity, operator,
+                                           reason_category, reason_note, created_at,
+                                           batch_id, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, RecordType.IN.value, qty, '系统',
+              'purchase', '初始建账', seed_time_str, batch_id, default_wh_id))
 
     # 生成出入库记录（近7天）
     material_ids = [row[0] for row in cursor.execute('SELECT id FROM materials').fetchall()]
