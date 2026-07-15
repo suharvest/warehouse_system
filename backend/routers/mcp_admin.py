@@ -43,6 +43,7 @@ from metadata import (
     api_keys as _t_api_keys,
     mcp_agent_devices as _t_mcp_agent_devices,
     mcp_connections as _t_mcp_connections,
+    tenant_face_config as _t_tenant_face_config,
     tenants as _t_tenants,
     warehouses as _t_warehouses,
 )
@@ -1054,6 +1055,27 @@ async def push_faces_to_device(
             "embedding_b64": base64.b64encode(emb_bytes).decode(),
         })
     payload = {"model_tag": model_tag, "embedding_format": fmt, "faces": faces}
+
+    # 随人脸库一并下发设备侧识别配置（Web「配置与规则」是唯一事实源，改完
+    # 重新下发即生效）：
+    #   match_threshold  — 最低识别置信度（0-100），设备本地 Match 阈值
+    #   identify_mode    — 'local' 设备 NPU + 本地库；'lan' 现场抓拍 POST 到
+    #                      identify_endpoint 的 /recognize（face_rec_api 契约）
+    # 旧固件忽略未知字段，向后兼容。
+    with get_engine().connect() as sa_conn:
+        fc = sa_conn.execute(
+            select(
+                _t_tenant_face_config.c.mode,
+                _t_tenant_face_config.c.endpoint,
+                _t_tenant_face_config.c.auth_token,
+                _t_tenant_face_config.c.min_confidence,
+            ).where(_t_tenant_face_config.c.tenant_id == tid)
+        ).fetchone()
+    if fc is not None:
+        payload["match_threshold"] = int(round(float(fc.min_confidence or 0.65) * 100))
+        payload["identify_mode"] = fc.mode if fc.mode in ("local", "lan") else "local"
+        payload["identify_endpoint"] = (fc.endpoint or "").strip()
+        payload["identify_token"] = fc.auth_token or ""
 
     url = f"http://{ip}:{port}/api/face/batch-update"
     # trust_env=False：设备在 LAN 内，必须直连其 IP，绝不能走系统/环境代理
