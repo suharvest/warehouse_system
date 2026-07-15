@@ -53,7 +53,7 @@ class FaceConfigPayload(BaseModel):
     min_confidence: float = 0.65
     greeting_enabled: bool = False
     # 鉴权强度（与推理拓扑 mode 正交）：'interface'（默认，fail-closed 重比对）
-    # 或 'session'（信任设备本地匹配，advisory 放行）。
+    # 或 'session'（信任设备会话起点的本地匹配；说话人未识别时同样 deny）。
     verify_mode: str = "interface"
 
 class FaceRulePayload(BaseModel):

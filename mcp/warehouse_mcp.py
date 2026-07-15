@@ -277,8 +277,9 @@ def _enforce_face(
     and honour whatever the backend decides. The backend is the sole authority
     on ``verify_mode``:
 
-    * **session**: backend trusts the device-resolved speaker, records an
-      advisory log and returns ``pass`` (allow-list still enforced → ``deny``).
+    * **session**: backend trusts the device-resolved speaker identity but
+      still enforces it — an unresolved speaker (or one outside the rule's
+      allow-list) gets ``deny``; only a resolved, active subject passes.
     * **interface** (default): backend ignores the speaker params and re-matches
       the embedding, fail-closed.
 
