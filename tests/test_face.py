@@ -335,83 +335,126 @@ def test_verify_deny_endpoint_unreachable(conn, monkeypatch):
     assert decision.failure_reason == "endpoint_unreachable"
 
 
-# ── Session mode (session-level enforcement) ────────────────────────────────
-# session 模式信任设备会话起点的本地匹配、不重比对，但拦截并未豁免：
-# 说话人未解析（设备没认出人 / 传了停用或跨租户 ID）必须 deny——session 模式
-# 只是把校验点前移到设备侧，不是取消校验。配了 allowed_subject_ids 的规则
-# 在此基础上进一步限制"谁"能通过。
+# ── Session mode: backend-direct device pull (B 方案) ───────────────────────
+# session 模式不信任 LLM 转发的 speaker_* 参数（可被提示注入伪造），改由后端直连
+# 设备拉取身份。测试通过 mock ``device_pull.pull_current_speaker`` 模拟设备应答。
+# 一切"不是一个当场、可解析、被允许的身份"→ deny（fail-closed）。
 
-def _verify_session(conn, **kw):
+_SENTINEL_DEVICE = object()  # stands in for a resolved PullDevice
+
+
+def _verify_session(conn, *, device_identity="__none__", **kw):
+    """Run session-mode verify with a mocked device pull.
+
+    device_identity: dict returned by the device (valid/subject_id/name/...);
+    None → device returned nothing (HTTP error/timeout/busy); "__none__" → no
+    pull_device resolvable at all (device_unresolved).
+    """
+    import backend.face.device_pull as device_pull
     from backend.face import orchestrator
-    return asyncio.run(orchestrator.verify_mcp_face(
-        conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out", **kw
-    ))
+
+    async def _fake_pull(dev, *, fresh=1):
+        return None if device_identity == "__none__" else device_identity
+
+    pull_device = None if device_identity == "__none__" else _SENTINEL_DEVICE
+    orig = device_pull.pull_current_speaker
+    device_pull.pull_current_speaker = _fake_pull
+    try:
+        return asyncio.run(orchestrator.verify_mcp_face(
+            conn, tenant_id=1, user_id=101, warehouse_id=None,
+            operation="stock_out", pull_device=pull_device, **kw
+        ))
+    finally:
+        device_pull.pull_current_speaker = orig
 
 
-def test_session_allow_list_denies_unresolved_speaker(conn):
+def test_session_no_device_resolvable_denies(conn):
+    """无法为该 API Key 定位设备 → device_unresolved deny。"""
     _set_config(conn, enabled=True, verify_mode="session")
-    sid = _create_subject(conn, "Session Allowed")
-    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+    _set_rule(conn, require_face=True)
 
-    decision = _verify_session(conn)  # no speaker at all
+    decision = _verify_session(conn, device_identity="__none__")
     assert decision.status == "deny"
-    assert decision.failure_reason == "speaker_unresolved"
+    assert decision.failure_reason == "device_unresolved"
 
 
-def test_session_allow_list_denies_other_subject(conn):
+def test_session_device_no_identity_denies(conn):
+    """设备应答无效身份（没拍到人/陌生人/忙/超时）→ device_no_identity deny。"""
     _set_config(conn, enabled=True, verify_mode="session")
-    sid_allowed = _create_subject(conn, "Session Allowed")
-    sid_other = _create_subject(conn, "Session Other")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(conn, device_identity={"valid": False})
+    assert decision.status == "deny"
+    assert decision.failure_reason == "device_no_identity"
+
+
+def test_session_ignores_llm_forwarded_identity(conn):
+    """即便 LLM 传了合法 speaker_subject_id，session 也只认设备拉取结果。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "Real Person")
+    _set_rule(conn, require_face=True)
+
+    # LLM 伪造了 sid，但设备说没人 → 必须 deny（不被 LLM 参数骗过）。
+    decision = _verify_session(
+        conn, device_identity={"valid": False}, speaker_subject_id=sid,
+    )
+    assert decision.status == "deny"
+    assert decision.failure_reason == "device_no_identity"
+
+
+def test_session_device_subject_passes(conn):
+    """设备上报有效 subject_id → 解析放行，confidence 取设备 similarity。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "Session Speaker")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(
+        conn, device_identity={"valid": True, "subject_id": sid, "similarity": 0.83},
+    )
+    assert decision.status == "pass"
+    assert decision.failure_reason == "session_verified"
+    assert decision.matched_subject_id == sid
+    assert decision.confidence == 0.83
+
+
+def test_session_device_name_only_passes(conn):
+    """lan 模式设备只给 name(subject_id=0) → 按姓名解析放行。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "By Name")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(
+        conn, device_identity={"valid": True, "subject_id": 0, "name": "By Name"},
+    )
+    assert decision.status == "pass"
+    assert decision.matched_subject_id == sid
+
+
+def test_session_device_subject_not_in_allow_list_denies(conn):
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid_allowed = _create_subject(conn, "Allowed")
+    sid_other = _create_subject(conn, "Other")
     _set_rule(conn, require_face=True, allowed_subject_ids=[sid_allowed])
 
-    decision = _verify_session(conn, speaker_subject_id=sid_other)
+    decision = _verify_session(
+        conn, device_identity={"valid": True, "subject_id": sid_other, "similarity": 0.9},
+    )
     assert decision.status == "deny"
     assert decision.failure_reason == "not_in_allow_list"
     assert decision.matched_subject_id == sid_other
 
 
-def test_session_allow_list_passes_allowed_subject(conn):
+def test_session_device_inactive_subject_denies(conn):
+    """设备上报的 subject 已停用 → 解析失败(不回退姓名) → speaker_unresolved deny。"""
     _set_config(conn, enabled=True, verify_mode="session")
-    sid = _create_subject(conn, "Session Allowed")
-    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
-
-    decision = _verify_session(conn, speaker_subject_id=sid)
-    assert decision.status == "pass"
-    assert decision.matched_subject_id == sid
-
-
-def test_session_no_allow_list_denies_unresolved(conn):
-    """即使规则没配白名单，未识别的说话人也必须 deny（session 级拦截）。"""
-    _set_config(conn, enabled=True, verify_mode="session")
-    _set_rule(conn, require_face=True)
-
-    decision = _verify_session(conn)
-    assert decision.status == "deny"
-    assert decision.failure_reason == "speaker_unresolved"
-    assert decision.matched_subject_id is None
-
-
-def test_session_no_allow_list_passes_resolved_speaker(conn):
-    """无白名单时，解析成功的说话人放行（不重比对 embedding）。"""
-    _set_config(conn, enabled=True, verify_mode="session")
-    sid = _create_subject(conn, "Session Speaker")
-    _set_rule(conn, require_face=True)
-
-    decision = _verify_session(conn, speaker_subject_id=sid)
-    assert decision.status == "pass"
-    assert decision.failure_reason == "session_verified"
-    assert decision.matched_subject_id == sid
-
-
-def test_session_inactive_subject_id_not_resolved(conn):
-    """停用人员的 speaker_subject_id 不再解析成功（等同未识别）。"""
-    _set_config(conn, enabled=True, verify_mode="session")
-    sid = _create_subject(conn, "Session Inactive")
+    sid = _create_subject(conn, "Inactive")
     cur = conn.cursor()
     cur.execute("UPDATE face_subjects SET is_active = 0 WHERE id = ?", (sid,))
     conn.commit()
-    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+    _set_rule(conn, require_face=True)
 
-    decision = _verify_session(conn, speaker_subject_id=sid)
+    decision = _verify_session(
+        conn, device_identity={"valid": True, "subject_id": sid, "similarity": 0.9},
+    )
     assert decision.status == "deny"
     assert decision.failure_reason == "speaker_unresolved"

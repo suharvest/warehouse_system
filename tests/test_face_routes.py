@@ -154,5 +154,8 @@ class TestFaceVerifyMcpWarehouseScope:
         )
         assert verify.status_code == 200, verify.text
         body = verify.json()
+        # 规则被 API-key 绑定的仓库正确命中（require_face）→ deny。session 模式(B)下
+        # 该测试 key 没有绑定物理设备，故 fail-closed 原因是 device_unresolved；重点是
+        # 规则在无 payload warehouse_id 时仍生效并拒绝，而非具体原因。
         assert body["status"] == "deny", body
-        assert body["failure_reason"] == "speaker_unresolved", body
+        assert body["failure_reason"] == "device_unresolved", body

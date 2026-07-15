@@ -14,7 +14,7 @@ import base64 as _face_base64  # retained for parity with the previous in-line i
 import json as _face_json
 import os as _os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy import func as _sa_func
@@ -591,11 +591,15 @@ class FaceVerifyMcpPayload(BaseModel):
     # (which re-matches the embedding, fail-closed).
     speaker_subject_id: Optional[int] = None
     speaker_name: Optional[str] = None
+    # 多设备消歧（一个 MCP 连接挂多台设备时）。由 MCP 传输层透传的可信设备标识，
+    # 不接受 LLM 自填。单设备部署留空即可。session 模式（B）用它精确定位设备。
+    device_id: Optional[str] = None
 
 
 @router.post("/api/face/verify-mcp")
 async def face_verify_mcp(
     payload: FaceVerifyMcpPayload,
+    request: Request,
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
 ):
     # Observability (opt-in via FACE_VERIFY_MCP_TRACE=1): record the caller-supplied
@@ -616,6 +620,7 @@ async def face_verify_mcp(
         return {"status": "skipped", "failure_reason": "no_tenant_context",
                 "confidence": None, "matched_subject_id": None}
     from face.orchestrator import verify_mcp_face as _verify
+    from face.device_pull import resolve_pull_device
     warehouse_id = resolve_warehouse_id(current_user, payload.warehouse_id)
     emb_bytes: Optional[bytes] = None
     if payload.embedding_b64:
@@ -623,6 +628,12 @@ async def face_verify_mcp(
             emb_bytes = _face_base64.b64decode(payload.embedding_b64)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"无效的 embedding_b64: {e}")
+    # session 模式（B 方案）用请求头的明文 API Key 定位该连接绑定的设备，后端直连拉取
+    # 身份。interface 模式不需要（走 embedding 重比对），resolve 返回 None 也无妨。
+    pull_device = resolve_pull_device(
+        request.headers.get("X-API-Key"),
+        device_id=payload.device_id,
+    )
     with get_db() as conn:
         decision = await _verify(
             conn,
@@ -635,6 +646,7 @@ async def face_verify_mcp(
             embedding_model_tag=payload.embedding_model_tag,
             speaker_subject_id=payload.speaker_subject_id,
             speaker_name=payload.speaker_name,
+            pull_device=pull_device,
             request_id=payload.request_id,
         )
     return {
