@@ -128,10 +128,13 @@ def _resolve_speaker_subject(
 ) -> Optional[int]:
     """Resolve the session-mode speaker to a tenant-scoped face_subjects.id.
 
-    ``speaker_subject_id`` (exact, no ambiguity) wins; falls back to a
-    case-sensitive name lookup. Both paths require the subject to be active —
-    a deactivated subject must not authenticate via a stale device entry.
-    Returns None when neither resolves (e.g. device had no valid match).
+    Precedence is strict, not a fallback chain: when ``speaker_subject_id`` is
+    supplied it is the ONLY authority — if it fails to resolve (wrong tenant /
+    deactivated) we return None (→ deny), we do NOT fall back to a name lookup.
+    Falling back would let a device-reported id for tenant B's subject silently
+    match a same-named subject in the caller's tenant. Name lookup is used only
+    when no id was provided at all. Both paths require an active subject.
+    Returns None when nothing resolves (e.g. device had no valid match).
     """
     cur = conn.cursor()
     if speaker_subject_id is not None:
@@ -143,6 +146,8 @@ def _resolve_speaker_subject(
         row = cur.fetchone()
         if row:
             return int(row["id"])
+        # id given but unresolved → hard deny; never degrade to name matching.
+        return None
     if speaker_name:
         cur.execute(
             "SELECT id FROM face_subjects "
