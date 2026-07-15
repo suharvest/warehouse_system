@@ -309,7 +309,7 @@ function renderConfigTab() {
                 </div>
                 <div class="face-config-actions">
                     <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', '保存')}</button>
-                    <button class="btn cancel-btn" data-action="testFaceConnection">${tt('faceTestConnection', '测试连接')}</button>
+                    <button class="btn cancel-btn" id="face-config-test-btn" data-action="testFaceConnection" style="${currentMode === 'local' ? 'display:none;' : ''}">${tt('faceTestConnection', '测试连接')}</button>
                     <span id="face-config-test-result" class="form-hint"></span>
                 </div>
             </div>
@@ -369,16 +369,20 @@ function renderRulesRows() {
     }).join('');
 }
 
-// mode=local 进程内推理,不需要远端地址/Token → 隐藏这两个字段;
-// mode=lan 走外部 face_rec_api 端点 → 显示。
+// mode=local 进程内推理,不需要远端地址/Token → 隐藏这两个字段和「测试连接」
+// (测试连接只测远端 face_rec_api,本机模式下无意义);mode=lan 走外部端点 → 显示。
 export function onFaceModeChange() {
     const modeEl = document.getElementById('face-config-mode');
     if (!modeEl) return;
     const isLocal = modeEl.value === 'local';
     const endpointGroup = document.getElementById('face-config-endpoint-group');
     const tokenGroup = document.getElementById('face-config-token-group');
+    const testBtn = document.getElementById('face-config-test-btn');
+    const testResult = document.getElementById('face-config-test-result');
     if (endpointGroup) endpointGroup.style.display = isLocal ? 'none' : '';
     if (tokenGroup) tokenGroup.style.display = isLocal ? 'none' : '';
+    if (testBtn) testBtn.style.display = isLocal ? 'none' : '';
+    if (testResult && isLocal) testResult.textContent = '';
 }
 
 // 总开关关闭时,配置与规则均不生效 → 顶部提醒条随开关显隐(不置灰,仍可编辑配置)
