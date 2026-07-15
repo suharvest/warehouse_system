@@ -335,26 +335,25 @@ async def verify_mcp_face(
         )
         return decision
 
-    # ── Session mode (advisory) ─────────────────────────────────────────
+    # ── Session mode (session-level enforcement) ────────────────────────
     # Trust the device's on-board match (frozen on the conversation rising
-    # edge). We do NOT re-infer/re-match the embedding; the device identity
-    # is recorded for audit (decision=pass, advisory) and the call proceeds.
-    # Exception: a rule with an allow-list is a hard restriction even in
-    # session mode — an unresolved speaker must NOT pass it (otherwise
-    # "nobody recognized" would bypass the very rule meant to limit who can
-    # perform the operation).
+    # edge) instead of re-inferring/re-matching the embedding — but the
+    # session MUST carry a resolvable identity. An unresolved speaker
+    # (device recognized nobody / stale or cross-tenant id) is denied:
+    # session mode moves *where* the face check happens, it does not waive
+    # it. A rule allow-list additionally restricts *who* may pass.
     if cfg.verify_mode == "session":
         matched = _resolve_speaker_subject(
             conn, tenant_id=tenant_id,
             speaker_subject_id=speaker_subject_id, speaker_name=speaker_name,
         )
-        if rule.allowed_subject_ids and (
-            matched is None or matched not in rule.allowed_subject_ids
+        if matched is None or (
+            rule.allowed_subject_ids and matched not in rule.allowed_subject_ids
         ):
             decision = Decision(
                 status="deny",
                 failure_reason=(
-                    "not_in_allow_list" if matched is not None else "speaker_unresolved"
+                    "speaker_unresolved" if matched is None else "not_in_allow_list"
                 ),
                 matched_subject_id=matched,
             )
@@ -365,7 +364,7 @@ async def verify_mcp_face(
             )
             return decision
         decision = Decision(
-            status="pass", failure_reason="advisory_session",
+            status="pass", failure_reason="session_verified",
             matched_subject_id=matched,
         )
         _log_decision(

@@ -335,10 +335,11 @@ def test_verify_deny_endpoint_unreachable(conn, monkeypatch):
     assert decision.failure_reason == "endpoint_unreachable"
 
 
-# ── Session mode (advisory) allow-list enforcement ──────────────────────────
-# session 模式信任设备本地匹配、不重比对，但配了 allowed_subject_ids 的规则是
-# 硬性限制：说话人未解析（设备没认出人 / 传了停用或跨租户 ID）也必须 deny，
-# 否则"谁都不是"反而能通过专门限制操作人的规则。
+# ── Session mode (session-level enforcement) ────────────────────────────────
+# session 模式信任设备会话起点的本地匹配、不重比对，但拦截并未豁免：
+# 说话人未解析（设备没认出人 / 传了停用或跨租户 ID）必须 deny——session 模式
+# 只是把校验点前移到设备侧，不是取消校验。配了 allowed_subject_ids 的规则
+# 在此基础上进一步限制"谁"能通过。
 
 def _verify_session(conn, **kw):
     from backend.face import orchestrator
@@ -379,14 +380,27 @@ def test_session_allow_list_passes_allowed_subject(conn):
     assert decision.matched_subject_id == sid
 
 
-def test_session_no_allow_list_passes_unresolved(conn):
-    """无白名单的规则保持 advisory 语义：未识别也放行，仅记审计。"""
+def test_session_no_allow_list_denies_unresolved(conn):
+    """即使规则没配白名单，未识别的说话人也必须 deny（session 级拦截）。"""
     _set_config(conn, enabled=True, verify_mode="session")
     _set_rule(conn, require_face=True)
 
     decision = _verify_session(conn)
-    assert decision.status == "pass"
+    assert decision.status == "deny"
+    assert decision.failure_reason == "speaker_unresolved"
     assert decision.matched_subject_id is None
+
+
+def test_session_no_allow_list_passes_resolved_speaker(conn):
+    """无白名单时，解析成功的说话人放行（不重比对 embedding）。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    sid = _create_subject(conn, "Session Speaker")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(conn, speaker_subject_id=sid)
+    assert decision.status == "pass"
+    assert decision.failure_reason == "session_verified"
+    assert decision.matched_subject_id == sid
 
 
 def test_session_inactive_subject_id_not_resolved(conn):
