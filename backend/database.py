@@ -595,6 +595,15 @@ def init_database():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_agent_devices_connection ON mcp_agent_devices(connection_id)')
 
+    # 后端直拉设备身份（B 方案）鉴权 token，raw 路径兜底加列（幂等）。
+    try:
+        cursor.execute('SELECT pull_token FROM mcp_agent_devices LIMIT 1')
+    except Exception:
+        cursor.execute('ALTER TABLE mcp_agent_devices ADD COLUMN pull_token TEXT')
+
+    # verify-mcp 每次都按明文 api_key 反查连接来定位设备 → 建索引避免全表扫。
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_connections_api_key ON mcp_connections(api_key)')
+
     # ============================================
     # 人脸识别 + 权限校验（Phase 1，仅对 MCP tool 生效）
     # ============================================

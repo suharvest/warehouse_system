@@ -382,6 +382,10 @@ mcp_agent_devices = Table(
     Column("model_tag", String(64), nullable=True),
     # opt-in 人脸：0=不下发人脸库到该设备，1=下发。存 0/1（sqlite/MySQL 通用）。
     Column("face_enabled", Integer, nullable=False, server_default="0"),
+    # 后端直拉设备身份（B 方案）的鉴权 token，每设备独立、可轮换。随人脸库
+    # 一并下发到设备 NVS face.pull_token；后端拉取时置于 X-Face-Token。与远端识别
+    # 的 identify_token（仅 lan 模式有值）刻意分离，避免复用扩大泄露面。
+    Column("pull_token", String(64), nullable=True),
     Column("last_seen", String(32), nullable=True),
     Column("created_at", String(32)),
     Column("updated_at", String(32)),
