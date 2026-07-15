@@ -22,7 +22,7 @@ from typing import Optional
 import httpx
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from database import generate_api_key, hash_api_key
@@ -1083,14 +1083,24 @@ async def push_faces_to_device(
     # 否则设备端 current-speaker 的 fail-closed 会永远 401。下发到 NVS face.pull_token。
     pull_token = dev.get("pull_token")
     if not pull_token:
-        pull_token = _secrets.token_hex(16)
+        # 条件更新：仅当仍为空时写入，避免两个并发 push 各生成一个 token 互相覆盖、
+        # 导致设备 NVS 与 DB 永久不一致。写完无条件回读 DB 的权威值再下发。
+        candidate = _secrets.token_hex(16)
         with get_engine().begin() as sa_conn:
             sa_conn.execute(
                 update(_t_mcp_agent_devices)
-                .where(_t_mcp_agent_devices.c.id == dev["id"])
-                .values(pull_token=pull_token)
+                .where(and_(
+                    _t_mcp_agent_devices.c.id == dev["id"],
+                    or_(_t_mcp_agent_devices.c.pull_token.is_(None),
+                        _t_mcp_agent_devices.c.pull_token == ""),
+                ))
+                .values(pull_token=candidate)
             )
-    payload["pull_token"] = pull_token
+            pull_token = sa_conn.execute(
+                select(_t_mcp_agent_devices.c.pull_token)
+                .where(_t_mcp_agent_devices.c.id == dev["id"])
+            ).scalar()
+    payload["pull_token"] = pull_token or ""
 
     url = f"http://{ip}:{port}/api/face/batch-update"
     # trust_env=False：设备在 LAN 内，必须直连其 IP，绝不能走系统/环境代理

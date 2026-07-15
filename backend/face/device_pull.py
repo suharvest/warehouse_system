@@ -51,23 +51,34 @@ def _ip_is_safe(ip: str) -> bool:
 
 
 def resolve_pull_device(api_key_plain: Optional[str],
+                        tenant_id: Optional[int],
                         device_id: Optional[str] = None) -> Optional[PullDevice]:
     """由 verify-mcp 请求的明文 API Key 唯一定位该连接下的设备。
 
-    每个 MCP 连接创建时生成独立的明文 key 存于 ``mcp_connections.api_key``（1:1），
-    所以 connection_id 由 key 精确确定，不靠 tenant/warehouse 猜。返回 None（→ 上游
-    fail-closed deny）当：无 key / 连接不存在 / 无设备 / 设备缺 ip 或 pull_token /
-    ip 不安全 / 同连接多设备但未透传可信 device_id 消歧。
+    每个 MCP 连接创建时生成独立的明文 key 存于 ``mcp_connections.api_key``。但该列
+    仅 NOT NULL、索引非唯一，为防脏数据/跨租户串绑，这里**同时按 tenant_id 过滤**
+    （与认证得到的 current_user.tenant_id 一致），且**匹配到 >1 连接即视为异常 deny**。
+    返回 None（→ 上游 fail-closed deny）当：无 key/无 tenant / 连接不存在或多于一条 /
+    无设备 / 设备缺 ip 或 pull_token / ip 不安全 / 端口非法 / 同连接多设备但未透传
+    可信 device_id 消歧。
     """
-    if not api_key_plain:
+    if not api_key_plain or tenant_id is None:
         return None
     with get_engine().connect() as conn:
-        crow = conn.execute(
-            select(_t_conns.c.id).where(_t_conns.c.api_key == api_key_plain)
-        ).fetchone()
-        if crow is None:
+        crows = conn.execute(
+            select(_t_conns.c.id).where(and_(
+                _t_conns.c.api_key == api_key_plain,
+                _t_conns.c.tenant_id == tenant_id,
+            ))
+        ).fetchall()
+        if len(crows) != 1:
+            # 0 条 → key/tenant 不匹配；>1 条 → api_key 非唯一的脏数据，一律 fail-closed。
+            if len(crows) > 1:
+                logger.warning("resolve_pull_device: api_key matched %d connections "
+                               "for tenant %s — ambiguous, denying", len(crows), tenant_id)
             return None
-        preds = [_t_devices.c.connection_id == crow.id]
+        conn_id = crows[0].id
+        preds = [_t_devices.c.connection_id == conn_id]
         if device_id is not None:
             preds.append(_t_devices.c.device_id == device_id)
         drows = conn.execute(
@@ -85,7 +96,13 @@ def resolve_pull_device(api_key_plain: Optional[str],
     token = (d.pull_token or "").strip()
     if not ip or not token or not _ip_is_safe(ip):
         return None
-    return PullDevice(ip, int(d.port or DEVICE_HTTP_PORT_DEFAULT), token)
+    try:
+        port = int(d.port or DEVICE_HTTP_PORT_DEFAULT)
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= port <= 65535):
+        return None
+    return PullDevice(ip, port, token)
 
 
 async def pull_current_speaker(device: PullDevice, *, fresh: int = 1) -> Optional[dict]:
