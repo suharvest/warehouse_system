@@ -305,6 +305,7 @@ async def verify_mcp_face(
     embedding_model_tag: Optional[str] = None,
     speaker_subject_id: Optional[int] = None,
     speaker_name: Optional[str] = None,
+    pull_device: "Optional[object]" = None,
     request_id: Optional[str] = None,
 ) -> Decision:
     """Short-circuit verification ladder for an MCP tool call.
@@ -340,42 +341,59 @@ async def verify_mcp_face(
         )
         return decision
 
-    # ── Session mode (session-level enforcement) ────────────────────────
-    # Trust the device's on-board match (frozen on the conversation rising
-    # edge) instead of re-inferring/re-matching the embedding — but the
-    # session MUST carry a resolvable identity. An unresolved speaker
-    # (device recognized nobody / stale or cross-tenant id) is denied:
-    # session mode moves *where* the face check happens, it does not waive
-    # it. A rule allow-list additionally restricts *who* may pass.
+    # ── Session mode (backend-direct device pull, B 方案) ────────────────
+    # The identity is NOT taken from LLM-forwarded speaker_* params (those are
+    # LLM-visible → forgeable by prompt injection). Instead the backend pulls it
+    # straight from the physical device over the LAN (fresh capture each op), so
+    # the trust root is "the device's HTTP response", not "the model's word".
+    # speaker_subject_id / speaker_name are ignored here on purpose.
+    # Anything short of a live, resolvable, allowed identity → deny (fail-closed).
     if cfg.verify_mode == "session":
-        matched = _resolve_speaker_subject(
-            conn, tenant_id=tenant_id,
-            speaker_subject_id=speaker_subject_id, speaker_name=speaker_name,
-        )
-        if matched is None or (
-            rule.allowed_subject_ids and matched not in rule.allowed_subject_ids
-        ):
-            decision = Decision(
-                status="deny",
-                failure_reason=(
-                    "speaker_unresolved" if matched is None else "not_in_allow_list"
-                ),
-                matched_subject_id=matched,
-            )
+        def _session_deny(reason: str, matched=None) -> Decision:
+            d = Decision(status="deny", failure_reason=reason, matched_subject_id=matched)
             _log_decision(
                 conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
                 tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-                confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+                confidence=None, decision=d.status, failure_reason=d.failure_reason,
             )
-            return decision
+            return d
+
+        if pull_device is None:
+            # No device resolvable for this API key → cannot verify → deny.
+            return _session_deny("device_unresolved")
+
+        from . import device_pull
+        ident = await device_pull.pull_current_speaker(pull_device, fresh=1)
+        if not ident or not ident.get("valid"):
+            # HTTP error / timeout / busy / no face / stranger → deny.
+            return _session_deny("device_no_identity")
+
+        # Resolve the device-reported identity to a tenant-scoped subject. Prefer
+        # subject_id (local mode); fall back to name only when the device gave no
+        # id (lan mode is name-keyed, subject_id=0). Same strict rule as elsewhere:
+        # a provided id that fails to resolve does NOT degrade to name matching.
+        dev_sid = ident.get("subject_id") or None
+        matched = _resolve_speaker_subject(
+            conn, tenant_id=tenant_id,
+            speaker_subject_id=dev_sid,
+            speaker_name=(ident.get("name") if not dev_sid else None),
+        )
+        if matched is None:
+            return _session_deny("speaker_unresolved")
+        if rule.allowed_subject_ids and matched not in rule.allowed_subject_ids:
+            return _session_deny("not_in_allow_list", matched)
+
+        confidence = ident.get("similarity")
         decision = Decision(
             status="pass", failure_reason="session_verified",
             matched_subject_id=matched,
+            confidence=confidence if isinstance(confidence, (int, float)) else None,
         )
         _log_decision(
             conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-            confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+            confidence=decision.confidence, decision=decision.status,
+            failure_reason=decision.failure_reason,
         )
         return decision
 

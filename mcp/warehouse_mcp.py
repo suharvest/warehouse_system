@@ -241,17 +241,16 @@ def _face_guard(
         body["embedding_b64"] = embedding_b64
     if embedding_model_tag:
         body["embedding_model_tag"] = embedding_model_tag
-    # Forward the LLM/server-supplied speaker identity too. The backend is the
-    # single authority: it consults these ONLY when the tenant's verify_mode is
-    # 'session', and ignores them under 'interface' (which re-matches embedding).
-    # We never decide the mode here, so a spoofed speaker_id cannot bypass the
-    # interface-mode hard check.
-    if speaker_subject_id is not None:
-        body["speaker_subject_id"] = speaker_subject_id
-    if speaker_name:
-        body["speaker_name"] = speaker_name
+    # NOTE: speaker_subject_id / speaker_name are intentionally NOT forwarded.
+    # Under B (session mode = backend-direct device pull) the backend derives the
+    # identity itself from the physical device and IGNORES any LLM-forwarded
+    # identity; interface mode re-matches the embedding. Forwarding LLM-supplied
+    # identity would only re-open the prompt-injection surface we closed. The two
+    # params remain in the tool signatures as deprecated no-ops for wire compat.
     try:
-        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
+        # 8s：session 模式(B)后端会同步直连设备拉取身份，fresh=1 现场拍 ~6s，
+        # 必须给足预算，否则慢路径被过早判 transport_error 而 fail-closed 误杀。
+        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=8)
         if resp.status_code >= 400:
             logger.warning("face verify returned %s: %s", resp.status_code, resp.text[:200])
             return {"status": "deny", "failure_reason": f"http_{resp.status_code}"}
@@ -298,19 +297,22 @@ def _enforce_face(
     )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
-        # speaker_unresolved 多半是 LLM 漏调 self.conversation.speaker（docstring
-        # 有要求但官方 LLM 执行不稳定）。把补救步骤写进错误消息，引导它自愈重试，
-        # 而不是直接放弃。
-        if reason == "speaker_unresolved" and speaker_subject_id is None and not speaker_name:
+        # 后端(B)直连设备取身份，LLM 无需也不应自己调 speaker/填参数。设备没认到人时
+        # 引导用户面向摄像头重试即可（而非让 LLM 补调工具）。
+        if reason in ("device_no_identity", "speaker_unresolved"):
             return {
                 "success": False,
                 "error": f"face_auth_denied:{reason}",
                 "message": (
-                    "缺少说话人身份，无法通过人脸校验。请立即调用 self.conversation.speaker "
-                    "获取当前说话人，把返回的 subject_id / name 填入 speaker_subject_id / "
-                    "speaker_name 参数后重试本操作一次；若设备未识别到人（valid=false），"
-                    "请提示用户面向摄像头后再试。"
+                    "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
+                    "若仍失败，请联系管理员确认人脸是否已录入。"
                 ),
+            }
+        if reason == "device_unresolved":
+            return {
+                "success": False,
+                "error": f"face_auth_denied:{reason}",
+                "message": "无法连接到人脸识别设备，出入库已阻止。请联系管理员检查设备在线状态。",
             }
         return {
             "success": False,

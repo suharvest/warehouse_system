@@ -14,6 +14,7 @@ Follow bare-module import style (no ``from backend.X``).
 import base64
 import ipaddress
 import os
+import secrets as _secrets
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -1076,6 +1077,20 @@ async def push_faces_to_device(
         payload["identify_mode"] = fc.mode if fc.mode in ("local", "lan") else "local"
         payload["identify_endpoint"] = (fc.endpoint or "").strip()
         payload["identify_token"] = fc.auth_token or ""
+
+    # pull_token（B 方案后端直拉鉴权）：每设备独立，首次下发时生成并持久化，之后复用。
+    # 与 identify_token 分离（后者仅 lan 模式有值），保证本机模式设备也有非空 token，
+    # 否则设备端 current-speaker 的 fail-closed 会永远 401。下发到 NVS face.pull_token。
+    pull_token = dev.get("pull_token")
+    if not pull_token:
+        pull_token = _secrets.token_hex(16)
+        with get_engine().begin() as sa_conn:
+            sa_conn.execute(
+                update(_t_mcp_agent_devices)
+                .where(_t_mcp_agent_devices.c.id == dev["id"])
+                .values(pull_token=pull_token)
+            )
+    payload["pull_token"] = pull_token
 
     url = f"http://{ip}:{port}/api/face/batch-update"
     # trust_env=False：设备在 LAN 内，必须直连其 IP，绝不能走系统/环境代理
