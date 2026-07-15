@@ -632,6 +632,7 @@ async def face_verify_mcp(
     # 身份。interface 模式不需要（走 embedding 重比对），resolve 返回 None 也无妨。
     pull_device = resolve_pull_device(
         request.headers.get("X-API-Key"),
+        current_user.tenant_id,
         device_id=payload.device_id,
     )
     with get_db() as conn:

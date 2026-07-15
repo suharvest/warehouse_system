@@ -430,6 +430,20 @@ def test_session_device_name_only_passes(conn):
     assert decision.matched_subject_id == sid
 
 
+def test_session_device_name_ambiguous_denies(conn):
+    """lan 设备只回 name，但同租户有两个同名 active subject → 无法确定 → deny。"""
+    _set_config(conn, enabled=True, verify_mode="session")
+    _create_subject(conn, "Dupe Name")
+    _create_subject(conn, "Dupe Name")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(
+        conn, device_identity={"valid": True, "subject_id": 0, "name": "Dupe Name"},
+    )
+    assert decision.status == "deny"
+    assert decision.failure_reason == "speaker_unresolved"
+
+
 def test_session_device_subject_not_in_allow_list_denies(conn):
     _set_config(conn, enabled=True, verify_mode="session")
     sid_allowed = _create_subject(conn, "Allowed")

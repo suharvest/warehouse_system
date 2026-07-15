@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime
 from typing import List, Optional
 
@@ -152,12 +153,14 @@ def _resolve_speaker_subject(
         cur.execute(
             "SELECT id FROM face_subjects "
             "WHERE tenant_id = ? AND name = ? AND is_active = 1 "
-            "ORDER BY id ASC LIMIT 1",
+            "ORDER BY id ASC LIMIT 2",
             (tenant_id, speaker_name),
         )
-        row = cur.fetchone()
-        if row:
-            return int(row["id"])
+        rows = cur.fetchall()
+        # 同租户无姓名唯一约束：查到多条同名 → 无法确定是谁 → deny（绝不任取第一条，
+        # 否则设备只回 name 时可能把甲授权成同名的乙）。恰好一条才放行。
+        if len(rows) == 1:
+            return int(rows[0]["id"])
     return None
 
 
@@ -364,7 +367,8 @@ async def verify_mcp_face(
 
         from . import device_pull
         ident = await device_pull.pull_current_speaker(pull_device, fresh=1)
-        if not ident or not ident.get("valid"):
+        # 严格判定：valid 必须是布尔 True（truthy 字符串/数字不算），否则一律 deny。
+        if not isinstance(ident, dict) or ident.get("valid") is not True:
             # HTTP error / timeout / busy / no face / stranger → deny.
             return _session_deny("device_no_identity")
 
@@ -383,11 +387,18 @@ async def verify_mcp_face(
         if rule.allowed_subject_ids and matched not in rule.allowed_subject_ids:
             return _session_deny("not_in_allow_list", matched)
 
-        confidence = ident.get("similarity")
+        raw_conf = ident.get("similarity")
+        confidence = (
+            float(raw_conf)
+            if isinstance(raw_conf, (int, float))
+            and not isinstance(raw_conf, bool)
+            and math.isfinite(raw_conf)
+            else None
+        )
         decision = Decision(
             status="pass", failure_reason="session_verified",
             matched_subject_id=matched,
-            confidence=confidence if isinstance(confidence, (int, float)) else None,
+            confidence=confidence,
         )
         _log_decision(
             conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
