@@ -298,6 +298,20 @@ def _enforce_face(
     )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
+        # speaker_unresolved 多半是 LLM 漏调 self.conversation.speaker（docstring
+        # 有要求但官方 LLM 执行不稳定）。把补救步骤写进错误消息，引导它自愈重试，
+        # 而不是直接放弃。
+        if reason == "speaker_unresolved" and speaker_subject_id is None and not speaker_name:
+            return {
+                "success": False,
+                "error": f"face_auth_denied:{reason}",
+                "message": (
+                    "缺少说话人身份，无法通过人脸校验。请立即调用 self.conversation.speaker "
+                    "获取当前说话人，把返回的 subject_id / name 填入 speaker_subject_id / "
+                    "speaker_name 参数后重试本操作一次；若设备未识别到人（valid=false），"
+                    "请提示用户面向摄像头后再试。"
+                ),
+            }
         return {
             "success": False,
             "error": f"face_auth_denied:{reason}",
