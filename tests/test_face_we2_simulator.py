@@ -107,7 +107,7 @@ def test_simulator_health_endpoint(client_we2_on):
     body = resp.json()
     assert body["status"] == "healthy"
     assert body["backend"] == "we2-simulator"
-    assert body["model_tag"] == "we2-mfn128-v1"
+    assert body["model_tag"] == "we2-mfnr6-128-v1"
     assert body["capabilities"] == ["detect", "embed"]
     assert body["embedding_dim"] == 128
     assert body["embedding_dtype"] == "float32"
@@ -124,7 +124,7 @@ def test_simulator_returns_face_rec_api_shape(client_we2_on):
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    assert body["model_tag"] == "we2-mfn128-v1"
+    assert body["model_tag"] == "we2-mfnr6-128-v1"
     assert body["backend"] == "we2-simulator"
     assert "faces" in body and "face_count" in body
     assert body["face_count"] == len(body["faces"])
@@ -231,7 +231,7 @@ def test_simulator_handles_no_face_gracefully(client_we2_on):
     body = resp.json()
     assert body["face_count"] == 0
     assert body["faces"] == []
-    assert body["model_tag"] == "we2-mfn128-v1"
+    assert body["model_tag"] == "we2-mfnr6-128-v1"
 
 
 # ---------------------------------------------------------------------------

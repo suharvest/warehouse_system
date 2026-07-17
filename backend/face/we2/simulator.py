@@ -33,10 +33,10 @@ from typing import Any, List, Optional
 import numpy as np
 from PIL import Image
 
-# wire tag 保持 v1 —— 设备 ESP32 固件的 DEVICE_FACE_MODEL_TAG 仍是 "we2-mfn128-v1"，
-# batch-update 门按此校验。实际权重已换成 distill_v2_relu6（见 MFN_MODEL_PATH），
-# 服务端与设备同模型，tag 名是历史遗留（bump 需重编设备固件，另行处理）。
-MODEL_TAG = "we2-mfn128-v1"
+# distill_v2_relu6 128D 的 wire tag。与设备固件 DEVICE_FACE_MODEL_TAG、后端
+# DEVICE_FACE_MODEL_TAG、tenant_face_config.embedding_model_tag、face_enrollments
+# .model_tag 必须一致（batch-update 门 + build_face_library 过滤都按它）。
+MODEL_TAG = "we2-mfnr6-128-v1"
 
 # ---------------------------------------------------------------------------
 # Constants — mirror common_config.h + face_alignment.h on the device
