@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from datetime import datetime
 from typing import List, Optional
 
@@ -18,6 +19,14 @@ from .matcher import topk_match
 from .models import Decision, FaceConfig, FaceRule
 
 logger = logging.getLogger("warehouse.face")
+
+# 「仅首次验证（之后免验）」= verify_mode 'session' 的按对话缓存。设备每轮对话把
+# conv_seq 递增（CaptureCurrentSpeaker）；同一对话内首笔操作走 fresh=1 现场验证
+# （含屏幕预览），之后同 conv_seq 的操作直接返回缓存（免验、不再拍照/预览）。
+# 键：设备 ip:port（一连接一设备）。进程内内存，重启即失效（首笔重验，安全）。
+# TTL 上限兜底：即使一直不换对话，超过 N 秒也强制重验，防长会话无限免验。
+_verify_once_cache: dict = {}
+_VERIFY_ONCE_TTL_S = 600  # 10 分钟安全上限
 
 
 # ── data access helpers ──
@@ -366,6 +375,43 @@ async def verify_mcp_face(
             return _session_deny("device_unresolved")
 
         from . import device_pull
+        dev_key = f"{pull_device.ip}:{pull_device.port}"
+
+        def _finish_pass(matched, confidence, reason):
+            decision = Decision(
+                status="pass", failure_reason=reason,
+                matched_subject_id=matched, confidence=confidence,
+            )
+            _log_decision(
+                conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
+                tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+                confidence=confidence, decision=decision.status,
+                failure_reason=decision.failure_reason,
+            )
+            return decision
+
+        # ── 仅首次（verify-once-per-conversation）缓存命中检查 ──────────────
+        # 同一对话内首笔操作走下面的 fresh=1 现场验证（含屏幕预览）；之后同 conv_seq
+        # 的操作直接读缓存放行（免验、不再拍照）。用 fresh=0（零硬件动作）廉价读当前
+        # conv_seq 判断是否还是那轮对话。
+        cached = _verify_once_cache.get(dev_key)
+        if cached is not None and (time.time() - cached["ts"]) <= _VERIFY_ONCE_TTL_S:
+            ident0 = await device_pull.pull_current_speaker(pull_device, fresh=0)
+            cur_seq = ident0.get("conv_seq") if isinstance(ident0, dict) else None
+            if isinstance(cur_seq, int) and cur_seq == cached["conv_seq"]:
+                # 同一对话，已验过 → 仅复查该 subject 仍活跃 + 仍在白名单（规则可能变），
+                # 不再现场拍照。停用/移出白名单则作废缓存、走下面重验。
+                matched = _resolve_speaker_subject(
+                    conn, tenant_id=tenant_id,
+                    speaker_subject_id=cached["subject_id"], speaker_name=None,
+                )
+                if matched is not None and (
+                    not rule.allowed_subject_ids or matched in rule.allowed_subject_ids
+                ):
+                    return _finish_pass(matched, None, "session_cached")
+                _verify_once_cache.pop(dev_key, None)
+
+        # ── 现场验证（首笔 / 缓存未命中 / 缓存失效）：fresh=1 现拍 + 预览 ──────
         ident = await device_pull.pull_current_speaker(pull_device, fresh=1)
         # 严格判定：valid 必须是布尔 True（truthy 字符串/数字不算），否则一律 deny。
         if not isinstance(ident, dict) or ident.get("valid") is not True:
@@ -395,18 +441,13 @@ async def verify_mcp_face(
             and math.isfinite(raw_conf)
             else None
         )
-        decision = Decision(
-            status="pass", failure_reason="session_verified",
-            matched_subject_id=matched,
-            confidence=confidence,
-        )
-        _log_decision(
-            conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
-            tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-            confidence=decision.confidence, decision=decision.status,
-            failure_reason=decision.failure_reason,
-        )
-        return decision
+        # 缓存本轮对话的验证结果，供同 conv_seq 的后续操作免验。
+        conv_seq = ident.get("conv_seq")
+        if isinstance(conv_seq, int):
+            _verify_once_cache[dev_key] = {
+                "conv_seq": conv_seq, "subject_id": matched, "ts": time.time(),
+            }
+        return _finish_pass(matched, confidence, "session_verified")
 
     # ── Interface mode (default, fail-closed) ───────────────────────────
     # Obtain embedding: either supplied by device (WE2 path) or via /infer.
