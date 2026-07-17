@@ -472,3 +472,83 @@ def test_session_device_inactive_subject_denies(conn):
     )
     assert decision.status == "deny"
     assert decision.failure_reason == "speaker_unresolved"
+
+
+# ── endpoint_client /infer parsing: passive liveness (spoof) ─────────────
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeAsyncClient:
+    """Stub for httpx.AsyncClient returning a canned /infer payload."""
+
+    payload = None
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, *a, **k):
+        return _FakeResponse(type(self).payload)
+
+
+def _lan_cfg():
+    from backend.face.models import FaceConfig
+    return FaceConfig(
+        tenant_id=1, enabled=True, mode="lan",
+        endpoint="http://fake:8001", auth_token=None,
+        embedding_model_tag=None, min_confidence=0.65,
+    )
+
+
+def _run_infer(monkeypatch, payload):
+    from backend.face import endpoint_client
+    _FakeAsyncClient.payload = payload
+    monkeypatch.setattr(endpoint_client.httpx, "AsyncClient", _FakeAsyncClient)
+    return asyncio.run(endpoint_client.infer(_lan_cfg(), "aW1n"))
+
+
+def test_infer_spoof_face_raises_spoof(monkeypatch):
+    """face_rec_api reject 模式：假体脸 live=false + embedding=null → spoof 错误码。"""
+    from backend.face.endpoint_client import FaceEndpointError
+    with pytest.raises(FaceEndpointError, match="^spoof$"):
+        _run_infer(monkeypatch, {
+            "model_tag": "hailo:x", "face_count": 1,
+            "faces": [{"det_score": 0.9, "embedding": None,
+                       "live": False, "liveness_score": 0.01}],
+        })
+
+
+def test_infer_live_face_with_liveness_fields_ok(monkeypatch):
+    """live=true 带活体字段照常返回 embedding（向后兼容）。"""
+    import base64 as b64
+    emb = _emb_bytes([0.1] * 4)
+    result = _run_infer(monkeypatch, {
+        "model_tag": "hailo:x", "face_count": 1,
+        "faces": [{"det_score": 0.9, "embedding": b64.b64encode(emb).decode(),
+                   "live": True, "liveness_score": 0.99}],
+    })
+    assert result["embedding"] == emb
+
+
+def test_infer_no_liveness_fields_ok(monkeypatch):
+    """活体关闭 / 旧版 face_rec_api：无 live 字段完全不受影响。"""
+    import base64 as b64
+    emb = _emb_bytes([0.2] * 4)
+    result = _run_infer(monkeypatch, {
+        "model_tag": "hailo:x", "face_count": 1,
+        "faces": [{"det_score": 0.9, "embedding": b64.b64encode(emb).decode()}],
+    })
+    assert result["embedding"] == emb

@@ -4,8 +4,13 @@ The tenant-configured endpoint is expected to follow the unified
 ``face_rec_api`` contract (Hailo / Jetson / RKNN / WE2-PC-simulator):
 
   POST /infer   {image_b64}
-       -> {faces: [{embedding (b64 float32), det_score, bbox, ...}],
+       -> {faces: [{embedding (b64 float32), det_score, bbox,
+                    live?, liveness_score?, ...}],
            face_count, model_tag, backend, processing_time_ms}
+
+When the endpoint runs passive liveness in reject mode, a spoofed face
+comes back with ``live=false`` and ``embedding=null`` — surfaced here as
+``FaceEndpointError("spoof")`` so the audit log records the real reason.
   GET  /health  -> {status, model_tag, backend, capabilities, ...}
 
 Stateless: there is no /capture. Upstream (frontend / MCP host) is
@@ -139,6 +144,11 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
         raise FaceEndpointError("no_face_detected")
     # Pick highest-det-score face; fall back to first if score absent.
     best = max(faces, key=lambda f: float(f.get("det_score") or 0.0))
+    # face_rec_api passive liveness: a spoofed face (print / screen replay)
+    # comes back with live=false and no embedding. Surface it as its own
+    # reason code instead of the misleading "infer_no_embedding".
+    if best.get("live") is False:
+        raise FaceEndpointError("spoof")
     emb_b64 = best.get("embedding")
     if not emb_b64:
         raise FaceEndpointError("infer_no_embedding")
