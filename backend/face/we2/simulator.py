@@ -33,6 +33,9 @@ from typing import Any, List, Optional
 import numpy as np
 from PIL import Image
 
+# wire tag 保持 v1 —— 设备 ESP32 固件的 DEVICE_FACE_MODEL_TAG 仍是 "we2-mfn128-v1"，
+# batch-update 门按此校验。实际权重已换成 distill_v2_relu6（见 MFN_MODEL_PATH），
+# 服务端与设备同模型，tag 名是历史遗留（bump 需重编设备固件，另行处理）。
 MODEL_TAG = "we2-mfn128-v1"
 
 # ---------------------------------------------------------------------------
@@ -79,7 +82,11 @@ _THIS_DIR = Path(__file__).resolve().parent
 _MODELS_DIR = _THIS_DIR / "models"
 
 SCRFD_MODEL_PATH = _MODELS_DIR / "scrfd_500m_kps.int8.tflite"
-MFN_MODEL_PATH = _MODELS_DIR / "mfn128_distilled.int8.tflite"
+# distill_v2 ReLU6 128D —— 与设备 Himax 部署的 production 模型一致（旧
+# mfn128_distilled 判别弱、陌生人误通过，见 grove qat_distill_v2_relu6_128d/README）。
+# 输入量化与旧模型相同（drop-in）；输出 scale/zp 不同，但从 tensor 读取，自动处理。
+# 用 pre-Vela 的 int8 版本（_vela 版含 ethos-u 自定义算子，PC TFLite 跑不了）。
+MFN_MODEL_PATH = _MODELS_DIR / "mfn128_distill_v2_relu6.int8.tflite"
 
 
 # ---------------------------------------------------------------------------
