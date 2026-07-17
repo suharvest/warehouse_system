@@ -174,6 +174,7 @@ export async function switchFaceSubTab(subTab) {
             await loadConfigAndRules();
             await loadSubjectsAndWarehouses();
             content.innerHTML = renderSetupTab();
+            attachSetupAutoSave();
             if (selectedSubjectId) {
                 await loadEnrollmentsForSelected();
             }
@@ -266,11 +267,17 @@ function renderSetupTab() {
     ];
     const currentVerifyMode = (c.verify_mode === 'session') ? 'session' : 'interface';
     return `
-        <div class="table-container face-config-card face-push-module">
-            <div class="section-header">
+        <div class="table-container face-config-card face-block face-block-device">
+            <div class="section-header face-block-header">
                 <div class="face-module-heading">
-                    <div class="section-title">${tt('facePushModuleTitle', '下发到设备')}</div>
-                    <div class="face-module-hint">${tt('facePushModuleHint', '以下识别设置与人脸库需下发到设备后才在设备端生效')}</div>
+                    <div class="face-block-titlerow">
+                        <span class="section-title">${tt('faceBaseConfigTitle', '基础配置')}</span>
+                        <span class="face-scope-tag is-device">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
+                            ${tt('faceScopeDeviceTag', '改动需下发到设备后生效')}
+                        </span>
+                    </div>
+                    <div class="face-module-hint">${tt('faceBaseConfigHint', '人脸识别如何工作，以及有哪些人可以被识别')}</div>
                 </div>
                 <button class="btn confirm-btn face-push-btn" data-action="showFacePushModal" title="${tt('facePushHint', '把人脸库和识别配置（模式/阈值/端点）一并下发到指定设备')}">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:5px;"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
@@ -322,7 +329,11 @@ function renderSetupTab() {
                         <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
                     </div>
                     <div class="face-config-actions">
-                        <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', '保存')}</button>
+                        <span class="face-autosave-note">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"></path></svg>
+                            ${tt('faceAutoSaveNote', '修改后自动保存')}
+                        </span>
+                        <span id="face-config-saved-hint" class="face-saved-hint">${tt('faceSaved', '已保存')}</span>
                         <button class="btn cancel-btn" id="face-config-test-btn" data-action="testFaceConnection" style="${currentMode === 'local' ? 'display:none;' : ''}">${tt('faceTestConnection', '测试连接')}</button>
                         <span id="face-config-test-result" class="form-hint"></span>
                     </div>
@@ -356,11 +367,17 @@ function renderSetupTab() {
             </div>
         </div>
 
-        <div class="table-container mt-6">
-            <div class="section-header">
+        <div class="table-container mt-6 face-block face-block-server">
+            <div class="section-header face-block-header">
                 <div class="face-module-heading">
-                    <div class="section-title">${tt('faceRules', '操作规则')}</div>
-                    <div class="face-module-hint">${tt('faceRulesServerHint', '服务端（MCP Server）校验规则，保存后实时生效，无需下发到设备')}</div>
+                    <div class="face-block-titlerow">
+                        <span class="section-title">${tt('faceRules', '操作规则')}</span>
+                        <span class="face-scope-tag is-server">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+                            ${tt('faceScopeServerTag', '服务端规则 · 保存即时生效')}
+                        </span>
+                    </div>
+                    <div class="face-module-hint">${tt('faceRulesServerHint2', '哪些操作要刷脸、谁能操作，无需下发到设备')}</div>
                 </div>
                 <button class="action-btn add-btn" data-action="showAddFaceRuleModal">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -436,6 +453,8 @@ export function onFaceConfigEnabledChange() {
     if (box && note) note.hidden = box.checked;
 }
 
+// 识别设置改为失焦/变更自动保存：下拉与开关 change 触发、文本输入 blur 触发。
+// saveFaceConfig 保留原有 PUT 字段与行为，只把「保存」反馈从 toast 换成轻量内联提示。
 export async function saveFaceConfig() {
     const data = {
         enabled: document.getElementById('face-config-enabled').checked,
@@ -449,10 +468,48 @@ export async function saveFaceConfig() {
     try {
         await faceApi.updateConfig(data, effectiveTenantId());
         currentConfig = { ...currentConfig, ...data };
-        showToast(tt('faceConfigSaved', '配置已保存'));
+        showSavedHint();
     } catch (error) {
         showToast(getErrorMessage(error, 'faceConfigSaveFailed', '配置保存失败'), 'error');
     }
+}
+
+// 轻量「已保存」内联提示：淡入后 1.6s 自动淡出，不打断操作。
+function showSavedHint() {
+    const el = document.getElementById('face-config-saved-hint');
+    if (!el) return;
+    el.classList.add('is-visible');
+    clearTimeout(el._hintTimer);
+    el._hintTimer = setTimeout(() => el.classList.remove('is-visible'), 1600);
+}
+
+// 识别设置自动保存监听：在 renderSetupTab 注入 DOM 后调用一次。
+// 每次进入 setup 页都是全新节点，监听随节点重建，不会累积。
+function attachSetupAutoSave() {
+    // 下拉与开关：change 即保存
+    ['face-config-mode', 'face-config-verify-mode', 'face-config-enabled'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => { saveFaceConfig(); });
+    });
+    // 置信度：blur 时校验并 clamp 到 0.0-1.0，非法值不保存（还原上次有效值）
+    const conf = document.getElementById('face-config-min-confidence');
+    if (conf) {
+        conf.addEventListener('blur', () => {
+            let v = parseFloat(conf.value);
+            if (!Number.isFinite(v)) {
+                conf.value = Number(currentConfig.min_confidence ?? 0.7);
+                return;
+            }
+            v = Math.min(1, Math.max(0, Math.round(v * 100) / 100));
+            conf.value = v;
+            saveFaceConfig();
+        });
+    }
+    // 文本输入（远端地址 / Token）：blur 即保存
+    ['face-config-endpoint', 'face-config-token'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('blur', () => { saveFaceConfig(); });
+    });
 }
 
 export async function testFaceConnection() {
