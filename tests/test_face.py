@@ -340,7 +340,12 @@ def test_verify_deny_endpoint_unreachable(conn, monkeypatch):
 # 设备拉取身份。测试通过 mock ``device_pull.pull_current_speaker`` 模拟设备应答。
 # 一切"不是一个当场、可解析、被允许的身份"→ deny（fail-closed）。
 
-_SENTINEL_DEVICE = object()  # stands in for a resolved PullDevice
+class _FakeDevice:  # stand-in for a resolved PullDevice (needs ip/port for cache key)
+    ip = "10.0.0.9"
+    port = 80
+
+
+_SENTINEL_DEVICE = _FakeDevice()
 
 
 def _verify_session(conn, *, device_identity="__none__", **kw):
@@ -348,10 +353,13 @@ def _verify_session(conn, *, device_identity="__none__", **kw):
 
     device_identity: dict returned by the device (valid/subject_id/name/...);
     None → device returned nothing (HTTP error/timeout/busy); "__none__" → no
-    pull_device resolvable at all (device_unresolved).
+    pull_device resolvable at all (device_unresolved). Clears the 仅首次 cache
+    each call so cases are independent.
     """
     import backend.face.device_pull as device_pull
     from backend.face import orchestrator
+
+    orchestrator._verify_once_cache.clear()
 
     async def _fake_pull(dev, *, fresh=1):
         return None if device_identity == "__none__" else device_identity
@@ -456,6 +464,95 @@ def test_session_device_subject_not_in_allow_list_denies(conn):
     assert decision.status == "deny"
     assert decision.failure_reason == "not_in_allow_list"
     assert decision.matched_subject_id == sid_other
+
+
+def test_session_verify_once_per_conversation(conn):
+    """仅首次：同一 conv_seq 首笔 fresh=1 验证并缓存，之后同 conv_seq 免验(session_cached，
+    不再 fresh=1)；新 conv_seq 重新 fresh=1 验证。"""
+    import backend.face.device_pull as device_pull
+    from backend.face import orchestrator
+
+    orchestrator._verify_once_cache.clear()
+    sid = _create_subject(conn, "Conv Person")
+    _set_config(conn, enabled=True, verify_mode="session")
+    _set_rule(conn, require_face=True)
+
+    calls = {"fresh1": 0, "fresh0": 0}
+    state = {"conv_seq": 5}
+
+    async def _fake_pull(dev, *, fresh=1):
+        if fresh == 1:
+            calls["fresh1"] += 1
+            return {"valid": True, "subject_id": sid, "similarity": 0.7,
+                    "conv_seq": state["conv_seq"]}
+        calls["fresh0"] += 1  # cheap conv_seq read
+        return {"valid": True, "subject_id": sid, "conv_seq": state["conv_seq"]}
+
+    orig = device_pull.pull_current_speaker
+    device_pull.pull_current_speaker = _fake_pull
+
+    def _run():
+        return asyncio.run(orchestrator.verify_mcp_face(
+            conn, tenant_id=1, user_id=101, warehouse_id=None,
+            operation="stock_out", pull_device=_SENTINEL_DEVICE,
+        ))
+    try:
+        d1 = _run()  # 首笔：fresh=1 验证 + 缓存
+        assert d1.status == "pass" and d1.failure_reason == "session_verified"
+        assert calls == {"fresh1": 1, "fresh0": 0}
+
+        d2 = _run()  # 同 conv_seq：免验（只 fresh=0 读 seq）
+        assert d2.status == "pass" and d2.failure_reason == "session_cached"
+        assert d2.matched_subject_id == sid
+        assert calls == {"fresh1": 1, "fresh0": 1}  # 没有新增 fresh=1
+
+        state["conv_seq"] = 6  # 新对话
+        d3 = _run()  # conv_seq 变了：重新 fresh=1 验证
+        assert d3.status == "pass" and d3.failure_reason == "session_verified"
+        assert calls["fresh1"] == 2
+    finally:
+        device_pull.pull_current_speaker = orig
+        orchestrator._verify_once_cache.clear()
+
+
+def test_session_cached_denies_deactivated_subject(conn):
+    """缓存命中但该 subject 已停用 → 作废缓存、重验(此处设备也无有效身份)→ deny。"""
+    import backend.face.device_pull as device_pull
+    from backend.face import orchestrator
+
+    orchestrator._verify_once_cache.clear()
+    sid = _create_subject(conn, "Will Deactivate")
+    _set_config(conn, enabled=True, verify_mode="session")
+    _set_rule(conn, require_face=True)
+
+    fresh1_returns = [{"valid": True, "subject_id": sid, "similarity": 0.7, "conv_seq": 9}]
+
+    async def _fake_pull(dev, *, fresh=1):
+        if fresh == 1:
+            return fresh1_returns[0]
+        return {"valid": True, "subject_id": sid, "conv_seq": 9}  # same conv
+
+    orig = device_pull.pull_current_speaker
+    device_pull.pull_current_speaker = _fake_pull
+
+    def _run():
+        return asyncio.run(orchestrator.verify_mcp_face(
+            conn, tenant_id=1, user_id=101, warehouse_id=None,
+            operation="stock_out", pull_device=_SENTINEL_DEVICE,
+        ))
+    try:
+        assert _run().status == "pass"  # 首笔缓存
+        # 停用该人；同对话再来 → 缓存作废、重验；设备现在也给不出可解析身份
+        cur = conn.cursor()
+        cur.execute("UPDATE face_subjects SET is_active = 0 WHERE id = ?", (sid,))
+        conn.commit()
+        fresh1_returns[0] = {"valid": True, "subject_id": sid, "similarity": 0.7, "conv_seq": 9}
+        d = _run()
+        assert d.status == "deny"  # 停用 → speaker_unresolved
+        assert d.failure_reason == "speaker_unresolved"
+    finally:
+        device_pull.pull_current_speaker = orig
+        orchestrator._verify_once_cache.clear()
 
 
 def test_session_device_inactive_subject_denies(conn):
