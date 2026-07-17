@@ -14,10 +14,10 @@ const DEFAULT_CONFIG = {
     min_confidence: 0.7,
     verify_mode: 'interface'
 };
-const SUB_TABS = ['config', 'enroll', 'logs'];
+const SUB_TABS = ['setup', 'logs'];
 const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust'];
 
-let currentSubTab = 'config';
+let currentSubTab = 'setup';
 let currentConfig = { ...DEFAULT_CONFIG };
 let currentRules = [];
 let allWarehouses = [];
@@ -141,8 +141,7 @@ function renderTenantBar() {
 
 function renderShell() {
     const tabs = [
-        { key: 'config', label: tt('faceConfig', '配置与规则') },
-        { key: 'enroll', label: tt('faceEnrollments', '人脸录入') },
+        { key: 'setup', label: tt('faceSetup', '配置与录入') },
         { key: 'logs', label: tt('faceLogs', '审计日志') }
     ];
     return `
@@ -162,7 +161,7 @@ function renderShell() {
 }
 
 export async function switchFaceSubTab(subTab) {
-    if (!SUB_TABS.includes(subTab)) subTab = 'config';
+    if (!SUB_TABS.includes(subTab)) subTab = 'setup';
     currentSubTab = subTab;
     document.querySelectorAll('#face-sub-tabs .sub-tab').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.subTab === subTab);
@@ -171,13 +170,10 @@ export async function switchFaceSubTab(subTab) {
     if (!content) return;
     content.innerHTML = renderLoading();
     try {
-        if (subTab === 'config') {
+        if (subTab === 'setup') {
             await loadConfigAndRules();
             await loadSubjectsAndWarehouses();
-            content.innerHTML = renderConfigTab();
-        } else if (subTab === 'enroll') {
-            await loadSubjectsAndWarehouses();
-            content.innerHTML = renderEnrollTab();
+            content.innerHTML = renderSetupTab();
             if (selectedSubjectId) {
                 await loadEnrollmentsForSelected();
             }
@@ -252,8 +248,11 @@ async function refreshSubjectList() {
     }
 }
 
-// ============ 子页签 A: 配置 ============
-function renderConfigTab() {
+// ============ 子页签 A: 配置与录入（合并）============
+// 按「归属 + 是否下发到设备」重组：
+//   - 「下发到设备」模块：识别设置 + 人脸录入（两者都需下发到设备后生效，下发逻辑统一）
+//   - 「操作规则」卡片：MCP Server 侧校验规则，服务端实时生效，不下发
+function renderSetupTab() {
     const c = currentConfig;
     const modes = [
         { v: 'local', label: tt('mode_local', '本机') },
@@ -267,57 +266,102 @@ function renderConfigTab() {
     ];
     const currentVerifyMode = (c.verify_mode === 'session') ? 'session' : 'interface';
     return `
-        <div class="table-container face-config-card">
+        <div class="table-container face-config-card face-push-module">
             <div class="section-header">
-                <div class="section-title">${tt('faceConfigCardTitle', '识别设置')}</div>
-                <label class="face-enable-toggle">
-                    <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
-                    <span>${tt('faceEnabled', '启用人脸识别')}</span>
-                </label>
+                <div class="face-module-heading">
+                    <div class="section-title">${tt('facePushModuleTitle', '下发到设备')}</div>
+                    <div class="face-module-hint">${tt('facePushModuleHint', '以下识别设置与人脸库需下发到设备后才在设备端生效')}</div>
+                </div>
+                <button class="btn confirm-btn face-push-btn" data-action="showFacePushModal" title="${tt('facePushHint', '把人脸库和识别配置（模式/阈值/端点）一并下发到指定设备')}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:5px;"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
+                    ${tt('facePushToDevice', '下发到设备')}
+                </button>
             </div>
             <div class="face-config-body">
                 <div class="face-config-disabled-note" id="face-config-disabled-note" ${c.enabled ? 'hidden' : ''}>
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
                     <span>${tt('faceDisabledNote', '当前未启用人脸识别，下方识别设置与所有操作规则均不生效')}</span>
                 </div>
-                <div class="face-config-grid">
-                    <div class="form-group">
-                        <label>${tt('faceMode', '识别模式')}</label>
-                        <select id="face-config-mode" data-action-change="onFaceModeChange">
-                            ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
-                        </select>
+
+                <!-- 分组 A-1：识别设置 -->
+                <div class="face-subsection">
+                    <div class="face-subsection-head">
+                        <div class="face-subsection-title">${tt('faceConfigCardTitle', '识别设置')}</div>
+                        <label class="face-enable-toggle">
+                            <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
+                            <span>${tt('faceEnabled', '启用人脸识别')}</span>
+                        </label>
                     </div>
-                    <div class="form-group">
-                        <label>${tt('faceVerifyMode', '鉴权强度')}</label>
-                        <select id="face-config-verify-mode">
-                            ${verifyModes.map(m => `<option value="${m.v}" ${currentVerifyMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
-                        </select>
+                    <div class="face-settings-row">
+                        <div class="form-group">
+                            <label>${tt('faceMode', '识别模式')}</label>
+                            <select id="face-config-mode" data-action-change="onFaceModeChange">
+                                ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>${tt('faceVerifyMode', '鉴权强度')}</label>
+                            <select id="face-config-verify-mode">
+                                ${verifyModes.map(m => `<option value="${m.v}" ${currentVerifyMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span></label>
+                            <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span></label>
-                        <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
+                    <div class="face-config-grid" style="margin-top:12px;">
+                        <div class="form-group span-2" id="face-config-endpoint-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
+                            <label>${tt('faceEndpoint', '远端服务地址')}</label>
+                            <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
+                        </div>
+                        <div class="form-group span-2" id="face-config-token-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
+                            <label>${tt('faceAuthToken', '认证 Token')}</label>
+                            <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
+                        </div>
+                        <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
                     </div>
-                    <div class="form-group span-2" id="face-config-endpoint-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
-                        <label>${tt('faceEndpoint', '远端服务地址')}</label>
-                        <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
+                    <div class="face-config-actions">
+                        <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', '保存')}</button>
+                        <button class="btn cancel-btn" id="face-config-test-btn" data-action="testFaceConnection" style="${currentMode === 'local' ? 'display:none;' : ''}">${tt('faceTestConnection', '测试连接')}</button>
+                        <span id="face-config-test-result" class="form-hint"></span>
                     </div>
-                    <div class="form-group span-2" id="face-config-token-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
-                        <label>${tt('faceAuthToken', '认证 Token')}</label>
-                        <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
-                    </div>
-                    <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
                 </div>
-                <div class="face-config-actions">
-                    <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', '保存')}</button>
-                    <button class="btn cancel-btn" id="face-config-test-btn" data-action="testFaceConnection" style="${currentMode === 'local' ? 'display:none;' : ''}">${tt('faceTestConnection', '测试连接')}</button>
-                    <span id="face-config-test-result" class="form-hint"></span>
+
+                <!-- 分组 A-2：人脸录入 -->
+                <div class="face-subsection">
+                    <div class="face-subsection-head">
+                        <div class="face-subsection-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
+                        <div class="action-buttons">
+                            <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                                ${tt('faceSubjectAdd', '新增人员')}
+                            </button>
+                        </div>
+                    </div>
+                    <div class="face-enroll-grid face-enroll-grid-embed">
+                        <aside class="face-enroll-users">
+                            <div class="face-enroll-users-header">${tt('faceSubjectList', '人员列表')} <span class="face-enroll-users-count">${allSubjects.length}</span></div>
+                            <div id="face-enroll-subject-list" class="face-enroll-users-list">
+                                ${allSubjects.length === 0
+                                    ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
+                                    : allSubjects.map(renderSubjectItem).join('')}
+                            </div>
+                        </aside>
+                        <section id="face-enroll-detail" class="face-enroll-detail">
+                            ${selectedSubjectId ? renderEnrollDetail() : renderEnrollPlaceholder()}
+                        </section>
+                    </div>
                 </div>
             </div>
         </div>
 
         <div class="table-container mt-6">
             <div class="section-header">
-                <div class="section-title">${tt('faceRules', '操作规则')}</div>
+                <div class="face-module-heading">
+                    <div class="section-title">${tt('faceRules', '操作规则')}</div>
+                    <div class="face-module-hint">${tt('faceRulesServerHint', '服务端（MCP Server）校验规则，保存后实时生效，无需下发到设备')}</div>
+                </div>
                 <button class="action-btn add-btn" data-action="showAddFaceRuleModal">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     <span>${tt('faceAddRule', '新增规则')}</span>
@@ -573,40 +617,7 @@ export async function deleteFaceRule(el) {
     }
 }
 
-// ============ 子页签 B: 人员 + 录入 ============
-function renderEnrollTab() {
-    return `
-        <div class="table-container face-enroll-card">
-            <div class="section-header">
-                <div class="section-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
-                <div class="action-buttons">
-                    <button class="btn cancel-btn" data-action="showFacePushModal" title="${tt('facePushHint', '把整个人脸库下发到指定设备')}">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><path d="M12 19V5"></path><path d="M5 12l7-7 7 7"></path></svg>
-                        ${tt('facePushLibrary', '下发')}
-                    </button>
-                    <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                        ${tt('faceSubjectAdd', '新增人员')}
-                    </button>
-                </div>
-            </div>
-            <div class="face-enroll-grid">
-                <aside class="face-enroll-users">
-                    <div class="face-enroll-users-header">${tt('faceSubjectList', '人员列表')} <span class="face-enroll-users-count">${allSubjects.length}</span></div>
-                    <div id="face-enroll-subject-list" class="face-enroll-users-list">
-                        ${allSubjects.length === 0
-                            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
-                            : allSubjects.map(renderSubjectItem).join('')}
-                    </div>
-                </aside>
-                <section id="face-enroll-detail" class="face-enroll-detail">
-                    ${selectedSubjectId ? renderEnrollDetail() : renderEnrollPlaceholder()}
-                </section>
-            </div>
-        </div>
-    `;
-}
-
+// ============ 子页签 B: 人员 + 录入（渲染辅助，嵌入 renderSetupTab）============
 function renderSubjectItem(s) {
     const name = s.name || `#${s.id}`;
     const sub = s.employee_id ? `${tt('faceSubjectEmployeeId', '工号')}: ${s.employee_id}` : '';

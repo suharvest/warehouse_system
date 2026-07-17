@@ -1521,6 +1521,58 @@
   flex-shrink: 0;
 }
 
+/* 「下发到设备」模块：卡片头部左侧标题 + 说明，右侧下发按钮 */
+.face-module-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.face-module-hint {
+  font-size: 12px;
+  color: #999;
+  font-weight: normal;
+  line-height: 1.4;
+}
+
+/* 模块内分组（识别设置 / 人脸录入），用极浅分隔线区分从属块 */
+.face-subsection + .face-subsection {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px dashed #eaeaea;
+}
+
+.face-subsection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.face-subsection-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #444;
+}
+
+/* 识别设置三小项并排一行（识别模式 / 鉴权强度 / 最低置信度） */
+.face-settings-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px 20px;
+}
+
+.face-settings-row .form-group {
+  margin: 0;
+}
+
+/* 录入网格嵌入模块内，去掉自身外内边距 */
+.face-enroll-grid-embed {
+  padding: 0;
+}
+
 .face-config-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1558,6 +1610,12 @@
 
 @media (max-width: 768px) {
   .face-config-grid { grid-template-columns: 1fr; }
+  .face-settings-row { grid-template-columns: 1fr; }
+  .face-subsection-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
   .face-config-card .section-header {
     flex-direction: column;
     align-items: flex-start;
