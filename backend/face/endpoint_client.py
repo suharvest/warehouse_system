@@ -85,7 +85,7 @@ def _infer_local(image_b64: str) -> dict:
     emb_bytes = best.get("embedding_bytes")
     if not emb_bytes:
         raise FaceEndpointError("infer_no_embedding")
-    model_tag = result.get("model_tag") or "we2-mfn128-v1"
+    model_tag = result.get("model_tag") or "we2-mfnr6-128-v1"
     return {"embedding": emb_bytes, "model_tag": model_tag}
 
 
