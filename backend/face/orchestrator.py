@@ -11,6 +11,7 @@ from typing import List, Optional
 from sqlalchemy import select, and_
 
 from db import get_engine
+from database import get_face_enabled
 from metadata import tenant_face_config, tenant_face_operation_rules
 
 from . import endpoint_client
@@ -577,6 +578,10 @@ async def verify_mcp_face(
       inference on its own NPU (e.g. Himax WE2) and posts the result
       directly. ``cfg.endpoint`` is not consulted on this path.
     """
+    if not get_face_enabled():
+        # 部署级人脸开关关闭（FACE_ENABLED=false，线上/云端版不支持人脸）→ 直接放行，
+        # 不拦任何写操作、不查 DB、不写审计。与前端隐藏人脸 tab 对应。
+        return Decision(status="skipped", failure_reason="feature_disabled")
     cfg = _load_config(conn, tenant_id)
     if cfg is None or not cfg.enabled:
         decision = Decision(status="skipped", failure_reason="feature_disabled")

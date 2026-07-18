@@ -1293,6 +1293,19 @@ def generate_mock_data():
 def get_deploy_mode() -> str:
     return os.environ.get('DEPLOY_MODE', 'single_tenant')
 
+
+def get_face_enabled() -> bool:
+    """部署级人脸识别开关。线上/云端版可设 FACE_ENABLED=false，完全隐藏人脸识别
+    设置 tab、并让前端不加载该功能；默认 true，保持本地/私有部署现有行为。
+
+    与租户级 tenant_face_config.enabled 正交：本 flag 决定"这套部署支不支持人脸"，
+    后者决定"某租户此刻要不要对出入库刷脸"。线上版通常 FACE_ENABLED=false。
+
+    未设置或留空都当默认 true（避免 .env 里 `FACE_ENABLED=` 空值意外关闭）；
+    只有显式的 false/0/no/off 才关闭。"""
+    raw = (os.environ.get('FACE_ENABLED') or 'true').strip().lower()
+    return raw not in ('0', 'false', 'no', 'off')
+
 if __name__ == '__main__':
     init_database()
     generate_mock_data()
