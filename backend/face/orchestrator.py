@@ -31,6 +31,23 @@ logger = logging.getLogger("warehouse.face")
 _verify_once_cache: dict = {}
 _VERIFY_ONCE_TTL_S = 600  # 10 分钟安全上限
 
+# 懒重算失败集合：(subject_id, model_tag) 首次重算失败（spoof/no_face/端点错）后
+# 进程内不再重试，防止每次验证都对同一张坏照片/坏端点重试轰炸。进程重启自然清空
+# （给修复后的照片/端点重试机会）。
+_reembed_failed: set = set()
+# 懒重算进行中集合：并发验证/后台任务对同一 (subject_id, model_tag) 去重，
+# 防止重复推理 + 重复插行。单事件循环内 add/discard 无竞态。
+_reembed_inflight: set = set()
+
+# 验证路径单次请求最多兜底补算的 subject 数：人数多时首验不能被批量重算拖到
+# 秒级（100 人 × ~30ms 推理就是 3s+），超出部分靠配置变更触发的后台批量任务。
+LAZY_RECOMPUTE_PER_REQUEST = 3
+
+# 配置变更触发的后台批量补算任务：key=(tenant_id, mode, endpoint)（任务内才探得
+# model_tag），同 key 只跑一个（幂等可重入）；status 按 tenant 暴露给管理 API。
+_recompute_tasks: dict = {}
+_recompute_status: dict = {}
+
 
 # ── data access helpers ──
 
@@ -215,6 +232,229 @@ def _log_decision(
         conn.commit()
     except Exception:
         logger.exception("failed to write face_auth_logs")
+
+
+async def ensure_enrollments_for_model(
+    conn, tenant_id: int, model_tag: str, infer_image,
+    *, limit: Optional[int] = None, progress=None,
+) -> int:
+    """懒重算核心（双向通用）：为缺 ``model_tag`` embedding 的 subject 补行。
+
+    统一原则：enrollment 按 (subject, model_tag) 多行共存；任何模型缺行、且该
+    subject 存在任一带 ``source_image_b64`` 注册照片的 active enrollment，就用
+    照片现算并缓存为新 enrollment（复制 applies_to_warehouse_ids，
+    enrolled_by=NULL）。切换识别模式（local WE2 ↔ lan Hailo/Jetson）永不要求
+    用户重录。两个调用方：
+
+    * lan 验证前置（``_ensure_model_enrollments``）— 端点 /infer 重算；
+    * push-faces 下发前置（routers/mcp_admin.py）— 进程内 WE2 模拟器重算
+      （lan 模式注册的 subject 切回本机模式下发时补 128D 行）。
+
+    ``infer_image``: async callable(image_b64) -> {"embedding": bytes,
+    "model_tag": str}。
+
+    新行的 source_image_b64 置 NULL：原始照片保留在源 enrollment 上即可——本函数
+    扫描的是「任一带照片的 active enrollment」，未来再换模型仍能从源行重算；复制
+    base64 大字段只会成倍膨胀 DB，无信息增益。
+
+    失败（spoof / no_face / 端点错 / 模拟器缺失）warn 并跳过该 subject，同时记入
+    进程内 ``_reembed_failed``，避免每次调用重复轰炸；进程重启自然重试。
+    ``limit``：单次调用最多尝试补算的 subject 数（验证路径兜底限量用，防人数多时
+    首次验证被拖到秒级）；None = 不限（后台批量 / push 下发）。
+    ``progress``：可选 callable(done, total)，后台任务用来更新进度。
+    正在被其他协程补算的 (subject, model) 直接跳过（进行中去重，防并发验证
+    重复算同一 subject）。返回本次插入的行数。
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT e.subject_id AS subject_id,
+               e.source_image_b64 AS img,
+               e.applies_to_warehouse_ids AS applies
+        FROM face_enrollments e
+        JOIN face_subjects s ON s.id = e.subject_id
+        WHERE e.id IN (
+            SELECT MAX(id) FROM face_enrollments
+            WHERE tenant_id = ? AND is_active = 1
+              AND source_image_b64 IS NOT NULL AND source_image_b64 != ''
+            GROUP BY subject_id
+        )
+          AND s.is_active = 1
+          AND e.subject_id NOT IN (
+              SELECT subject_id FROM face_enrollments
+              WHERE tenant_id = ? AND model_tag = ? AND is_active = 1
+          )
+        """,
+        (tenant_id, tenant_id, model_tag),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return 0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    inserted = 0
+    attempted = 0
+    total = len(rows)
+    for i, row in enumerate(rows):
+        sid = int(row["subject_id"])
+        key = (sid, model_tag)
+        if key in _reembed_failed or key in _reembed_inflight:
+            if progress:
+                progress(i + 1, total)
+            continue
+        if limit is not None and attempted >= limit:
+            break  # 剩余交给后台批量任务
+        attempted += 1
+        _reembed_inflight.add(key)
+        try:
+            result = await infer_image(row["img"])
+        except FaceEndpointError as e:
+            logger.warning(
+                "lazy re-embed skipped: subject=%s target_model=%s reason=%s",
+                sid, model_tag, e,
+            )
+            _reembed_failed.add(key)
+            continue
+        finally:
+            _reembed_inflight.discard(key)
+        got_tag = result["model_tag"]
+        cur.execute(
+            """
+            INSERT INTO face_enrollments
+                (subject_id, tenant_id, model_tag, embedding, source_image_b64,
+                 applies_to_warehouse_ids, is_active, enrolled_at, enrolled_by)
+            VALUES (?, ?, ?, ?, NULL, ?, 1, ?, NULL)
+            """,
+            (sid, tenant_id, got_tag, result["embedding"], row["applies"], now),
+        )
+        conn.commit()  # 每条独立提交：后台任务中途被杀不丢已算好的行
+        inserted += 1
+        if got_tag != model_tag:
+            # 推理方返回的 model_tag 与请求侧不一致（端点又换了模型？）：插入的
+            # 数据本身有效，但对当前 target 仍缺 → 标失败避免每次调用死循环重算。
+            logger.warning(
+                "lazy re-embed model_tag mismatch: subject=%s want=%s got=%s",
+                sid, model_tag, got_tag,
+            )
+            _reembed_failed.add(key)
+        if progress:
+            progress(i + 1, total)
+        if attempted % 10 == 0:
+            logger.info(
+                "lazy re-embed progress: tenant=%s model=%s %d/%d",
+                tenant_id, model_tag, i + 1, total,
+            )
+    if inserted:
+        logger.info(
+            "lazy re-embed: tenant=%s model=%s inserted %d enrollment(s)",
+            tenant_id, model_tag, inserted,
+        )
+    return inserted
+
+
+async def _ensure_model_enrollments(conn, cfg: FaceConfig, tenant_id: int, model_tag: str) -> None:
+    """lan 验证前置的懒重算兜底：限量（LAZY_RECOMPUTE_PER_REQUEST）现算，
+    避免人数多时首次验证被拖爆；全量补算靠配置变更触发的后台任务。"""
+    if cfg.mode == "local" or not cfg.endpoint:
+        # 无端点重算通道。刻意不标失败集合：端点配置好后自动恢复重算。
+        return
+
+    async def infer_image(image_b64):
+        return await endpoint_client.infer(cfg, image_b64)
+
+    await ensure_enrollments_for_model(
+        conn, tenant_id, model_tag, infer_image,
+        limit=LAZY_RECOMPUTE_PER_REQUEST,
+    )
+
+
+def get_recompute_status(tenant_id: int) -> Optional[dict]:
+    """后台批量补算进度：{model_tag, done, total, running}；从未跑过 → None。"""
+    st = _recompute_status.get(tenant_id)
+    return dict(st) if st is not None else None
+
+
+def start_background_recompute(
+    tenant_id: int, mode: Optional[str], endpoint: Optional[str],
+    auth_token: Optional[str],
+) -> bool:
+    """配置变更（mode/endpoint 变化 → 生效 model_tag 可能变化）触发的后台批量
+    补算（主路径）。串行逐 subject 重算，不挤占在线验证的 NPU；同
+    (tenant, mode, endpoint) 只跑一个任务（幂等可重入）；进度写
+    ``_recompute_status``，每 10 个 subject 记一条 info 日志（核心函数内）。
+    返回是否真的启动了新任务。需在运行中的事件循环里调用（FastAPI handler）。
+    """
+    import asyncio
+
+    key = (tenant_id, mode or "", endpoint or "")
+    existing = _recompute_tasks.get(key)
+    if existing is not None and not existing.done():
+        return False
+    task = asyncio.get_running_loop().create_task(
+        _bg_recompute(tenant_id, mode, endpoint, auth_token)
+    )
+    _recompute_tasks[key] = task
+    return True
+
+
+async def _bg_recompute(
+    tenant_id: int, mode: Optional[str], endpoint: Optional[str],
+    auth_token: Optional[str],
+) -> None:
+    st = {"model_tag": None, "done": 0, "total": 0, "running": True}
+    _recompute_status[tenant_id] = st
+    try:
+        # 解析当前生效的 model_tag + 推理通道
+        if mode == "local":
+            model_tag = endpoint_client.LOCAL_MODEL_TAG
+
+            async def infer_image(img):
+                return endpoint_client._infer_local(img)
+        else:
+            if not endpoint:
+                return
+            try:
+                info = await endpoint_client.health(endpoint, auth_token)
+            except FaceEndpointError as e:
+                logger.warning(
+                    "bg re-embed aborted, health probe failed: tenant=%s ep=%s (%s)",
+                    tenant_id, endpoint, e,
+                )
+                return
+            model_tag = info.get("model_tag")
+            if not model_tag:
+                logger.warning(
+                    "bg re-embed aborted, endpoint reports no model_tag: %s", endpoint)
+                return
+            cfg = FaceConfig(
+                tenant_id=tenant_id, enabled=True, mode=mode,
+                endpoint=endpoint, auth_token=auth_token,
+            )
+
+            async def infer_image(img):
+                return await endpoint_client.infer(cfg, img)
+
+        st["model_tag"] = model_tag
+
+        def progress(done, total):
+            st["done"], st["total"] = done, total
+
+        # 后台任务独立开自己的 sqlite 连接（不与请求 conn 共享线程）
+        import database
+        conn = database.get_db_connection()
+        try:
+            inserted = await ensure_enrollments_for_model(
+                conn, tenant_id, model_tag, infer_image, progress=progress,
+            )
+            logger.info(
+                "bg re-embed finished: tenant=%s model=%s inserted=%d (%d/%d)",
+                tenant_id, model_tag, inserted, st["done"], st["total"],
+            )
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("bg re-embed crashed: tenant=%s", tenant_id)
+    finally:
+        st["running"] = False
 
 
 # ── public API ──
@@ -496,6 +736,13 @@ async def verify_mcp_face(
             confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
         )
         return decision
+
+    # 懒重算兜底：换模型后老 subject 只有旧 model_tag 的 embedding 时，用注册照片
+    # 现场重算出当前模型的 embedding 再比对。任何异常都不阻塞验证主链路。
+    try:
+        await _ensure_model_enrollments(conn, cfg, tenant_id, model_tag)
+    except Exception:
+        logger.exception("lazy re-embedding pass failed (non-fatal)")
 
     matches = topk_match(
         conn,

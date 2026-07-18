@@ -92,6 +92,11 @@ class FaceTestConnectionPayload(BaseModel):
     auth_token: Optional[str] = None
 
 
+def _get_recompute_status(tid: int):
+    from face.orchestrator import get_recompute_status
+    return get_recompute_status(tid)
+
+
 def _face_resolve_tenant(current_user: 'CurrentUser', tenant_id: Optional[int]) -> int:
     """Resolve which tenant the request is acting on, with admin scope checks."""
     if current_user.tenant_id is None:
@@ -130,7 +135,8 @@ async def face_get_config(
         return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
                 "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65,
                 "greeting_enabled": False, "verify_frequency": "always",
-                "verify_mode": "interface"}  # verify_mode: deprecated echo
+                "verify_mode": "interface",  # deprecated echo
+                "recompute_status": _get_recompute_status(tid)}
     return {
         "tenant_id": row.tenant_id,
         "enabled": bool(row.enabled),
@@ -143,6 +149,9 @@ async def face_get_config(
         "verify_frequency": row.verify_frequency or "always",
         # DEPRECATED: 仅为旧客户端保留的回显；新代码请读 verify_frequency。
         "verify_mode": row.verify_mode or "interface",
+        # 后台批量 embedding 补算进度（配置变更触发）：
+        # {model_tag, done, total, running} 或 null（从未跑过）。UI 可选展示。
+        "recompute_status": _get_recompute_status(tid),
         "created_at": row.created_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.created_at, datetime) else row.created_at,
         "updated_at": row.updated_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.updated_at, datetime) else row.updated_at,
     }
@@ -189,7 +198,11 @@ async def face_put_config(
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_engine().begin() as sa_conn:
         existing = sa_conn.execute(
-            select(_t_tenant_face_config.c.id).where(_t_tenant_face_config.c.tenant_id == tid)
+            select(
+                _t_tenant_face_config.c.id,
+                _t_tenant_face_config.c.mode,
+                _t_tenant_face_config.c.endpoint,
+            ).where(_t_tenant_face_config.c.tenant_id == tid)
         ).first()
         if existing:
             sa_conn.execute(
@@ -225,6 +238,22 @@ async def face_put_config(
                     updated_at=now,
                 )
             )
+    # mode/endpoint 变化 → 当前生效 model_tag 可能变化 → 触发后台批量补算
+    # （懒重算主路径；验证路径只做限量兜底）。仅启用状态下触发，避免关着开关
+    # 还去打端点/NPU。任务进程内单例幂等，见 orchestrator.start_background_recompute。
+    if payload.enabled:
+        prior_mode = existing.mode if existing else None
+        prior_endpoint = existing.endpoint if existing else None
+        if (payload.mode, payload.endpoint) != (prior_mode, prior_endpoint):
+            from face.orchestrator import start_background_recompute
+            try:
+                start_background_recompute(
+                    tid, payload.mode, payload.endpoint, payload.auth_token)
+            except Exception:
+                # 后台补算失败绝不影响配置保存本身
+                import logging
+                logging.getLogger("warehouse.face").exception(
+                    "start_background_recompute failed (non-fatal)")
     return {"success": True, "tenant_id": tid}
 
 

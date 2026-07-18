@@ -1035,6 +1035,27 @@ async def push_faces_to_device(
     # 取本租户人脸库并按固定 model_tag 过滤（复用 face 路由的 library 逻辑）。
     from routers.face import build_face_library
     tid = conn_row.tenant_id if hasattr(conn_row, "tenant_id") else dict(conn_row._mapping).get("tenant_id")
+
+    # 下发前置懒重算（反方向）：lan 模式注册的 subject 只有远端模型（如 Hailo
+    # 512D）的 enrollment + 注册照片，切回本机模式下发时设备需要 WE2 128D
+    # embedding → 用进程内 WE2 模拟器从照片现算补行再下发。统一原则：enrollment
+    # 按 (subject, model_tag) 多行共存，任何模型缺行且有照片就现算缓存，切换
+    # 模式永不要求用户重录。失败 warn+跳过+进程内防重试集合（orchestrator 核心）。
+    # push 本来就是用户主动的批量操作 → 不限量。任何异常不阻塞下发主链路。
+    from face.orchestrator import ensure_enrollments_for_model
+    from face import endpoint_client as _face_ec
+
+    async def _local_infer(image_b64):
+        return _face_ec._infer_local(image_b64)
+
+    try:
+        with get_db() as _lazy_conn:
+            await ensure_enrollments_for_model(_lazy_conn, tid, model_tag, _local_infer)
+    except Exception:
+        import logging
+        logging.getLogger("warehouse.face").exception(
+            "push-faces lazy re-embed failed (non-fatal)")
+
     library = build_face_library(tid, model_tag=model_tag)
     # 服务端强制上限：超过设备固件容量（FACE_MAX_COUNT=20）直接拒绝，不 POST、
     # 不截断。错误信息用户友好，前端会 alert 出来。
