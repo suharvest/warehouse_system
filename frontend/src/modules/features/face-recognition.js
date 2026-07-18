@@ -276,7 +276,53 @@ function renderSetupTab() {
     ];
     const currentVerifyFrequency = (c.verify_frequency === 'session') ? 'session' : 'always';
     return `
-        <div class="table-container face-config-card face-block face-block-device">
+        <!-- 操作规则（服务端·保存即时生效）置前：先决定"要不要刷脸、谁能操作"，
+             总开关「启用人脸识别」也是服务端即时生效，一并放这张卡顶部。 -->
+        <div class="table-container face-block face-block-server">
+            <div class="section-header face-block-header">
+                <div class="face-module-heading">
+                    <div class="face-block-titlerow">
+                        <span class="section-title">${tt('faceRules', '操作规则')}</span>
+                        <span class="face-scope-tag is-server">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+                            ${tt('faceScopeServerTag', '服务端规则 · 保存即时生效')}
+                        </span>
+                    </div>
+                    <div class="face-module-hint">${tt('faceRulesServerHint2', '哪些操作要刷脸、谁能操作，无需下发到设备')}</div>
+                </div>
+                <div class="face-block-header-actions" style="display:flex;align-items:center;gap:16px;">
+                    <label class="face-switch">
+                        <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
+                        <span class="face-switch-slider"></span>
+                        <span class="face-switch-text">${tt('faceEnabled', '启用人脸识别')}</span>
+                    </label>
+                    <button class="action-btn add-btn" data-action="showAddFaceRuleModal">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        <span>${tt('faceAddRule', '新增规则')}</span>
+                    </button>
+                </div>
+            </div>
+            <div class="face-config-disabled-note" id="face-config-disabled-note" style="margin: 14px 24px;" ${c.enabled ? 'hidden' : ''}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                <span>${tt('faceDisabledNote', '未启用人脸识别，所有操作规则与下方基础配置均不生效')}</span>
+            </div>
+            <table id="face-rules-table">
+                <thead>
+                    <tr>
+                        <th>${tt('warehouse', t('warehouseName') || '仓库')}</th>
+                        <th>${tt('faceRuleOperation', '操作类型')}</th>
+                        <th>${tt('faceRuleStatus', '状态')}</th>
+                        <th>${tt('faceAllowedUsers', '允许用户')}</th>
+                        <th>${tt('faceMinConfidenceOverride', '自定义阈值')}</th>
+                        <th style="width:160px;">${t('actions') || '管理'}</th>
+                    </tr>
+                </thead>
+                <tbody id="face-rules-tbody">${renderRulesRows()}</tbody>
+            </table>
+        </div>
+
+        <!-- 基础配置（设备侧·需下发到设备后生效）置后 -->
+        <div class="table-container mt-6 face-config-card face-block face-block-device">
             <div class="section-header face-block-header">
                 <div class="face-module-heading">
                     <div class="face-block-titlerow">
@@ -294,19 +340,10 @@ function renderSetupTab() {
                 </button>
             </div>
             <div class="face-config-body">
-                <div class="face-config-disabled-note" id="face-config-disabled-note" ${c.enabled ? 'hidden' : ''}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                    <span>${tt('faceDisabledNote', '当前未启用人脸识别，下方识别设置与所有操作规则均不生效')}</span>
-                </div>
-
                 <!-- 分组 A-1：识别设置 -->
                 <div class="face-subsection">
                     <div class="face-subsection-head">
                         <div class="face-subsection-title">${tt('faceConfigCardTitle', '识别设置')}</div>
-                        <label class="face-enable-toggle">
-                            <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
-                            <span>${tt('faceEnabled', '启用人脸识别')}</span>
-                        </label>
                     </div>
                     <div class="face-settings-row">
                         <div class="form-group">
@@ -376,38 +413,6 @@ function renderSetupTab() {
                     </div>
                 </div>
             </div>
-        </div>
-
-        <div class="table-container mt-6 face-block face-block-server">
-            <div class="section-header face-block-header">
-                <div class="face-module-heading">
-                    <div class="face-block-titlerow">
-                        <span class="section-title">${tt('faceRules', '操作规则')}</span>
-                        <span class="face-scope-tag is-server">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
-                            ${tt('faceScopeServerTag', '服务端规则 · 保存即时生效')}
-                        </span>
-                    </div>
-                    <div class="face-module-hint">${tt('faceRulesServerHint2', '哪些操作要刷脸、谁能操作，无需下发到设备')}</div>
-                </div>
-                <button class="action-btn add-btn" data-action="showAddFaceRuleModal">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                    <span>${tt('faceAddRule', '新增规则')}</span>
-                </button>
-            </div>
-            <table id="face-rules-table">
-                <thead>
-                    <tr>
-                        <th>${tt('warehouse', t('warehouseName') || '仓库')}</th>
-                        <th>${tt('faceRuleOperation', '操作类型')}</th>
-                        <th>${tt('faceRuleStatus', '状态')}</th>
-                        <th>${tt('faceAllowedUsers', '允许用户')}</th>
-                        <th>${tt('faceMinConfidenceOverride', '自定义阈值')}</th>
-                        <th style="width:160px;">${t('actions') || '管理'}</th>
-                    </tr>
-                </thead>
-                <tbody id="face-rules-tbody">${renderRulesRows()}</tbody>
-            </table>
         </div>
     `;
 }

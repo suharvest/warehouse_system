@@ -1471,6 +1471,66 @@
   accent-color: var(--color-primary, #8cc63f);
 }
 
+/* 滑动开关（iOS 风格）——用于「启用人脸识别」总开关 */
+.face-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
+}
+
+/* 原生 checkbox 隐藏但保留可访问性（键盘/读屏仍可聚焦切换） */
+.face-switch input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+}
+
+.face-switch-slider {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: #cfd4d9;
+  transition: background 0.2s ease;
+}
+
+.face-switch-slider::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 0.2s ease;
+}
+
+.face-switch input:checked + .face-switch-slider {
+  background: var(--color-primary, #8cc63f);
+}
+
+.face-switch input:checked + .face-switch-slider::before {
+  transform: translateX(18px);
+}
+
+.face-switch input:focus-visible + .face-switch-slider {
+  outline: 2px solid var(--color-primary, #8cc63f);
+  outline-offset: 2px;
+}
+
+.face-switch-text {
+  font-size: 13px;
+  color: #555;
+}
+
 /* 规则弹窗：停用规则时,其依赖字段(允许人员/自定义阈值)整体置灰 */
 .face-rule-dependent {
   transition: opacity 0.15s ease;
