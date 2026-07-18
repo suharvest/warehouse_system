@@ -246,9 +246,10 @@ def _face_guard(
     # identity would only re-open the prompt-injection surface we closed. The two
     # params remain in the tool signatures as deprecated no-ops for wire compat.
     try:
-        # 8s：session 模式(B)后端会同步直连设备拉取身份，fresh=1 现场拍 ~6s，
+        # 18s：后端可能同步直连设备拉取身份/拉图。local fresh=1 现拍 ~6s；lan option 3
+        # 拉一张 JPEG(~8s，含切 sensor mode 3 + 抓帧 + 编码) 之后还要接一次端点 /infer(≤10s)。
         # 必须给足预算，否则慢路径被过早判 transport_error 而 fail-closed 误杀。
-        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=8)
+        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=18)
         if resp.status_code >= 400:
             logger.warning("face verify returned %s: %s", resp.status_code, resp.text[:200])
             return {"status": "deny", "failure_reason": f"http_{resp.status_code}"}
@@ -770,7 +771,8 @@ def query_batch(batch_no: str) -> dict:
 @mcp.tool(
     exclude_args=["contact_id", "variant",
                   "face_image_b64", "face_embedding_b64", "face_model_tag"],
-    meta={"requires_face": True},
+    # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
+    # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
 @_antihallucination("stock_in")
@@ -782,12 +784,7 @@ def stock_in(product_name: str, quantity: int,
              face_image_b64: str = None,
              face_embedding_b64: str = None,
              face_model_tag: str = None) -> dict:
-    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
-
-    人脸鉴权对你完全透明、无需任何操作：仓库后端按租户配置自行裁决——session 模式后端直连
-    设备现场取当前操作人身份，interface 模式由 runtime 注入 face_* 重比对。你不需要、也无法
-    通过任何参数影响鉴权；被拒时按返回 message 提示用户（如面向摄像头）即可。
-    """
+    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。"""
     blocked = _enforce_face(
         "stock_in",
         image_b64=face_image_b64,
@@ -806,7 +803,8 @@ def stock_in(product_name: str, quantity: int,
 @mcp.tool(
     exclude_args=["allow_partial_fallback",
                   "face_image_b64", "face_embedding_b64", "face_model_tag"],
-    meta={"requires_face": True},
+    # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
+    # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
 @_antihallucination("stock_out")
@@ -819,12 +817,7 @@ def stock_out(product_name: str, quantity: int,
               face_image_b64: str = None,
               face_embedding_b64: str = None,
               face_model_tag: str = None) -> dict:
-    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
-
-    人脸鉴权对你完全透明、无需任何操作：仓库后端自行裁决（session 模式后端直连设备现场取操作人
-    身份，interface 模式 runtime 注入 face_* 重比对）。你无法通过任何参数影响鉴权；被拒时按返回
-    message 提示用户即可。
-    """
+    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。"""
     blocked = _enforce_face(
         "stock_out",
         image_b64=face_image_b64,
@@ -859,7 +852,8 @@ def search(query: str = None, entity_type: str = "material",
 
 @mcp.tool(
     exclude_args=["face_image_b64", "face_embedding_b64", "face_model_tag"],
-    meta={"requires_face": True},
+    # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
+    # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
 @_antihallucination("move_batch_location")
@@ -872,8 +866,6 @@ def move_batch_location(batch_no: str, new_location: str,
     """批次库位移位。batch_no 精确指定批次，new_location 目标库位。
     quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
     注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
-
-    人脸鉴权对你完全透明、无需任何操作：仓库后端自行裁决。你无法通过任何参数影响鉴权。
     """
     blocked = _enforce_face(
         "move_batch_location",

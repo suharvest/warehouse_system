@@ -653,16 +653,10 @@ async def verify_mcp_face(
     # the trust root is "the device's HTTP response", not "the model's word".
     # speaker_subject_id / speaker_name are ignored here on purpose.
     # Anything short of a live, resolvable, allowed identity → deny (fail-closed).
-    #
-    # lan 无图回退：MCP 调用未带 image/embedding、但连接能定位到设备时，同样走
-    # 设备拉身份——lan 设备识别代理（/api/face/device/recognize）刚在现场识别过，
-    # 身份已在设备侧，直接拉取即可（与 local 模式同一条 B 方案链路，audit reason
-    # 沿用 session_verified / device_no_identity 等现有值）。带图/带 embedding
-    # 时行为不变（下方端点重比对）；无图且无 pull_device 仍 deny no_image_provided。
-    use_device_pull = cfg.mode == "local" or (
-        not embedding_bytes and not image_b64 and pull_device is not None
-    )
-    if use_device_pull:
+    # 仅 local 模式走"拉身份"（设备本地 Himax 识别 → 直接信任 subject_id）。
+    # lan 模式无图不再回退到设备本地识别，而是下方"后端拉一张 JPEG → 端点强模型
+    # 比对"（option 3：拍照决策统一在后端、按规则驱动，且 lan 坚持用端点强模型）。
+    if cfg.mode == "local":
         def _session_deny(reason: str, matched=None) -> Decision:
             d = Decision(status="deny", failure_reason=reason, matched_subject_id=matched)
             _log_decision(
@@ -720,31 +714,37 @@ async def verify_mcp_face(
 
     # ── mode='lan'（含 mode 未设默认）：端点接口比对，fail-closed ─────────
     # Obtain embedding: either supplied by device (WE2 path) or via /infer.
-    if embedding_bytes:
-        model_tag = embedding_model_tag or cfg.embedding_model_tag or "unknown"
-        query_bytes = embedding_bytes
-    elif image_b64:
-        try:
-            result = await endpoint_client.infer(cfg, image_b64)
-        except FaceEndpointError as e:
-            reason = str(e) if str(e) else "endpoint_unreachable"
-            decision = Decision(status="deny", failure_reason=reason)
-            _log_decision(
-                conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
-                tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-                confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
-            )
-            return decision
-        model_tag = result["model_tag"]
-        query_bytes = result["embedding"]
-    else:
-        decision = Decision(status="deny", failure_reason="no_image_provided")
+    def _lan_deny(reason: str) -> Decision:
+        d = Decision(status="deny", failure_reason=reason)
         _log_decision(
             conn, request_id=request_id, user_id=user_id, matched_subject_id=None,
             tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-            confidence=None, decision=decision.status, failure_reason=decision.failure_reason,
+            confidence=None, decision=d.status, failure_reason=d.failure_reason,
         )
-        return decision
+        return d
+
+    if embedding_bytes:
+        model_tag = embedding_model_tag or cfg.embedding_model_tag or "unknown"
+        query_bytes = embedding_bytes
+    else:
+        # 图片来源：优先调用方注入的 image_b64（旧 xiaozhi 运行时 face_* 注入，兼容保留），
+        # 否则后端按规则现拉一张 JPEG（option 3：拍照决策在后端、跟规则走）。
+        img_b64 = image_b64
+        if not img_b64:
+            if pull_device is None:
+                return _lan_deny("device_unresolved")  # 无图又定位不到设备 → 无法验证
+            from . import device_pull
+            jpeg = await device_pull.pull_image(pull_device)
+            if not jpeg:
+                return _lan_deny("device_no_identity")  # 抓图失败（忙/无脸/超时/错误）
+            import base64 as _b64
+            img_b64 = _b64.b64encode(jpeg).decode("ascii")
+        try:
+            result = await endpoint_client.infer(cfg, img_b64)
+        except FaceEndpointError as e:
+            return _lan_deny(str(e) if str(e) else "endpoint_unreachable")
+        model_tag = result["model_tag"]
+        query_bytes = result["embedding"]
 
     # 懒重算兜底：换模型后老 subject 只有旧 model_tag 的 embedding 时，用注册照片
     # 现场重算出当前模型的 embedding 再比对。任何异常都不阻塞验证主链路。
