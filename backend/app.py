@@ -30,7 +30,7 @@ from database import (
     generate_batch_no, needs_password_rehash,
     validate_username, validate_password_strength,
     REASON_CATEGORIES, REASON_CATEGORY_LABELS,
-    get_deploy_mode, _is_sqlite,
+    get_deploy_mode, get_face_enabled, _is_sqlite,
 )
 from models import (
     DashboardStats, CategoryItem, WeeklyTrend, TopStock, LowStockItem,
@@ -6732,7 +6732,7 @@ async def get_system_mode():
             select(_t_system_settings.c.value).where(_t_system_settings.c.key == 'system_mode')
         ).first()
     mode = row.value if row else 'self_owned'
-    return {"mode": mode, "deploy_mode": get_deploy_mode()}
+    return {"mode": mode, "deploy_mode": get_deploy_mode(), "face_enabled": get_face_enabled()}
 
 
 @app.put("/api/system/mode")
@@ -6780,7 +6780,26 @@ async def set_system_mode(
 # ============ Face Recognition Management APIs ============
 # Moved to backend/routers/face.py (Phase 1 split, task #5).
 from routers.face import router as face_router
-app.include_router(face_router)
+
+
+def _face_feature_gate(request: Request):
+    """部署级人脸开关的路由守卫：FACE_ENABLED=false 时，把用户面向的人脸管理端点
+    (config/rules/subjects/enrollments/library/logs/test-connection) 全部 404，
+    让"线上版不支持人脸"在 API 层也成立、不暴露任何配置或生物特征数据。
+
+    豁免两个**运行时端点**(必须始终可达)：
+      - /api/face/verify-mcp：关闭时 verify_mcp_face 已返回 skipped(放行)；若 404，
+        MCP 的 _face_guard 会把 4xx 当 deny → 反而拦死出入库。
+      - /api/face/device/recognize：设备识别代理，断了会影响设备侧问候/识别。
+    """
+    if get_face_enabled():
+        return
+    if request.url.path in ("/api/face/verify-mcp", "/api/face/device/recognize"):
+        return
+    raise HTTPException(status_code=404, detail="face recognition is not enabled in this deployment")
+
+
+app.include_router(face_router, dependencies=[Depends(_face_feature_gate)])
 
 
 # ============ WE2 Face Inference Simulator (opt-in) ============

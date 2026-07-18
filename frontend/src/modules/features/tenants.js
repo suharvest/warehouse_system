@@ -1,6 +1,6 @@
 // ============ 租户管理模块 ============
 import { t } from '../../../i18n.js';
-import { getDeployMode, setDeployMode, getCurrentUser } from '../state.js';
+import { getDeployMode, setDeployMode, setFaceEnabled, getCurrentUser } from '../state.js';
 import { showToast, showModalSuccessState } from '../ui-components.js';
 import { warehousesApi, usersApi } from '../api.js';
 import { switchTab } from '../ui/tabs.js';
@@ -49,6 +49,8 @@ export async function fetchDeployMode() {
             const data = await response.json();
             const mode = data.deploy_mode || 'single_tenant';
             setDeployMode(mode);
+            // 部署级人脸开关：缺省（旧后端不返回该字段）当 true，只有显式 false 才关。
+            setFaceEnabled(data.face_enabled !== false);
             return mode;
         }
         console.warn('获取部署模式失败: HTTP', response.status);
