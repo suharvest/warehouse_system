@@ -124,7 +124,13 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
         raise FaceEndpointError("endpoint_not_configured")
     url = cfg.endpoint.rstrip("/") + "/infer"
     try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        # trust_env=False: LAN face endpoints must be reached directly —
+        # env/system proxies (macOS scutil proxy, Clash, ...) cannot route
+        # Tailscale/LAN ranges and turn every call into a 502 (same fix as
+        # device_pull.py).
+        async with httpx.AsyncClient(
+            timeout=DEFAULT_TIMEOUT, trust_env=False
+        ) as client:
             resp = await client.post(
                 url,
                 json={"image_b64": image_b64},
@@ -165,7 +171,10 @@ async def health(endpoint: str, auth_token: Optional[str] = None) -> dict:
         raise FaceEndpointError("endpoint_not_configured")
     url = endpoint.rstrip("/") + "/health"
     try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        # trust_env=False: see infer() — never proxy LAN endpoint probes.
+        async with httpx.AsyncClient(
+            timeout=DEFAULT_TIMEOUT, trust_env=False
+        ) as client:
             resp = await client.get(url, headers=_headers(auth_token))
             return _parse_json_response(resp, "health")
     except httpx.HTTPError as e:
