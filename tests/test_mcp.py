@@ -900,3 +900,62 @@ class TestPushFacesToDevice:
             assert "We2 Ready" in [f["name"] for f in body["faces"]]
         finally:
             admin_client.delete(f"/api/face/subjects/{sid}")
+
+    # ── lan 模式下发地址改写（设备识别代理）──────────────────────────────
+    # lan：identify_endpoint 指向 warehouse 自身 /api/face/device（设备拼
+    # /recognize），identify_token 用租户级 auth_token（为空首发自动生成）。
+    # local：endpoint/token 原样透传，行为不变。
+
+    def _set_face_cfg(self, admin_client, **kw):
+        body = {
+            "enabled": True, "mode": "local", "endpoint": "",
+            "auth_token": "", "min_confidence": 0.65,
+        }
+        body.update(kw)
+        r = admin_client.put("/api/face/config", json=body)
+        assert r.status_code == 200, r.text
+
+    def test_push_lan_rewrites_endpoint_and_generates_token(
+            self, admin_client, monkeypatch):
+        monkeypatch.delenv("WAREHOUSE_DEVICE_BASE_URL", raising=False)
+        self._set_face_cfg(
+            admin_client, mode="lan",
+            endpoint="http://tenant-endpoint.invalid:8001", auth_token="")
+        data, body = self._run_push(admin_client, monkeypatch)
+        assert data["success"] is True, data
+        assert body["identify_mode"] == "lan"
+        ep = body["identify_endpoint"]
+        assert ep.startswith("http://") and ep.endswith("/api/face/device"), ep
+        # 不再把租户 face_rec_api 端点直发设备。
+        assert "tenant-endpoint.invalid" not in ep
+        tok = body["identify_token"]
+        assert tok and len(tok) == 32, tok
+        # token 已入库（UI GET config 可见），设备与库一致。
+        assert admin_client.get("/api/face/config").json()["auth_token"] == tok
+
+    def test_push_lan_env_override_base_url(self, admin_client, monkeypatch):
+        monkeypatch.setenv(
+            "WAREHOUSE_DEVICE_BASE_URL", "http://10.9.8.7:8443/api/face/device/")
+        self._set_face_cfg(
+            admin_client, mode="lan",
+            endpoint="http://tenant-endpoint.invalid:8001",
+            auth_token="tok-fixed-abc")
+        data, body = self._run_push(admin_client, monkeypatch)
+        assert body["identify_endpoint"] == "http://10.9.8.7:8443/api/face/device"
+        # 已有 token 原样复用，不重新生成。
+        assert body["identify_token"] == "tok-fixed-abc"
+        assert admin_client.get(
+            "/api/face/config").json()["auth_token"] == "tok-fixed-abc"
+
+    def test_push_local_mode_unchanged(self, admin_client, monkeypatch):
+        monkeypatch.delenv("WAREHOUSE_DEVICE_BASE_URL", raising=False)
+        self._set_face_cfg(
+            admin_client, mode="local",
+            endpoint="http://local-ep.invalid/x", auth_token="loctok")
+        data, body = self._run_push(admin_client, monkeypatch)
+        assert body["identify_mode"] == "local"
+        assert body["identify_endpoint"] == "http://local-ep.invalid/x"
+        assert body["identify_token"] == "loctok"
+        # local 模式不自动生成 token。
+        assert admin_client.get(
+            "/api/face/config").json()["auth_token"] == "loctok"
