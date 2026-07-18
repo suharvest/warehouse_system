@@ -15,6 +15,7 @@ import base64
 import ipaddress
 import os
 import secrets as _secrets
+import socket as _socket
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -1010,6 +1011,57 @@ def quantize_embedding(f32_bytes: bytes, fmt: str) -> bytes:
     raise ValueError(f"未知 embedding_format: {fmt!r}")
 
 
+def _device_facing_base_url(device_ip: str) -> str:
+    """lan 模式下发给设备的识别代理 base（设备会拼 /recognize）。
+
+    优先 env ``WAREHOUSE_DEVICE_BASE_URL`` 整体覆盖（值应含 /api/face/device，
+    反代 / 容器端口映射 / 多网卡场景用，见 DEPLOY.md「.env 完整变量表」）；否则自动探测：
+    UDP connect 到设备 IP 取本机路由出口 IP（connect 不发包，仅查路由表拿
+    getsockname），端口取后端实际监听端口（run_backend.py 同源的 env PORT，
+    默认 2124）。
+    """
+    override = os.environ.get("WAREHOUSE_DEVICE_BASE_URL")
+    if override:
+        return override.rstrip("/")
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            s.connect((device_ip, 9))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        # 探测失败兜底（如设备 IP 不可路由）：回环。测试环境设备就是 127.0.0.1。
+        local_ip = "127.0.0.1"
+    port = int(os.environ.get("PORT", 2124))
+    return f"http://{local_ip}:{port}/api/face/device"
+
+
+def _ensure_tenant_auth_token(tid: int, current: "str | None") -> str:
+    """租户级设备识别代理 Bearer（tenant_face_config.auth_token）为空时自动
+    生成并持久化。条件更新防并发（仿 pull_token）：仅当仍为空时写入，写完
+    无条件回读 DB 权威值。GET /api/face/config 会回传，UI「认证 Token」可见。"""
+    token = (current or "").strip()
+    if token:
+        return token
+    candidate = _secrets.token_hex(16)
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_tenant_face_config)
+            .where(and_(
+                _t_tenant_face_config.c.tenant_id == tid,
+                or_(_t_tenant_face_config.c.auth_token.is_(None),
+                    _t_tenant_face_config.c.auth_token == ""),
+            ))
+            .values(auth_token=candidate)
+        )
+        token = sa_conn.execute(
+            select(_t_tenant_face_config.c.auth_token)
+            .where(_t_tenant_face_config.c.tenant_id == tid)
+        ).scalar() or ""
+    return token
+
+
 @router.post("/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
 async def push_faces_to_device(
     conn_id: str,
@@ -1095,9 +1147,22 @@ async def push_faces_to_device(
         ).fetchone()
     if fc is not None:
         payload["match_threshold"] = int(round(float(fc.min_confidence or 0.65) * 100))
-        payload["identify_mode"] = fc.mode if fc.mode in ("local", "lan") else "local"
-        payload["identify_endpoint"] = (fc.endpoint or "").strip()
-        payload["identify_token"] = fc.auth_token or ""
+        identify_mode = fc.mode if fc.mode in ("local", "lan") else "local"
+        payload["identify_mode"] = identify_mode
+        if identify_mode == "lan":
+            # 设备识别代理：lan 模式设备抓拍 POST 的是 **warehouse 自身**的
+            # /api/face/device/recognize（伪装 face_rec_api /recognize 契约），
+            # 不再直连租户端点——人脸库只在 warehouse 存一份，face_rec_api 保持
+            # 无状态推理。identify_token 用租户级 auth_token（为空首发自动生成）。
+            payload["identify_endpoint"] = _device_facing_base_url(ip)
+            payload["identify_token"] = _ensure_tenant_auth_token(tid, fc.auth_token)
+        else:
+            # local 模式行为不变：设备本地 NPU + 本地库，endpoint/token 原样透传。
+            payload["identify_endpoint"] = (fc.endpoint or "").strip()
+            payload["identify_token"] = fc.auth_token or ""
+        # faces 库两种模式都照常下发：固件注释明确「旧固件忽略未知字段」、lan 模式
+        # 忽略本地库即可；保留下发让设备离线/回切 local 时仍有可用库，也避免
+        # payload 结构按模式分叉（MAX_PUSH_FACES 上限检查逻辑保持单一路径）。
 
     # pull_token（B 方案后端直拉鉴权）：每设备独立，首次下发时生成并持久化，之后复用。
     # 与 identify_token 分离（后者仅 lan 模式有值），保证本机模式设备也有非空 token，
