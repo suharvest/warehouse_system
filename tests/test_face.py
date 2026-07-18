@@ -1006,3 +1006,52 @@ def test_infer_no_liveness_fields_ok(monkeypatch):
         "faces": [{"det_score": 0.9, "embedding": b64.b64encode(emb).decode()}],
     })
     assert result["embedding"] == emb
+
+
+# ── lan 无图回退：设备拉身份（设备识别代理场景）─────────────────────────────
+# lan 模式设备经 /api/face/device/recognize 代理识别后，身份在设备侧；verify-mcp
+# 无图但能定位设备时走同一条 B 方案拉取链路，而不是 deny no_image_provided。
+
+
+def test_lan_no_image_with_device_falls_back_to_pull(conn):
+    """lan + 无图 + pull_device 可解析 → 设备拉身份放行（session_verified）。"""
+    _set_config(conn, enabled=True, mode="lan")
+    sid = _create_subject(conn, "Lan Fallback")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(
+        conn, device_identity={"valid": True, "subject_id": sid, "similarity": 0.77},
+    )
+    assert decision.status == "pass"
+    assert decision.failure_reason == "session_verified"
+    assert decision.matched_subject_id == sid
+    assert decision.confidence == 0.77
+
+
+def test_lan_no_image_without_device_still_denies(conn):
+    """lan + 无图 + 无 pull_device → 原行为不变：no_image_provided。"""
+    _set_config(conn, enabled=True, mode="lan")
+    _set_rule(conn, require_face=True)
+
+    decision = _verify_session(conn, device_identity="__none__")
+    assert decision.status == "deny"
+    assert decision.failure_reason == "no_image_provided"
+
+
+def test_lan_with_image_ignores_device_pull(conn, monkeypatch):
+    """lan + 带图 → 仍走端点重比对（有 pull_device 也不改道设备拉取）。"""
+    from backend.face import endpoint_client, orchestrator
+
+    async def fake_infer(cfg, image_b64):
+        raise endpoint_client.FaceEndpointError("endpoint_unreachable")
+
+    monkeypatch.setattr(endpoint_client, "infer", fake_infer)
+    _set_config(conn, enabled=True, mode="lan")
+    _set_rule(conn, require_face=True)
+
+    decision = asyncio.run(orchestrator.verify_mcp_face(
+        conn, tenant_id=1, user_id=101, warehouse_id=None, operation="stock_out",
+        image_b64="snap", pull_device=_SENTINEL_DEVICE,
+    ))
+    assert decision.status == "deny"
+    assert decision.failure_reason == "endpoint_unreachable"
