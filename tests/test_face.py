@@ -132,15 +132,15 @@ def _create_subject(conn, name: str, employee_id: str | None = None) -> int:
     return int(cur.lastrowid)
 
 
-def _enroll(conn, subject_id: int, vec, model_tag: str = "fake-v1"):
+def _enroll(conn, subject_id: int, vec, model_tag: str = "fake-v1", source_image_b64=None):
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO face_enrollments
-            (subject_id, tenant_id, model_tag, embedding, is_active)
-        VALUES (?, 1, ?, ?, 1)
+            (subject_id, tenant_id, model_tag, embedding, source_image_b64, is_active)
+        VALUES (?, 1, ?, ?, ?, 1)
         """,
-        (subject_id, model_tag, _emb_bytes(vec)),
+        (subject_id, model_tag, _emb_bytes(vec), source_image_b64),
     )
     conn.commit()
 
@@ -670,6 +670,262 @@ def test_lan_always_no_cache(conn, monkeypatch):
         assert d.status == "pass"
     assert calls["infer"] == 2
     assert not orchestrator._verify_once_cache
+
+
+# ── lazy re-embedding（换模型后用注册照片重算 embedding）────────────────────
+
+def _lazy_env(conn, monkeypatch, *, photo_vec, query_vec, fail_photos=()):
+    """搭 lan 懒重算测试环境：fake infer 按 image 内容分流。
+
+    - image 'query'      → query_vec + model_tag 'new-v1'（现场抓拍）
+    - image 以 photo: 开头 → photo_vec + 'new-v1'（注册照片重算）
+    - image 在 fail_photos → 抛 no_face_detected
+    统一计数 calls['infer']。
+    """
+    from backend.face import endpoint_client, orchestrator
+
+    orchestrator._verify_once_cache.clear()
+    orchestrator._reembed_failed.clear()
+    orchestrator._reembed_inflight.clear()
+    calls = {"infer": 0, "images": []}
+
+    async def fake_infer(cfg, image_b64):
+        calls["infer"] += 1
+        calls["images"].append(image_b64)
+        if image_b64 in fail_photos:
+            raise endpoint_client.FaceEndpointError("no_face_detected")
+        vec = query_vec if image_b64 == "query" else photo_vec
+        return {"embedding": _emb_bytes(vec), "model_tag": "new-v1"}
+
+    monkeypatch.setattr(endpoint_client, "infer", fake_infer)
+    _set_config(conn, enabled=True, min_confidence=0.5)
+    return calls
+
+
+def _run_verify(conn, img="query"):
+    from backend.face import orchestrator
+    return asyncio.run(orchestrator.verify_mcp_face(
+        conn, tenant_id=1, user_id=101, warehouse_id=None,
+        operation="stock_out", image_b64=img,
+    ))
+
+
+def test_lazy_reembed_inserts_and_matches(conn, monkeypatch):
+    """subject 只有旧模型 enrollment（带照片）→ 懒重算插入 new-v1 行且比对命中。"""
+    target = [1.0, 0.0, 0.0]
+    calls = _lazy_env(conn, monkeypatch, photo_vec=target, query_vec=target)
+    sid = _create_subject(conn, "Old Model Person")
+    _enroll(conn, sid, [0.5, 0.5, 0.0], model_tag="old-v1",
+            source_image_b64="photo:old", )
+    _set_rule(conn, require_face=True)
+
+    d = _run_verify(conn)
+    assert d.status == "pass", d
+    assert d.matched_subject_id == sid
+    assert calls["infer"] == 2  # query + 1 张照片重算
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT model_tag, source_image_b64, enrolled_by, is_active "
+        "FROM face_enrollments WHERE subject_id = ? AND model_tag = 'new-v1'", (sid,))
+    rows = cur.fetchall()
+    assert len(rows) == 1
+    # 新行不复制照片（照片保留在源 enrollment），enrolled_by NULL
+    assert rows[0]["source_image_b64"] is None
+    assert rows[0]["enrolled_by"] is None
+    assert rows[0]["is_active"] == 1
+
+
+def test_lazy_reembed_copies_warehouse_scope(conn, monkeypatch):
+    """懒重算新行复制源 enrollment 的 applies_to_warehouse_ids。"""
+    target = [1.0, 0.0, 0.0]
+    _lazy_env(conn, monkeypatch, photo_vec=target, query_vec=target)
+    sid = _create_subject(conn, "Scoped Person")
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO face_enrollments (subject_id, tenant_id, model_tag, embedding,"
+        " source_image_b64, applies_to_warehouse_ids, is_active)"
+        " VALUES (?, 1, 'old-v1', ?, 'photo:s', '[7]', 1)",
+        (sid, _emb_bytes([0.5, 0.5, 0.0])))
+    conn.commit()
+    _set_rule(conn, require_face=True, warehouse_id=7)
+
+    from backend.face import orchestrator
+    d = asyncio.run(orchestrator.verify_mcp_face(
+        conn, tenant_id=1, user_id=101, warehouse_id=7,
+        operation="stock_out", image_b64="query",
+    ))
+    assert d.status == "pass", d
+    cur.execute(
+        "SELECT applies_to_warehouse_ids FROM face_enrollments "
+        "WHERE subject_id = ? AND model_tag = 'new-v1'", (sid,))
+    assert cur.fetchone()["applies_to_warehouse_ids"] == "[7]"
+
+
+def test_lazy_reembed_skips_when_current_model_exists(conn, monkeypatch):
+    """已有当前模型 embedding → 零额外 infer（只有 query 一次）。"""
+    target = [1.0, 0.0, 0.0]
+    calls = _lazy_env(conn, monkeypatch, photo_vec=target, query_vec=target)
+    sid = _create_subject(conn, "Current Model Person")
+    _enroll(conn, sid, target, model_tag="new-v1", source_image_b64="photo:cur")
+    _set_rule(conn, require_face=True)
+
+    d = _run_verify(conn)
+    assert d.status == "pass"
+    assert calls["infer"] == 1  # 仅 query，无重算
+
+
+def test_lazy_reembed_failure_skips_subject_without_blocking(conn, monkeypatch):
+    """照片重算失败的 subject 被跳过，不阻塞其他 subject 的比对。"""
+    target = [1.0, 0.0, 0.0]
+    calls = _lazy_env(conn, monkeypatch, photo_vec=[0.0, 1.0, 0.0],
+                      query_vec=target, fail_photos={"photo:bad"})
+    sid_bad = _create_subject(conn, "Bad Photo")
+    _enroll(conn, sid_bad, [0.9, 0.1, 0.0], model_tag="old-v1",
+            source_image_b64="photo:bad")
+    sid_ok = _create_subject(conn, "Good Person")
+    _enroll(conn, sid_ok, target, model_tag="new-v1")
+    _set_rule(conn, require_face=True)
+
+    d = _run_verify(conn)
+    assert d.status == "pass"
+    assert d.matched_subject_id == sid_ok
+    from backend.face import orchestrator
+    assert (sid_bad, "new-v1") in orchestrator._reembed_failed
+
+
+def test_lazy_reembed_no_photo_subject_skipped(conn, monkeypatch):
+    """旧模型 enrollment 无照片 → 无从重算，跳过且不报错。"""
+    target = [1.0, 0.0, 0.0]
+    calls = _lazy_env(conn, monkeypatch, photo_vec=target, query_vec=target)
+    sid = _create_subject(conn, "No Photo Person")
+    _enroll(conn, sid, [0.5, 0.5, 0.0], model_tag="old-v1")  # 无 source_image
+    _set_rule(conn, require_face=True)
+
+    d = _run_verify(conn)
+    assert d.status == "deny"
+    assert d.failure_reason == "no_match"
+    assert calls["infer"] == 1  # 仅 query
+
+
+def test_lazy_reembed_failed_set_prevents_retry(conn, monkeypatch):
+    """失败集合：同一 (subject, model) 只重算一次，后续验证不再重试轰炸。"""
+    target = [1.0, 0.0, 0.0]
+    calls = _lazy_env(conn, monkeypatch, photo_vec=target, query_vec=target,
+                      fail_photos={"photo:bad"})
+    sid = _create_subject(conn, "Retry Person")
+    _enroll(conn, sid, [0.5, 0.5, 0.0], model_tag="old-v1",
+            source_image_b64="photo:bad")
+    _set_rule(conn, require_face=True)
+
+    d1 = _run_verify(conn)
+    assert d1.status == "deny"
+    assert calls["infer"] == 2  # query + 失败的照片重算
+    d2 = _run_verify(conn)
+    assert d2.status == "deny"
+    assert calls["infer"] == 3  # 只多了第二次 query；照片不再重试
+
+
+def test_verify_lazy_recompute_limited_per_request(conn, monkeypatch):
+    """验证路径兜底限量：单次请求最多补算 LAZY_RECOMPUTE_PER_REQUEST 个 subject，
+    剩余留给后台任务/后续请求。"""
+    from backend.face import orchestrator
+    target = [1.0, 0.0, 0.0]
+    calls = _lazy_env(conn, monkeypatch, photo_vec=[0.0, 1.0, 0.0], query_vec=target)
+    assert orchestrator.LAZY_RECOMPUTE_PER_REQUEST == 3
+    for i in range(5):
+        sid = _create_subject(conn, f"Bulk {i}")
+        _enroll(conn, sid, [0.5, 0.5, 0.0], model_tag="old-v1",
+                source_image_b64=f"photo:{i}")
+    _set_rule(conn, require_face=True)
+
+    _run_verify(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS n FROM face_enrollments WHERE model_tag = 'new-v1'")
+    assert cur.fetchone()["n"] == 3  # 限量 3
+    assert calls["infer"] == 4  # 1 query + 3 photos
+
+    _run_verify(conn)  # 第二次请求补齐剩余 2 个
+    cur.execute("SELECT COUNT(*) AS n FROM face_enrollments WHERE model_tag = 'new-v1'")
+    assert cur.fetchone()["n"] == 5
+    assert calls["infer"] == 7  # +1 query +2 photos
+
+
+def test_reembed_inflight_dedup(conn, monkeypatch):
+    """进行中去重：并发补算同一 (subject, model) 只推理一次、只插一行。"""
+    from backend.face import orchestrator
+
+    orchestrator._reembed_failed.clear()
+    orchestrator._reembed_inflight.clear()
+    sid = _create_subject(conn, "Concurrent Person")
+    _enroll(conn, sid, [0.5, 0.5, 0.0], model_tag="old-v1", source_image_b64="photo:c")
+
+    calls = {"infer": 0}
+
+    async def slow_infer(image_b64):
+        calls["infer"] += 1
+        await asyncio.sleep(0.05)
+        return {"embedding": _emb_bytes([1.0, 0.0, 0.0]), "model_tag": "new-v1"}
+
+    async def _both():
+        await asyncio.gather(
+            orchestrator.ensure_enrollments_for_model(conn, 1, "new-v1", slow_infer),
+            orchestrator.ensure_enrollments_for_model(conn, 1, "new-v1", slow_infer),
+        )
+    asyncio.run(_both())
+    assert calls["infer"] == 1
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS n FROM face_enrollments WHERE model_tag = 'new-v1'")
+    assert cur.fetchone()["n"] == 1
+
+
+def test_bg_recompute_full_batch_and_singleton(conn, monkeypatch):
+    """配置变更触发的后台批量补算：全量补齐 + 进度 status + 同 key 不重复启动。"""
+    from backend.face import endpoint_client, orchestrator
+
+    orchestrator._reembed_failed.clear()
+    orchestrator._reembed_inflight.clear()
+    orchestrator._recompute_tasks.clear()
+    orchestrator._recompute_status.clear()
+
+    for i in range(5):
+        sid = _create_subject(conn, f"Batch {i}")
+        _enroll(conn, sid, [0.5, 0.5, 0.0], model_tag="old-v1",
+                source_image_b64=f"photo:{i}")
+
+    calls = {"infer": 0}
+
+    async def fake_health(endpoint, auth_token=None):
+        return {"model_tag": "new-v1", "status": "ok"}
+
+    async def fake_infer(cfg, image_b64):
+        calls["infer"] += 1
+        return {"embedding": _emb_bytes([1.0, 0.0, 0.0]), "model_tag": "new-v1"}
+
+    monkeypatch.setattr(endpoint_client, "health", fake_health)
+    monkeypatch.setattr(endpoint_client, "infer", fake_infer)
+
+    async def _run():
+        assert orchestrator.start_background_recompute(
+            1, "lan", "http://fake.local", None) is True
+        # 任务仍在（或刚建未完成）→ 同 key 幂等拒绝二次启动
+        assert orchestrator.start_background_recompute(
+            1, "lan", "http://fake.local", None) is False
+        await orchestrator._recompute_tasks[(1, "lan", "http://fake.local")]
+    asyncio.run(_run())
+
+    st = orchestrator.get_recompute_status(1)
+    assert st == {"model_tag": "new-v1", "done": 5, "total": 5, "running": False}
+    assert calls["infer"] == 5
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS n FROM face_enrollments WHERE model_tag = 'new-v1'")
+    assert cur.fetchone()["n"] == 5
+    # 任务结束后可再次启动（重入）
+    async def _rerun():
+        assert orchestrator.start_background_recompute(
+            1, "lan", "http://fake.local", None) is True
+        await orchestrator._recompute_tasks[(1, "lan", "http://fake.local")]
+    asyncio.run(_rerun())
+    assert calls["infer"] == 5  # 已全部补齐，零额外推理
 
 
 # ── endpoint_client /infer parsing: passive liveness (spoof) ─────────────

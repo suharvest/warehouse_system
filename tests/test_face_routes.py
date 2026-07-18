@@ -156,6 +156,14 @@ class TestFaceConfigVerifyFrequency:
             "/api/face/config", json={**self._BASE, "verify_mode": "bogus"})
         assert resp.status_code == 400, resp.text
 
+    def test_config_get_exposes_recompute_status(self, admin_client):
+        """GET config 暴露后台补算进度字段（无任务时为 null / 或任务状态 dict）。"""
+        resp = admin_client.put("/api/face/config", json=self._BASE)
+        assert resp.status_code == 200, resp.text
+        got = admin_client.get("/api/face/config").json()
+        assert "recompute_status" in got
+        assert got["recompute_status"] is None or isinstance(got["recompute_status"], dict)
+
 
 class TestFaceVerifyMcpWarehouseScope:
     """MCP API keys bind to one warehouse; face rules must use that scope too."""

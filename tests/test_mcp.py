@@ -786,3 +786,117 @@ class TestPushFacesToDevice:
     def test_push_unknown_connection_404(self, admin_client):
         r = admin_client.post("/api/mcp/connections/nope1234/devices/1/push-faces")
         assert r.status_code == 404
+
+    # ── push 前置懒重算（反方向：lan 注册 → 本机下发补 WE2 行）────────────
+
+    def _insert_lan_only_subject(self, admin_client, name, photo):
+        """造一个只有 lan 模型 enrollment（带注册照片）的 subject，返回 (sid, tid)。"""
+        import struct as _s
+        sub = admin_client.post("/api/face/subjects", json={"name": name}).json()
+        sid = sub["id"]
+        tid = admin_client.get("/api/face/subjects").json()[0]["tenant_id"]
+        from db import get_engine
+        from metadata import face_enrollments as _t_fe
+        with get_engine().begin() as c:
+            c.execute(_t_fe.insert().values(
+                subject_id=sid, tenant_id=tid, model_tag="hailo:remote-v1",
+                embedding=b"".join(_s.pack("<f", x) for x in [0.3, 0.3, 0.3]),
+                source_image_b64=photo, is_active=1,
+            ))
+        return sid, tid
+
+    def _run_push(self, admin_client, monkeypatch):
+        """起假设备服务器执行一次 push，返回 (resp_json, captured_body)。"""
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                captured["body"] = _json.loads(self.rfile.read(n))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", port)
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            conn_id = self._make_conn(admin_client)
+            dev_id = self._add_device(admin_client, conn_id, port=port)
+            r = admin_client.post(
+                f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            th.join(timeout=5)
+            return r.json(), captured.get("body")
+        finally:
+            srv.server_close()
+
+    def test_push_lazy_recomputes_we2_row_from_photo(self, admin_client, monkeypatch):
+        """subject 只有 lan 模型 enrollment + 照片 → push 用 WE2 模拟器补算
+        128D 行并纳入本次下发（统一原则：切换模式永不要求重录）。"""
+        import struct as _s
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+        from face import orchestrator
+        orchestrator._reembed_failed.clear()
+        orchestrator._reembed_inflight.clear()
+
+        sid, tid = self._insert_lan_only_subject(
+            admin_client, "LanOnly Person", "photo:lan-only")
+        calls = {"local": 0}
+        we2_emb = b"".join(_s.pack("<f", x) for x in [1.0, 0.0, 0.0, 0.0])
+
+        def fake_local(image_b64):
+            calls["local"] += 1
+            assert image_b64 == "photo:lan-only"
+            return {"embedding": we2_emb, "model_tag": DEVICE_FACE_MODEL_TAG}
+
+        monkeypatch.setattr("face.endpoint_client._infer_local", fake_local)
+        try:
+            data, body = self._run_push(admin_client, monkeypatch)
+            assert data["success"] is True, data
+            assert calls["local"] == 1
+            names = [f["name"] for f in body["faces"]]
+            assert "LanOnly Person" in names
+            # DB 长出 WE2 行；照片保留在源 lan 行、新行不复制
+            from db import get_engine
+            from sqlalchemy import text as _text
+            with get_engine().connect() as c:
+                rows = c.execute(_text(
+                    "SELECT model_tag, source_image_b64 FROM face_enrollments "
+                    "WHERE subject_id = :sid"), {"sid": sid}).fetchall()
+            tags = {r[0] for r in rows}
+            assert {"hailo:remote-v1", DEVICE_FACE_MODEL_TAG} <= tags
+            we2_rows = [r for r in rows if r[0] == DEVICE_FACE_MODEL_TAG]
+            assert we2_rows[0][1] is None
+        finally:
+            admin_client.delete(f"/api/face/subjects/{sid}")
+
+    def test_push_no_recompute_when_we2_row_exists(self, admin_client, monkeypatch):
+        """subject 已有 WE2 行 → push 零重算（不调模拟器）。"""
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+        from face import orchestrator
+        orchestrator._reembed_failed.clear()
+        orchestrator._reembed_inflight.clear()
+
+        sid = self._enroll(
+            admin_client, "We2 Ready", DEVICE_FACE_MODEL_TAG, [1.0, 0.0, 0.0])
+        calls = {"local": 0}
+
+        def fake_local(image_b64):
+            calls["local"] += 1
+            return {"embedding": b"\x00" * 16, "model_tag": DEVICE_FACE_MODEL_TAG}
+
+        monkeypatch.setattr("face.endpoint_client._infer_local", fake_local)
+        try:
+            data, body = self._run_push(admin_client, monkeypatch)
+            assert data["success"] is True, data
+            assert calls["local"] == 0
+            assert "We2 Ready" in [f["name"] for f in body["faces"]]
+        finally:
+            admin_client.delete(f"/api/face/subjects/{sid}")

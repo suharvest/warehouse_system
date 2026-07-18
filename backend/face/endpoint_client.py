@@ -33,6 +33,10 @@ logger = logging.getLogger("warehouse.face")
 
 DEFAULT_TIMEOUT = 10.0
 
+# 进程内 WE2 模拟器（mode=local）的 embedding 模型标签。设备端（Himax WE2 NPU）
+# 与本模拟器同模型，routers/mcp_admin.py 的 DEVICE_FACE_MODEL_TAG 也须与此一致。
+LOCAL_MODEL_TAG = "we2-mfnr6-128-v1"
+
 
 def _headers(auth_token: Optional[str]) -> dict:
     h = {"Content-Type": "application/json"}
@@ -90,7 +94,7 @@ def _infer_local(image_b64: str) -> dict:
     emb_bytes = best.get("embedding_bytes")
     if not emb_bytes:
         raise FaceEndpointError("infer_no_embedding")
-    model_tag = result.get("model_tag") or "we2-mfnr6-128-v1"
+    model_tag = result.get("model_tag") or LOCAL_MODEL_TAG
     return {"embedding": emb_bytes, "model_tag": model_tag}
 
 
