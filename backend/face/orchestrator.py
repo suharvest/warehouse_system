@@ -653,7 +653,16 @@ async def verify_mcp_face(
     # the trust root is "the device's HTTP response", not "the model's word".
     # speaker_subject_id / speaker_name are ignored here on purpose.
     # Anything short of a live, resolvable, allowed identity → deny (fail-closed).
-    if cfg.mode == "local":
+    #
+    # lan 无图回退：MCP 调用未带 image/embedding、但连接能定位到设备时，同样走
+    # 设备拉身份——lan 设备识别代理（/api/face/device/recognize）刚在现场识别过，
+    # 身份已在设备侧，直接拉取即可（与 local 模式同一条 B 方案链路，audit reason
+    # 沿用 session_verified / device_no_identity 等现有值）。带图/带 embedding
+    # 时行为不变（下方端点重比对）；无图且无 pull_device 仍 deny no_image_provided。
+    use_device_pull = cfg.mode == "local" or (
+        not embedding_bytes and not image_b64 and pull_device is not None
+    )
+    if use_device_pull:
         def _session_deny(reason: str, matched=None) -> Decision:
             d = Decision(status="deny", failure_reason=reason, matched_subject_id=matched)
             _log_decision(
