@@ -82,16 +82,20 @@ def conn(monkeypatch):
         pass
 
 
-def _set_config(conn, *, enabled: bool, min_confidence: float = 0.65, verify_mode: str = "interface"):
+def _set_config(conn, *, enabled: bool, min_confidence: float = 0.65,
+                mode: str = "lan", verify_frequency: str = "always"):
+    """新语义：验证链路只看 mode（local=设备拉身份 / lan=端点比对）；
+    verify_frequency 只控制会话缓存（always=每次都验 / session=首验后免验）。"""
     cur = conn.cursor()
     cur.execute("DELETE FROM tenant_face_config WHERE tenant_id = 1")
     cur.execute(
         """
         INSERT INTO tenant_face_config
-            (tenant_id, enabled, mode, endpoint, embedding_model_tag, min_confidence, verify_mode)
-        VALUES (1, ?, 'lan', 'http://fake.local', 'fake-v1', ?, ?)
+            (tenant_id, enabled, mode, endpoint, embedding_model_tag,
+             min_confidence, verify_frequency)
+        VALUES (1, ?, ?, 'http://fake.local', 'fake-v1', ?, ?)
         """,
-        (1 if enabled else 0, min_confidence, verify_mode),
+        (1 if enabled else 0, mode, min_confidence, verify_frequency),
     )
     conn.commit()
 
@@ -378,7 +382,7 @@ def _verify_session(conn, *, device_identity="__none__", **kw):
 
 def test_session_no_device_resolvable_denies(conn):
     """无法为该 API Key 定位设备 → device_unresolved deny。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     _set_rule(conn, require_face=True)
 
     decision = _verify_session(conn, device_identity="__none__")
@@ -388,7 +392,7 @@ def test_session_no_device_resolvable_denies(conn):
 
 def test_session_device_no_identity_denies(conn):
     """设备应答无效身份（没拍到人/陌生人/忙/超时）→ device_no_identity deny。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     _set_rule(conn, require_face=True)
 
     decision = _verify_session(conn, device_identity={"valid": False})
@@ -398,7 +402,7 @@ def test_session_device_no_identity_denies(conn):
 
 def test_session_ignores_llm_forwarded_identity(conn):
     """即便 LLM 传了合法 speaker_subject_id，session 也只认设备拉取结果。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     sid = _create_subject(conn, "Real Person")
     _set_rule(conn, require_face=True)
 
@@ -412,7 +416,7 @@ def test_session_ignores_llm_forwarded_identity(conn):
 
 def test_session_device_subject_passes(conn):
     """设备上报有效 subject_id → 解析放行，confidence 取设备 similarity。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     sid = _create_subject(conn, "Session Speaker")
     _set_rule(conn, require_face=True)
 
@@ -427,7 +431,7 @@ def test_session_device_subject_passes(conn):
 
 def test_session_device_name_only_passes(conn):
     """lan 模式设备只给 name(subject_id=0) → 按姓名解析放行。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     sid = _create_subject(conn, "By Name")
     _set_rule(conn, require_face=True)
 
@@ -440,7 +444,7 @@ def test_session_device_name_only_passes(conn):
 
 def test_session_device_name_ambiguous_denies(conn):
     """lan 设备只回 name，但同租户有两个同名 active subject → 无法确定 → deny。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     _create_subject(conn, "Dupe Name")
     _create_subject(conn, "Dupe Name")
     _set_rule(conn, require_face=True)
@@ -453,7 +457,7 @@ def test_session_device_name_ambiguous_denies(conn):
 
 
 def test_session_device_subject_not_in_allow_list_denies(conn):
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     sid_allowed = _create_subject(conn, "Allowed")
     sid_other = _create_subject(conn, "Other")
     _set_rule(conn, require_face=True, allowed_subject_ids=[sid_allowed])
@@ -474,7 +478,7 @@ def test_session_verify_once_per_conversation(conn):
 
     orchestrator._verify_once_cache.clear()
     sid = _create_subject(conn, "Conv Person")
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local", verify_frequency="session")
     _set_rule(conn, require_face=True)
 
     calls = {"fresh1": 0, "fresh0": 0}
@@ -522,7 +526,7 @@ def test_session_cached_denies_deactivated_subject(conn):
 
     orchestrator._verify_once_cache.clear()
     sid = _create_subject(conn, "Will Deactivate")
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local", verify_frequency="session")
     _set_rule(conn, require_face=True)
 
     fresh1_returns = [{"valid": True, "subject_id": sid, "similarity": 0.7, "conv_seq": 9}]
@@ -557,7 +561,7 @@ def test_session_cached_denies_deactivated_subject(conn):
 
 def test_session_device_inactive_subject_denies(conn):
     """设备上报的 subject 已停用 → 解析失败(不回退姓名) → speaker_unresolved deny。"""
-    _set_config(conn, enabled=True, verify_mode="session")
+    _set_config(conn, enabled=True, mode="local")
     sid = _create_subject(conn, "Inactive")
     cur = conn.cursor()
     cur.execute("UPDATE face_subjects SET is_active = 0 WHERE id = ?", (sid,))
@@ -569,6 +573,103 @@ def test_session_device_inactive_subject_denies(conn):
     )
     assert decision.status == "deny"
     assert decision.failure_reason == "speaker_unresolved"
+
+
+def test_local_always_never_caches(conn):
+    """mode=local + verify_frequency='always'（默认）→ 每笔都 fresh=1 现场验证，
+    不读不写缓存。"""
+    import backend.face.device_pull as device_pull
+    from backend.face import orchestrator
+
+    orchestrator._verify_once_cache.clear()
+    sid = _create_subject(conn, "Always Person")
+    _set_config(conn, enabled=True, mode="local")  # verify_frequency 默认 always
+    _set_rule(conn, require_face=True)
+
+    calls = {"fresh1": 0, "fresh0": 0}
+
+    async def _fake_pull(dev, *, fresh=1):
+        calls["fresh1" if fresh == 1 else "fresh0"] += 1
+        return {"valid": True, "subject_id": sid, "similarity": 0.8, "conv_seq": 3}
+
+    orig = device_pull.pull_current_speaker
+    device_pull.pull_current_speaker = _fake_pull
+    try:
+        for _ in range(2):
+            d = asyncio.run(orchestrator.verify_mcp_face(
+                conn, tenant_id=1, user_id=101, warehouse_id=None,
+                operation="stock_out", pull_device=_SENTINEL_DEVICE,
+            ))
+            assert d.status == "pass" and d.failure_reason == "session_verified"
+        assert calls == {"fresh1": 2, "fresh0": 0}
+        assert not orchestrator._verify_once_cache
+    finally:
+        device_pull.pull_current_speaker = orig
+
+
+def test_lan_session_frequency_caches_after_first_pass(conn, monkeypatch):
+    """mode=lan + verify_frequency='session'：首验走 /infer 比对并缓存，
+    之后 TTL 内免验（session_cached，零 infer 调用）。"""
+    from backend.face import endpoint_client, orchestrator
+
+    orchestrator._verify_once_cache.clear()
+    target = [1.0, 0.0, 0.0]
+    calls = {"infer": 0}
+
+    async def fake_infer(cfg, image_b64):
+        calls["infer"] += 1
+        return {"embedding": _emb_bytes(target), "model_tag": "fake-v1"}
+
+    monkeypatch.setattr(endpoint_client, "infer", fake_infer)
+    _set_config(conn, enabled=True, min_confidence=0.5, verify_frequency="session")
+    sid = _create_subject(conn, "Lan Session Person")
+    _enroll(conn, sid, target)
+    _set_rule(conn, require_face=True, allowed_subject_ids=[sid])
+
+    def _run(img="snap"):
+        return asyncio.run(orchestrator.verify_mcp_face(
+            conn, tenant_id=1, user_id=101, warehouse_id=None,
+            operation="stock_out", image_b64=img,
+        ))
+    try:
+        d1 = _run()
+        assert d1.status == "pass" and d1.failure_reason is None
+        assert calls["infer"] == 1
+
+        d2 = _run(img="")  # 免验：无需再附图
+        assert d2.status == "pass" and d2.failure_reason == "session_cached"
+        assert d2.matched_subject_id == sid
+        assert calls["infer"] == 1  # 零额外 infer
+    finally:
+        orchestrator._verify_once_cache.clear()
+
+
+def test_lan_always_no_cache(conn, monkeypatch):
+    """mode=lan + verify_frequency='always'：每笔都 /infer 重比对，无缓存。"""
+    from backend.face import endpoint_client, orchestrator
+
+    orchestrator._verify_once_cache.clear()
+    target = [1.0, 0.0, 0.0]
+    calls = {"infer": 0}
+
+    async def fake_infer(cfg, image_b64):
+        calls["infer"] += 1
+        return {"embedding": _emb_bytes(target), "model_tag": "fake-v1"}
+
+    monkeypatch.setattr(endpoint_client, "infer", fake_infer)
+    _set_config(conn, enabled=True, min_confidence=0.5)
+    sid = _create_subject(conn, "Lan Always Person")
+    _enroll(conn, sid, target)
+    _set_rule(conn, require_face=True)
+
+    for _ in range(2):
+        d = asyncio.run(orchestrator.verify_mcp_face(
+            conn, tenant_id=1, user_id=101, warehouse_id=None,
+            operation="stock_out", image_b64="snap",
+        ))
+        assert d.status == "pass"
+    assert calls["infer"] == 2
+    assert not orchestrator._verify_once_cache
 
 
 # ── endpoint_client /infer parsing: passive liveness (spoof) ─────────────

@@ -52,9 +52,12 @@ class FaceConfigPayload(BaseModel):
     embedding_model_tag: Optional[str] = None
     min_confidence: float = 0.65
     greeting_enabled: bool = False
-    # 鉴权强度（与推理拓扑 mode 正交）：'interface'（默认，fail-closed 重比对）
-    # 或 'session'（信任设备会话起点的本地匹配；说话人未识别时同样 deny）。
-    verify_mode: str = "interface"
+    # 人脸验证频率（与推理拓扑 mode 正交，只控制会话缓存）：
+    #   'always'（默认，每次操作都验证）或 'session'（首验通过后本会话免验）。
+    verify_frequency: Optional[str] = None
+    # DEPRECATED: 旧客户端兼容入参。未传 verify_frequency 时按
+    # session→session / interface→always 映射；两者都传时 verify_frequency 优先。
+    verify_mode: Optional[str] = None
 
 class FaceRulePayload(BaseModel):
     warehouse_id: Optional[int] = None
@@ -118,6 +121,7 @@ async def face_get_config(
                 _t_tenant_face_config.c.min_confidence,
                 _t_tenant_face_config.c.greeting_enabled,
                 _t_tenant_face_config.c.verify_mode,
+                _t_tenant_face_config.c.verify_frequency,
                 _t_tenant_face_config.c.created_at,
                 _t_tenant_face_config.c.updated_at,
             ).where(_t_tenant_face_config.c.tenant_id == tid)
@@ -125,7 +129,8 @@ async def face_get_config(
     if not row:
         return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
                 "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65,
-                "greeting_enabled": False, "verify_mode": "interface"}
+                "greeting_enabled": False, "verify_frequency": "always",
+                "verify_mode": "interface"}  # verify_mode: deprecated echo
     return {
         "tenant_id": row.tenant_id,
         "enabled": bool(row.enabled),
@@ -135,6 +140,8 @@ async def face_get_config(
         "embedding_model_tag": row.embedding_model_tag,
         "min_confidence": row.min_confidence,
         "greeting_enabled": bool(row.greeting_enabled),
+        "verify_frequency": row.verify_frequency or "always",
+        # DEPRECATED: 仅为旧客户端保留的回显；新代码请读 verify_frequency。
         "verify_mode": row.verify_mode or "interface",
         "created_at": row.created_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.created_at, datetime) else row.created_at,
         "updated_at": row.updated_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.updated_at, datetime) else row.updated_at,
@@ -159,11 +166,26 @@ async def face_put_config(
             status_code=400,
             detail="mode 必须是 local 或 lan",
         )
-    if payload.verify_mode not in ("session", "interface"):
-        raise HTTPException(
-            status_code=400,
-            detail="verify_mode 必须是 session 或 interface",
-        )
+    # verify_frequency 优先；旧客户端只传 verify_mode 时按迁移同规则映射
+    # （session→session，interface→always）。两者都缺省 → 'always'。
+    if payload.verify_frequency is not None:
+        if payload.verify_frequency not in ("always", "session"):
+            raise HTTPException(
+                status_code=400,
+                detail="verify_frequency 必须是 always 或 session",
+            )
+        frequency = payload.verify_frequency
+    elif payload.verify_mode is not None:
+        if payload.verify_mode not in ("session", "interface"):
+            raise HTTPException(
+                status_code=400,
+                detail="verify_mode 必须是 session 或 interface",
+            )
+        frequency = "session" if payload.verify_mode == "session" else "always"
+    else:
+        frequency = "always"
+    # deprecated 列反向同步写入（旧版本回滚后仍能读到一致语义）。
+    legacy_verify_mode = "session" if frequency == "session" else "interface"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_engine().begin() as sa_conn:
         existing = sa_conn.execute(
@@ -181,7 +203,8 @@ async def face_put_config(
                     embedding_model_tag=payload.embedding_model_tag,
                     min_confidence=payload.min_confidence,
                     greeting_enabled=1 if payload.greeting_enabled else 0,
-                    verify_mode=payload.verify_mode,
+                    verify_frequency=frequency,
+                    verify_mode=legacy_verify_mode,
                     updated_at=now,
                 )
             )
@@ -196,7 +219,8 @@ async def face_put_config(
                     embedding_model_tag=payload.embedding_model_tag,
                     min_confidence=payload.min_confidence,
                     greeting_enabled=1 if payload.greeting_enabled else 0,
-                    verify_mode=payload.verify_mode,
+                    verify_frequency=frequency,
+                    verify_mode=legacy_verify_mode,
                     created_at=now,
                     updated_at=now,
                 )

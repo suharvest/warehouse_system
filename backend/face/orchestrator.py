@@ -20,11 +20,14 @@ from .models import Decision, FaceConfig, FaceRule
 
 logger = logging.getLogger("warehouse.face")
 
-# 「仅首次验证（之后免验）」= verify_mode 'session' 的按对话缓存。设备每轮对话把
-# conv_seq 递增（CaptureCurrentSpeaker）；同一对话内首笔操作走 fresh=1 现场验证
-# （含屏幕预览），之后同 conv_seq 的操作直接返回缓存（免验、不再拍照/预览）。
-# 键：设备 ip:port（一连接一设备）。进程内内存，重启即失效（首笔重验，安全）。
-# TTL 上限兜底：即使一直不换对话，超过 N 秒也强制重验，防长会话无限免验。
+# 「仅首次验证（之后免验）」= verify_frequency 'session' 的按对话缓存，两种
+# mode（local 设备拉身份 / lan 端点比对）都生效。local 模式设备每轮对话把
+# conv_seq 递增（CaptureCurrentSpeaker）；同一对话内首笔操作走现场验证（含屏幕
+# 预览），之后同 conv_seq 的操作直接返回缓存（免验、不再拍照/预览）。lan 模式无
+# conv_seq 概念（缓存条目 conv_seq=None），退化为 TTL 内免验。
+# 键：设备 ip:port（一连接一设备）；无可解析设备时按租户。进程内内存，重启即
+# 失效（首笔重验，安全）。TTL 上限兜底：即使一直不换对话，超过 N 秒也强制重验，
+# 防长会话无限免验。verify_frequency='always' 时完全不读不写本缓存。
 _verify_once_cache: dict = {}
 _VERIFY_ONCE_TTL_S = 600  # 10 分钟安全上限
 
@@ -42,7 +45,8 @@ def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
         tenant_face_config.c.auth_token,
         tenant_face_config.c.embedding_model_tag,
         tenant_face_config.c.min_confidence,
-        tenant_face_config.c.verify_mode,
+        # NOTE: verify_mode 列已 deprecated（仅为旧版本回滚保留），这里刻意不读。
+        tenant_face_config.c.verify_frequency,
     ).where(tenant_face_config.c.tenant_id == tenant_id)
     with get_engine().connect() as sa_conn:
         row = sa_conn.execute(stmt).first()
@@ -56,7 +60,7 @@ def _load_config(conn, tenant_id: int) -> Optional[FaceConfig]:
         auth_token=row.auth_token,
         embedding_model_tag=row.embedding_model_tag,
         min_confidence=float(row.min_confidence or 0.65),
-        verify_mode=row.verify_mode or "interface",
+        verify_frequency=row.verify_frequency or "always",
     )
 
 
@@ -353,14 +357,63 @@ async def verify_mcp_face(
         )
         return decision
 
-    # ── Session mode (backend-direct device pull, B 方案) ────────────────
+    # ── 验证链路只看 mode ────────────────────────────────────────────────
+    #   mode='local' → 后端直连设备拉身份（B 方案，原 verify_mode='session' 分支）
+    #   mode='lan'   → 端点 /infer 重比对（原 verify_mode='interface' 分支）
+    # verify_frequency 只控制会话缓存（'session' 首验后免验 / 'always' 每次都验），
+    # 对两种 mode 都生效。旧 verify_mode 列 deprecated，代码不再读。
+    verify_once = cfg.verify_frequency == "session"
+    cache_key = (
+        f"{pull_device.ip}:{pull_device.port}" if pull_device is not None
+        else f"tenant:{tenant_id}"
+    )
+
+    def _finish_pass(matched, confidence, reason):
+        decision = Decision(
+            status="pass", failure_reason=reason,
+            matched_subject_id=matched, confidence=confidence,
+        )
+        _log_decision(
+            conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
+            tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
+            confidence=confidence, decision=decision.status,
+            failure_reason=decision.failure_reason,
+        )
+        return decision
+
+    # ── 「仅首次验证」缓存命中检查（verify_frequency='session'，两种 mode 通用）──
+    # local 模式缓存条目带设备 conv_seq：用 fresh=0（零硬件动作）廉价读当前
+    # conv_seq 判断是否还是那轮对话；lan 模式条目 conv_seq=None → TTL 内免验。
+    # 命中后仅复查该 subject 仍活跃 + 仍在白名单（规则可能变），不再现场验证；
+    # 停用/移出白名单则作废缓存、走下面重验。
+    if verify_once:
+        cached = _verify_once_cache.get(cache_key)
+        if cached is not None and (time.time() - cached["ts"]) <= _VERIFY_ONCE_TTL_S:
+            same_session = True
+            if pull_device is not None and cached.get("conv_seq") is not None:
+                from . import device_pull
+                ident0 = await device_pull.pull_current_speaker(pull_device, fresh=0)
+                cur_seq = ident0.get("conv_seq") if isinstance(ident0, dict) else None
+                same_session = isinstance(cur_seq, int) and cur_seq == cached["conv_seq"]
+            if same_session:
+                matched = _resolve_speaker_subject(
+                    conn, tenant_id=tenant_id,
+                    speaker_subject_id=cached["subject_id"], speaker_name=None,
+                )
+                if matched is not None and (
+                    not rule.allowed_subject_ids or matched in rule.allowed_subject_ids
+                ):
+                    return _finish_pass(matched, None, "session_cached")
+            _verify_once_cache.pop(cache_key, None)
+
+    # ── mode='local'：后端直连设备拉身份（B 方案） ────────────────────────
     # The identity is NOT taken from LLM-forwarded speaker_* params (those are
     # LLM-visible → forgeable by prompt injection). Instead the backend pulls it
     # straight from the physical device over the LAN (fresh capture each op), so
     # the trust root is "the device's HTTP response", not "the model's word".
     # speaker_subject_id / speaker_name are ignored here on purpose.
     # Anything short of a live, resolvable, allowed identity → deny (fail-closed).
-    if cfg.verify_mode == "session":
+    if cfg.mode == "local":
         def _session_deny(reason: str, matched=None) -> Decision:
             d = Decision(status="deny", failure_reason=reason, matched_subject_id=matched)
             _log_decision(
@@ -375,41 +428,6 @@ async def verify_mcp_face(
             return _session_deny("device_unresolved")
 
         from . import device_pull
-        dev_key = f"{pull_device.ip}:{pull_device.port}"
-
-        def _finish_pass(matched, confidence, reason):
-            decision = Decision(
-                status="pass", failure_reason=reason,
-                matched_subject_id=matched, confidence=confidence,
-            )
-            _log_decision(
-                conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
-                tenant_id=tenant_id, warehouse_id=warehouse_id, operation=operation,
-                confidence=confidence, decision=decision.status,
-                failure_reason=decision.failure_reason,
-            )
-            return decision
-
-        # ── 仅首次（verify-once-per-conversation）缓存命中检查 ──────────────
-        # 同一对话内首笔操作走下面的 fresh=1 现场验证（含屏幕预览）；之后同 conv_seq
-        # 的操作直接读缓存放行（免验、不再拍照）。用 fresh=0（零硬件动作）廉价读当前
-        # conv_seq 判断是否还是那轮对话。
-        cached = _verify_once_cache.get(dev_key)
-        if cached is not None and (time.time() - cached["ts"]) <= _VERIFY_ONCE_TTL_S:
-            ident0 = await device_pull.pull_current_speaker(pull_device, fresh=0)
-            cur_seq = ident0.get("conv_seq") if isinstance(ident0, dict) else None
-            if isinstance(cur_seq, int) and cur_seq == cached["conv_seq"]:
-                # 同一对话，已验过 → 仅复查该 subject 仍活跃 + 仍在白名单（规则可能变），
-                # 不再现场拍照。停用/移出白名单则作废缓存、走下面重验。
-                matched = _resolve_speaker_subject(
-                    conn, tenant_id=tenant_id,
-                    speaker_subject_id=cached["subject_id"], speaker_name=None,
-                )
-                if matched is not None and (
-                    not rule.allowed_subject_ids or matched in rule.allowed_subject_ids
-                ):
-                    return _finish_pass(matched, None, "session_cached")
-                _verify_once_cache.pop(dev_key, None)
 
         # ── 现场验证（首笔 / 缓存未命中 / 缓存失效）：fresh=1 现拍 + 预览 ──────
         ident = await device_pull.pull_current_speaker(pull_device, fresh=1)
@@ -441,15 +459,17 @@ async def verify_mcp_face(
             and math.isfinite(raw_conf)
             else None
         )
-        # 缓存本轮对话的验证结果，供同 conv_seq 的后续操作免验。
-        conv_seq = ident.get("conv_seq")
-        if isinstance(conv_seq, int):
-            _verify_once_cache[dev_key] = {
-                "conv_seq": conv_seq, "subject_id": matched, "ts": time.time(),
+        # 仅 verify_frequency='session' 缓存本轮对话的验证结果，供后续操作免验；
+        # 'always' 不写缓存（每次都现场验证）。conv_seq 缺失时退化为 TTL 内免验。
+        if verify_once:
+            conv_seq = ident.get("conv_seq")
+            _verify_once_cache[cache_key] = {
+                "conv_seq": conv_seq if isinstance(conv_seq, int) else None,
+                "subject_id": matched, "ts": time.time(),
             }
         return _finish_pass(matched, confidence, "session_verified")
 
-    # ── Interface mode (default, fail-closed) ───────────────────────────
+    # ── mode='lan'（含 mode 未设默认）：端点接口比对，fail-closed ─────────
     # Obtain embedding: either supplied by device (WE2 path) or via /infer.
     if embedding_bytes:
         model_tag = embedding_model_tag or cfg.embedding_model_tag or "unknown"
@@ -521,6 +541,12 @@ async def verify_mcp_face(
         )
         return decision
 
+    # lan 模式的「仅首次验证」：首验通过后写缓存（无 conv_seq 概念 → conv_seq=None，
+    # TTL 内免验），后续操作在上方缓存命中检查处直接 session_cached 放行。
+    if verify_once:
+        _verify_once_cache[cache_key] = {
+            "conv_seq": None, "subject_id": best.subject_id, "ts": time.time(),
+        }
     decision = Decision(
         status="pass", failure_reason=None,
         confidence=best.confidence, matched_subject_id=best.subject_id,
