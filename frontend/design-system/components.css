@@ -1594,6 +1594,39 @@
   border: 1px solid #d3e9b3;
 }
 
+/* 「待下发」状态：改了需下发到设备才生效的内容时才出现；即时生效的不显示 */
+.face-pending-summary[hidden] { display: none; }
+
+/* 逐字段橙点 badge —— 挂在标签后，提示这个字段改了还没下发 */
+.face-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: middle;
+  background: #fff3e0;
+  color: #b25b00;
+  border: 1px solid #f3d199;
+}
+.face-pending-badge[hidden] { display: none; }
+
+/* 有待下发时，「下发到设备」按钮高亮引导 */
+.face-push-btn.has-pending {
+  box-shadow: 0 0 0 3px rgba(240, 160, 30, 0.28);
+  animation: facePushPulse 1.8s ease-in-out infinite;
+}
+@keyframes facePushPulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(240, 160, 30, 0.28); }
+  50%      { box-shadow: 0 0 0 5px rgba(240, 160, 30, 0.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .face-push-btn.has-pending { animation: none; }
+}
+
 /* 自动保存提示条 + 「已保存」内联反馈 */
 .face-autosave-note {
   display: inline-flex;
