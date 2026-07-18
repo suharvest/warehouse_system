@@ -425,16 +425,24 @@ tenant_face_config = Table(
     # auth switch (`enabled`). xiaozhi reads this on device connect / voice sync
     # and aligns the device's local passive-recognition state via self.face.enable.
     Column("greeting_enabled", Boolean, nullable=False, server_default="0"),
-    # 鉴权强度（与 mode 正交）：
-    #   interface — warehouse 重比对 embedding，fail-closed（默认，保留存量行为）
-    #   session   — 信任设备本地匹配，记 advisory 日志放行，不重比对
+    # DEPRECATED: verify_mode（旧「鉴权强度」）已被 mode + verify_frequency 取代。
+    # 验证链路现在只看 mode（local=设备拉身份 / lan=端点重比对），代码不再读本列；
+    # 列保留以支持旧版本回滚（PUT /api/face/config 仍反向同步写入保持一致）。
     Column("verify_mode", String(16), nullable=False, server_default="interface"),
+    # 人脸验证频率（与 mode 正交，只控制会话缓存）：
+    #   always  — 每次操作都现场验证（默认）
+    #   session — 同一会话首次验证通过后，之后免验（session_cached）
+    Column("verify_frequency", String(16), nullable=False, server_default="always"),
     Column("created_at", String(32), server_default=func.current_timestamp()),
     Column("updated_at", String(32), server_default=func.current_timestamp()),
     CheckConstraint("mode IN ('local','lan')", name="ck_tenant_face_config_mode"),
     CheckConstraint(
         "verify_mode IN ('session','interface')",
         name="ck_tenant_face_config_verify_mode",
+    ),
+    CheckConstraint(
+        "verify_frequency IN ('always','session')",
+        name="ck_tenant_face_config_verify_frequency",
     ),
     **MYSQL_TABLE_KW,
 )

@@ -619,6 +619,7 @@ def init_database():
             min_confidence REAL NOT NULL DEFAULT 0.65,
             greeting_enabled INTEGER NOT NULL DEFAULT 0,
             verify_mode TEXT NOT NULL DEFAULT 'interface' CHECK(verify_mode IN('session','interface')),
+            verify_frequency TEXT NOT NULL DEFAULT 'always' CHECK(verify_frequency IN('always','session')),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
@@ -727,6 +728,15 @@ def init_database():
         cursor.execute('SELECT verify_mode FROM tenant_face_config LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'interface'")
+
+    # verify_frequency（人脸验证频率，取代 verify_mode 的「频率」语义）：旧库兜底
+    # 补列并按旧 verify_mode 回填（session→session，interface→always），与
+    # alembic 迁移 m2n3o4p5q6r7 同规则。CHECK 省略同上（SQLite ALTER 限制）。
+    try:
+        cursor.execute('SELECT verify_frequency FROM tenant_face_config LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_frequency TEXT NOT NULL DEFAULT 'always'")
+        cursor.execute("UPDATE tenant_face_config SET verify_frequency = 'session' WHERE verify_mode = 'session'")
 
     # greeting_enabled（被动问候开关）：旧库兜底补列。此列在 metadata 与 alembic
     # 迁移(h7i8j9k0l1m2)中已有，但此前漏在 raw init_database 的 CREATE TABLE 里，
