@@ -134,3 +134,41 @@ async def pull_current_speaker(device: PullDevice, *, fresh: int = 1) -> Optiona
     except Exception:
         logger.warning("pull_current_speaker bad JSON from %s", url)
         return None
+
+
+# 抓图比 fresh=1 identify 略重（切 sensor mode 3 + 抓帧 + JPEG 编码），给 8s。
+# 后端拿到 JPEG 后还要接一次端点 /infer(≤10s)，故 lan 拉图路径的 verify-mcp 侧
+# _face_guard 超时需相应放宽（见 mcp/warehouse_mcp.py）。
+PULL_IMAGE_TIMEOUT = 8.0
+MAX_IMAGE_BYTES = 2 * 1024 * 1024  # 2MB JPEG 上限，防 SPIRAM/传输压力
+
+
+async def pull_image(device: PullDevice) -> Optional[bytes]:
+    """局域网直连设备现抓一张原始 JPEG（lan 模式后端拉图 → 转端点强模型比对）。
+
+    返回 JPEG 字节当 HTTP 200 且 content-type=image/jpeg 且非空且 ≤ 上限；否则
+    返回 None（401/409/503/超时/传输错误/类型或大小不符）→ 上游 fail-closed deny。
+    与 pull_current_speaker 同源：X-Face-Token 鉴权、trust_env=False 直连 LAN。
+    """
+    url = f"http://{device.ip}:{device.port}/api/face/capture"
+    try:
+        async with httpx.AsyncClient(timeout=PULL_IMAGE_TIMEOUT, trust_env=False) as client:
+            resp = await client.get(url, headers={"X-Face-Token": device.pull_token})
+    except httpx.TimeoutException:
+        logger.warning("pull_image timeout: %s", url)
+        return None
+    except httpx.RequestError as e:
+        logger.warning("pull_image transport error %s: %s", url, e)
+        return None
+    if resp.status_code != 200:
+        logger.info("pull_image %s -> HTTP %s", url, resp.status_code)
+        return None
+    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if ctype != "image/jpeg":
+        logger.warning("pull_image %s -> unexpected content-type %r", url, ctype)
+        return None
+    data = resp.content
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        logger.warning("pull_image %s -> bad size %d", url, len(data) if data else 0)
+        return None
+    return data
