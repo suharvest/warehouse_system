@@ -17,6 +17,21 @@ const DEFAULT_CONFIG = {
 const SUB_TABS = ['setup', 'logs'];
 const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust'];
 
+// 本机(local)模式设备端人脸库上限。与固件 FACE_MAX_COUNT=20 / 后端 MAX_PUSH_FACES=20
+// 对齐：设备最多存 20 条 embedding（= 20 张图片，不是 20 个人）。lan 模式在端点比对、
+// 不受此限。前端在录入时前置拦截，避免录到超限、下发才失败。
+const FACE_LOCAL_MAX_ENROLLMENTS = 20;
+
+// 全租户已录入的人脸图片(embedding)总数：各人员 enrollment_count 之和。
+function faceTotalEnrollments() {
+    return allSubjects.reduce((sum, s) => sum + (Number(s.enrollment_count) || 0), 0);
+}
+
+// 当前是否本机模式（非 local 一律视为 lan，与 renderSetupTab 归一化一致）。
+function isFaceLocalMode() {
+    return (currentConfig && currentConfig.mode) === 'local';
+}
+
 let currentSubTab = 'setup';
 let currentConfig = { ...DEFAULT_CONFIG };
 let currentRules = [];
@@ -1013,6 +1028,10 @@ export function showFaceEnrollModal() {
                         <label>${tt('faceEnrollImages', '上传人脸图片')} <span class="required">*</span></label>
                         <input type="file" id="face-enroll-images" accept="image/*" multiple>
                         <div class="form-hint">${tt('faceEnrollImagesHint', '可选择多张照片，建议正面清晰图像')}</div>
+                        ${isFaceLocalMode() ? `<div class="form-hint" style="color:#b25b00;">${tt('faceEnrollLocalQuota', '本机模式：设备最多存 {max} 张图片（是 {max} 张图，不是 {max} 人），当前 {total} 张，可再录 {remaining} 张。')
+                            .replaceAll('{max}', FACE_LOCAL_MAX_ENROLLMENTS)
+                            .replace('{total}', faceTotalEnrollments())
+                            .replace('{remaining}', Math.max(0, FACE_LOCAL_MAX_ENROLLMENTS - faceTotalEnrollments()))}</div>` : ''}
                     </div>
                     <div class="form-group">
                         <label>${tt('faceAppliesToWarehouses', '生效仓库')}</label>
@@ -1072,6 +1091,25 @@ export async function submitFaceEnroll() {
     if (files.length === 0) {
         if (errEl) { errEl.hidden = false; errEl.textContent = tt('faceEnrollImagesRequired', '请至少选择一张图片'); }
         return;
+    }
+    // 本机模式设备端人脸库上限：20 张图片（不是 20 人）。录入前拦，避免超限、下发才失败。
+    if (isFaceLocalMode()) {
+        const total = faceTotalEnrollments();
+        const remaining = FACE_LOCAL_MAX_ENROLLMENTS - total;
+        if (files.length > remaining) {
+            if (errEl) {
+                errEl.hidden = false;
+                errEl.textContent = tt('faceEnrollLocalLimit',
+                    '本机模式设备最多存 {max} 张人脸图片（是 {max} 张图片，不是 {max} 个人）。'
+                    + '当前已录入 {total} 张，仅剩 {remaining} 张，本次选了 {picked} 张，超出。'
+                    + '请减少本次数量，或先删除已有录入。')
+                    .replaceAll('{max}', FACE_LOCAL_MAX_ENROLLMENTS)
+                    .replace('{total}', total)
+                    .replace('{remaining}', Math.max(0, remaining))
+                    .replace('{picked}', files.length);
+            }
+            return;
+        }
     }
     let warehouseIds = [];
     if (!allBox.checked) {
