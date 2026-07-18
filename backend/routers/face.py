@@ -711,6 +711,132 @@ async def face_verify_mcp(
     }
 
 
+# ============ Device Recognition Proxy (identify_mode='lan') ============
+# 设备识别代理：lan 模式下设备现场抓拍后按 face_rec_api 的 /recognize 契约
+# POST 到这里（push-faces 下发 identify_endpoint=http://<warehouse>:<port>/api/face/device，
+# 固件拼 /recognize）。warehouse 转发到租户端点 /infer 取 embedding（含活体），
+# 再对本库 face_enrollments 比对——人脸库只在 warehouse 存一份，face_rec_api
+# 保持无状态推理。设备无 cookie 登录态，鉴权用租户级 tenant_face_config.auth_token
+# （Bearer，push-faces 首发时自动生成）。
+
+
+class DeviceRecognizePayload(BaseModel):
+    image_base64: str
+
+
+def _device_recognize_tenant(request: Request) -> int:
+    """Bearer token 反查租户。token 为空 / 无租户命中 → 401。
+
+    auth_token 为空的租户天然无法命中（谓词排除 NULL/''），不存在
+    「空 token 匹配空列」的绕过。"""
+    auth = request.headers.get("Authorization") or ""
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_tenant_face_config.c.tenant_id).where(and_(
+                _t_tenant_face_config.c.auth_token == token,
+                _t_tenant_face_config.c.auth_token.isnot(None),
+                _t_tenant_face_config.c.auth_token != "",
+            ))
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return int(row.tenant_id)
+
+
+@router.post("/api/face/device/recognize")
+async def face_device_recognize(payload: DeviceRecognizePayload, request: Request):
+    """face_rec_api /recognize 契约的代理实现（设备直连，无登录态）。
+
+    响应恒 200：{matched, name, confidence, processing_time_ms, live,
+    liveness_score, reason}；spoof/no_face/端点错都以 matched=false + reason
+    表达（契约如此，固件按 body 判定）。每次调用写一行 face_auth_logs
+    （operation='device_recognize'，user_id=0 表示无系统用户的设备调用）。
+    """
+    import time as _time
+
+    from face import endpoint_client as _ec
+    from face.endpoint_client import FaceEndpointError
+    from face.matcher import topk_match
+    from face.orchestrator import (
+        _ensure_model_enrollments,
+        _load_config,
+        _log_decision,
+    )
+
+    t0 = _time.monotonic()
+    tid = _device_recognize_tenant(request)
+    cfg = _load_config(None, tid)  # token 反查命中 → 该租户必有 config 行
+
+    def _resp(matched: bool, *, name=None, confidence: float = 0.0,
+              live=None, liveness_score=None, reason=None) -> dict:
+        return {
+            "matched": matched,
+            "name": name,
+            "confidence": round(float(confidence), 4),
+            "processing_time_ms": int((_time.monotonic() - t0) * 1000),
+            "live": live,
+            "liveness_score": liveness_score,
+            "reason": reason,
+        }
+
+    with get_db() as conn:
+        def _audit(decision: str, *, subject_id=None, confidence=None, reason=None):
+            _log_decision(
+                conn, request_id=None, user_id=0, matched_subject_id=subject_id,
+                tenant_id=tid, warehouse_id=None, operation="device_recognize",
+                confidence=confidence, decision=decision, failure_reason=reason,
+            )
+
+        try:
+            result = await _ec.infer(cfg, payload.image_base64)
+        except FaceEndpointError as e:
+            reason = str(e) or "endpoint_unreachable"
+            _audit("deny", reason=reason)
+            return _resp(
+                False, reason=reason,
+                # 契约：假体时 live=false；其余错误活体未知 → null。
+                live=False if reason == "spoof" else None,
+            )
+
+        model_tag = result["model_tag"]
+        # 懒重算兜底（与 verify 路径同一 helper）：换模型后老 subject 缺当前
+        # model_tag 的 embedding 时用注册照片限量补算。异常不阻塞识别主链路。
+        try:
+            await _ensure_model_enrollments(conn, cfg, tid, model_tag)
+        except Exception:
+            import logging
+            logging.getLogger("warehouse.face").exception(
+                "device-recognize lazy re-embed failed (non-fatal)")
+
+        matches = topk_match(
+            conn, tenant_id=tid, warehouse_id=None, model_tag=model_tag,
+            query_emb_bytes=result["embedding"], k=1,
+        )
+        best = matches[0] if matches else None
+        threshold = cfg.min_confidence if cfg else 0.65
+        if best is None or best.confidence < threshold:
+            reason = "no_match" if best is None else "low_confidence"
+            _audit(
+                "deny", subject_id=best.subject_id if best else None,
+                confidence=best.confidence if best else None, reason=reason,
+            )
+            return _resp(
+                False, confidence=best.confidence if best else 0.0,
+                reason="no_match",  # 契约不区分低分/无候选，统一 no_match
+            )
+
+        with get_engine().connect() as sa_conn:
+            name = sa_conn.execute(
+                select(_t_face_subjects.c.name)
+                .where(_t_face_subjects.c.id == best.subject_id)
+            ).scalar()
+        _audit("pass", subject_id=best.subject_id, confidence=best.confidence)
+        return _resp(True, name=name, confidence=best.confidence)
+
+
 # ============ Face Subjects CRUD ============
 
 @router.get("/api/face/subjects")
