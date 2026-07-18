@@ -304,6 +304,8 @@ export function selectWarehouse(slug) {
 }
 
 // ============ 自动刷新 ============
+let visibilityHandlerRegistered = false;
+
 export function stopAutoUpdate() {
     if (countdownInterval) {
         clearInterval(countdownInterval);
@@ -313,6 +315,18 @@ export function stopAutoUpdate() {
 
 export function startAutoUpdate() {
     stopAutoUpdate();
+
+    // 页面从后台切回前台时立即刷新一次。后台标签的 setInterval 会被浏览器
+    // 限流（隐藏时约 1min 才 tick），否则切走再切回 / 笔记本唤醒后，看板要等
+    // 最多一个限流周期数字才更新。只注册一次，避免多次登录叠加监听。
+    if (!visibilityHandlerRegistered) {
+        visibilityHandlerRegistered = true;
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') {
+                refreshCurrentTab();
+            }
+        });
+    }
 
     const interval = setInterval(function () {
         setCountdownSeconds(countdownSeconds - 1);
