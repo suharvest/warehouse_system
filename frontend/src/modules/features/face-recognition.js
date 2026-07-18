@@ -27,6 +27,12 @@ let enrollmentItems = [];
 let allTenants = [];
 let selectedTenantId = null;
 
+// 「待下发」脏检测（纯前端，不追设备实际状态）：进入配置页时以当前 DB 值为基线，
+// 用户改动了「需下发到设备才生效」的内容就标出来，下发成功后重置基线。刷新页面即丢失
+// （用户已确认此取舍：不为多设备记录各自下发了什么，只提示"你改了需下发的东西"）。
+let facePushBaseline = null;      // { mode, min_confidence, endpoint, auth_token }
+let facePendingLibrary = false;   // 人脸库/人员增删改 → 需重新下发
+
 function isGlobalAdmin() {
     const u = getCurrentUser();
     return !!(u && u.role === 'admin' && (u.tenant_id == null));
@@ -175,6 +181,8 @@ export async function switchFaceSubTab(subTab) {
             await loadSubjectsAndWarehouses();
             content.innerHTML = renderSetupTab();
             attachSetupAutoSave();
+            captureFacePushBaseline();
+            updateFacePendingUI();
             if (selectedSubjectId) {
                 await loadEnrollmentsForSelected();
             }
@@ -273,9 +281,9 @@ function renderSetupTab() {
                 <div class="face-module-heading">
                     <div class="face-block-titlerow">
                         <span class="section-title">${tt('faceBaseConfigTitle', '基础配置')}</span>
-                        <span class="face-scope-tag is-device">
+                        <span class="face-scope-tag is-device face-pending-summary" id="face-pending-summary" hidden>
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
-                            ${tt('faceScopeDeviceTag', '改动需下发到设备后生效')}
+                            <span id="face-pending-summary-text"></span>
                         </span>
                     </div>
                     <div class="face-module-hint">${tt('faceBaseConfigHint', '人脸识别如何工作，以及有哪些人可以被识别')}</div>
@@ -302,7 +310,7 @@ function renderSetupTab() {
                     </div>
                     <div class="face-settings-row">
                         <div class="form-group">
-                            <label>${tt('faceMode', '识别模式')}</label>
+                            <label>${tt('faceMode', '识别模式')}${pendingBadge('mode')}</label>
                             <select id="face-config-mode" data-action-change="onFaceModeChange">
                                 ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
                             </select>
@@ -314,17 +322,19 @@ function renderSetupTab() {
                             </select>
                         </div>
                         <div class="form-group">
-                            <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span></label>
+                            <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span>${pendingBadge('min_confidence')}</label>
                             <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
                         </div>
                     </div>
                     <div class="face-config-grid" style="margin-top:12px;">
                         <div class="form-group span-2" id="face-config-endpoint-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
-                            <label>${tt('faceEndpoint', '远端服务地址')}</label>
+                            <label>${tt('faceEndpoint', '远端服务地址')}${pendingBadge('endpoint')}</label>
                             <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
                         </div>
-                        <div class="form-group span-2" id="face-config-token-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
-                            <label>${tt('faceAuthToken', '认证 Token')}</label>
+                        <!-- 认证 Token 暂隐藏：face_rec_api 端点当前不校验 token，放出来只会误导。
+                             输入框保留在 DOM，保存/测试连接仍读它（不丢已存值），启用端点鉴权后再放出。 -->
+                        <div class="form-group span-2" id="face-config-token-group" style="display:none;">
+                            <label>${tt('faceAuthToken', '认证 Token')}${pendingBadge('auth_token')}</label>
                             <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
                         </div>
                         <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
@@ -442,9 +452,84 @@ export function onFaceModeChange() {
     const testBtn = document.getElementById('face-config-test-btn');
     const testResult = document.getElementById('face-config-test-result');
     if (endpointGroup) endpointGroup.style.display = isLocal ? 'none' : '';
-    if (tokenGroup) tokenGroup.style.display = isLocal ? 'none' : '';
+    if (tokenGroup) tokenGroup.style.display = 'none';  // 认证 Token 暂时始终隐藏（端点未校验）
     if (testBtn) testBtn.style.display = isLocal ? 'none' : '';
     if (testResult && isLocal) testResult.textContent = '';
+    updateFacePendingUI();
+}
+
+// ============ 「待下发」脏检测 ============
+// 待下发的橙点 badge 只挂在这几个字段上；启用开关/验证频率是后端即时生效，不挂。
+function pendingBadge(key) {
+    return `<span class="face-pending-badge" data-pending-badge="${key}" hidden>${tt('facePending', '待下发')}</span>`;
+}
+
+// 当前 mode 下"影响设备行为、改了就要下发"的配置字段。
+// 本机(local)：模式、阈值(=闸门实际阈值)；端点/Token 本机模式隐藏不计。
+// 局域网(lan)：模式、阈值、端点、Token（这些改动出入库闸门后端即时生效，
+//              下发只把设备本地识别/唤醒问候同步过去）。
+function pendingConfigKeys() {
+    const modeEl = document.getElementById('face-config-mode');
+    const mode = modeEl ? modeEl.value : 'local';
+    const keys = ['mode', 'min_confidence'];
+    if (mode === 'lan') keys.push('endpoint');  // auth_token 字段已隐藏，不参与待下发
+    return keys;
+}
+
+// 从当前表单读出用于比对的值（阈值归一化，避免 "0.7" / "0.70" 误判为改动）。
+function faceFormValues() {
+    const g = id => document.getElementById(id);
+    const conf = parseFloat(g('face-config-min-confidence')?.value);
+    return {
+        mode: g('face-config-mode')?.value ?? '',
+        min_confidence: Number.isFinite(conf) ? String(Math.round(conf * 100) / 100) : '',
+        endpoint: (g('face-config-endpoint')?.value ?? '').trim(),
+        auth_token: g('face-config-token')?.value ?? '',
+    };
+}
+
+// 以当前表单值为"已下发基线"。进入配置页、下发成功后各调一次。
+function captureFacePushBaseline() {
+    facePushBaseline = faceFormValues();
+    facePendingLibrary = false;
+}
+
+// 重算并渲染：逐字段橙点、顶部汇总、下发按钮高亮。
+function updateFacePendingUI() {
+    if (!facePushBaseline) return;
+    const cur = faceFormValues();
+    const keys = pendingConfigKeys();
+    const dirty = keys.filter(k => cur[k] !== facePushBaseline[k]);
+
+    // 逐字段 badge（只显示当前 mode 关心的字段；隐藏字段的 badge 一律收起）
+    document.querySelectorAll('[data-pending-badge]').forEach(el => {
+        const k = el.getAttribute('data-pending-badge');
+        el.hidden = !dirty.includes(k);
+    });
+
+    const total = dirty.length + (facePendingLibrary ? 1 : 0);
+    const summary = document.getElementById('face-pending-summary');
+    const summaryText = document.getElementById('face-pending-summary-text');
+    if (summary && summaryText) {
+        if (total > 0) {
+            const parts = [];
+            if (dirty.length) parts.push(tt('facePendingConfig', '识别配置'));
+            if (facePendingLibrary) parts.push(tt('facePendingLibrary', '人脸库'));
+            summaryText.textContent = tt('facePendingSummary', '{items} 有改动待下发到设备')
+                .replace('{items}', parts.join(' + '));
+            summary.hidden = false;
+        } else {
+            summary.hidden = true;   // 即时生效 / 已同步 → 不显示任何提示
+        }
+    }
+    const pushBtn = document.querySelector('.face-push-btn');
+    if (pushBtn) pushBtn.classList.toggle('has-pending', total > 0);
+}
+
+// 人脸库/人员发生增删改 → 标记待下发（下发成功后清除）。
+function markFaceLibraryDirty() {
+    facePendingLibrary = true;
+    updateFacePendingUI();
 }
 
 // 总开关关闭时,配置与规则均不生效 → 顶部提醒条随开关显隐(不置灰,仍可编辑配置)
@@ -490,7 +575,7 @@ function attachSetupAutoSave() {
     // 下拉与开关：change 即保存
     ['face-config-mode', 'face-config-verify-frequency', 'face-config-enabled'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.addEventListener('change', () => { saveFaceConfig(); });
+        if (el) el.addEventListener('change', () => { saveFaceConfig(); updateFacePendingUI(); });
     });
     // 置信度：blur 时校验并 clamp 到 0.0-1.0，非法值不保存（还原上次有效值）
     const conf = document.getElementById('face-config-min-confidence');
@@ -504,12 +589,13 @@ function attachSetupAutoSave() {
             v = Math.min(1, Math.max(0, Math.round(v * 100) / 100));
             conf.value = v;
             saveFaceConfig();
+            updateFacePendingUI();
         });
     }
     // 文本输入（远端地址 / Token）：blur 即保存
     ['face-config-endpoint', 'face-config-token'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.addEventListener('blur', () => { saveFaceConfig(); });
+        if (el) el.addEventListener('blur', () => { saveFaceConfig(); updateFacePendingUI(); });
     });
 }
 
@@ -859,6 +945,9 @@ export async function submitFacePush() {
                 .replace('{name}', label).replace('{count}', result.pushed_count ?? 0);
             if (resultEl) resultEl.innerHTML = `<div class="result-banner success">${escapeHtml(msg)}</div>`;
             showToast(msg);
+            // 下发成功 → 以当前配置为新基线，清掉所有待下发标记。
+            captureFacePushBaseline();
+            updateFacePendingUI();
         } else {
             const msg = tt('mcpDevicePushFailed', '向设备 "{name}" 下发失败：{error}')
                 .replace('{name}', label).replace('{error}', (result && result.error) || tt('operationFailed', '操作失败'));
@@ -995,6 +1084,7 @@ export async function submitFaceEnroll() {
         closeFaceEnrollModal();
         // 人员计数徽章与右侧详情互相独立，可并行刷新
         await Promise.all([refreshSubjectList(), loadEnrollmentsForSelected()]);
+        markFaceLibraryDirty();
     } catch (error) {
         if (errEl) { errEl.hidden = false; errEl.textContent = getErrorMessage(error, 'faceEnrollFailed', '录入失败'); }
     }
@@ -1007,6 +1097,7 @@ export async function deleteFaceEnrollment(el) {
         await faceApi.deleteEnrollment(id, effectiveTenantId());
         showToast(tt('faceEnrollDeleted', '录入条目已删除'));
         await Promise.all([refreshSubjectList(), loadEnrollmentsForSelected()]);
+        markFaceLibraryDirty();
     } catch (error) {
         showToast(getErrorMessage(error, 'faceEnrollDeleteFailed', '删除失败'), 'error');
     }
@@ -1254,6 +1345,7 @@ export async function saveFaceSubject() {
         }
         closeFaceSubjectModal();
         showToast(tt('faceSubjectSaved', '人员档案已保存'));
+        markFaceLibraryDirty();
         await refreshSubjectList();
         // refresh detail if currently viewing the edited subject
         if (idVal && parseInt(idVal, 10) === selectedSubjectId) {
@@ -1273,6 +1365,7 @@ export async function deleteFaceSubject(el) {
     try {
         await faceApi.deleteSubject(sid, effectiveTenantId());
         showToast(tt('faceSubjectDeleted', '已删除'));
+        markFaceLibraryDirty();
         if (selectedSubjectId === sid) {
             selectedSubjectId = null;
             enrollmentItems = [];
