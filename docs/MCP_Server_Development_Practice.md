@@ -440,161 +440,131 @@ def wrap_agri_response(operation: str, resp: dict) -> dict:
 
 这类场景建议把普通 API key / token 作为“系统到系统”的鉴权，把人脸识别作为“当前会话说话人”的二次鉴权。
 
-### 推荐链路
+> ⚠️ **本节 2026-07 按 option 3 重写。** 旧设计（让 LLM 先调设备 `self.conversation.speaker` 取身份、再把 `speaker_*` 填进写操作；或用 `verify_mode=session/interface`）**已废弃**。原因：① LLM 经手身份 = 提示注入面；② 只要工具让 LLM「感知」到要刷脸，它就会在写操作前自作主张多调一次识别工具（多拍一张照 + 多一句「请正对摄像头」播报 + 流程每次不一样）。现在**身份完全由后端直连设备拉取，LLM 全程不经手、也不知道有人脸这回事**。
 
-当前仓库系统已经落地了这条链路，可直接参考：
+### 推荐链路（后端直连设备拉取）
 
 ```text
-设备本地识别人脸/说话人
-  -> MCP tool 调用前拿到 session speaker
-  -> MCP tool 把 speaker_subject_id / speaker_name 转发给后端
-  -> 后端 /api/face/verify-mcp 做权威裁决
-  -> 通过才执行写操作；失败则返回结构化失败，业务操作不落库
+LLM 调 MCP 写操作（如 stock_out）              # LLM 只管业务，完全不知道要刷脸
+  -> MCP tool 第一行 _enforce_face(operation)   # 透明 gate，无任何身份入参
+  -> 后端 /api/face/verify-mcp
+  -> 后端按 mode 直连设备（pull_token 鉴权）拉身份：
+       mode=local: GET 设备 /api/face/current-speaker  → 设备本地 NPU 识别出的 subject_id
+       mode=lan:   GET 设备 /api/face/capture (原始 JPEG) → 端点 /infer 强模型重比对
+  -> 规则裁决（require_face + allow-list）-> pass 才执行；deny 则写操作不落库（fail-closed）
 ```
 
-仓库里的对应实现：
+信任根从「LLM 的话」变成「设备的 HTTP 响应」，提示注入无法伪造身份。仓库里的对应实现：
 
 | 位置 | 作用 |
 | --- | --- |
-| `mcp/warehouse_mcp.py::_enforce_face()` | MCP 写操作前统一调用人脸 gate |
-| `backend/routers/face.py:/api/face/verify-mcp` | MCP 专用人脸校验桥接端点 |
-| `backend/face/orchestrator.py::verify_mcp_face()` | 根据租户配置、操作规则、allow-list 做最终裁决 |
-| `tenant_face_config.verify_mode` | 决定鉴权强度：`session` 或 `interface` |
-| `tenant_face_operation_rules` | 配置哪些操作需要人脸、哪些 subject 被允许 |
+| `mcp/warehouse_mcp.py::_enforce_face()` | MCP 写操作前统一调用人脸 gate（无身份入参） |
+| `backend/routers/face.py:/api/face/verify-mcp` | MCP 专用人脸校验桥接端点，按 API Key 唯一定位设备 |
+| `backend/face/orchestrator.py::verify_mcp_face()` | 按租户配置、操作规则、allow-list 做最终裁决 |
+| `backend/face/device_pull.py` | 后端直连设备：`pull_current_speaker()` / `pull_image()` |
+| `tenant_face_config.mode` | `local`（拉身份）/ `lan`（拉图重比对）。旧 `verify_mode` 列已 deprecated |
+| `tenant_face_config.verify_frequency` | `always`（每次都验）/ `session`（同一轮对话首验后免验，靠 conv_seq 判定） |
+| `tenant_face_operation_rules` | 哪些 operation 需要人脸、哪些 subject 被允许（allow-list） |
 
-### 两种模式：session 与 interface
+### 两种 mode：local 与 lan
 
-`verify_mode` 不等于人脸推理部署方式，它只表示鉴权强度：
+`mode` 不是「鉴权强度」，而是「后端从哪、用什么模型拿身份」：
 
-| 模式 | 行为 | 适用场景 |
-| --- | --- | --- |
-| `session` | 信任设备在当前会话里识别出的说话人，只用 `speaker_subject_id` / `speaker_name` 做授权判断和审计 | 云端 server 不能改、只能让 LLM 编排设备 tool 的场景 |
-| `interface` | 忽略 speaker 参数，使用当前图片或 embedding 在仓库后端重新比对，失败即拒绝 | 更高安全要求、server/runtime 能注入 `image_b64` 或 `embedding_b64` 的场景 |
+| mode | 后端怎么拿身份 | 用哪套模型 | 适用 |
+| --- | --- | --- | --- |
+| `local` | 直连设备 `GET /api/face/current-speaker`，信任设备本地 NPU 识别出的 `subject_id` | 设备端（如 Himax） | 无外部端点、要低延迟；设备阈值即闸门阈值 |
+| `lan` | 直连设备 `GET /api/face/capture` 拿原始 JPEG，转端点 `/infer` 重比对 | 端点强模型（Hailo/Jetson）+ 可选活体 | 更高精度 / 需活体检测 |
 
-关键安全点：
+安全点：
+- MCP server 不自己判「谁能操作」，只触发后端裁决；后端是唯一权威。
+- `pull_token` 每设备独立、与业务 token 分离，用于后端拉取设备的鉴权。
+- fail-closed：设备不可达 / 超时 / 无脸 / 未识别 / 不在 allow-list → 一律 deny，写操作不落库。
+- allow-list 永远生效：规则限定了 subject，未识别或不在名单都拒。
 
-- MCP server 不应该自己决定“这个人是否允许操作”，只负责转发身份材料。
-- 后端是唯一权威，必须在 `/api/face/verify-mcp` 里统一判断。
-- 即使 LLM 或客户端伪造 `speaker_subject_id`，在 `interface` 模式下也会被后端忽略。
-- `session` 模式下也要保留 allow-list：如果规则限定只有某些人能操作，未识别或不在名单内都必须拒绝。
-- 人脸校验失败时写操作不能执行，响应里要明确“没有执行”。
+### ⭐ 透明 gate：绝不要让 LLM 知道有人脸校验（本会话踩的坑）
 
-### MCP tool 参数设计
+**这是最重要的一条。** 写操作工具的 **docstring / 参数 / meta 一律不提人脸、身份、摄像头、鉴权**：
 
-以仓库 `stock_out` 为例，写操作保留两类身份字段：
+- ❌ 不要 `meta={"requires_face": True}`
+- ❌ 不要 `speaker_subject_id` / `speaker_name` / `face_image_b64` 这类身份参数（后端自己拉，不需要 LLM 填；留着既是注入面，又是「诱导线索」）
+- ❌ docstring 不要写「后端会取操作人身份 / 被拒时提示面向摄像头」之类
+
+**事故复盘**：曾在 stock_in/out 的 docstring 里写了「人脸鉴权对你完全透明…后端取当前操作人身份…被拒时提示面向摄像头」，本意是叫 LLM 别管。结果「乐于助人」的 LLM 一读到「这个操作牵涉身份验证」，就在调写操作**前**自己去工具清单里找了个身份工具（设备的 `self.face.identify`）先调一遍——于是每次操作多拍一张照、多一句「请正对摄像头」、且顺序每次不同（LLM 驱动、非确定）。gate 本就在后端强制、LLM 跳不过，所以正解是**让它彻底无感**：删掉一切线索，LLM 就没有理由去验身份。
+
+### MCP tool 参数设计（option 3）
+
+写操作只留业务参数，不带任何身份字段，docstring 只讲业务：
 
 ```python
-def stock_out(
-    product_name: str,
-    quantity: int,
-    reason_category: str,
-    face_image_b64: str = None,
-    face_embedding_b64: str = None,
-    face_model_tag: str = None,
-    speaker_subject_id: int = None,
-    speaker_name: str = None,
-) -> dict:
-    blocked = _enforce_face(
-        "stock_out",
-        image_b64=face_image_b64,
-        embedding_b64=face_embedding_b64,
-        embedding_model_tag=face_model_tag,
-        speaker_subject_id=speaker_subject_id,
-        speaker_name=speaker_name,
-    )
+def stock_out(product_name: str, quantity: int, reason_category: str) -> dict:
+    """出库。reason_category: sell|lend|consume|loss|...（也接受中文别名）。"""  # 一个字不提人脸
+    blocked = _enforce_face("stock_out")   # 后端直连设备拉身份，无需任何入参
     if blocked is not None:
-        return blocked
-
+        return blocked                     # deny：结构化失败，业务不落库
     return provider.stock_out(...)
 ```
 
-设计约定：
+> 兼容说明：`_enforce_face` 仍接受 `image_b64` / `embedding_b64` 入参，仅为兼容「旧客户端 runtime 注入」的过渡，且这些参数用 `exclude_args` 对 LLM 隐藏。**新接入直接不要这些参数。**
 
-- `speaker_subject_id` / `speaker_name`：session 模式使用，来自设备当前会话识别结果。
-- `face_image_b64` / `face_embedding_b64` / `face_model_tag`：interface 模式使用，通常由 runtime 或服务端注入，不暴露给普通用户填写。
-- tool 描述里要明确：session 模式先调用设备的 `self.conversation.speaker`，把返回的 `subject_id` / `name` 填进写操作。
-- 写操作入口第一步就是 `_enforce_face()`，不要先调用外部业务 API 再校验。
+### 套用到新域（农业 / 环境传感器 / 运维）—— 先分「读」还是「写」
 
-### 农业平台如何套用
+是否需要 gate，取决于操作性质：
 
-假设新增一个控制灌溉阀门的 tool：
+- **读类**（查库存、读传感器当前值、拉历史曲线）→ **不 gate**，敞开让 LLM 调。
+- **写 / 控制类**（出库、开阀门、改告警阈值、重启设备、下发配置）→ **一行 `_enforce_face(operation)`**，后端按规则裁决。
+
+例：环境控制平台开灌溉阀门（写/控制类，需 gate）
 
 ```python
-@mcp.tool(meta={"requires_face": True})
-def open_irrigation_valve(
-    region: str,
-    duration_minutes: int,
-    speaker_subject_id: int = None,
-    speaker_name: str = None,
-    face_embedding_b64: str = None,
-    face_model_tag: str = None,
-) -> dict:
-    blocked = enforce_face(
-        operation="open_irrigation_valve",
-        speaker_subject_id=speaker_subject_id,
-        speaker_name=speaker_name,
-        embedding_b64=face_embedding_b64,
-        embedding_model_tag=face_model_tag,
-    )
-    if blocked:
-        return {
-            "success": False,
-            "facts": {"executed": False},
-            "say": "人脸校验未通过，本次没有打开灌溉阀门。",
-            "say_kind": "fail",
-            "data": blocked,
-        }
-
-    resp = provider.open_irrigation_valve(region, duration_minutes)
-    return wrap_agri_response("open_irrigation_valve", resp)
+def open_valve(region: str, duration_minutes: int) -> dict:
+    """打开指定区域灌溉阀门 duration_minutes 分钟。"""  # 不提人脸
+    blocked = _enforce_face("open_valve")
+    if blocked is not None:
+        return blocked
+    return wrap_response("open_valve", provider.open_valve(region, duration_minutes))
 ```
 
-对应后端规则可以按 operation 配置：
+例：读传感器（读类，不 gate）
+
+```python
+def read_sensor(region: str, metric: str = "all") -> dict:
+    """读取指定区域环境传感器当前值：temperature|humidity|co2|soil_moisture|all。"""
+    return wrap_response("read_sensor", provider.read_sensor(region, metric))
+```
+
+后端规则按 `operation` + **作用域**配置（用 `site_id`/`farm_id`/`greenhouse_id` 替代 `warehouse_id`）：
 
 ```text
-operation = open_irrigation_valve
-require_face = true
-allowed_subject_ids = [12, 18]
-warehouse_id / site_id / farm_id = 当前作用域
+operation=open_valve  require_face=true  allowed_subject_ids=[12,18]  scope_id=<当前作用域>
 ```
 
-农业平台没有“仓库”的概念时，也要保留同等作用域字段，例如 `farm_id`、`site_id`、`greenhouse_id`。不要只按全局 subject 授权，否则 A 农场的人可能误操作 B 农场设备。
+作用域字段别省——否则 A 场的人能操作 B 场设备。没配规则的 operation 默认 `skipped`（不验），所以「哪些写操作要刷脸」完全由后端规则驱动，改规则即时生效、不用动工具代码。
 
-### 响应和审计要求
+> `self.face.identify` 是设备侧一个**独立的「我是谁」体验工具**（用户主动问「你能认出我吗」才用），与上面的授权 gate 无关，也不该被写操作牵连——正因如此，写工具描述才必须对人脸「零提及」。
 
-人脸鉴权必须和反幻觉响应契约配合：
+### 响应与审计要求
+
+人脸校验必须和反幻觉响应契约配合。deny 时 `facts.executed=false` + `say_kind=fail`，`say` 照搬后端返回的提示（如「没有识别到已登记的操作人，请面向摄像头后再说一次」）：
 
 ```python
 {
     "success": False,
     "facts": {"executed": False},
-    "say": "人脸校验未通过，本次没有执行操作。",
     "say_kind": "fail",
-    "data": {
-        "error": "face_auth_denied:not_in_allow_list",
-        "operation": "open_irrigation_valve"
-    }
+    "data": {"error": "face_auth_denied:not_in_allow_list", "operation": "open_valve"}
 }
 ```
 
-后端还应记录审计日志：
-
-- `tenant_id` / `farm_id` / `warehouse_id`
-- `operation`
-- `user_id` 或 API key 归属用户
-- `matched_subject_id`
-- `decision`: `pass` / `deny` / `skipped`
-- `failure_reason`
-- `request_id`
-- 时间戳
+后端每次裁决写一行审计（`face_auth_logs`）：`tenant_id` / 作用域 id / `operation` / `user_id`（或 API key 归属）/ `matched_subject_id` / `decision`（pass·deny·skipped）/ `failure_reason` / `request_id` / 时间戳。
 
 ### 不要做的事
 
-- 不要只靠 LLM 口头判断“我认识这个人”，必须有后端校验结果。
-- 不要把 `speaker_name` 当唯一身份，优先使用稳定的 `speaker_subject_id`。
-- 不要在写操作失败后让 LLM 自己“再试一次”，应返回 `say_kind=fail` 或明确等待用户确认。
-- 不要在 `session` 模式下绕过 allow-list。
-- 不要把人脸校验写进每个 Provider；Provider 只负责业务系统适配，鉴权 gate 应该在 MCP tool 或统一 wrapper 层。
+- **不要在写工具的 docstring / 参数 / meta 里提任何人脸 / 身份 / 摄像头字样**（透明 gate；否则诱导 LLM 多调识别工具）。
+- 不要让 LLM 经手身份（`speaker_*`）——后端直连设备拉，注入面归零。
+- 不要只靠 LLM 口头「我认识这个人」，必须有后端裁决结果。
+- 不要 fail-open：拉不到身份 / 超时 / 无脸，必须 deny，业务不落库。
+- 不要给读类操作加 gate（徒增摩擦、还会诱发多余抓拍）。
+- 不要把人脸校验写进 Provider；gate 在 MCP tool / 统一 wrapper 层，Provider 只做业务系统适配。
 
 ## 推荐落地方式
 

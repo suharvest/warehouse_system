@@ -7,6 +7,7 @@ import {
     setAllWarehouses, getAllWarehouses,
     getWarehouseEpoch,
     setUserDataLoadError,
+    getFaceEnabled,
 } from './state.js';
 
 // UI 模块
@@ -663,8 +664,16 @@ document.addEventListener('DOMContentLoaded', async function () {
     faceModalsContainer.innerHTML = getFaceModalsHTML();
     document.body.appendChild(faceModalsContainer);
 
-    // 获取部署模式（鉴权渲染会依赖它决定多租户入口显隐）
+    // 获取部署模式（鉴权渲染会依赖它决定多租户入口显隐）；同时拿到部署级人脸开关
     await fetchDeployMode();
+
+    // 部署级人脸开关：FACE_ENABLED=false（线上/云端版）→ 隐藏「人脸识别」设置 tab 与面板，
+    // 该部署不支持人脸识别功能。默认 true 不影响本地/私有部署。
+    if (!getFaceEnabled()) {
+        document.querySelectorAll('[data-sub-tab="face-recognition"]').forEach(el => { el.style.display = 'none'; });
+        const facePanel = document.getElementById('settings-panel-face-recognition');
+        if (facePanel) facePanel.style.display = 'none';
+    }
 
     // 检查认证状态
     await checkAuthStatus();

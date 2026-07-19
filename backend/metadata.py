@@ -382,6 +382,10 @@ mcp_agent_devices = Table(
     Column("model_tag", String(64), nullable=True),
     # opt-in 人脸：0=不下发人脸库到该设备，1=下发。存 0/1（sqlite/MySQL 通用）。
     Column("face_enabled", Integer, nullable=False, server_default="0"),
+    # 后端直拉设备身份（B 方案）的鉴权 token，每设备独立、可轮换。随人脸库
+    # 一并下发到设备 NVS face.pull_token；后端拉取时置于 X-Face-Token。与远端识别
+    # 的 identify_token（仅 lan 模式有值）刻意分离，避免复用扩大泄露面。
+    Column("pull_token", String(64), nullable=True),
     Column("last_seen", String(32), nullable=True),
     Column("created_at", String(32)),
     Column("updated_at", String(32)),
@@ -421,16 +425,24 @@ tenant_face_config = Table(
     # auth switch (`enabled`). xiaozhi reads this on device connect / voice sync
     # and aligns the device's local passive-recognition state via self.face.enable.
     Column("greeting_enabled", Boolean, nullable=False, server_default="0"),
-    # 鉴权强度（与 mode 正交）：
-    #   interface — warehouse 重比对 embedding，fail-closed（默认，保留存量行为）
-    #   session   — 信任设备本地匹配，记 advisory 日志放行，不重比对
+    # DEPRECATED: verify_mode（旧「鉴权强度」）已被 mode + verify_frequency 取代。
+    # 验证链路现在只看 mode（local=设备拉身份 / lan=端点重比对），代码不再读本列；
+    # 列保留以支持旧版本回滚（PUT /api/face/config 仍反向同步写入保持一致）。
     Column("verify_mode", String(16), nullable=False, server_default="interface"),
+    # 人脸验证频率（与 mode 正交，只控制会话缓存）：
+    #   always  — 每次操作都现场验证（默认）
+    #   session — 同一会话首次验证通过后，之后免验（session_cached）
+    Column("verify_frequency", String(16), nullable=False, server_default="always"),
     Column("created_at", String(32), server_default=func.current_timestamp()),
     Column("updated_at", String(32), server_default=func.current_timestamp()),
     CheckConstraint("mode IN ('local','lan')", name="ck_tenant_face_config_mode"),
     CheckConstraint(
         "verify_mode IN ('session','interface')",
         name="ck_tenant_face_config_verify_mode",
+    ),
+    CheckConstraint(
+        "verify_frequency IN ('always','session')",
+        name="ck_tenant_face_config_verify_frequency",
     ),
     **MYSQL_TABLE_KW,
 )

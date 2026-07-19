@@ -1471,6 +1471,66 @@
   accent-color: var(--color-primary, #8cc63f);
 }
 
+/* 滑动开关（iOS 风格）——用于「启用人脸识别」总开关 */
+.face-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
+}
+
+/* 原生 checkbox 隐藏但保留可访问性（键盘/读屏仍可聚焦切换） */
+.face-switch input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+}
+
+.face-switch-slider {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: #cfd4d9;
+  transition: background 0.2s ease;
+}
+
+.face-switch-slider::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 0.2s ease;
+}
+
+.face-switch input:checked + .face-switch-slider {
+  background: var(--color-primary, #8cc63f);
+}
+
+.face-switch input:checked + .face-switch-slider::before {
+  transform: translateX(18px);
+}
+
+.face-switch input:focus-visible + .face-switch-slider {
+  outline: 2px solid var(--color-primary, #8cc63f);
+  outline-offset: 2px;
+}
+
+.face-switch-text {
+  font-size: 13px;
+  color: #555;
+}
+
 /* 规则弹窗：停用规则时,其依赖字段(允许人员/自定义阈值)整体置灰 */
 .face-rule-dependent {
   transition: opacity 0.15s ease;
@@ -1521,6 +1581,183 @@
   flex-shrink: 0;
 }
 
+/* 「下发到设备」模块：卡片头部左侧标题 + 说明，右侧下发按钮 */
+.face-module-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.face-module-hint {
+  font-size: 12px;
+  color: #999;
+  font-weight: normal;
+  line-height: 1.4;
+}
+
+/* ============ 两块视觉区分：基础配置（需下发）/ 操作规则（服务端即时） ============ */
+/* 每块一张独立卡片，左侧色条 + 顶部作用域标签，一眼看出归属与是否需下发 */
+.face-block {
+  position: relative;
+  border: 1px solid #ececec;
+}
+
+.face-block::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 12px 0 0 12px;
+}
+
+.face-block-device::before { background: #f0b429; }
+.face-block-server::before { background: var(--color-primary, #8cc63f); }
+
+.face-block-header {
+  align-items: flex-start;
+}
+
+.face-block-titlerow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 作用域标签：淡底 pill，颜色对应色条 */
+.face-scope-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.face-scope-tag svg { flex-shrink: 0; }
+
+.face-scope-tag.is-device {
+  background: #fff8e6;
+  color: #9a6a00;
+  border: 1px solid #f6e2ad;
+}
+
+.face-scope-tag.is-server {
+  background: #eef7e0;
+  color: #4d7a1a;
+  border: 1px solid #d3e9b3;
+}
+
+/* 「待下发」状态：改了需下发到设备才生效的内容时才出现；即时生效的不显示 */
+.face-pending-summary[hidden] { display: none; }
+
+/* 逐字段橙点 badge —— 挂在标签后，提示这个字段改了还没下发 */
+.face-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: middle;
+  background: #fff3e0;
+  color: #b25b00;
+  border: 1px solid #f3d199;
+}
+.face-pending-badge[hidden] { display: none; }
+
+/* 有待下发时，「下发到设备」按钮高亮引导 */
+.face-push-btn.has-pending {
+  box-shadow: 0 0 0 3px rgba(240, 160, 30, 0.28);
+  animation: facePushPulse 1.8s ease-in-out infinite;
+}
+@keyframes facePushPulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(240, 160, 30, 0.28); }
+  50%      { box-shadow: 0 0 0 5px rgba(240, 160, 30, 0.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .face-push-btn.has-pending { animation: none; }
+}
+
+/* 自动保存提示条 + 「已保存」内联反馈 */
+.face-autosave-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9aa0a6;
+}
+
+.face-autosave-note svg { color: #b8c0c7; }
+
+.face-saved-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary, #8cc63f);
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+
+.face-saved-hint::before {
+  content: "✓";
+  font-weight: 700;
+}
+
+.face-saved-hint.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 模块内分组（识别设置 / 人脸录入），用极浅分隔线区分从属块 */
+.face-subsection + .face-subsection {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px dashed #eaeaea;
+}
+
+.face-subsection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.face-subsection-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #444;
+}
+
+/* 识别设置三小项并排一行（识别模式 / 鉴权强度 / 最低置信度） */
+.face-settings-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px 20px;
+}
+
+.face-settings-row .form-group {
+  margin: 0;
+}
+
+/* 录入网格嵌入模块内，去掉自身外内边距 */
+.face-enroll-grid-embed {
+  padding: 0;
+}
+
 .face-config-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1556,16 +1793,29 @@
   font-size: 12px;
 }
 
+/* 「测试连接」按钮及其结果推到右侧，与左侧自动保存提示分隔 */
+.face-config-actions #face-config-test-btn {
+  margin-left: auto;
+}
+
 @media (max-width: 768px) {
   .face-config-grid { grid-template-columns: 1fr; }
-  .face-config-card .section-header {
+  .face-settings-row { grid-template-columns: 1fr; }
+  .face-subsection-head {
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+  .face-config-card .section-header,
+  .face-block-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
     padding: 12px 14px;
   }
   .face-config-body { padding: 12px 14px; }
-  .face-config-actions { gap: 8px; flex-wrap: wrap; }
+  .face-config-actions { gap: 8px 12px; flex-wrap: wrap; }
+  .face-config-actions #face-config-test-btn { margin-left: 0; }
   .face-config-actions .btn,
   .face-config-actions button { flex: 1 1 auto; min-height: 40px; }
 }

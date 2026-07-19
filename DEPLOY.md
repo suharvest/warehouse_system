@@ -160,6 +160,7 @@ export FACTORY_API_KEY=<你的 token>   # 不会提交到 git
 | `MAX_UPLOAD_SIZE_MB` | 10 | 否 | 上传大小上限 |
 | `MAX_IMPORT_ROWS` | 10000 | 否 | Excel 导入行数上限 |
 | `PORT` | 2125 | 否 | 容器内监听端口；改了要同步改 compose 的 ports 右侧 |
+| `WAREHOUSE_DEVICE_BASE_URL` | 空 | 否 | 人脸 lan 模式 push-faces 下发给设备的识别代理 base（设备会拼 `/recognize`）。空则自动探测：UDP connect 设备 IP 取出口 IP + `PORT` 拼 `http://<ip>:<port>/api/face/device`。容器端口映射 / 反代 / 多网卡探测不准时用它整体覆盖，值需含 `/api/face/device` |
 
 ### MySQL 前置（仅 MySQL 模式）
 

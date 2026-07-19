@@ -141,3 +141,14 @@ export const getDeployMode = () => deployMode;
 export function setCurrentTenant(tenant) { currentTenant = tenant; }
 export function setDeployMode(mode) { deployMode = mode; localStorage.setItem('deploy_mode', mode); }
 
+// faceEnabled 是部署级人脸识别开关，来自 /api/system/mode 的 face_enabled 字段。
+// 为 false（线上/云端版）时隐藏「人脸识别」设置 tab 与相关功能。默认 true；fetch 完成
+// 前用 localStorage 缓存占位（只有显式 'false' 才关，缺省当 true）。与租户级
+// tenant_face_config.enabled 正交——前者决定"这套部署支不支持"，后者决定"某租户要不要验"。
+export let faceEnabled = localStorage.getItem('face_enabled') !== 'false';
+export const getFaceEnabled = () => faceEnabled;
+export function setFaceEnabled(enabled) {
+    faceEnabled = !!enabled;
+    localStorage.setItem('face_enabled', faceEnabled ? 'true' : 'false');
+}
+

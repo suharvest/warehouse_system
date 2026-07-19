@@ -19,7 +19,7 @@ Response shape mirrors ``face_rec_api``:
         }, ...
       ],
       "face_count": 1,
-      "model_tag": "we2-mfn128-v1",
+      "model_tag": "we2-mfnr6-128-v1",
       "backend": "we2-simulator",
       "processing_time_ms": 12.3
     }

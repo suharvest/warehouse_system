@@ -4,8 +4,13 @@ The tenant-configured endpoint is expected to follow the unified
 ``face_rec_api`` contract (Hailo / Jetson / RKNN / WE2-PC-simulator):
 
   POST /infer   {image_b64}
-       -> {faces: [{embedding (b64 float32), det_score, bbox, ...}],
+       -> {faces: [{embedding (b64 float32), det_score, bbox,
+                    live?, liveness_score?, ...}],
            face_count, model_tag, backend, processing_time_ms}
+
+When the endpoint runs passive liveness in reject mode, a spoofed face
+comes back with ``live=false`` and ``embedding=null`` — surfaced here as
+``FaceEndpointError("spoof")`` so the audit log records the real reason.
   GET  /health  -> {status, model_tag, backend, capabilities, ...}
 
 Stateless: there is no /capture. Upstream (frontend / MCP host) is
@@ -27,6 +32,10 @@ from .models import FaceConfig
 logger = logging.getLogger("warehouse.face")
 
 DEFAULT_TIMEOUT = 10.0
+
+# 进程内 WE2 模拟器（mode=local）的 embedding 模型标签。设备端（Himax WE2 NPU）
+# 与本模拟器同模型，routers/mcp_admin.py 的 DEVICE_FACE_MODEL_TAG 也须与此一致。
+LOCAL_MODEL_TAG = "we2-mfnr6-128-v1"
 
 
 def _headers(auth_token: Optional[str]) -> dict:
@@ -85,7 +94,7 @@ def _infer_local(image_b64: str) -> dict:
     emb_bytes = best.get("embedding_bytes")
     if not emb_bytes:
         raise FaceEndpointError("infer_no_embedding")
-    model_tag = result.get("model_tag") or "we2-mfn128-v1"
+    model_tag = result.get("model_tag") or LOCAL_MODEL_TAG
     return {"embedding": emb_bytes, "model_tag": model_tag}
 
 
@@ -119,7 +128,13 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
         raise FaceEndpointError("endpoint_not_configured")
     url = cfg.endpoint.rstrip("/") + "/infer"
     try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        # trust_env=False: LAN face endpoints must be reached directly —
+        # env/system proxies (macOS scutil proxy, Clash, ...) cannot route
+        # Tailscale/LAN ranges and turn every call into a 502 (same fix as
+        # device_pull.py).
+        async with httpx.AsyncClient(
+            timeout=DEFAULT_TIMEOUT, trust_env=False
+        ) as client:
             resp = await client.post(
                 url,
                 json={"image_b64": image_b64},
@@ -139,6 +154,11 @@ async def infer(cfg: FaceConfig, image_b64: str) -> dict:
         raise FaceEndpointError("no_face_detected")
     # Pick highest-det-score face; fall back to first if score absent.
     best = max(faces, key=lambda f: float(f.get("det_score") or 0.0))
+    # face_rec_api passive liveness: a spoofed face (print / screen replay)
+    # comes back with live=false and no embedding. Surface it as its own
+    # reason code instead of the misleading "infer_no_embedding".
+    if best.get("live") is False:
+        raise FaceEndpointError("spoof")
     emb_b64 = best.get("embedding")
     if not emb_b64:
         raise FaceEndpointError("infer_no_embedding")
@@ -155,7 +175,10 @@ async def health(endpoint: str, auth_token: Optional[str] = None) -> dict:
         raise FaceEndpointError("endpoint_not_configured")
     url = endpoint.rstrip("/") + "/health"
     try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        # trust_env=False: see infer() — never proxy LAN endpoint probes.
+        async with httpx.AsyncClient(
+            timeout=DEFAULT_TIMEOUT, trust_env=False
+        ) as client:
             resp = await client.get(url, headers=_headers(auth_token))
             return _parse_json_response(resp, "health")
     except httpx.HTTPError as e:

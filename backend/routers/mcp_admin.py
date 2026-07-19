@@ -14,6 +14,8 @@ Follow bare-module import style (no ``from backend.X``).
 import base64
 import ipaddress
 import os
+import secrets as _secrets
+import socket as _socket
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -21,7 +23,7 @@ from typing import Optional
 import httpx
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from database import generate_api_key, hash_api_key
@@ -43,6 +45,7 @@ from metadata import (
     api_keys as _t_api_keys,
     mcp_agent_devices as _t_mcp_agent_devices,
     mcp_connections as _t_mcp_connections,
+    tenant_face_config as _t_tenant_face_config,
     tenants as _t_tenants,
     warehouses as _t_warehouses,
 )
@@ -958,7 +961,7 @@ MAX_PUSH_FACES = 20
 # 设备固件写死的 embedding 模型标签。当前全设备同一模型，下发时用此固定常量
 # 过滤人脸库并作为 payload.model_tag，**不读** mcp_agent_devices.model_tag（该列
 # 保留作未来多模型扩展，现阶段不对用户暴露、不参与下发）。
-DEVICE_FACE_MODEL_TAG = "we2-mfn128-v1"
+DEVICE_FACE_MODEL_TAG = "we2-mfnr6-128-v1"
 
 # ---- Embedding 量化（仅 push 路径） -------------------------------------
 #
@@ -1008,6 +1011,57 @@ def quantize_embedding(f32_bytes: bytes, fmt: str) -> bytes:
     raise ValueError(f"未知 embedding_format: {fmt!r}")
 
 
+def _device_facing_base_url(device_ip: str) -> str:
+    """lan 模式下发给设备的识别代理 base（设备会拼 /recognize）。
+
+    优先 env ``WAREHOUSE_DEVICE_BASE_URL`` 整体覆盖（值应含 /api/face/device，
+    反代 / 容器端口映射 / 多网卡场景用，见 DEPLOY.md「.env 完整变量表」）；否则自动探测：
+    UDP connect 到设备 IP 取本机路由出口 IP（connect 不发包，仅查路由表拿
+    getsockname），端口取后端实际监听端口（run_backend.py 同源的 env PORT，
+    默认 2124）。
+    """
+    override = os.environ.get("WAREHOUSE_DEVICE_BASE_URL")
+    if override:
+        return override.rstrip("/")
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            s.connect((device_ip, 9))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        # 探测失败兜底（如设备 IP 不可路由）：回环。测试环境设备就是 127.0.0.1。
+        local_ip = "127.0.0.1"
+    port = int(os.environ.get("PORT", 2124))
+    return f"http://{local_ip}:{port}/api/face/device"
+
+
+def _ensure_tenant_auth_token(tid: int, current: "str | None") -> str:
+    """租户级设备识别代理 Bearer（tenant_face_config.auth_token）为空时自动
+    生成并持久化。条件更新防并发（仿 pull_token）：仅当仍为空时写入，写完
+    无条件回读 DB 权威值。GET /api/face/config 会回传，UI「认证 Token」可见。"""
+    token = (current or "").strip()
+    if token:
+        return token
+    candidate = _secrets.token_hex(16)
+    with get_engine().begin() as sa_conn:
+        sa_conn.execute(
+            update(_t_tenant_face_config)
+            .where(and_(
+                _t_tenant_face_config.c.tenant_id == tid,
+                or_(_t_tenant_face_config.c.auth_token.is_(None),
+                    _t_tenant_face_config.c.auth_token == ""),
+            ))
+            .values(auth_token=candidate)
+        )
+        token = sa_conn.execute(
+            select(_t_tenant_face_config.c.auth_token)
+            .where(_t_tenant_face_config.c.tenant_id == tid)
+        ).scalar() or ""
+    return token
+
+
 @router.post("/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
 async def push_faces_to_device(
     conn_id: str,
@@ -1033,6 +1087,27 @@ async def push_faces_to_device(
     # 取本租户人脸库并按固定 model_tag 过滤（复用 face 路由的 library 逻辑）。
     from routers.face import build_face_library
     tid = conn_row.tenant_id if hasattr(conn_row, "tenant_id") else dict(conn_row._mapping).get("tenant_id")
+
+    # 下发前置懒重算（反方向）：lan 模式注册的 subject 只有远端模型（如 Hailo
+    # 512D）的 enrollment + 注册照片，切回本机模式下发时设备需要 WE2 128D
+    # embedding → 用进程内 WE2 模拟器从照片现算补行再下发。统一原则：enrollment
+    # 按 (subject, model_tag) 多行共存，任何模型缺行且有照片就现算缓存，切换
+    # 模式永不要求用户重录。失败 warn+跳过+进程内防重试集合（orchestrator 核心）。
+    # push 本来就是用户主动的批量操作 → 不限量。任何异常不阻塞下发主链路。
+    from face.orchestrator import ensure_enrollments_for_model
+    from face import endpoint_client as _face_ec
+
+    async def _local_infer(image_b64):
+        return _face_ec._infer_local(image_b64)
+
+    try:
+        with get_db() as _lazy_conn:
+            await ensure_enrollments_for_model(_lazy_conn, tid, model_tag, _local_infer)
+    except Exception:
+        import logging
+        logging.getLogger("warehouse.face").exception(
+            "push-faces lazy re-embed failed (non-fatal)")
+
     library = build_face_library(tid, model_tag=model_tag)
     # 服务端强制上限：超过设备固件容量（FACE_MAX_COUNT=20）直接拒绝，不 POST、
     # 不截断。错误信息用户友好，前端会 alert 出来。
@@ -1054,6 +1129,64 @@ async def push_faces_to_device(
             "embedding_b64": base64.b64encode(emb_bytes).decode(),
         })
     payload = {"model_tag": model_tag, "embedding_format": fmt, "faces": faces}
+
+    # 随人脸库一并下发设备侧识别配置（Web「配置与规则」是唯一事实源，改完
+    # 重新下发即生效）：
+    #   match_threshold  — 最低识别置信度（0-100），设备本地 Match 阈值
+    #   identify_mode    — 'local' 设备 NPU + 本地库；'lan' 现场抓拍 POST 到
+    #                      identify_endpoint 的 /recognize（face_rec_api 契约）
+    # 旧固件忽略未知字段，向后兼容。
+    with get_engine().connect() as sa_conn:
+        fc = sa_conn.execute(
+            select(
+                _t_tenant_face_config.c.mode,
+                _t_tenant_face_config.c.endpoint,
+                _t_tenant_face_config.c.auth_token,
+                _t_tenant_face_config.c.min_confidence,
+            ).where(_t_tenant_face_config.c.tenant_id == tid)
+        ).fetchone()
+    if fc is not None:
+        payload["match_threshold"] = int(round(float(fc.min_confidence or 0.65) * 100))
+        identify_mode = fc.mode if fc.mode in ("local", "lan") else "local"
+        payload["identify_mode"] = identify_mode
+        if identify_mode == "lan":
+            # 设备识别代理：lan 模式设备抓拍 POST 的是 **warehouse 自身**的
+            # /api/face/device/recognize（伪装 face_rec_api /recognize 契约），
+            # 不再直连租户端点——人脸库只在 warehouse 存一份，face_rec_api 保持
+            # 无状态推理。identify_token 用租户级 auth_token（为空首发自动生成）。
+            payload["identify_endpoint"] = _device_facing_base_url(ip)
+            payload["identify_token"] = _ensure_tenant_auth_token(tid, fc.auth_token)
+        else:
+            # local 模式行为不变：设备本地 NPU + 本地库，endpoint/token 原样透传。
+            payload["identify_endpoint"] = (fc.endpoint or "").strip()
+            payload["identify_token"] = fc.auth_token or ""
+        # faces 库两种模式都照常下发：固件注释明确「旧固件忽略未知字段」、lan 模式
+        # 忽略本地库即可；保留下发让设备离线/回切 local 时仍有可用库，也避免
+        # payload 结构按模式分叉（MAX_PUSH_FACES 上限检查逻辑保持单一路径）。
+
+    # pull_token（B 方案后端直拉鉴权）：每设备独立，首次下发时生成并持久化，之后复用。
+    # 与 identify_token 分离（后者仅 lan 模式有值），保证本机模式设备也有非空 token，
+    # 否则设备端 current-speaker 的 fail-closed 会永远 401。下发到 NVS face.pull_token。
+    pull_token = dev.get("pull_token")
+    if not pull_token:
+        # 条件更新：仅当仍为空时写入，避免两个并发 push 各生成一个 token 互相覆盖、
+        # 导致设备 NVS 与 DB 永久不一致。写完无条件回读 DB 的权威值再下发。
+        candidate = _secrets.token_hex(16)
+        with get_engine().begin() as sa_conn:
+            sa_conn.execute(
+                update(_t_mcp_agent_devices)
+                .where(and_(
+                    _t_mcp_agent_devices.c.id == dev["id"],
+                    or_(_t_mcp_agent_devices.c.pull_token.is_(None),
+                        _t_mcp_agent_devices.c.pull_token == ""),
+                ))
+                .values(pull_token=candidate)
+            )
+            pull_token = sa_conn.execute(
+                select(_t_mcp_agent_devices.c.pull_token)
+                .where(_t_mcp_agent_devices.c.id == dev["id"])
+            ).scalar()
+    payload["pull_token"] = pull_token or ""
 
     url = f"http://{ip}:{port}/api/face/batch-update"
     # trust_env=False：设备在 LAN 内，必须直连其 IP，绝不能走系统/环境代理
