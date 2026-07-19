@@ -52,6 +52,36 @@ def test_classify_garbage():
     assert mcp_pipe._classify_json_rpc({"only": "stuff"}) == (None, None)
 
 
+def test_json_rpc_summary_excludes_payload_and_secrets():
+    parsed = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"api_key": "must-not-leak", "arguments": {"query": "secret"}},
+    }
+
+    summary = mcp_pipe._json_rpc_summary(parsed, 123)
+
+    assert summary == "request method=tools/call id=7 bytes=123"
+    assert "must-not-leak" not in summary
+    assert "secret" not in summary
+
+
+def test_json_rpc_summary_preserves_zero_id():
+    summary = mcp_pipe._json_rpc_summary(
+        {"jsonrpc": "2.0", "id": 0, "method": "initialize"}, 205
+    )
+
+    assert summary == "request method=initialize id=0 bytes=205"
+
+
+def test_reconnect_delay_is_jittered_and_capped(monkeypatch):
+    monkeypatch.setattr(mcp_pipe.random, "uniform", lambda low, high: high)
+
+    assert mcp_pipe._reconnect_delay(10) == 15
+    assert mcp_pipe._reconnect_delay(60) == mcp_pipe.MAX_BACKOFF
+
+
 def test_build_log_target_includes_connection_labels(monkeypatch, tmp_path):
     target = tmp_path / "warehouse_mcp.py"
     target.write_text("# fake")

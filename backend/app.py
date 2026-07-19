@@ -1,6 +1,7 @@
 """
 仓库管理系统 FastAPI 后端
 """
+import asyncio
 import os
 import logging
 import secrets
@@ -97,10 +98,9 @@ import math
 import uuid
 
 # Excel处理
-from openpyxl import Workbook, load_workbook
 
 # MCP进程管理
-from mcp_manager import MCPProcessManager
+from mcp_manager import MCPProcessManager, get_autostart_stagger_seconds
 
 # Shared dependencies (extracted from app.py — Phase 1 split, task #5).
 # Re-exported so existing route handlers in app.py continue to reference
@@ -5355,6 +5355,8 @@ def export_materials_excel(
                     'variant': '',
                 })
 
+    from openpyxl import Workbook
+
     wb = Workbook()
     ws = wb.active
     ws.title = "库存数据"
@@ -5438,6 +5440,8 @@ async def preview_import_excel(
         return _error_resp(f"文件大小 ({file_size_mb:.1f}MB) 超过限制 ({MAX_UPLOAD_SIZE_MB}MB)")
 
     try:
+        from openpyxl import load_workbook
+
         wb = load_workbook(filename=BytesIO(contents))
         ws = wb.active
     except Exception as e:
@@ -6338,6 +6342,8 @@ def export_inventory_records(
     current_user: CurrentUser = Depends(require_permission(Resource.INVENTORY, Action.READ))
 ):
     """导出出入库记录为Excel（支持筛选，含批次信息）— Phase 3f: SA Core read."""
+    from openpyxl import Workbook
+
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
 
     preds = list(build_authorized_scope_predicates(_t_inventory_records, current_user, wh_id))
@@ -6652,15 +6658,8 @@ async def _run_migrations():
             logger.warning(f"generate_mock_data() skipped: {e}")
 
 
-@app.on_event("startup")
-async def startup_mcp_manager():
-    """启动时恢复 auto_start 的 MCP 连接"""
-    # Create the per-worker singleton on app.state.
-    mcp_manager = MCPProcessManager()
-    app.state.mcp_manager = mcp_manager
-    await mcp_manager.start_monitor()
-
-    # 恢复 auto_start 的连接 — Phase 3e: subprocess/network 在 engine.begin() 之外
+async def _restore_auto_start_mcp_connections(mcp_manager: MCPProcessManager):
+    """Restore MCP connections one at a time after HTTP startup completes."""
     try:
         with get_engine().connect() as sa_conn:
             rows = sa_conn.execute(
@@ -6673,7 +6672,8 @@ async def startup_mcp_manager():
                 ).where(_t_mcp_connections.c.auto_start == 1)
             ).all()
 
-        for row in rows:
+        stagger_seconds = get_autostart_stagger_seconds()
+        for index, row in enumerate(rows):
             logger.info(f"Auto-starting MCP connection: {row.name}")
             await mcp_manager.start_connection(
                 row.id, row.mcp_endpoint, row.api_key,
@@ -6687,13 +6687,46 @@ async def startup_mcp_manager():
                     .where(_t_mcp_connections.c.id == row.id)
                     .values(status=status_info['status'], updated_at=datetime.now().isoformat())
                 )
+            ready = await mcp_manager.wait_for_protocol_ready(row.id, timeout=30.0)
+            if not ready:
+                logger.warning(
+                    "MCP connection %s did not complete initialize within 30s; "
+                    "continuing sequential restore",
+                    row.id,
+                )
+            if stagger_seconds and index + 1 < len(rows):
+                logger.info(
+                    "Waiting %.1fs before the next MCP auto-start",
+                    stagger_seconds,
+                )
+                await asyncio.sleep(stagger_seconds)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to restore MCP connections: {e}")
+
+
+@app.on_event("startup")
+async def startup_mcp_manager():
+    """Start MCP supervision and restore connections in the background."""
+    mcp_manager = MCPProcessManager()
+    app.state.mcp_manager = mcp_manager
+    await mcp_manager.start_monitor()
+    app.state.mcp_restore_task = asyncio.create_task(
+        _restore_auto_start_mcp_connections(mcp_manager)
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown_mcp_manager():
     """关闭时停止所有 MCP 连接"""
+    restore_task = getattr(app.state, "mcp_restore_task", None)
+    if restore_task is not None and not restore_task.done():
+        restore_task.cancel()
+        try:
+            await restore_task
+        except asyncio.CancelledError:
+            pass
     mcp_manager = getattr(app.state, "mcp_manager", None)
     if mcp_manager is not None:
         await mcp_manager.stop_all()

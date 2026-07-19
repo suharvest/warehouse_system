@@ -16,12 +16,17 @@
 """
 
 from fastmcp import FastMCP
+import asyncio
 import sys
 import os
 import logging
 import yaml
 import functools
 import json
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime
 
 # 调试模式：MCP_DEBUG=1 时打印每个 tool 的入参和返回值到 stderr（由 mcp_pipe.py 转发到终端）
@@ -37,20 +42,26 @@ logger = logging.getLogger('WarehouseMCP')
 
 # MCP Tool 调用日志装饰器（仅 MCP_DEBUG=1 时生效）
 def log_mcp_call(func):
-    if not _MCP_DEBUG:
-        return func  # 非调试模式，直接返回原函数，零开销
-
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        logger.info(f"→ {func.__name__}({json.dumps(kwargs, ensure_ascii=False, default=str)})")
-        try:
-            result = func(*args, **kwargs)
-            result_str = json.dumps(result, ensure_ascii=False, default=str)
-            logger.info(f"← {func.__name__} => {result_str[:3000]}")
-            return result
-        except Exception as e:
-            logger.error(f"✗ {func.__name__} => {e}", exc_info=True)
-            raise
+    async def wrapper(*args, **kwargs):
+        def invoke():
+            if not _debug_enabled():
+                return func(*args, **kwargs)
+            logger.info(f"→ {func.__name__}({json.dumps(kwargs, ensure_ascii=False, default=str)})")
+            try:
+                result = func(*args, **kwargs)
+                result_str = json.dumps(result, ensure_ascii=False, default=str)
+                logger.info(f"← {func.__name__} => {result_str[:3000]}")
+                return result
+            except Exception as e:
+                logger.error(f"✗ {func.__name__} => {e}", exc_info=True)
+                raise
+
+        # FastMCP 2.13 calls synchronous tools directly on its event loop.
+        # Providers call this same Uvicorn service over HTTP, so direct execution
+        # deadlocks the event loop until requests times out. asyncio.to_thread
+        # also copies ContextVars, preserving per-session tenant credentials.
+        return await asyncio.to_thread(invoke)
     return wrapper
 
 # 修复 Windows 控制台 UTF-8 编码
@@ -190,7 +201,84 @@ def _load_provider_from_db_or_default(default_config: dict):
         return load_provider(default_config)
 
 
-_provider = _load_provider_from_db_or_default(_config)
+_provider = None
+_provider_lock = threading.Lock()
+_runtime_state: ContextVar[dict | None] = ContextVar(
+    'warehouse_mcp_runtime_state', default=None
+)
+
+
+def create_runtime_state(
+    api_base_url: str,
+    api_key: str,
+    *,
+    debug: bool = False,
+    provider: str | None = None,
+) -> dict:
+    """Create isolated configuration and provider cache for one MCP session."""
+    config = deepcopy(_config)
+    config['api_base_url'] = api_base_url.rstrip('/')
+    config['api_key'] = api_key
+    config['auth'] = {
+        'type': 'api_key',
+        'key': api_key,
+        'header': 'X-API-Key',
+    }
+    if provider:
+        config['provider'] = provider
+    return {
+        'config': config,
+        'provider': None,
+        'provider_lock': threading.Lock(),
+        'debug': bool(debug),
+    }
+
+
+@contextmanager
+def runtime_context(state: dict):
+    """Bind one tenant/session runtime to the current async task context."""
+    token = _runtime_state.set(state)
+    try:
+        yield
+    finally:
+        _runtime_state.reset(token)
+
+
+def _get_config() -> dict:
+    state = _runtime_state.get()
+    return state['config'] if state is not None else _config
+
+
+def _debug_enabled() -> bool:
+    state = _runtime_state.get()
+    return bool(state['debug']) if state is not None else _MCP_DEBUG
+
+
+def _get_provider():
+    """Load the tenant provider on first tool use, not during MCP startup.
+
+    The watcher expects an initialize response within roughly 30 seconds. A
+    production restart starts every configured MCP connection together, and
+    eagerly calling the backend API here made all child processes contend
+    before they could read the initialize request. Keeping startup side-effect
+    free lets the protocol handshake complete immediately.
+    """
+    state = _runtime_state.get()
+    if state is not None:
+        if state['provider'] is None:
+            with state['provider_lock']:
+                if state['provider'] is None:
+                    state['provider'] = _load_provider_from_db_or_default(
+                        state['config']
+                    )
+        return state['provider']
+
+    global _provider
+    if _provider is None:
+        with _provider_lock:
+            if _provider is None:
+                _provider = _load_provider_from_db_or_default(_config)
+    return _provider
 
 
 # ============ Face Guard (Phase 1) ============
@@ -223,11 +311,12 @@ def _face_guard(
     'skipped' instead of being blocked on missing camera input.
     """
     import requests as _r
-    api_base = _config.get('api_base_url', '').rstrip('/')
+    config = _get_config()
+    api_base = config.get('api_base_url', '').rstrip('/')
     if not api_base:
         return {"status": "skipped", "failure_reason": "no_api_base"}
     headers = {}
-    auth = _config.get('auth') or {}
+    auth = config.get('auth') or {}
     if auth.get('type') == 'api_key':
         headers[auth.get('header', 'X-API-Key')] = auth.get('key', '')
     elif auth.get('type') == 'bearer':
@@ -739,7 +828,7 @@ mcp = FastMCP("Warehouse System", instructions=_RULES_FOOTER.strip())
 def resolve_name(text: str, entity_type: str = "all") -> dict:
     """仅"先确认实体再下一步"时用；查库存/批次/出入库已内建模糊匹配，请直接调对应工具。"""
     try:
-        return _provider.resolve_name(text, entity_type)
+        return _get_provider().resolve_name(text, entity_type)
     except Exception as e:
         return _tool_error("名称解析", e)
 
@@ -750,7 +839,7 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 def query_stock(product_name: str) -> dict:
     """按产品名查库存。"""
     try:
-        resp = _provider.query_stock(product_name)
+        resp = _get_provider().query_stock(product_name)
     except Exception as e:
         resp = _tool_error("查询库存", e)
     return resp
@@ -762,7 +851,7 @@ def query_stock(product_name: str) -> dict:
 def query_batch(batch_no: str) -> dict:
     """按批次号查批次。"""
     try:
-        resp = _provider.query_batch(batch_no)
+        resp = _get_provider().query_batch(batch_no)
     except Exception as e:
         resp = _tool_error("批次查询", e)
     return resp
@@ -794,7 +883,7 @@ def stock_in(product_name: str, quantity: int,
     if blocked is not None:
         return blocked
     try:
-        return _provider.stock_in(product_name, quantity, reason_category, reason_note,
+        return _get_provider().stock_in(product_name, quantity, reason_category, reason_note,
                                   operator, True, location, contact_id, variant)
     except Exception as e:
         return _tool_error("入库", e)
@@ -827,7 +916,7 @@ def stock_out(product_name: str, quantity: int,
     if blocked is not None:
         return blocked
     try:
-        return _provider.stock_out(product_name, quantity, reason_category, reason_note,
+        return _get_provider().stock_out(product_name, quantity, reason_category, reason_note,
                                    operator, True, variant, location,
                                    batch_no=batch_no, location_fuzzy=True,
                                    allow_partial_fallback=allow_partial_fallback)
@@ -844,7 +933,7 @@ def search(query: str = None, entity_type: str = "material",
            max_results: int = 0) -> dict:
     """搜索物料、联系方或操作员。"""
     try:
-        return _provider.search(query, entity_type, category, status, contact_type, True,
+        return _get_provider().search(query, entity_type, category, status, contact_type, True,
                                 include_batches, max_results)
     except Exception as e:
         return _tool_error("搜索", e)
@@ -879,7 +968,7 @@ def move_batch_location(batch_no: str, new_location: str,
         # 该工具有意不暴露 from_location / product_name（batch_no 已足够定位），
         # provider 对应参数默认为 None。此前误传了未定义的 from_location/product_name
         # 名字，触发 NameError → 批次移位永远失败。
-        return _provider.move_batch_location(
+        return _get_provider().move_batch_location(
             batch_no, new_location, quantity, operator=operator
         )
     except Exception as e:
@@ -892,7 +981,7 @@ def move_batch_location(batch_no: str, new_location: str,
 def get_today_statistics() -> dict:
     """今日入出库与库存概览。"""
     try:
-        return _provider.get_today_statistics()
+        return _get_provider().get_today_statistics()
     except Exception as e:
         return _tool_error("统计查询", e)
 
