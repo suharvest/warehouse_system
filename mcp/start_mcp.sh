@@ -33,10 +33,13 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
-# 检查后端服务是否运行
+# 检查后端服务是否运行。端口跟随 PORT 环境变量（与 warehouse_mcp.py 的
+# api_base_url 推导一致；Docker 部署设 PORT=2125），默认 2124，避免健康检查
+# 对着错误端口报"后端未运行"的假警告（issue #2）。
 echo "检查后端服务..."
-if curl -s http://localhost:2124/api/dashboard/stats > /dev/null 2>&1; then
-    echo "后端服务运行正常 (端口 2124)"
+BACKEND_PORT="${PORT:-2124}"
+if curl -s "http://localhost:${BACKEND_PORT}/api/dashboard/stats" > /dev/null 2>&1; then
+    echo "后端服务运行正常 (端口 ${BACKEND_PORT})"
 else
     echo "警告: 后端服务未运行，MCP 功能可能受限"
     echo "请先启动后端服务: uv run python run_backend.py"
