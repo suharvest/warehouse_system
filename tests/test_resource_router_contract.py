@@ -669,8 +669,9 @@ def test_contract_face_rules(admin_client, default_warehouse_id):
     rid = r.json()["id"]
 
     r = admin_client.get("/api/face/rules")
-    _check("face_rules/list", r.status_code, r.json(), shape_only=True)
     assert r.status_code == 200
+    created_rule = next(item for item in r.json() if item["id"] == rid)
+    _check("face_rules/list", r.status_code, [created_rule], shape_only=True)
 
     r = admin_client.put(f"/api/face/rules/{rid}", json={
         "warehouse_id": default_warehouse_id,

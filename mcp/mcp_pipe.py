@@ -21,6 +21,7 @@ Env overrides:
 """
 
 import asyncio
+import random
 import time
 import websockets
 import subprocess
@@ -61,15 +62,18 @@ except (OSError, ValueError):
 # Reconnection settings
 INITIAL_BACKOFF = 1  # Initial wait time in seconds
 MAX_BACKOFF = 60  # Cap reconnect interval at 60s (was 600s — 2-5 min recovery felt broken)
+RECONNECT_JITTER_LOW = 0.5
+RECONNECT_JITTER_HIGH = 1.5
 
 # Timeout settings
 TOOL_CALL_TIMEOUT = 60   # Max seconds to wait for warehouse_mcp to produce one response line
 WS_PING_INTERVAL = 10    # WebSocket keepalive ping interval (seconds) — shorter to survive NAT idle
 WS_PING_TIMEOUT = 10     # WebSocket ping response deadline (seconds)
+PROTOCOL_EVENT_LOG = os.environ.get('MCP_PROTOCOL_EVENT_LOG', '1') != '0'
 
 
 def _safe_label(value, limit=160):
-    text = str(value or '').replace('\n', ' ').replace('\r', ' ').strip()
+    text = str('' if value is None else value).replace('\n', ' ').replace('\r', ' ').strip()
     return text[:limit]
 
 
@@ -90,6 +94,14 @@ def build_log_target(target):
     return ' '.join(parts) or _safe_label(target) or 'mcp'
 
 
+def _reconnect_delay(backoff):
+    """Spread reconnects so many connections do not retry in lockstep."""
+    return min(
+        MAX_BACKOFF,
+        random.uniform(backoff * RECONNECT_JITTER_LOW, backoff * RECONNECT_JITTER_HIGH),
+    )
+
+
 async def connect_with_retry(uri, target, log_target=None):
     """Connect to WebSocket server with retry mechanism for a given server target."""
     log_target = log_target or build_log_target(target)
@@ -97,13 +109,14 @@ async def connect_with_retry(uri, target, log_target=None):
     backoff = INITIAL_BACKOFF
     while True:  # Infinite reconnection
         try:
-            # First retry after a failure: immediate (transient blips recover instantly).
-            # Subsequent retries: exponential backoff capped at MAX_BACKOFF.
-            if reconnect_attempt > 1:
-                logger.info(f"[{log_target}] Waiting {backoff}s before reconnection attempt {reconnect_attempt}...")
-                await asyncio.sleep(backoff)
-            elif reconnect_attempt == 1:
-                logger.info(f"[{log_target}] Immediate reconnect attempt {reconnect_attempt}")
+            if reconnect_attempt:
+                delay = _reconnect_delay(backoff)
+                logger.info(
+                    f"[{log_target}] "
+                    f"Waiting {delay:.1f}s before reconnection "
+                    f"attempt {reconnect_attempt}..."
+                )
+                await asyncio.sleep(delay)
 
             # Attempt to connect
             await connect_to_server(uri, target, log_target)
@@ -146,13 +159,18 @@ async def connect_to_server(uri, target, log_target=None):
             # a request waiting on a response — idle periods between cloud requests
             # must not kill the subprocess (was the cause of the ~60s reconnect cycle).
             pending_requests: dict = {}
+            protocol_trace = {'last_cloud': None, 'last_server': None}
 
             tasks = [
                 asyncio.create_task(
-                    pipe_websocket_to_process(websocket, process, log_target, pending_requests)
+                    pipe_websocket_to_process(
+                        websocket, process, log_target, pending_requests, protocol_trace
+                    )
                 ),
                 asyncio.create_task(
-                    pipe_process_to_websocket(process, websocket, log_target, pending_requests)
+                    pipe_process_to_websocket(
+                        process, websocket, log_target, pending_requests, protocol_trace
+                    )
                 ),
                 asyncio.create_task(
                     pipe_process_stderr_to_terminal(process, log_target)
@@ -182,6 +200,7 @@ async def connect_to_server(uri, target, log_target=None):
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=5)
             logger.info(f"[{log_target}] Server process terminated")
 
 def _classify_json_rpc(parsed):
@@ -203,7 +222,30 @@ def _classify_json_rpc(parsed):
     return (None, None)
 
 
-async def pipe_websocket_to_process(websocket, process, target, pending_requests: dict):
+def _json_rpc_summary(parsed, byte_count):
+    """Return protocol metadata without logging params, results, or credentials."""
+    kind, rid = _classify_json_rpc(parsed)
+    if kind in ('request', 'notification'):
+        method = _safe_label(parsed.get('method'), 100)
+        return f"{kind} method={method or '?'} id={_safe_label(rid)} bytes={byte_count}"
+    if kind == 'response':
+        outcome = 'error' if 'error' in parsed else 'result'
+        return f"response id={_safe_label(rid)} outcome={outcome} bytes={byte_count}"
+    return f"non-json-rpc bytes={byte_count}"
+
+
+def _trace_suffix(protocol_trace):
+    if not protocol_trace:
+        return ''
+    return (
+        f"; last_cloud={protocol_trace.get('last_cloud') or 'none'}"
+        f"; last_server={protocol_trace.get('last_server') or 'none'}"
+    )
+
+
+async def pipe_websocket_to_process(
+    websocket, process, target, pending_requests: dict, protocol_trace=None
+):
     """Read data from WebSocket and write to process stdin.
     Records each JSON-RPC request id into pending_requests so the timeout handler
     only fires when a response is actually expected.
@@ -219,6 +261,11 @@ async def pipe_websocket_to_process(websocket, process, target, pending_requests
             try:
                 parsed = json.loads(message)
                 kind, rid = _classify_json_rpc(parsed)
+                summary = _json_rpc_summary(parsed, len(message.encode('utf-8')))
+                if protocol_trace is not None:
+                    protocol_trace['last_cloud'] = summary
+                if PROTOCOL_EVENT_LOG:
+                    logger.info(f"[{target}] RPC cloud->server {summary}")
                 if kind == 'request':
                     pending_requests[rid] = time.monotonic()
             except Exception:
@@ -227,14 +274,19 @@ async def pipe_websocket_to_process(websocket, process, target, pending_requests
             process.stdin.write(message + '\n')
             process.stdin.flush()
     except Exception as e:
-        logger.error(f"[{target}] Error in WebSocket to process pipe: {e}")
+        logger.error(
+            f"[{target}] Error in WebSocket to process pipe: {e}"
+            f"{_trace_suffix(protocol_trace)}"
+        )
         raise  # Re-throw exception to trigger reconnection
     finally:
         # Close process stdin
         if not process.stdin.closed:
             process.stdin.close()
 
-async def pipe_process_to_websocket(process, websocket, target, pending_requests: dict):
+async def pipe_process_to_websocket(
+    process, websocket, target, pending_requests: dict, protocol_trace=None
+):
     """Read data from process stdout and send to WebSocket.
 
     Timeout policy: only enforce TOOL_CALL_TIMEOUT when there's an outstanding request
@@ -288,13 +340,20 @@ async def pipe_process_to_websocket(process, websocket, target, pending_requests
                 data = await asyncio.to_thread(process.stdout.readline)
 
             if not data:  # If no data, the process may have ended
-                logger.info(f"[{target}] Process has ended output")
-                break
+                exit_code = process.poll()
+                raise RuntimeError(
+                    f"Server process stdout closed unexpectedly (exit_code={exit_code})"
+                )
 
             # Clear pending entry when its response goes out
             try:
                 parsed = json.loads(data)
                 kind, rid = _classify_json_rpc(parsed)
+                summary = _json_rpc_summary(parsed, len(data.encode('utf-8')))
+                if protocol_trace is not None:
+                    protocol_trace['last_server'] = summary
+                if PROTOCOL_EVENT_LOG:
+                    logger.info(f"[{target}] RPC server->cloud {summary}")
                 if kind == 'response':
                     pending_requests.pop(rid, None)
             except Exception:

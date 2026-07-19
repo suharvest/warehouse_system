@@ -21,7 +21,6 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -429,9 +428,7 @@ async def update_mcp_connection(
     row = dict(_r._mapping) if _r else None
 
     if new_endpoint is not None and new_endpoint != old_endpoint:
-        if (conn_id in mcp_manager.connections
-            and mcp_manager.connections[conn_id].process
-            and mcp_manager.connections[conn_id].process.returncode is None):
+        if mcp_manager.get_connection_status(conn_id).get('status') == 'running':
             await mcp_manager.restart_connection(conn_id, row['mcp_endpoint'], row['api_key'])
 
     status_info = mcp_manager.get_connection_status(conn_id)
@@ -999,6 +996,8 @@ def quantize_embedding(f32_bytes: bytes, fmt: str) -> bytes:
         # 原样透传：canonical 源已是 float32 LE。
         return f32_bytes
     if fmt == "fp16":
+        import numpy as np
+
         vec = np.frombuffer(f32_bytes, dtype="<f4")
         return vec.astype("<f2").tobytes()
     if fmt == "int8":

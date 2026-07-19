@@ -12,10 +12,73 @@ We mock ``asyncio.create_subprocess_exec`` so we don't fork real
 processes during the test.
 """
 import asyncio
+import ast
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _use_legacy_process_mode(monkeypatch):
+    """These tests exercise the rollback-compatible subprocess manager path."""
+    monkeypatch.setenv("MCP_SHARED_RUNTIME", "0")
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, 3.0),
+        ("0", 0.0),
+        ("1.5", 1.5),
+        ("-4", 0.0),
+        ("120", 30.0),
+        ("invalid", 3.0),
+    ],
+)
+def test_get_autostart_stagger_seconds(monkeypatch, raw_value, expected):
+    import mcp_manager
+
+    if raw_value is None:
+        monkeypatch.delenv("MCP_AUTOSTART_STAGGER_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("MCP_AUTOSTART_STAGGER_SECONDS", raw_value)
+
+    assert mcp_manager.get_autostart_stagger_seconds() == expected
+
+
+def test_app_autostart_has_asyncio_dependency():
+    """The startup loop must not stop after its first staggered connection."""
+    app_path = Path(__file__).parents[1] / "backend" / "app.py"
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+    imported_modules = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "asyncio" in imported_modules
+
+
+@pytest.mark.asyncio
+async def test_wait_for_protocol_ready_tracks_initialize_response():
+    import mcp_manager
+
+    mgr = object.__new__(mcp_manager.MCPProcessManager)
+    proc = mcp_manager.MCPProcess("conn", "wss://example", "key", status="running")
+    mgr.connections = {"conn": proc}
+
+    mgr._update_websocket_status_from_log(
+        proc,
+        "RPC server->cloud response id=0 outcome=result bytes=1046",
+    )
+    assert await mgr.wait_for_protocol_ready("conn", timeout=0.01) is True
+
+    mgr._update_websocket_status_from_log(proc, "WebSocket connection closed: 4004")
+    assert proc.protocol_ready is False
+    assert await mgr.wait_for_protocol_ready("conn", timeout=0.01) is False
 
 
 class _FakeProcess:

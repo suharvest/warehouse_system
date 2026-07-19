@@ -18,6 +18,32 @@ logger = logging.getLogger('warehouse.mcp')
 MAX_RESTART_COUNT = 5
 MONITOR_INTERVAL = 30  # seconds
 MAX_LOG_LINES = 200
+DEFAULT_AUTOSTART_STAGGER_SECONDS = 3.0
+MAX_AUTOSTART_STAGGER_SECONDS = 30.0
+
+
+def get_autostart_stagger_seconds() -> float:
+    """Return the delay between boot-time MCP process starts.
+
+    Small production hosts cannot import FastMCP for every configured
+    connection at once and still meet the watcher's handshake deadline.
+    Staggering only applies to boot-time restore; manual starts remain
+    immediate.
+    """
+    raw_value = os.environ.get(
+        'MCP_AUTOSTART_STAGGER_SECONDS',
+        str(DEFAULT_AUTOSTART_STAGGER_SECONDS),
+    )
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid MCP_AUTOSTART_STAGGER_SECONDS=%r; using %.1fs",
+            raw_value,
+            DEFAULT_AUTOSTART_STAGGER_SECONDS,
+        )
+        return DEFAULT_AUTOSTART_STAGGER_SECONDS
+    return max(0.0, min(value, MAX_AUTOSTART_STAGGER_SECONDS))
 
 
 @dataclass
@@ -36,7 +62,9 @@ class MCPProcess:
     log_context: dict = field(default_factory=dict)
     started_at: Optional[datetime] = None
     logs: deque = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
+    protocol_ready: bool = False
     _log_task: Optional[asyncio.Task] = None
+    _bridge_task: Optional[asyncio.Task] = None
 
 
 class MCPProcessManager:
@@ -45,6 +73,10 @@ class MCPProcessManager:
     def __init__(self):
         self.connections: Dict[str, MCPProcess] = {}
         self._monitor_task: Optional[asyncio.Task] = None
+        self._shared_runtime = None
+        self._shared_runtime_enabled = (
+            os.environ.get('MCP_SHARED_RUNTIME', '1') != '0'
+        )
         # per-connection async lock：串行化同一 conn_id 的所有 state
         # 变更（start / stop / restart / toggle_debug），避免并发
         # /start + /stop 把 self.connections[conn_id] 改成不一致状态
@@ -57,6 +89,14 @@ class MCPProcessManager:
         # spawns a second copy, and the cloud sees two clients with the
         # same identity — observed as "云端连接失败" + multi-minute recovery.
         self._kill_orphan_pipes()
+
+    async def _get_shared_runtime(self):
+        if self._shared_runtime is None:
+            from mcp_shared_runtime import SharedMCPRuntime
+
+            self._shared_runtime = SharedMCPRuntime()
+        await self._shared_runtime.start()
+        return self._shared_runtime
 
     @staticmethod
     def _kill_orphan_pipes():
@@ -153,7 +193,15 @@ class MCPProcessManager:
         # 如果已经有运行中的进程，先停止（同样 unlocked，避免锁重入）
         if conn_id in self.connections:
             existing = self.connections[conn_id]
-            if existing.process and existing.process.returncode is None:
+            shared_running = (
+                existing._bridge_task is not None
+                and not existing._bridge_task.done()
+            )
+            process_running = (
+                existing.process is not None
+                and existing.process.returncode is None
+            )
+            if shared_running or process_running:
                 await self._stop_connection_locked(conn_id)
 
         # 确定 mcp_pipe.py 和 warehouse_mcp.py 路径
@@ -178,6 +226,16 @@ class MCPProcessManager:
         )
         for key, value in log_context.items():
             env[f"MCP_LOG_{key.upper()}"] = str(value)
+
+        if self._shared_runtime_enabled:
+            return await self._start_shared_connection(
+                conn_id=conn_id,
+                endpoint=endpoint,
+                api_key=api_key,
+                debug_mode=effective_debug,
+                log_context=log_context,
+                api_url=env['WAREHOUSE_API_URL'],
+            )
 
         try:
             # 传 warehouse_mcp.py 路径作为参数，避免依赖 mcp_config.json 的硬编码路径
@@ -225,6 +283,145 @@ class MCPProcessManager:
                 log_context=log_context,
             )
             return False
+
+    async def _start_shared_connection(
+        self,
+        *,
+        conn_id: str,
+        endpoint: str,
+        api_key: str,
+        debug_mode: bool,
+        log_context: dict,
+        api_url: str,
+    ) -> bool:
+        """Start one watcher session on the process-wide FastMCP runtime."""
+        try:
+            runtime = await self._get_shared_runtime()
+            session_state = runtime.create_session_state(
+                api_url,
+                api_key,
+                debug=debug_mode,
+            )
+            mcp_proc = MCPProcess(
+                conn_id=conn_id,
+                endpoint=endpoint,
+                api_key=api_key,
+                status='running',
+                websocket_status='connecting',
+                started_at=datetime.now(),
+                restart_count=0,
+                debug_mode=debug_mode,
+                log_context=log_context,
+            )
+            self.connections[conn_id] = mcp_proc
+            log_target = self._build_shared_log_target(log_context)
+
+            def event_callback(event: str, message: str):
+                if self.connections.get(conn_id) is not mcp_proc:
+                    return
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                mcp_proc.logs.append(f"[{timestamp}] {event.upper()} {message}")
+                self._update_shared_runtime_status(mcp_proc, event, message)
+
+            task = asyncio.create_task(
+                runtime.run_connection(
+                    endpoint,
+                    session_state,
+                    log_target,
+                    event_callback,
+                ),
+                name=f"mcp-shared-{conn_id}",
+            )
+            mcp_proc._bridge_task = task
+            task.add_done_callback(
+                lambda completed: self._shared_task_done(mcp_proc, completed)
+            )
+            logger.info(
+                "MCP connection '%s' started on shared runtime (PID: %s)",
+                conn_id,
+                os.getpid(),
+            )
+            return True
+        except Exception as exc:
+            logger.error("Failed to start shared MCP connection '%s': %s", conn_id, exc)
+            self.connections[conn_id] = MCPProcess(
+                conn_id=conn_id,
+                endpoint=endpoint,
+                api_key=api_key,
+                status='error',
+                websocket_status='error',
+                websocket_error=str(exc),
+                error_message=str(exc),
+                debug_mode=debug_mode,
+                log_context=log_context,
+            )
+            return False
+
+    @staticmethod
+    def _build_shared_log_target(log_context: dict) -> str:
+        labels = (
+            ('conn_id', 'conn_id'),
+            ('name', 'name'),
+            ('tenant_id', 'tenant_id'),
+            ('tenant', 'tenant_name'),
+            ('warehouse_id', 'warehouse_id'),
+            ('warehouse', 'warehouse_name'),
+        )
+        parts = []
+        for label, key in labels:
+            value = log_context.get(key)
+            if value is not None and str(value).strip():
+                clean_value = (
+                    str(value)
+                    .replace('\n', ' ')
+                    .replace('\r', ' ')
+                    .strip()[:160]
+                )
+                if clean_value:
+                    parts.append(f"{label}={clean_value}")
+        parts.append('target=shared-fastmcp')
+        return ' '.join(parts)
+
+    @staticmethod
+    def _update_shared_runtime_status(
+        proc: MCPProcess,
+        event: str,
+        message: str,
+    ):
+        if event in ('connecting', 'reconnecting'):
+            proc.websocket_status = 'connecting'
+            proc.websocket_error = None
+            proc.protocol_ready = False
+        elif event == 'connected':
+            proc.websocket_status = 'connected'
+            proc.websocket_error = None
+        elif event == 'protocol_ready':
+            proc.websocket_status = 'connected'
+            proc.websocket_error = None
+            proc.protocol_ready = True
+        elif event == 'disconnected':
+            proc.websocket_status = 'disconnected'
+            proc.websocket_error = message
+            proc.protocol_ready = False
+        elif event == 'error':
+            proc.websocket_status = 'error'
+            proc.websocket_error = message
+            proc.protocol_ready = False
+
+    def _shared_task_done(self, proc: MCPProcess, task: asyncio.Task):
+        if task.cancelled() or proc.status != 'running':
+            return
+        exception = task.exception()
+        proc.status = 'error'
+        proc.websocket_status = 'error'
+        proc.protocol_ready = False
+        proc.error_message = str(exception or 'Shared MCP runtime task stopped')
+        proc.websocket_error = proc.error_message
+        logger.error(
+            "Shared MCP connection '%s' stopped unexpectedly: %s",
+            proc.conn_id,
+            proc.error_message,
+        )
 
     @staticmethod
     def _normalize_log_context(conn_id: str, context: Optional[dict]) -> dict:
@@ -291,6 +488,16 @@ class MCPProcessManager:
             return False
 
         proc = self.connections[conn_id]
+        if proc._bridge_task is not None:
+            task = proc._bridge_task
+            if not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=5)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            proc._bridge_task = None
+
         if proc.process and proc.process.returncode is None:
             try:
                 # 杀整个进程组（mcp_pipe + warehouse_mcp 子进程）
@@ -365,6 +572,17 @@ class MCPProcessManager:
             return {'status': 'stopped', 'pid': None}
 
         proc = self.connections[conn_id]
+        if proc._bridge_task is not None and proc._bridge_task.done():
+            if proc.status == 'running' and not proc._bridge_task.cancelled():
+                proc.status = 'error'
+                exception = proc._bridge_task.exception()
+                proc.error_message = str(
+                    exception or 'Shared MCP runtime task stopped'
+                )
+                proc.websocket_status = 'error'
+                proc.websocket_error = proc.error_message
+                proc.protocol_ready = False
+
         # 检查进程是否仍在运行
         if proc.process and proc.process.returncode is not None:
             if proc.status == 'running':
@@ -382,7 +600,15 @@ class MCPProcessManager:
             'status': proc.status,
             'websocket_status': proc.websocket_status,
             'websocket_error': proc.websocket_error,
-            'pid': proc.process.pid if proc.process and proc.process.returncode is None else None,
+            'pid': (
+                os.getpid()
+                if proc._bridge_task is not None and not proc._bridge_task.done()
+                else (
+                    proc.process.pid
+                    if proc.process and proc.process.returncode is None
+                    else None
+                )
+            ),
             'error_message': proc.error_message,
             'restart_count': proc.restart_count,
             'uptime_seconds': uptime
@@ -396,11 +622,28 @@ class MCPProcessManager:
         logs = list(proc.logs)
         return logs[-lines:] if len(logs) > lines else logs
 
+    async def wait_for_protocol_ready(self, conn_id: str, timeout: float = 30.0) -> bool:
+        """Wait until the local MCP server answers the initialize request."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            proc = self.connections.get(conn_id)
+            if proc is None or proc.status != 'running':
+                return False
+            if proc.protocol_ready:
+                return True
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.2, remaining))
+
     async def stop_all(self):
         """停止所有连接"""
         for conn_id in list(self.connections.keys()):
             await self.stop_connection(conn_id)
         await self.stop_monitor()
+        if self._shared_runtime is not None:
+            await self._shared_runtime.stop()
+            self._shared_runtime = None
 
     def _cleanup_on_exit(self):
         """atexit 兜底：同步杀掉所有残留子进程组"""
@@ -458,15 +701,22 @@ class MCPProcessManager:
         if 'Connecting to WebSocket server' in text:
             proc.websocket_status = 'connecting'
             proc.websocket_error = None
+            proc.protocol_ready = False
         elif 'Successfully connected to WebSocket server' in text:
             proc.websocket_status = 'connected'
             proc.websocket_error = None
+        elif 'RPC server->cloud response id=0 outcome=result' in text:
+            proc.websocket_status = 'connected'
+            proc.websocket_error = None
+            proc.protocol_ready = True
         elif 'WebSocket connection closed' in text:
             proc.websocket_status = 'disconnected'
             proc.websocket_error = text
+            proc.protocol_ready = False
         elif 'Connection error' in text or 'Connection closed' in text:
             proc.websocket_status = 'error'
             proc.websocket_error = text
+            proc.protocol_ready = False
 
     async def _monitor_loop(self):
         """每 30s 检查进程状态，崩溃时自动重启"""
@@ -474,13 +724,28 @@ class MCPProcessManager:
             try:
                 await asyncio.sleep(MONITOR_INTERVAL)
                 for conn_id, proc in list(self.connections.items()):
-                    if proc.status != 'running':
+                    shared_stopped = (
+                        proc._bridge_task is not None
+                        and proc._bridge_task.done()
+                        and not proc._bridge_task.cancelled()
+                    )
+                    process_stopped = (
+                        proc.process is not None
+                        and proc.process.returncode is not None
+                    )
+                    # A shared task's done callback records a visible error
+                    # immediately. It still needs the monitor to restart it;
+                    # stopped sessions have their task reference cleared.
+                    if proc.status not in ('running', 'error'):
                         continue
-                    if proc.process and proc.process.returncode is not None:
+                    if proc.status == 'error' and not shared_stopped:
+                        continue
+                    if shared_stopped or process_stopped:
                         # 进程已退出
                         logger.warning(
-                            f"MCP connection '{conn_id}' exited "
-                            f"(code: {proc.process.returncode})"
+                            "MCP connection '%s' exited (code: %s)",
+                            conn_id,
+                            proc.process.returncode if proc.process else 'shared-task',
                         )
                         await self._auto_restart(conn_id)
             except asyncio.CancelledError:

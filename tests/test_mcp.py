@@ -1,6 +1,7 @@
 """
 MCP (Agent) configuration tests: CRUD, API key auto-creation/deletion, role sync.
 """
+import asyncio
 import pytest
 import uuid
 import importlib
@@ -373,6 +374,24 @@ class TestMCPRequiresFaceMeta:
                 )
 
 
+def test_provider_is_loaded_once_on_first_tool_use(monkeypatch):
+    warehouse_mcp = _import_warehouse_mcp()
+    provider = object()
+    calls = []
+
+    def _load(config):
+        calls.append(config)
+        return provider
+
+    monkeypatch.setattr(warehouse_mcp, "_provider", None)
+    monkeypatch.setattr(warehouse_mcp, "_load_provider_from_db_or_default", _load)
+
+    assert calls == []
+    assert warehouse_mcp._get_provider() is provider
+    assert warehouse_mcp._get_provider() is provider
+    assert calls == [warehouse_mcp._config]
+
+
 class TestMCPMoveBatchTool:
     """Regression: the move_batch_location tool must reach the provider.
 
@@ -392,11 +411,14 @@ class TestMCPMoveBatchTool:
 
         # face disabled / allowed, and stub the provider so no HTTP is needed.
         monkeypatch.setattr(warehouse_mcp, "_enforce_face", lambda *a, **k: None)
-        monkeypatch.setattr(warehouse_mcp._provider, "move_batch_location", _stub_move)
+        class _ProviderStub:
+            move_batch_location = staticmethod(_stub_move)
+
+        monkeypatch.setattr(warehouse_mcp, "_provider", _ProviderStub())
 
         fn = getattr(warehouse_mcp.move_batch_location, "fn",
                      warehouse_mcp.move_batch_location)
-        resp = fn(batch_no="B-1", new_location="A-2")
+        resp = asyncio.run(fn(batch_no="B-1", new_location="A-2"))
 
         # The provider was reached with the right args → no NameError, correct forwarding.
         assert captured.get("call") == ("B-1", "A-2", None, "MCP系统"), captured
