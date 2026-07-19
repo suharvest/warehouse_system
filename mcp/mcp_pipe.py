@@ -147,12 +147,26 @@ async def connect_to_server(uri, target, log_target=None):
             # must not kill the subprocess (was the cause of the ~60s reconnect cycle).
             pending_requests: dict = {}
 
-            # Create two tasks: read from WebSocket and write to process, read from process and write to WebSocket
-            await asyncio.gather(
-                pipe_websocket_to_process(websocket, process, log_target, pending_requests),
-                pipe_process_to_websocket(process, websocket, log_target, pending_requests),
-                pipe_process_stderr_to_terminal(process, log_target)
-            )
+            tasks = [
+                asyncio.create_task(
+                    pipe_websocket_to_process(websocket, process, log_target, pending_requests)
+                ),
+                asyncio.create_task(
+                    pipe_process_to_websocket(process, websocket, log_target, pending_requests)
+                ),
+                asyncio.create_task(
+                    pipe_process_stderr_to_terminal(process, log_target)
+                ),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
     except websockets.exceptions.ConnectionClosed as e:
         logger.error(f"[{log_target}] WebSocket connection closed: {e}")
         raise  # Re-throw exception to trigger reconnection
@@ -267,6 +281,7 @@ async def pipe_process_to_websocket(process, websocket, target, pending_requests
                     except Exception:
                         pass
                     process.kill()
+                    await asyncio.to_thread(process.wait)
                     raise  # propagates to connect_to_server → triggers reconnect
             else:
                 # Idle: no outstanding request, block indefinitely

@@ -87,6 +87,45 @@ def test_disabled_tenant_user_cannot_login(admin_client, client, monkeypatch):
     assert "租户已停用" in data["message"]
 
 
+def test_duplicate_username_login_is_rejected(admin_client, client, monkeypatch):
+    monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
+    _as_global_admin(admin_client)
+
+    suffix = uuid.uuid4().hex[:8]
+    tenant_resp = admin_client.post("/api/tenants", json={
+        "slug": f"tenant-login-{suffix}",
+        "name": f"Tenant Login {suffix}",
+    })
+    assert tenant_resp.status_code == 200, tenant_resp.text
+    tenant_id = tenant_resp.json()["id"]
+
+    from database import get_db_connection, hash_password
+
+    username = f"seeed-{suffix}"
+    password_hash = hash_password("Same123!")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO users (username, password_hash, role, display_name, tenant_id)
+        VALUES (?, ?, 'admin', 'Global Seeed', NULL)
+    """, (username, password_hash))
+    cursor.execute("""
+        INSERT INTO users (username, password_hash, role, display_name, tenant_id)
+        VALUES (?, ?, 'admin', 'Tenant Seeed', ?)
+    """, (username, password_hash, tenant_id))
+    conn.commit()
+    conn.close()
+
+    login_resp = client.post("/api/auth/login", json={
+        "username": username,
+        "password": "Same123!",
+    })
+    assert login_resp.status_code == 200
+    data = login_resp.json()
+    assert data["success"] is False
+    assert "同名账号存在于多个租户" in data["message"]
+
+
 def test_global_admin_can_create_another_global_admin(admin_client, monkeypatch):
     monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
     _as_global_admin(admin_client)
@@ -101,6 +140,39 @@ def test_global_admin_can_create_another_global_admin(admin_client, monkeypatch)
     })
     assert resp.status_code == 200, resp.text
     assert resp.json()["tenant_id"] is None
+
+
+def test_username_is_globally_unique_across_tenants(admin_client, monkeypatch):
+    monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
+    _as_global_admin(admin_client)
+
+    suffix = uuid.uuid4().hex[:8]
+    tenant_resp = admin_client.post("/api/tenants", json={
+        "slug": f"tenant-unique-{suffix}",
+        "name": f"Tenant Unique {suffix}",
+    })
+    assert tenant_resp.status_code == 200, tenant_resp.text
+    tenant_id = tenant_resp.json()["id"]
+
+    username = f"unique-see-{suffix}"
+    global_resp = admin_client.post("/api/users", json={
+        "username": username,
+        "password": "Admin123!",
+        "display_name": "Global Admin",
+        "role": "admin",
+        "tenant_id": None,
+    })
+    assert global_resp.status_code == 200, global_resp.text
+
+    tenant_resp = admin_client.post("/api/users", json={
+        "username": username,
+        "password": "Admin123!",
+        "display_name": "Tenant Admin",
+        "role": "admin",
+        "tenant_id": tenant_id,
+    })
+    assert tenant_resp.status_code == 400
+    assert "用户名已存在" in tenant_resp.text
 
 
 def test_global_non_admin_user_is_rejected(admin_client, monkeypatch):

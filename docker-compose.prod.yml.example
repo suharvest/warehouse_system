@@ -53,6 +53,9 @@ services:
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-10}
       - MAX_IMPORT_ROWS=${MAX_IMPORT_ROWS:-10000}
       - FACTORY_API_KEY=${FACTORY_API_KEY:-}
+      # 云端/线上版默认不开放人脸识别；私有部署需要时显式设 FACE_ENABLED=true。
+      - FACE_ENABLED=${FACE_ENABLED:-false}
+      - FACE_WE2_SIMULATOR_ENABLED=${FACE_WE2_SIMULATOR_ENABLED:-0}
     restart: unless-stopped
     deploy:
       resources:

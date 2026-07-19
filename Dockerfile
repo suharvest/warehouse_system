@@ -3,7 +3,7 @@
 # 分层策略：依赖层(很少变) → 前端层(偶尔变) → 后端代码层(频繁变)
 #
 # 构建: docker build -t warehouse .
-# 运行: docker run -p 1025:1025 -e PORT=1025 -v data:/data warehouse
+# 运行: docker run -p 2125:2125 -e PORT=2125 -v data:/data warehouse
 
 # ---- Stage 1: 构建前端 ----
 FROM node:20-alpine AS frontend-builder
@@ -46,25 +46,25 @@ FROM python:3.12-alpine
 # procps: pgrep/ps，MCPProcessManager 启动时清理孤儿 mcp_pipe.py 需要
 RUN apk add --no-cache libffi libgcc ca-certificates procps
 
-RUN adduser -D -u 1000 appuser && mkdir -p /data
+RUN adduser -D -u 1000 appuser && mkdir -p /data /app/logs
 WORKDIR /app
 
 # Layer 1: Python 依赖（最稳定，几乎不变）
-COPY --from=python-builder /app/.venv /app/.venv
+COPY --chown=appuser:appuser --from=python-builder /app/.venv /app/.venv
 
 # Layer 2: 前端构建产物（偶尔变）
-COPY --from=frontend-builder /build/dist /app/static
+COPY --chown=appuser:appuser --from=frontend-builder /build/dist /app/static
 
 # Layer 3: 后端代码（最常变，放最后 → 只改 .py 时只推/拉这几层）
-COPY backend/ ./backend/
-COPY mcp/ ./mcp/
-COPY run_backend.py ./
+COPY --chown=appuser:appuser backend/ ./backend/
+COPY --chown=appuser:appuser mcp/ ./mcp/
+COPY --chown=appuser:appuser run_backend.py ./
 
-RUN chown -R appuser:appuser /data /app
+RUN chown appuser:appuser /data /app/logs
 USER appuser
 
 # 环境变量
-ENV PORT=1025
+ENV PORT=2125
 ENV STATIC_DIR=/app/static
 ENV DATABASE_PATH=/data/warehouse.db
 ENV DEPLOY_MODE=single_tenant
@@ -78,6 +78,6 @@ ENV LOG_LEVEL=INFO
 EXPOSE ${PORT}
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",1025)}/health', timeout=5)" || exit 1
+    CMD python -c 'import os,socket; s=socket.create_connection(("127.0.0.1", int(os.environ.get("PORT", 2125))), timeout=5); s.close()' || exit 1
 
 CMD [".venv/bin/python", "run_backend.py"]

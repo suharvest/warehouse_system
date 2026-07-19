@@ -1543,12 +1543,8 @@ def _user_before_create(sa_conn, current_user, request: CreateUserRequest):
         raise HTTPException(status_code=400, detail="无效的角色")
     if len(request.password) < 4:
         raise HTTPException(status_code=400, detail="密码长度至少4位")
-    # 用户名唯一性按租户隔离检查
-    target_tenant_id = request.tenant_id if request.tenant_id is not None else current_user.tenant_id
     existing = sa_conn.execute(
-        select(_t_users.c.id).where(
-            and_(_t_users.c.username == request.username, _t_users.c.tenant_id == target_tenant_id)
-        )
+        select(_t_users.c.id).where(_t_users.c.username == request.username)
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="用户名已存在")
@@ -1607,7 +1603,6 @@ def _user_values_for_update(sa_conn, current_user, request: UpdateUserRequest, r
                 and_(
                     _t_users.c.username == request.username,
                     _t_users.c.id != user_id,
-                    _t_users.c.tenant_id == row.tenant_id,
                 )
             )
         ).first()
