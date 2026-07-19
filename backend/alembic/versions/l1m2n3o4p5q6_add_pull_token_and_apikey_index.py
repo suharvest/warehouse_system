@@ -45,8 +45,18 @@ def upgrade():
         op.add_column('mcp_agent_devices',
                       sa.Column('pull_token', sa.String(64), nullable=True))
     if 'idx_mcp_connections_api_key' not in _indexes('mcp_connections'):
-        op.create_index('idx_mcp_connections_api_key',
-                        'mcp_connections', ['api_key'])
+        bind = op.get_bind()
+        kwargs = {}
+        if bind.dialect.name == 'mysql':
+            # api_key is TEXT because watcher tokens can exceed VARCHAR(255).
+            # MySQL requires a prefix length when indexing TEXT/BLOB columns.
+            kwargs['mysql_length'] = {'api_key': 191}
+        op.create_index(
+            'idx_mcp_connections_api_key',
+            'mcp_connections',
+            ['api_key'],
+            **kwargs,
+        )
 
 
 def downgrade():
