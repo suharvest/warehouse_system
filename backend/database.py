@@ -595,6 +595,15 @@ def init_database():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_agent_devices_connection ON mcp_agent_devices(connection_id)')
 
+    # 后端直拉设备身份（B 方案）鉴权 token，raw 路径兜底加列（幂等）。
+    try:
+        cursor.execute('SELECT pull_token FROM mcp_agent_devices LIMIT 1')
+    except Exception:
+        cursor.execute('ALTER TABLE mcp_agent_devices ADD COLUMN pull_token TEXT')
+
+    # verify-mcp 每次都按明文 api_key 反查连接来定位设备 → 建索引避免全表扫。
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mcp_connections_api_key ON mcp_connections(api_key)')
+
     # ============================================
     # 人脸识别 + 权限校验（Phase 1，仅对 MCP tool 生效）
     # ============================================
@@ -610,6 +619,7 @@ def init_database():
             min_confidence REAL NOT NULL DEFAULT 0.65,
             greeting_enabled INTEGER NOT NULL DEFAULT 0,
             verify_mode TEXT NOT NULL DEFAULT 'interface' CHECK(verify_mode IN('session','interface')),
+            verify_frequency TEXT NOT NULL DEFAULT 'always' CHECK(verify_frequency IN('always','session')),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
@@ -718,6 +728,15 @@ def init_database():
         cursor.execute('SELECT verify_mode FROM tenant_face_config LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'interface'")
+
+    # verify_frequency（人脸验证频率，取代 verify_mode 的「频率」语义）：旧库兜底
+    # 补列并按旧 verify_mode 回填（session→session，interface→always），与
+    # alembic 迁移 m2n3o4p5q6r7 同规则。CHECK 省略同上（SQLite ALTER 限制）。
+    try:
+        cursor.execute('SELECT verify_frequency FROM tenant_face_config LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tenant_face_config ADD COLUMN verify_frequency TEXT NOT NULL DEFAULT 'always'")
+        cursor.execute("UPDATE tenant_face_config SET verify_frequency = 'session' WHERE verify_mode = 'session'")
 
     # greeting_enabled（被动问候开关）：旧库兜底补列。此列在 metadata 与 alembic
     # 迁移(h7i8j9k0l1m2)中已有，但此前漏在 raw init_database 的 CREATE TABLE 里，
@@ -1164,12 +1183,35 @@ def generate_mock_data():
     default_wh = cursor.fetchone()
     default_wh_id = default_wh['id'] if default_wh else 1
 
-    # 插入物料数据
-    for material in materials_data:
+    # 插入物料数据 + 初始批次
+    # 单一真相源：库存由 batches 聚合派生，materials.quantity 只是废弃的过渡
+    # 缓存列（与 import-excel 路径一致写 0）。每个 mock 物料建一条初始批次
+    # 承载库存，并配套一条带 batch_id 的入库记录——保证 mock 环境与真实
+    # 业务入口（stock-in / import-excel）产出的数据形态一致，不存在无批次物料。
+    seed_date = datetime.now() - timedelta(days=30)
+    seed_batch_prefix = seed_date.strftime('%Y%m%d')
+    seed_time_str = seed_date.replace(hour=10, minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
+    for seq, material in enumerate(materials_data, start=1):
+        name, sku, category, qty, unit, safe_stock, location = material
         cursor.execute('''
             INSERT INTO materials (name, sku, category, quantity, unit, safe_stock, location, warehouse_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (*material, default_wh_id))
+            VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+        ''', (name, sku, category, unit, safe_stock, location, default_wh_id))
+        material_id = cursor.lastrowid
+        cursor.execute('''
+            INSERT INTO batches (batch_no, material_id, quantity, initial_quantity,
+                                 is_exhausted, warehouse_id, location, created_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+        ''', (f'{seed_batch_prefix}-{seq:03d}', material_id, qty, qty,
+              default_wh_id, location, seed_time_str))
+        batch_id = cursor.lastrowid
+        cursor.execute('''
+            INSERT INTO inventory_records (material_id, type, quantity, operator,
+                                           reason_category, reason_note, created_at,
+                                           batch_id, warehouse_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (material_id, RecordType.IN.value, qty, '系统',
+              'purchase', '初始建账', seed_time_str, batch_id, default_wh_id))
 
     # 生成出入库记录（近7天）
     material_ids = [row[0] for row in cursor.execute('SELECT id FROM materials').fetchall()]
@@ -1250,6 +1292,19 @@ def generate_mock_data():
 
 def get_deploy_mode() -> str:
     return os.environ.get('DEPLOY_MODE', 'single_tenant')
+
+
+def get_face_enabled() -> bool:
+    """部署级人脸识别开关。线上/云端版可设 FACE_ENABLED=false，完全隐藏人脸识别
+    设置 tab、并让前端不加载该功能；默认 true，保持本地/私有部署现有行为。
+
+    与租户级 tenant_face_config.enabled 正交：本 flag 决定"这套部署支不支持人脸"，
+    后者决定"某租户此刻要不要对出入库刷脸"。线上版通常 FACE_ENABLED=false。
+
+    未设置或留空都当默认 true（避免 .env 里 `FACE_ENABLED=` 空值意外关闭）；
+    只有显式的 false/0/no/off 才关闭。"""
+    raw = (os.environ.get('FACE_ENABLED') or 'true').strip().lower()
+    return raw not in ('0', 'false', 'no', 'off')
 
 if __name__ == '__main__':
     init_database()

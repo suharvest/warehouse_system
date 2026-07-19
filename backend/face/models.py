@@ -12,9 +12,12 @@ class FaceConfig:
     auth_token: Optional[str] = None
     embedding_model_tag: Optional[str] = None
     min_confidence: float = 0.65
-    # 鉴权强度（与 mode 正交）：'interface'（默认，fail-closed 重比对）或
-    # 'session'（信任设备本地匹配，advisory 放行）。
-    verify_mode: str = "interface"
+    # 人脸验证频率（与 mode 正交，只控制会话缓存）：
+    #   'always'  — 每次操作都现场验证（默认）
+    #   'session' — 同会话首验通过后免验（session_cached）
+    # 注：旧 verify_mode 列已 deprecated，验证链路只看 mode（local=设备拉身份 /
+    # lan=端点重比对），代码不再读 verify_mode。
+    verify_frequency: str = "always"
 
 
 @dataclass

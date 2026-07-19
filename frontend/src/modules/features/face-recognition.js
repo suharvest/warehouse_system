@@ -12,12 +12,27 @@ const DEFAULT_CONFIG = {
     auth_token: '',
     embedding_model_tag: '',
     min_confidence: 0.7,
-    verify_mode: 'interface'
+    verify_frequency: 'always'
 };
-const SUB_TABS = ['config', 'enroll', 'logs'];
+const SUB_TABS = ['setup', 'logs'];
 const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust'];
 
-let currentSubTab = 'config';
+// 本机(local)模式设备端人脸库上限。与固件 FACE_MAX_COUNT=20 / 后端 MAX_PUSH_FACES=20
+// 对齐：设备最多存 20 条 embedding（= 20 张图片，不是 20 个人）。lan 模式在端点比对、
+// 不受此限。前端在录入时前置拦截，避免录到超限、下发才失败。
+const FACE_LOCAL_MAX_ENROLLMENTS = 20;
+
+// 全租户已录入的人脸图片(embedding)总数：各人员 enrollment_count 之和。
+function faceTotalEnrollments() {
+    return allSubjects.reduce((sum, s) => sum + (Number(s.enrollment_count) || 0), 0);
+}
+
+// 当前是否本机模式（非 local 一律视为 lan，与 renderSetupTab 归一化一致）。
+function isFaceLocalMode() {
+    return (currentConfig && currentConfig.mode) === 'local';
+}
+
+let currentSubTab = 'setup';
 let currentConfig = { ...DEFAULT_CONFIG };
 let currentRules = [];
 let allWarehouses = [];
@@ -26,6 +41,12 @@ let selectedSubjectId = null;
 let enrollmentItems = [];
 let allTenants = [];
 let selectedTenantId = null;
+
+// 「待下发」脏检测（纯前端，不追设备实际状态）：进入配置页时以当前 DB 值为基线，
+// 用户改动了「需下发到设备才生效」的内容就标出来，下发成功后重置基线。刷新页面即丢失
+// （用户已确认此取舍：不为多设备记录各自下发了什么，只提示"你改了需下发的东西"）。
+let facePushBaseline = null;      // { mode, min_confidence, endpoint, auth_token }
+let facePendingLibrary = false;   // 人脸库/人员增删改 → 需重新下发
 
 function isGlobalAdmin() {
     const u = getCurrentUser();
@@ -141,8 +162,7 @@ function renderTenantBar() {
 
 function renderShell() {
     const tabs = [
-        { key: 'config', label: tt('faceConfig', '配置与规则') },
-        { key: 'enroll', label: tt('faceEnrollments', '人脸录入') },
+        { key: 'setup', label: tt('faceSetup', '配置与录入') },
         { key: 'logs', label: tt('faceLogs', '审计日志') }
     ];
     return `
@@ -162,7 +182,7 @@ function renderShell() {
 }
 
 export async function switchFaceSubTab(subTab) {
-    if (!SUB_TABS.includes(subTab)) subTab = 'config';
+    if (!SUB_TABS.includes(subTab)) subTab = 'setup';
     currentSubTab = subTab;
     document.querySelectorAll('#face-sub-tabs .sub-tab').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.subTab === subTab);
@@ -171,13 +191,13 @@ export async function switchFaceSubTab(subTab) {
     if (!content) return;
     content.innerHTML = renderLoading();
     try {
-        if (subTab === 'config') {
+        if (subTab === 'setup') {
             await loadConfigAndRules();
             await loadSubjectsAndWarehouses();
-            content.innerHTML = renderConfigTab();
-        } else if (subTab === 'enroll') {
-            await loadSubjectsAndWarehouses();
-            content.innerHTML = renderEnrollTab();
+            content.innerHTML = renderSetupTab();
+            attachSetupAutoSave();
+            captureFacePushBaseline();
+            updateFacePendingUI();
             if (selectedSubjectId) {
                 await loadEnrollmentsForSelected();
             }
@@ -252,8 +272,11 @@ async function refreshSubjectList() {
     }
 }
 
-// ============ 子页签 A: 配置 ============
-function renderConfigTab() {
+// ============ 子页签 A: 配置与录入（合并）============
+// 按「归属 + 是否下发到设备」重组：
+//   - 「下发到设备」模块：识别设置 + 人脸录入（两者都需下发到设备后生效，下发逻辑统一）
+//   - 「操作规则」卡片：MCP Server 侧校验规则，服务端实时生效，不下发
+function renderSetupTab() {
     const c = currentConfig;
     const modes = [
         { v: 'local', label: tt('mode_local', '本机') },
@@ -261,67 +284,42 @@ function renderConfigTab() {
     ];
     // 老数据可能是 hello/jetson/custom，统一归为 lan
     const currentMode = (c.mode === 'local') ? 'local' : 'lan';
-    const verifyModes = [
-        { v: 'interface', label: tt('verifyMode_interface', '接口校验（重比对）') },
-        { v: 'session', label: tt('verifyMode_session', '会话信任（设备本地匹配）') }
+    // 人脸验证频率（与识别模式正交，只控制会话缓存）
+    const verifyFrequencies = [
+        { v: 'always', label: tt('verifyFrequency_always', '每次操作都验证') },
+        { v: 'session', label: tt('verifyFrequency_session', '仅首次验证（之后免验）') }
     ];
-    const currentVerifyMode = (c.verify_mode === 'session') ? 'session' : 'interface';
+    const currentVerifyFrequency = (c.verify_frequency === 'session') ? 'session' : 'always';
     return `
-        <div class="table-container face-config-card">
-            <div class="section-header">
-                <div class="section-title">${tt('faceConfigCardTitle', '识别设置')}</div>
-                <label class="face-enable-toggle">
-                    <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
-                    <span>${tt('faceEnabled', '启用人脸识别')}</span>
-                </label>
-            </div>
-            <div class="face-config-body">
-                <div class="face-config-disabled-note" id="face-config-disabled-note" ${c.enabled ? 'hidden' : ''}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                    <span>${tt('faceDisabledNote', '当前未启用人脸识别，下方识别设置与所有操作规则均不生效')}</span>
+        <!-- 操作规则（服务端·保存即时生效）置前：先决定"要不要刷脸、谁能操作"，
+             总开关「启用人脸识别」也是服务端即时生效，一并放这张卡顶部。 -->
+        <div class="table-container face-block face-block-server">
+            <div class="section-header face-block-header">
+                <div class="face-module-heading">
+                    <div class="face-block-titlerow">
+                        <span class="section-title">${tt('faceRules', '操作规则')}</span>
+                        <span class="face-scope-tag is-server">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+                            ${tt('faceScopeServerTag', '服务端规则 · 保存即时生效')}
+                        </span>
+                    </div>
+                    <div class="face-module-hint">${tt('faceRulesServerHint2', '哪些操作要刷脸、谁能操作，无需下发到设备')}</div>
                 </div>
-                <div class="face-config-grid">
-                    <div class="form-group">
-                        <label>${tt('faceMode', '识别模式')}</label>
-                        <select id="face-config-mode" data-action-change="onFaceModeChange">
-                            ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>${tt('faceVerifyMode', '鉴权强度')}</label>
-                        <select id="face-config-verify-mode">
-                            ${verifyModes.map(m => `<option value="${m.v}" ${currentVerifyMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span></label>
-                        <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
-                    </div>
-                    <div class="form-group span-2" id="face-config-endpoint-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
-                        <label>${tt('faceEndpoint', '远端服务地址')}</label>
-                        <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
-                    </div>
-                    <div class="form-group span-2" id="face-config-token-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
-                        <label>${tt('faceAuthToken', '认证 Token')}</label>
-                        <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
-                    </div>
-                    <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
-                </div>
-                <div class="face-config-actions">
-                    <button class="btn confirm-btn" data-action="saveFaceConfig">${tt('save', '保存')}</button>
-                    <button class="btn cancel-btn" data-action="testFaceConnection">${tt('faceTestConnection', '测试连接')}</button>
-                    <span id="face-config-test-result" class="form-hint"></span>
+                <div class="face-block-header-actions" style="display:flex;align-items:center;gap:16px;">
+                    <label class="face-switch">
+                        <input type="checkbox" id="face-config-enabled" data-action-change="onFaceConfigEnabledChange" ${c.enabled ? 'checked' : ''}>
+                        <span class="face-switch-slider"></span>
+                        <span class="face-switch-text">${tt('faceEnabled', '启用人脸识别')}</span>
+                    </label>
+                    <button class="action-btn add-btn" data-action="showAddFaceRuleModal">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        <span>${tt('faceAddRule', '新增规则')}</span>
+                    </button>
                 </div>
             </div>
-        </div>
-
-        <div class="table-container mt-6">
-            <div class="section-header">
-                <div class="section-title">${tt('faceRules', '操作规则')}</div>
-                <button class="action-btn add-btn" data-action="showAddFaceRuleModal">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                    <span>${tt('faceAddRule', '新增规则')}</span>
-                </button>
+            <div class="face-config-disabled-note" id="face-config-disabled-note" style="margin: 14px 24px;" ${c.enabled ? 'hidden' : ''}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                <span>${tt('faceDisabledNote', '未启用人脸识别，所有操作规则与下方基础配置均不生效')}</span>
             </div>
             <table id="face-rules-table">
                 <thead>
@@ -336,6 +334,100 @@ function renderConfigTab() {
                 </thead>
                 <tbody id="face-rules-tbody">${renderRulesRows()}</tbody>
             </table>
+        </div>
+
+        <!-- 基础配置（设备侧·需下发到设备后生效）置后 -->
+        <div class="table-container mt-6 face-config-card face-block face-block-device">
+            <div class="section-header face-block-header">
+                <div class="face-module-heading">
+                    <div class="face-block-titlerow">
+                        <span class="section-title">${tt('faceBaseConfigTitle', '基础配置')}</span>
+                        <span class="face-scope-tag is-device face-pending-summary" id="face-pending-summary" hidden>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
+                            <span id="face-pending-summary-text"></span>
+                        </span>
+                    </div>
+                    <div class="face-module-hint">${tt('faceBaseConfigHint', '人脸识别如何工作，以及有哪些人可以被识别')}</div>
+                </div>
+                <button class="btn confirm-btn face-push-btn" data-action="showFacePushModal" title="${tt('facePushHint', '把人脸库和识别配置（模式/阈值/端点）一并下发到指定设备')}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:5px;"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
+                    ${tt('facePushToDevice', '下发到设备')}
+                </button>
+            </div>
+            <div class="face-config-body">
+                <!-- 分组 A-1：识别设置 -->
+                <div class="face-subsection">
+                    <div class="face-subsection-head">
+                        <div class="face-subsection-title">${tt('faceConfigCardTitle', '识别设置')}</div>
+                    </div>
+                    <div class="face-settings-row">
+                        <div class="form-group">
+                            <label>${tt('faceMode', '识别模式')}${pendingBadge('mode')}</label>
+                            <select id="face-config-mode" data-action-change="onFaceModeChange">
+                                ${modes.map(m => `<option value="${m.v}" ${currentMode === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>${tt('faceVerifyFrequency', '人脸验证频率')}</label>
+                            <select id="face-config-verify-frequency">
+                                ${verifyFrequencies.map(m => `<option value="${m.v}" ${currentVerifyFrequency === m.v ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span>${pendingBadge('min_confidence')}</label>
+                            <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
+                        </div>
+                    </div>
+                    <div class="face-config-grid" style="margin-top:12px;">
+                        <div class="form-group span-2" id="face-config-endpoint-group" style="${currentMode === 'local' ? 'display:none;' : ''}">
+                            <label>${tt('faceEndpoint', '远端服务地址')}${pendingBadge('endpoint')}</label>
+                            <input type="text" id="face-config-endpoint" value="${escapeHtml(c.endpoint || '')}" placeholder="https://example.com/face">
+                        </div>
+                        <!-- 认证 Token 暂隐藏：face_rec_api 端点当前不校验 token，放出来只会误导。
+                             输入框保留在 DOM，保存/测试连接仍读它（不丢已存值），启用端点鉴权后再放出。 -->
+                        <div class="form-group span-2" id="face-config-token-group" style="display:none;">
+                            <label>${tt('faceAuthToken', '认证 Token')}${pendingBadge('auth_token')}</label>
+                            <input type="password" id="face-config-token" value="${escapeHtml(c.auth_token || '')}" autocomplete="new-password">
+                        </div>
+                        <input type="hidden" id="face-config-model-tag" value="${escapeHtml(c.embedding_model_tag || '')}">
+                    </div>
+                    <div class="face-config-actions">
+                        <span class="face-autosave-note">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"></path></svg>
+                            ${tt('faceAutoSaveNote', '修改后自动保存')}
+                        </span>
+                        <span id="face-config-saved-hint" class="face-saved-hint">${tt('faceSaved', '已保存')}</span>
+                        <button class="btn cancel-btn" id="face-config-test-btn" data-action="testFaceConnection" style="${currentMode === 'local' ? 'display:none;' : ''}">${tt('faceTestConnection', '测试连接')}</button>
+                        <span id="face-config-test-result" class="form-hint"></span>
+                    </div>
+                </div>
+
+                <!-- 分组 A-2：人脸录入 -->
+                <div class="face-subsection">
+                    <div class="face-subsection-head">
+                        <div class="face-subsection-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
+                        <div class="action-buttons">
+                            <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                                ${tt('faceSubjectAdd', '新增人员')}
+                            </button>
+                        </div>
+                    </div>
+                    <div class="face-enroll-grid face-enroll-grid-embed">
+                        <aside class="face-enroll-users">
+                            <div class="face-enroll-users-header">${tt('faceSubjectList', '人员列表')} <span class="face-enroll-users-count">${allSubjects.length}</span></div>
+                            <div id="face-enroll-subject-list" class="face-enroll-users-list">
+                                ${allSubjects.length === 0
+                                    ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
+                                    : allSubjects.map(renderSubjectItem).join('')}
+                            </div>
+                        </aside>
+                        <section id="face-enroll-detail" class="face-enroll-detail">
+                            ${selectedSubjectId ? renderEnrollDetail() : renderEnrollPlaceholder()}
+                        </section>
+                    </div>
+                </div>
+            </div>
         </div>
     `;
 }
@@ -369,16 +461,95 @@ function renderRulesRows() {
     }).join('');
 }
 
-// mode=local 进程内推理,不需要远端地址/Token → 隐藏这两个字段;
-// mode=lan 走外部 face_rec_api 端点 → 显示。
+// mode=local 进程内推理,不需要远端地址/Token → 隐藏这两个字段和「测试连接」
+// (测试连接只测远端 face_rec_api,本机模式下无意义);mode=lan 走外部端点 → 显示。
 export function onFaceModeChange() {
     const modeEl = document.getElementById('face-config-mode');
     if (!modeEl) return;
     const isLocal = modeEl.value === 'local';
     const endpointGroup = document.getElementById('face-config-endpoint-group');
     const tokenGroup = document.getElementById('face-config-token-group');
+    const testBtn = document.getElementById('face-config-test-btn');
+    const testResult = document.getElementById('face-config-test-result');
     if (endpointGroup) endpointGroup.style.display = isLocal ? 'none' : '';
-    if (tokenGroup) tokenGroup.style.display = isLocal ? 'none' : '';
+    if (tokenGroup) tokenGroup.style.display = 'none';  // 认证 Token 暂时始终隐藏（端点未校验）
+    if (testBtn) testBtn.style.display = isLocal ? 'none' : '';
+    if (testResult && isLocal) testResult.textContent = '';
+    updateFacePendingUI();
+}
+
+// ============ 「待下发」脏检测 ============
+// 待下发的橙点 badge 只挂在这几个字段上；启用开关/验证频率是后端即时生效，不挂。
+function pendingBadge(key) {
+    return `<span class="face-pending-badge" data-pending-badge="${key}" hidden>${tt('facePending', '待下发')}</span>`;
+}
+
+// 当前 mode 下"影响设备行为、改了就要下发"的配置字段。
+// 本机(local)：模式、阈值(=闸门实际阈值)；端点/Token 本机模式隐藏不计。
+// 局域网(lan)：模式、阈值、端点、Token（这些改动出入库闸门后端即时生效，
+//              下发只把设备本地识别/唤醒问候同步过去）。
+function pendingConfigKeys() {
+    const modeEl = document.getElementById('face-config-mode');
+    const mode = modeEl ? modeEl.value : 'local';
+    const keys = ['mode', 'min_confidence'];
+    if (mode === 'lan') keys.push('endpoint');  // auth_token 字段已隐藏，不参与待下发
+    return keys;
+}
+
+// 从当前表单读出用于比对的值（阈值归一化，避免 "0.7" / "0.70" 误判为改动）。
+function faceFormValues() {
+    const g = id => document.getElementById(id);
+    const conf = parseFloat(g('face-config-min-confidence')?.value);
+    return {
+        mode: g('face-config-mode')?.value ?? '',
+        min_confidence: Number.isFinite(conf) ? String(Math.round(conf * 100) / 100) : '',
+        endpoint: (g('face-config-endpoint')?.value ?? '').trim(),
+        auth_token: g('face-config-token')?.value ?? '',
+    };
+}
+
+// 以当前表单值为"已下发基线"。进入配置页、下发成功后各调一次。
+function captureFacePushBaseline() {
+    facePushBaseline = faceFormValues();
+    facePendingLibrary = false;
+}
+
+// 重算并渲染：逐字段橙点、顶部汇总、下发按钮高亮。
+function updateFacePendingUI() {
+    if (!facePushBaseline) return;
+    const cur = faceFormValues();
+    const keys = pendingConfigKeys();
+    const dirty = keys.filter(k => cur[k] !== facePushBaseline[k]);
+
+    // 逐字段 badge（只显示当前 mode 关心的字段；隐藏字段的 badge 一律收起）
+    document.querySelectorAll('[data-pending-badge]').forEach(el => {
+        const k = el.getAttribute('data-pending-badge');
+        el.hidden = !dirty.includes(k);
+    });
+
+    const total = dirty.length + (facePendingLibrary ? 1 : 0);
+    const summary = document.getElementById('face-pending-summary');
+    const summaryText = document.getElementById('face-pending-summary-text');
+    if (summary && summaryText) {
+        if (total > 0) {
+            const parts = [];
+            if (dirty.length) parts.push(tt('facePendingConfig', '识别配置'));
+            if (facePendingLibrary) parts.push(tt('facePendingLibrary', '人脸库'));
+            summaryText.textContent = tt('facePendingSummary', '{items} 有改动待下发到设备')
+                .replace('{items}', parts.join(' + '));
+            summary.hidden = false;
+        } else {
+            summary.hidden = true;   // 即时生效 / 已同步 → 不显示任何提示
+        }
+    }
+    const pushBtn = document.querySelector('.face-push-btn');
+    if (pushBtn) pushBtn.classList.toggle('has-pending', total > 0);
+}
+
+// 人脸库/人员发生增删改 → 标记待下发（下发成功后清除）。
+function markFaceLibraryDirty() {
+    facePendingLibrary = true;
+    updateFacePendingUI();
 }
 
 // 总开关关闭时,配置与规则均不生效 → 顶部提醒条随开关显隐(不置灰,仍可编辑配置)
@@ -388,6 +559,8 @@ export function onFaceConfigEnabledChange() {
     if (box && note) note.hidden = box.checked;
 }
 
+// 识别设置改为失焦/变更自动保存：下拉与开关 change 触发、文本输入 blur 触发。
+// saveFaceConfig 保留原有 PUT 字段与行为，只把「保存」反馈从 toast 换成轻量内联提示。
 export async function saveFaceConfig() {
     const data = {
         enabled: document.getElementById('face-config-enabled').checked,
@@ -396,15 +569,54 @@ export async function saveFaceConfig() {
         auth_token: document.getElementById('face-config-token').value,
         embedding_model_tag: document.getElementById('face-config-model-tag').value.trim(),
         min_confidence: parseFloat(document.getElementById('face-config-min-confidence').value) || 0,
-        verify_mode: document.getElementById('face-config-verify-mode').value
+        verify_frequency: document.getElementById('face-config-verify-frequency').value
     };
     try {
         await faceApi.updateConfig(data, effectiveTenantId());
         currentConfig = { ...currentConfig, ...data };
-        showToast(tt('faceConfigSaved', '配置已保存'));
+        showSavedHint();
     } catch (error) {
         showToast(getErrorMessage(error, 'faceConfigSaveFailed', '配置保存失败'), 'error');
     }
+}
+
+// 轻量「已保存」内联提示：淡入后 1.6s 自动淡出，不打断操作。
+function showSavedHint() {
+    const el = document.getElementById('face-config-saved-hint');
+    if (!el) return;
+    el.classList.add('is-visible');
+    clearTimeout(el._hintTimer);
+    el._hintTimer = setTimeout(() => el.classList.remove('is-visible'), 1600);
+}
+
+// 识别设置自动保存监听：在 renderSetupTab 注入 DOM 后调用一次。
+// 每次进入 setup 页都是全新节点，监听随节点重建，不会累积。
+function attachSetupAutoSave() {
+    // 下拉与开关：change 即保存
+    ['face-config-mode', 'face-config-verify-frequency', 'face-config-enabled'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => { saveFaceConfig(); updateFacePendingUI(); });
+    });
+    // 置信度：blur 时校验并 clamp 到 0.0-1.0，非法值不保存（还原上次有效值）
+    const conf = document.getElementById('face-config-min-confidence');
+    if (conf) {
+        conf.addEventListener('blur', () => {
+            let v = parseFloat(conf.value);
+            if (!Number.isFinite(v)) {
+                conf.value = Number(currentConfig.min_confidence ?? 0.7);
+                return;
+            }
+            v = Math.min(1, Math.max(0, Math.round(v * 100) / 100));
+            conf.value = v;
+            saveFaceConfig();
+            updateFacePendingUI();
+        });
+    }
+    // 文本输入（远端地址 / Token）：blur 即保存
+    ['face-config-endpoint', 'face-config-token'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('blur', () => { saveFaceConfig(); updateFacePendingUI(); });
+    });
 }
 
 export async function testFaceConnection() {
@@ -569,40 +781,7 @@ export async function deleteFaceRule(el) {
     }
 }
 
-// ============ 子页签 B: 人员 + 录入 ============
-function renderEnrollTab() {
-    return `
-        <div class="table-container face-enroll-card">
-            <div class="section-header">
-                <div class="section-title">${tt('faceSubjectsTitle', '人员与录入')}</div>
-                <div class="action-buttons">
-                    <button class="btn cancel-btn" data-action="showFacePushModal" title="${tt('facePushHint', '把整个人脸库下发到指定设备')}">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><path d="M12 19V5"></path><path d="M5 12l7-7 7 7"></path></svg>
-                        ${tt('facePushLibrary', '下发')}
-                    </button>
-                    <button class="btn confirm-btn" data-action="showAddFaceSubjectModal">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                        ${tt('faceSubjectAdd', '新增人员')}
-                    </button>
-                </div>
-            </div>
-            <div class="face-enroll-grid">
-                <aside class="face-enroll-users">
-                    <div class="face-enroll-users-header">${tt('faceSubjectList', '人员列表')} <span class="face-enroll-users-count">${allSubjects.length}</span></div>
-                    <div id="face-enroll-subject-list" class="face-enroll-users-list">
-                        ${allSubjects.length === 0
-                            ? `<div class="face-enroll-users-empty">${tt('faceSubjectsEmpty', '点击右上角「新增人员」开始录入')}</div>`
-                            : allSubjects.map(renderSubjectItem).join('')}
-                    </div>
-                </aside>
-                <section id="face-enroll-detail" class="face-enroll-detail">
-                    ${selectedSubjectId ? renderEnrollDetail() : renderEnrollPlaceholder()}
-                </section>
-            </div>
-        </div>
-    `;
-}
-
+// ============ 子页签 B: 人员 + 录入（渲染辅助，嵌入 renderSetupTab）============
 function renderSubjectItem(s) {
     const name = s.name || `#${s.id}`;
     const sub = s.employee_id ? `${tt('faceSubjectEmployeeId', '工号')}: ${s.employee_id}` : '';
@@ -786,6 +965,9 @@ export async function submitFacePush() {
                 .replace('{name}', label).replace('{count}', result.pushed_count ?? 0);
             if (resultEl) resultEl.innerHTML = `<div class="result-banner success">${escapeHtml(msg)}</div>`;
             showToast(msg);
+            // 下发成功 → 以当前配置为新基线，清掉所有待下发标记。
+            captureFacePushBaseline();
+            updateFacePendingUI();
         } else {
             const msg = tt('mcpDevicePushFailed', '向设备 "{name}" 下发失败：{error}')
                 .replace('{name}', label).replace('{error}', (result && result.error) || tt('operationFailed', '操作失败'));
@@ -846,6 +1028,10 @@ export function showFaceEnrollModal() {
                         <label>${tt('faceEnrollImages', '上传人脸图片')} <span class="required">*</span></label>
                         <input type="file" id="face-enroll-images" accept="image/*" multiple>
                         <div class="form-hint">${tt('faceEnrollImagesHint', '可选择多张照片，建议正面清晰图像')}</div>
+                        ${isFaceLocalMode() ? `<div class="form-hint" style="color:#b25b00;">${tt('faceEnrollLocalQuota', '本机模式：设备最多存 {max} 张图片（是 {max} 张图，不是 {max} 人），当前 {total} 张，可再录 {remaining} 张。')
+                            .replaceAll('{max}', FACE_LOCAL_MAX_ENROLLMENTS)
+                            .replace('{total}', faceTotalEnrollments())
+                            .replace('{remaining}', Math.max(0, FACE_LOCAL_MAX_ENROLLMENTS - faceTotalEnrollments()))}</div>` : ''}
                     </div>
                     <div class="form-group">
                         <label>${tt('faceAppliesToWarehouses', '生效仓库')}</label>
@@ -906,6 +1092,25 @@ export async function submitFaceEnroll() {
         if (errEl) { errEl.hidden = false; errEl.textContent = tt('faceEnrollImagesRequired', '请至少选择一张图片'); }
         return;
     }
+    // 本机模式设备端人脸库上限：20 张图片（不是 20 人）。录入前拦，避免超限、下发才失败。
+    if (isFaceLocalMode()) {
+        const total = faceTotalEnrollments();
+        const remaining = FACE_LOCAL_MAX_ENROLLMENTS - total;
+        if (files.length > remaining) {
+            if (errEl) {
+                errEl.hidden = false;
+                errEl.textContent = tt('faceEnrollLocalLimit',
+                    '本机模式设备最多存 {max} 张人脸图片（是 {max} 张图片，不是 {max} 个人）。'
+                    + '当前已录入 {total} 张，仅剩 {remaining} 张，本次选了 {picked} 张，超出。'
+                    + '请减少本次数量，或先删除已有录入。')
+                    .replaceAll('{max}', FACE_LOCAL_MAX_ENROLLMENTS)
+                    .replace('{total}', total)
+                    .replace('{remaining}', Math.max(0, remaining))
+                    .replace('{picked}', files.length);
+            }
+            return;
+        }
+    }
     let warehouseIds = [];
     if (!allBox.checked) {
         warehouseIds = Array.from(document.querySelectorAll('#face-enroll-wh-list input[type="checkbox"]:checked')).map(cb => parseInt(cb.value, 10));
@@ -922,6 +1127,7 @@ export async function submitFaceEnroll() {
         closeFaceEnrollModal();
         // 人员计数徽章与右侧详情互相独立，可并行刷新
         await Promise.all([refreshSubjectList(), loadEnrollmentsForSelected()]);
+        markFaceLibraryDirty();
     } catch (error) {
         if (errEl) { errEl.hidden = false; errEl.textContent = getErrorMessage(error, 'faceEnrollFailed', '录入失败'); }
     }
@@ -934,6 +1140,7 @@ export async function deleteFaceEnrollment(el) {
         await faceApi.deleteEnrollment(id, effectiveTenantId());
         showToast(tt('faceEnrollDeleted', '录入条目已删除'));
         await Promise.all([refreshSubjectList(), loadEnrollmentsForSelected()]);
+        markFaceLibraryDirty();
     } catch (error) {
         showToast(getErrorMessage(error, 'faceEnrollDeleteFailed', '删除失败'), 'error');
     }
@@ -1181,6 +1388,7 @@ export async function saveFaceSubject() {
         }
         closeFaceSubjectModal();
         showToast(tt('faceSubjectSaved', '人员档案已保存'));
+        markFaceLibraryDirty();
         await refreshSubjectList();
         // refresh detail if currently viewing the edited subject
         if (idVal && parseInt(idVal, 10) === selectedSubjectId) {
@@ -1200,6 +1408,7 @@ export async function deleteFaceSubject(el) {
     try {
         await faceApi.deleteSubject(sid, effectiveTenantId());
         showToast(tt('faceSubjectDeleted', '已删除'));
+        markFaceLibraryDirty();
         if (selectedSubjectId === sid) {
             selectedSubjectId = null;
             enrollmentItems = [];

@@ -336,6 +336,14 @@
     "tags": []
   },
   {
+    "method": "POST",
+    "name": "face_device_recognize",
+    "path": "/api/face/device/recognize",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "GET",
     "name": "face_list_enrollments",
     "path": "/api/face/enrollments",

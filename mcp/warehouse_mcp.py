@@ -203,8 +203,6 @@ def _face_guard(
     image_b64: str = None,
     embedding_b64: str = None,
     embedding_model_tag: str = None,
-    speaker_subject_id: int = None,
-    speaker_name: str = None,
 ) -> dict:
     """Verify face for an MCP write operation. Returns the decision dict.
 
@@ -241,17 +239,17 @@ def _face_guard(
         body["embedding_b64"] = embedding_b64
     if embedding_model_tag:
         body["embedding_model_tag"] = embedding_model_tag
-    # Forward the LLM/server-supplied speaker identity too. The backend is the
-    # single authority: it consults these ONLY when the tenant's verify_mode is
-    # 'session', and ignores them under 'interface' (which re-matches embedding).
-    # We never decide the mode here, so a spoofed speaker_id cannot bypass the
-    # interface-mode hard check.
-    if speaker_subject_id is not None:
-        body["speaker_subject_id"] = speaker_subject_id
-    if speaker_name:
-        body["speaker_name"] = speaker_name
+    # NOTE: speaker_subject_id / speaker_name are intentionally NOT forwarded.
+    # Under B (session mode = backend-direct device pull) the backend derives the
+    # identity itself from the physical device and IGNORES any LLM-forwarded
+    # identity; interface mode re-matches the embedding. Forwarding LLM-supplied
+    # identity would only re-open the prompt-injection surface we closed. The two
+    # params remain in the tool signatures as deprecated no-ops for wire compat.
     try:
-        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=5)
+        # 18s：后端可能同步直连设备拉取身份/拉图。local fresh=1 现拍 ~6s；lan option 3
+        # 拉一张 JPEG(~8s，含切 sensor mode 3 + 抓帧 + 编码) 之后还要接一次端点 /infer(≤10s)。
+        # 必须给足预算，否则慢路径被过早判 transport_error 而 fail-closed 误杀。
+        resp = _r.post(f"{api_base}/face/verify-mcp", json=body, headers=headers, timeout=18)
         if resp.status_code >= 400:
             logger.warning("face verify returned %s: %s", resp.status_code, resp.text[:200])
             return {"status": "deny", "failure_reason": f"http_{resp.status_code}"}
@@ -267,8 +265,6 @@ def _enforce_face(
     image_b64: str = None,
     embedding_b64: str = None,
     embedding_model_tag: str = None,
-    speaker_subject_id: int = None,
-    speaker_name: str = None,
 ) -> dict | None:
     """Run the face gate; return a tool-error dict to surface, or None to proceed.
 
@@ -277,8 +273,9 @@ def _enforce_face(
     and honour whatever the backend decides. The backend is the sole authority
     on ``verify_mode``:
 
-    * **session**: backend trusts the device-resolved speaker, records an
-      advisory log and returns ``pass`` (allow-list still enforced → ``deny``).
+    * **session**: backend trusts the device-resolved speaker identity but
+      still enforces it — an unresolved speaker (or one outside the rule's
+      allow-list) gets ``deny``; only a resolved, active subject passes.
     * **interface** (default): backend ignores the speaker params and re-matches
       the embedding, fail-closed.
 
@@ -292,11 +289,26 @@ def _enforce_face(
         image_b64=image_b64,
         embedding_b64=embedding_b64,
         embedding_model_tag=embedding_model_tag,
-        speaker_subject_id=speaker_subject_id,
-        speaker_name=speaker_name,
     )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
+        # 后端(B)直连设备取身份，LLM 无需也不应自己调 speaker/填参数。设备没认到人时
+        # 引导用户面向摄像头重试即可（而非让 LLM 补调工具）。
+        if reason in ("device_no_identity", "speaker_unresolved"):
+            return {
+                "success": False,
+                "error": f"face_auth_denied:{reason}",
+                "message": (
+                    "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
+                    "若仍失败，请联系管理员确认人脸是否已录入。"
+                ),
+            }
+        if reason == "device_unresolved":
+            return {
+                "success": False,
+                "error": f"face_auth_denied:{reason}",
+                "message": "无法连接到人脸识别设备，出入库已阻止。请联系管理员检查设备在线状态。",
+            }
         return {
             "success": False,
             "error": f"face_auth_denied:{reason}",
@@ -759,7 +771,8 @@ def query_batch(batch_no: str) -> dict:
 @mcp.tool(
     exclude_args=["contact_id", "variant",
                   "face_image_b64", "face_embedding_b64", "face_model_tag"],
-    meta={"requires_face": True},
+    # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
+    # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
 @_antihallucination("stock_in")
@@ -770,24 +783,13 @@ def stock_in(product_name: str, quantity: int,
              variant: str = None,
              face_image_b64: str = None,
              face_embedding_b64: str = None,
-             face_model_tag: str = None,
-             speaker_subject_id: int = None,
-             speaker_name: str = None) -> dict:
-    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
-
-    人脸鉴权 · session 模式：执行前先调用 self.conversation.speaker 获取当前说话人，把返回的
-    subject_id / name 填入 speaker_subject_id / speaker_name；valid=false（陌生人）则置空。
-    人脸鉴权 · interface 模式：face_image_b64 / face_embedding_b64 / face_model_tag 由 runtime
-    注入，对你不可见、无需填写。仓库按 verify_mode 裁决（session 信任设备身份；interface 忽略
-    speaker、改用 embedding 硬校验），你无法通过填写 speaker 参数绕过 interface。
-    """
+             face_model_tag: str = None) -> dict:
+    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。"""
     blocked = _enforce_face(
         "stock_in",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
         embedding_model_tag=face_model_tag,
-        speaker_subject_id=speaker_subject_id,
-        speaker_name=speaker_name,
     )
     if blocked is not None:
         return blocked
@@ -801,7 +803,8 @@ def stock_in(product_name: str, quantity: int,
 @mcp.tool(
     exclude_args=["allow_partial_fallback",
                   "face_image_b64", "face_embedding_b64", "face_model_tag"],
-    meta={"requires_face": True},
+    # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
+    # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
 @_antihallucination("stock_out")
@@ -813,22 +816,13 @@ def stock_out(product_name: str, quantity: int,
               allow_partial_fallback: bool = False,
               face_image_b64: str = None,
               face_embedding_b64: str = None,
-              face_model_tag: str = None,
-              speaker_subject_id: int = None,
-              speaker_name: str = None) -> dict:
-    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
-
-    人脸鉴权（同 stock_in）：session 模式先调 self.conversation.speaker 把 subject_id / name 填入
-    speaker_subject_id / speaker_name；interface 模式的 face_* 由 runtime 注入、不可见。仓库按
-    verify_mode 裁决，填 speaker 无法绕过 interface 硬校验。
-    """
+              face_model_tag: str = None) -> dict:
+    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。"""
     blocked = _enforce_face(
         "stock_out",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
         embedding_model_tag=face_model_tag,
-        speaker_subject_id=speaker_subject_id,
-        speaker_name=speaker_name,
     )
     if blocked is not None:
         return blocked
@@ -858,7 +852,8 @@ def search(query: str = None, entity_type: str = "material",
 
 @mcp.tool(
     exclude_args=["face_image_b64", "face_embedding_b64", "face_model_tag"],
-    meta={"requires_face": True},
+    # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
+    # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
 @_antihallucination("move_batch_location")
@@ -867,24 +862,16 @@ def move_batch_location(batch_no: str, new_location: str,
                          operator: str = "MCP系统",
                          face_image_b64: str = None,
                          face_embedding_b64: str = None,
-                         face_model_tag: str = None,
-                         speaker_subject_id: int = None,
-                         speaker_name: str = None) -> dict:
+                         face_model_tag: str = None) -> dict:
     """批次库位移位。batch_no 精确指定批次，new_location 目标库位。
     quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
     注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
-
-    人脸鉴权（同 stock_in）：session 模式先调 self.conversation.speaker 把 subject_id / name 填入
-    speaker_subject_id / speaker_name；interface 模式的 face_* 由 runtime 注入、不可见。仓库按
-    verify_mode 裁决，填 speaker 无法绕过 interface 硬校验。
     """
     blocked = _enforce_face(
         "move_batch_location",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
         embedding_model_tag=face_model_tag,
-        speaker_subject_id=speaker_subject_id,
-        speaker_name=speaker_name,
     )
     if blocked is not None:
         return blocked

@@ -110,15 +110,72 @@ class TestFaceConfigModeValidation:
         assert resp.status_code == 400, resp.text
 
 
+class TestFaceConfigVerifyFrequency:
+    """verify_frequency（新）与 verify_mode（deprecated 兼容入参）的映射契约。"""
+
+    _BASE = {
+        "enabled": True,
+        "mode": "lan",
+        "endpoint": "http://example.local/face",
+        "min_confidence": 0.7,
+    }
+
+    def test_verify_frequency_roundtrip(self, admin_client):
+        resp = admin_client.put(
+            "/api/face/config", json={**self._BASE, "verify_frequency": "session"})
+        assert resp.status_code == 200, resp.text
+        got = admin_client.get("/api/face/config").json()
+        assert got["verify_frequency"] == "session"
+        # deprecated 列反向同步，旧版本回滚后语义一致
+        assert got["verify_mode"] == "session"
+
+    def test_legacy_verify_mode_interface_maps_to_always(self, admin_client):
+        resp = admin_client.put(
+            "/api/face/config", json={**self._BASE, "verify_mode": "interface"})
+        assert resp.status_code == 200, resp.text
+        assert admin_client.get("/api/face/config").json()["verify_frequency"] == "always"
+
+    def test_legacy_verify_mode_session_maps_to_session(self, admin_client):
+        resp = admin_client.put(
+            "/api/face/config", json={**self._BASE, "verify_mode": "session"})
+        assert resp.status_code == 200, resp.text
+        assert admin_client.get("/api/face/config").json()["verify_frequency"] == "session"
+
+    def test_neither_field_defaults_always(self, admin_client):
+        resp = admin_client.put("/api/face/config", json=self._BASE)
+        assert resp.status_code == 200, resp.text
+        assert admin_client.get("/api/face/config").json()["verify_frequency"] == "always"
+
+    def test_bad_verify_frequency_rejected_400(self, admin_client):
+        resp = admin_client.put(
+            "/api/face/config", json={**self._BASE, "verify_frequency": "bogus"})
+        assert resp.status_code == 400, resp.text
+
+    def test_bad_legacy_verify_mode_rejected_400(self, admin_client):
+        resp = admin_client.put(
+            "/api/face/config", json={**self._BASE, "verify_mode": "bogus"})
+        assert resp.status_code == 400, resp.text
+
+    def test_config_get_exposes_recompute_status(self, admin_client):
+        """GET config 暴露后台补算进度字段（无任务时为 null / 或任务状态 dict）。"""
+        resp = admin_client.put("/api/face/config", json=self._BASE)
+        assert resp.status_code == 200, resp.text
+        got = admin_client.get("/api/face/config").json()
+        assert "recompute_status" in got
+        assert got["recompute_status"] is None or isinstance(got["recompute_status"], dict)
+
+
 class TestFaceVerifyMcpWarehouseScope:
     """MCP API keys bind to one warehouse; face rules must use that scope too."""
 
     def test_api_key_bound_warehouse_rule_applies_without_payload_warehouse(
         self, admin_client, client, default_warehouse_id
     ):
+        # 新语义：设备拉身份链路由 mode='local' 触发（verify_mode 已 deprecated，
+        # 这里仍传旧字段以覆盖 legacy 兼容映射 session→verify_frequency='session'）。
         cfg = {
             "enabled": True,
-            "mode": "lan",
+            "mode": "local",
             "endpoint": "http://example.local/face",
             "auth_token": "",
             "embedding_model_tag": "fake-v1",
@@ -154,5 +211,8 @@ class TestFaceVerifyMcpWarehouseScope:
         )
         assert verify.status_code == 200, verify.text
         body = verify.json()
+        # 规则被 API-key 绑定的仓库正确命中（require_face）→ deny。session 模式(B)下
+        # 该测试 key 没有绑定物理设备，故 fail-closed 原因是 device_unresolved；重点是
+        # 规则在无 payload warehouse_id 时仍生效并拒绝，而非具体原因。
         assert body["status"] == "deny", body
-        assert body["failure_reason"] == "speaker_unresolved", body
+        assert body["failure_reason"] == "device_unresolved", body

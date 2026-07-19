@@ -14,7 +14,7 @@ import base64 as _face_base64  # retained for parity with the previous in-line i
 import json as _face_json
 import os as _os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy import func as _sa_func
@@ -52,9 +52,12 @@ class FaceConfigPayload(BaseModel):
     embedding_model_tag: Optional[str] = None
     min_confidence: float = 0.65
     greeting_enabled: bool = False
-    # 鉴权强度（与推理拓扑 mode 正交）：'interface'（默认，fail-closed 重比对）
-    # 或 'session'（信任设备本地匹配，advisory 放行）。
-    verify_mode: str = "interface"
+    # 人脸验证频率（与推理拓扑 mode 正交，只控制会话缓存）：
+    #   'always'（默认，每次操作都验证）或 'session'（首验通过后本会话免验）。
+    verify_frequency: Optional[str] = None
+    # DEPRECATED: 旧客户端兼容入参。未传 verify_frequency 时按
+    # session→session / interface→always 映射；两者都传时 verify_frequency 优先。
+    verify_mode: Optional[str] = None
 
 class FaceRulePayload(BaseModel):
     warehouse_id: Optional[int] = None
@@ -89,6 +92,11 @@ class FaceTestConnectionPayload(BaseModel):
     auth_token: Optional[str] = None
 
 
+def _get_recompute_status(tid: int):
+    from face.orchestrator import get_recompute_status
+    return get_recompute_status(tid)
+
+
 def _face_resolve_tenant(current_user: 'CurrentUser', tenant_id: Optional[int]) -> int:
     """Resolve which tenant the request is acting on, with admin scope checks."""
     if current_user.tenant_id is None:
@@ -118,6 +126,7 @@ async def face_get_config(
                 _t_tenant_face_config.c.min_confidence,
                 _t_tenant_face_config.c.greeting_enabled,
                 _t_tenant_face_config.c.verify_mode,
+                _t_tenant_face_config.c.verify_frequency,
                 _t_tenant_face_config.c.created_at,
                 _t_tenant_face_config.c.updated_at,
             ).where(_t_tenant_face_config.c.tenant_id == tid)
@@ -125,7 +134,9 @@ async def face_get_config(
     if not row:
         return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
                 "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65,
-                "greeting_enabled": False, "verify_mode": "interface"}
+                "greeting_enabled": False, "verify_frequency": "always",
+                "verify_mode": "interface",  # deprecated echo
+                "recompute_status": _get_recompute_status(tid)}
     return {
         "tenant_id": row.tenant_id,
         "enabled": bool(row.enabled),
@@ -135,7 +146,12 @@ async def face_get_config(
         "embedding_model_tag": row.embedding_model_tag,
         "min_confidence": row.min_confidence,
         "greeting_enabled": bool(row.greeting_enabled),
+        "verify_frequency": row.verify_frequency or "always",
+        # DEPRECATED: 仅为旧客户端保留的回显；新代码请读 verify_frequency。
         "verify_mode": row.verify_mode or "interface",
+        # 后台批量 embedding 补算进度（配置变更触发）：
+        # {model_tag, done, total, running} 或 null（从未跑过）。UI 可选展示。
+        "recompute_status": _get_recompute_status(tid),
         "created_at": row.created_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.created_at, datetime) else row.created_at,
         "updated_at": row.updated_at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(row.updated_at, datetime) else row.updated_at,
     }
@@ -159,15 +175,34 @@ async def face_put_config(
             status_code=400,
             detail="mode 必须是 local 或 lan",
         )
-    if payload.verify_mode not in ("session", "interface"):
-        raise HTTPException(
-            status_code=400,
-            detail="verify_mode 必须是 session 或 interface",
-        )
+    # verify_frequency 优先；旧客户端只传 verify_mode 时按迁移同规则映射
+    # （session→session，interface→always）。两者都缺省 → 'always'。
+    if payload.verify_frequency is not None:
+        if payload.verify_frequency not in ("always", "session"):
+            raise HTTPException(
+                status_code=400,
+                detail="verify_frequency 必须是 always 或 session",
+            )
+        frequency = payload.verify_frequency
+    elif payload.verify_mode is not None:
+        if payload.verify_mode not in ("session", "interface"):
+            raise HTTPException(
+                status_code=400,
+                detail="verify_mode 必须是 session 或 interface",
+            )
+        frequency = "session" if payload.verify_mode == "session" else "always"
+    else:
+        frequency = "always"
+    # deprecated 列反向同步写入（旧版本回滚后仍能读到一致语义）。
+    legacy_verify_mode = "session" if frequency == "session" else "interface"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_engine().begin() as sa_conn:
         existing = sa_conn.execute(
-            select(_t_tenant_face_config.c.id).where(_t_tenant_face_config.c.tenant_id == tid)
+            select(
+                _t_tenant_face_config.c.id,
+                _t_tenant_face_config.c.mode,
+                _t_tenant_face_config.c.endpoint,
+            ).where(_t_tenant_face_config.c.tenant_id == tid)
         ).first()
         if existing:
             sa_conn.execute(
@@ -181,7 +216,8 @@ async def face_put_config(
                     embedding_model_tag=payload.embedding_model_tag,
                     min_confidence=payload.min_confidence,
                     greeting_enabled=1 if payload.greeting_enabled else 0,
-                    verify_mode=payload.verify_mode,
+                    verify_frequency=frequency,
+                    verify_mode=legacy_verify_mode,
                     updated_at=now,
                 )
             )
@@ -196,11 +232,28 @@ async def face_put_config(
                     embedding_model_tag=payload.embedding_model_tag,
                     min_confidence=payload.min_confidence,
                     greeting_enabled=1 if payload.greeting_enabled else 0,
-                    verify_mode=payload.verify_mode,
+                    verify_frequency=frequency,
+                    verify_mode=legacy_verify_mode,
                     created_at=now,
                     updated_at=now,
                 )
             )
+    # mode/endpoint 变化 → 当前生效 model_tag 可能变化 → 触发后台批量补算
+    # （懒重算主路径；验证路径只做限量兜底）。仅启用状态下触发，避免关着开关
+    # 还去打端点/NPU。任务进程内单例幂等，见 orchestrator.start_background_recompute。
+    if payload.enabled:
+        prior_mode = existing.mode if existing else None
+        prior_endpoint = existing.endpoint if existing else None
+        if (payload.mode, payload.endpoint) != (prior_mode, prior_endpoint):
+            from face.orchestrator import start_background_recompute
+            try:
+                start_background_recompute(
+                    tid, payload.mode, payload.endpoint, payload.auth_token)
+            except Exception:
+                # 后台补算失败绝不影响配置保存本身
+                import logging
+                logging.getLogger("warehouse.face").exception(
+                    "start_background_recompute failed (non-fatal)")
     return {"success": True, "tenant_id": tid}
 
 
@@ -591,11 +644,15 @@ class FaceVerifyMcpPayload(BaseModel):
     # (which re-matches the embedding, fail-closed).
     speaker_subject_id: Optional[int] = None
     speaker_name: Optional[str] = None
+    # 多设备消歧（一个 MCP 连接挂多台设备时）。由 MCP 传输层透传的可信设备标识，
+    # 不接受 LLM 自填。单设备部署留空即可。session 模式（B）用它精确定位设备。
+    device_id: Optional[str] = None
 
 
 @router.post("/api/face/verify-mcp")
 async def face_verify_mcp(
     payload: FaceVerifyMcpPayload,
+    request: Request,
     current_user: 'CurrentUser' = Depends(require_permission(Resource.FACE, Action.WRITE)),
 ):
     # Observability (opt-in via FACE_VERIFY_MCP_TRACE=1): record the caller-supplied
@@ -616,6 +673,7 @@ async def face_verify_mcp(
         return {"status": "skipped", "failure_reason": "no_tenant_context",
                 "confidence": None, "matched_subject_id": None}
     from face.orchestrator import verify_mcp_face as _verify
+    from face.device_pull import resolve_pull_device
     warehouse_id = resolve_warehouse_id(current_user, payload.warehouse_id)
     emb_bytes: Optional[bytes] = None
     if payload.embedding_b64:
@@ -623,6 +681,13 @@ async def face_verify_mcp(
             emb_bytes = _face_base64.b64decode(payload.embedding_b64)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"无效的 embedding_b64: {e}")
+    # session 模式（B 方案）用请求头的明文 API Key 定位该连接绑定的设备，后端直连拉取
+    # 身份。interface 模式不需要（走 embedding 重比对），resolve 返回 None 也无妨。
+    pull_device = resolve_pull_device(
+        request.headers.get("X-API-Key"),
+        current_user.tenant_id,
+        device_id=payload.device_id,
+    )
     with get_db() as conn:
         decision = await _verify(
             conn,
@@ -635,6 +700,7 @@ async def face_verify_mcp(
             embedding_model_tag=payload.embedding_model_tag,
             speaker_subject_id=payload.speaker_subject_id,
             speaker_name=payload.speaker_name,
+            pull_device=pull_device,
             request_id=payload.request_id,
         )
     return {
@@ -643,6 +709,132 @@ async def face_verify_mcp(
         "confidence": decision.confidence,
         "matched_subject_id": decision.matched_subject_id,
     }
+
+
+# ============ Device Recognition Proxy (identify_mode='lan') ============
+# 设备识别代理：lan 模式下设备现场抓拍后按 face_rec_api 的 /recognize 契约
+# POST 到这里（push-faces 下发 identify_endpoint=http://<warehouse>:<port>/api/face/device，
+# 固件拼 /recognize）。warehouse 转发到租户端点 /infer 取 embedding（含活体），
+# 再对本库 face_enrollments 比对——人脸库只在 warehouse 存一份，face_rec_api
+# 保持无状态推理。设备无 cookie 登录态，鉴权用租户级 tenant_face_config.auth_token
+# （Bearer，push-faces 首发时自动生成）。
+
+
+class DeviceRecognizePayload(BaseModel):
+    image_base64: str
+
+
+def _device_recognize_tenant(request: Request) -> int:
+    """Bearer token 反查租户。token 为空 / 无租户命中 → 401。
+
+    auth_token 为空的租户天然无法命中（谓词排除 NULL/''），不存在
+    「空 token 匹配空列」的绕过。"""
+    auth = request.headers.get("Authorization") or ""
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    with get_engine().connect() as sa_conn:
+        row = sa_conn.execute(
+            select(_t_tenant_face_config.c.tenant_id).where(and_(
+                _t_tenant_face_config.c.auth_token == token,
+                _t_tenant_face_config.c.auth_token.isnot(None),
+                _t_tenant_face_config.c.auth_token != "",
+            ))
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return int(row.tenant_id)
+
+
+@router.post("/api/face/device/recognize")
+async def face_device_recognize(payload: DeviceRecognizePayload, request: Request):
+    """face_rec_api /recognize 契约的代理实现（设备直连，无登录态）。
+
+    响应恒 200：{matched, name, confidence, processing_time_ms, live,
+    liveness_score, reason}；spoof/no_face/端点错都以 matched=false + reason
+    表达（契约如此，固件按 body 判定）。每次调用写一行 face_auth_logs
+    （operation='device_recognize'，user_id=0 表示无系统用户的设备调用）。
+    """
+    import time as _time
+
+    from face import endpoint_client as _ec
+    from face.endpoint_client import FaceEndpointError
+    from face.matcher import topk_match
+    from face.orchestrator import (
+        _ensure_model_enrollments,
+        _load_config,
+        _log_decision,
+    )
+
+    t0 = _time.monotonic()
+    tid = _device_recognize_tenant(request)
+    cfg = _load_config(None, tid)  # token 反查命中 → 该租户必有 config 行
+
+    def _resp(matched: bool, *, name=None, confidence: float = 0.0,
+              live=None, liveness_score=None, reason=None) -> dict:
+        return {
+            "matched": matched,
+            "name": name,
+            "confidence": round(float(confidence), 4),
+            "processing_time_ms": int((_time.monotonic() - t0) * 1000),
+            "live": live,
+            "liveness_score": liveness_score,
+            "reason": reason,
+        }
+
+    with get_db() as conn:
+        def _audit(decision: str, *, subject_id=None, confidence=None, reason=None):
+            _log_decision(
+                conn, request_id=None, user_id=0, matched_subject_id=subject_id,
+                tenant_id=tid, warehouse_id=None, operation="device_recognize",
+                confidence=confidence, decision=decision, failure_reason=reason,
+            )
+
+        try:
+            result = await _ec.infer(cfg, payload.image_base64)
+        except FaceEndpointError as e:
+            reason = str(e) or "endpoint_unreachable"
+            _audit("deny", reason=reason)
+            return _resp(
+                False, reason=reason,
+                # 契约：假体时 live=false；其余错误活体未知 → null。
+                live=False if reason == "spoof" else None,
+            )
+
+        model_tag = result["model_tag"]
+        # 懒重算兜底（与 verify 路径同一 helper）：换模型后老 subject 缺当前
+        # model_tag 的 embedding 时用注册照片限量补算。异常不阻塞识别主链路。
+        try:
+            await _ensure_model_enrollments(conn, cfg, tid, model_tag)
+        except Exception:
+            import logging
+            logging.getLogger("warehouse.face").exception(
+                "device-recognize lazy re-embed failed (non-fatal)")
+
+        matches = topk_match(
+            conn, tenant_id=tid, warehouse_id=None, model_tag=model_tag,
+            query_emb_bytes=result["embedding"], k=1,
+        )
+        best = matches[0] if matches else None
+        threshold = cfg.min_confidence if cfg else 0.65
+        if best is None or best.confidence < threshold:
+            reason = "no_match" if best is None else "low_confidence"
+            _audit(
+                "deny", subject_id=best.subject_id if best else None,
+                confidence=best.confidence if best else None, reason=reason,
+            )
+            return _resp(
+                False, confidence=best.confidence if best else 0.0,
+                reason="no_match",  # 契约不区分低分/无候选，统一 no_match
+            )
+
+        with get_engine().connect() as sa_conn:
+            name = sa_conn.execute(
+                select(_t_face_subjects.c.name)
+                .where(_t_face_subjects.c.id == best.subject_id)
+            ).scalar()
+        _audit("pass", subject_id=best.subject_id, confidence=best.confidence)
+        return _resp(True, name=name, confidence=best.confidence)
 
 
 # ============ Face Subjects CRUD ============
