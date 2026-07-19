@@ -63,11 +63,15 @@ if (-not $uvCommand) {
     exit 1
 }
 
-# Check if backend service is running
+# Check if backend service is running. Port follows the PORT env var (matches
+# warehouse_mcp.py api_base_url derivation; Docker deployment sets PORT=2125),
+# default 2124 — avoids a false "backend not running" warning when the health
+# check targets the wrong port (issue #2).
 Write-Host "Checking backend service..."
+$backendPort = if ($env:PORT) { $env:PORT } else { "2124" }
 try {
-    $response = Invoke-WebRequest -Uri "http://localhost:2124/api/dashboard/stats" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-    Write-Host "Backend service is running (port 2124)" -ForegroundColor Green
+    $response = Invoke-WebRequest -Uri "http://localhost:$backendPort/api/dashboard/stats" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+    Write-Host "Backend service is running (port $backendPort)" -ForegroundColor Green
 } catch {
     Write-Host "Warning: Backend service is not running, MCP features may be limited" -ForegroundColor Yellow
     Write-Host "Please start backend first: uv run python run_backend.py"
