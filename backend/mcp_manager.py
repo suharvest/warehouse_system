@@ -780,6 +780,8 @@ class MCPProcessManager:
         if proc.restart_count > MAX_RESTART_COUNT:
             proc.status = 'error'
             proc.error_message = f'Max restart attempts ({MAX_RESTART_COUNT}) exceeded'
+            proc.websocket_status = 'disconnected'
+            proc.protocol_ready = False
             logger.error(f"MCP connection '{conn_id}' exceeded max restarts")
             # 更新数据库状态
             self._update_db_status(conn_id, 'error', proc.error_message, proc.restart_count)
