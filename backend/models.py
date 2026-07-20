@@ -193,6 +193,9 @@ class StockOperationRequest(BaseModel):
     # "先扣完该批次 + FIFO 从其他批次补差额"。
     # 默认 False —— 必须由用户在前端/语音对话中明确确认后由 MCP 重发时置 True。
     allow_partial_fallback: bool = False
+    # 入库 variant 归一不 confident 且库内有相近规格时，是否允许直接新建规格。
+    # 默认 False —— 先追问用户（variant_ambiguous），确认新建后由 MCP 重发时置 True。
+    allow_new_variant: bool = False
 
 
 class StockOperationProduct(BaseModel):
@@ -622,6 +625,9 @@ class StockOutResponse(BaseModel):
     # 让 MCP 包装器据此生成 speak_ask 并设置 retry_hint。
     batch_no_requested: Optional[str] = None  # 用户原本指定的批次号
     batch_available: Optional[int] = None     # 该批次实际余量
+    shortfall: Optional[int] = None           # 缺多少
+    can_fallback: Optional[bool] = None       # 其他批次是否够补差额
+    fallback_total_available: Optional[int] = None  # 其他批次合计可用
 
 
 class BatchMoveRequest(BaseModel):

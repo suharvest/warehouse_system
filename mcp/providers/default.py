@@ -150,7 +150,20 @@ class DefaultProvider(BaseProvider):
             return original_resp
 
         # 先尝试精确查询，同时做多义检测
+        resolved_material_id = None
         data = self.http_get("/materials/product-stats", params={"name": product_name})
+
+        def _spec_of(c):
+            """候选的规格描述：单值 variant 优先，其次 variants 列表用 / 连接。"""
+            extra = c.get("extra") or {}
+            return extra.get("variant") or "/".join(extra.get("variants") or [])
+
+        def _fmt(c):
+            spec = _spec_of(c)
+            if spec:
+                return f"{c['name']}（{spec}）"
+            sku = (c.get("extra") or {}).get("sku", "")
+            return f"{c['name']}（SKU: {sku}）" if sku else c["name"]
 
         # 精确查询成功时，仍需检查是否存在同名多条（精确匹配只返回第一条）
         if "error" not in data:
@@ -161,9 +174,6 @@ class DefaultProvider(BaseProvider):
             # 同名多条：所有候选都与查询词完全一致 → 需要用户澄清
             exact_same = [c for c in candidates if c.get("name") == product_name]
             if not resolve_result.get("confident") and len(exact_same) > 1:
-                def _fmt(c):
-                    sku = c.get("extra", {}).get("sku", "")
-                    return f"{c['name']}（SKU: {sku}）" if sku else c["name"]
                 items = "、".join(_fmt(c) for c in exact_same[:6])
                 return {
                     "success": False,
@@ -171,7 +181,7 @@ class DefaultProvider(BaseProvider):
                     "candidates": exact_same[:6],
                     "message": (
                         f"'{product_name}' 在系统中有 {len(exact_same)} 个同名产品：{items}。"
-                        "请告知需要查询哪个（可指定 SKU 或其他特征）"
+                        "请告知需要查询哪个（可指定规格或 SKU）"
                     ),
                 }
 
@@ -191,7 +201,13 @@ class DefaultProvider(BaseProvider):
                     resolved_name = best["name"].replace(f" {resolved_variant}", "").strip()
                 elif not resolved_name:
                     resolved_name = best["name"]
-                data = self.http_get("/materials/product-stats", params={"name": resolved_name})
+                # entity_id 可直接精确定位物料，避免同名多行时按 name 回查盲取错料
+                resolved_material_id = best.get("entity_id")
+                if resolved_material_id:
+                    stats_params = {"material_id": resolved_material_id}
+                else:
+                    stats_params = {"name": resolved_name}
+                data = self.http_get("/materials/product-stats", params=stats_params)
                 if "error" in data:
                     return _batch_fallback({
                         "success": False,
@@ -207,15 +223,18 @@ class DefaultProvider(BaseProvider):
                 candidates = resolve_result.get("candidates", [])
                 if candidates:
                     def _fmt_candidate(c):
-                        sku = c.get("extra", {}).get("sku", "")
+                        spec = _spec_of(c)
                         score = c["score"]
+                        if spec:
+                            return f"{c['name']}（{spec}，{score}分）"
+                        sku = c.get("extra", {}).get("sku", "")
                         return f"{c['name']}（SKU: {sku}，{score}分）" if sku else f"{c['name']}（{score}分）"
                     ranked = [_fmt_candidate(c) for c in candidates[:5]]
                     return {
                         "success": False,
                         "error": f"名称 '{product_name}' 不够明确",
                         "candidates": candidates[:5],
-                        "message": f"找到以下候选产品：{', '.join(ranked)}。请告知是哪个（可指定 SKU）",
+                        "message": f"找到以下候选产品：{', '.join(ranked)}。请告知是哪个（可指定规格或 SKU）",
                     }
                 return _batch_fallback({
                     "success": False,
@@ -228,7 +247,11 @@ class DefaultProvider(BaseProvider):
         resolved_variant = data.pop("resolved_variant", None)
 
         # 始终获取批次明细（用于多位置/多变体展示）
-        batches_data = self.http_get("/materials/batches", params={"name": data["name"]})
+        if resolved_material_id:
+            batch_params = {"material_id": resolved_material_id}
+        else:
+            batch_params = {"name": data["name"]}
+        batches_data = self.http_get("/materials/batches", params=batch_params)
         batches_list = []
         if isinstance(batches_data, dict) and "error" not in batches_data:
             batches_list = batches_data.get("batches", [])
@@ -274,6 +297,11 @@ class DefaultProvider(BaseProvider):
             msg = f"查询成功：{display_name} 当前库存 {quantity} {unit}{status_info}{loc_info}"
 
         product_data = {**data}
+        if resolved_variant:
+            # variant 过滤后重算的库存必须写回 product，否则下游
+            # _wrap_response 播报 product.current_stock 时读到全规格总量
+            product_data["current_stock"] = quantity
+            product_data["variant"] = resolved_variant
         if status:
             product_data["status"] = status
         else:
@@ -292,7 +320,8 @@ class DefaultProvider(BaseProvider):
         return result
 
     def stock_in(self, product_name, quantity, reason_category, reason_note,
-                 operator, fuzzy, location=None, contact_id=None, variant=None):
+                 operator, fuzzy, location=None, contact_id=None, variant=None,
+                 allow_new_variant=False):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
@@ -307,6 +336,8 @@ class DefaultProvider(BaseProvider):
             payload["contact_id"] = contact_id
         if variant is not None:
             payload["variant"] = variant
+        if allow_new_variant:
+            payload["allow_new_variant"] = True
 
         return self.http_post("/materials/stock-in", payload)
 
