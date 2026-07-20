@@ -325,38 +325,22 @@ class TestMCPSlimResponse:
 
 
 class TestMCPRequiresFaceMeta:
-    """方案 D: 写工具通过 tool.meta['requires_face'] 标记需要 face 校验，
-    供 MCP client (xiaozhi) 在调 call_tool 前自动注入摄像头数据。
-    对 LLM 不可见，纯客户端编排提示。"""
+    """option 3: 拍照/识别决策统一由后端按规则驱动（需要时后端直连设备
+    拉图/拉身份），工具不再通过 meta['requires_face'] 让 xiaozhi 客户端
+    预抓拍。守护该契约：任何工具都不得再携带 requires_face meta。"""
 
-    def test_write_tools_carry_requires_face_meta(self):
+    def test_no_tool_carries_requires_face_meta(self):
         import asyncio
         warehouse_mcp = _import_warehouse_mcp()
         tools = asyncio.run(warehouse_mcp.mcp.get_tools())
 
-        EXPECTED = {"stock_in", "stock_out", "move_batch_location"}
         marked = {
             name for name, t in tools.items()
             if t.to_mcp_tool().meta and t.to_mcp_tool().meta.get("requires_face")
         }
-        assert EXPECTED.issubset(marked), (
-            f"写工具应该标 requires_face；缺: {EXPECTED - marked}"
+        assert not marked, (
+            f"requires_face 已废弃（决策在后端规则驱动），不应再标记: {marked}"
         )
-
-    def test_readonly_tools_do_not_carry_requires_face_meta(self):
-        import asyncio
-        warehouse_mcp = _import_warehouse_mcp()
-        tools = asyncio.run(warehouse_mcp.mcp.get_tools())
-
-        READONLY = {"resolve_name", "query_stock", "query_batch",
-                    "search", "get_today_statistics"}
-        for name in READONLY:
-            if name not in tools:
-                continue
-            meta = tools[name].to_mcp_tool().meta or {}
-            assert not meta.get("requires_face"), (
-                f"只读工具 {name} 不应标 requires_face"
-            )
 
     def test_face_args_hidden_from_llm_schema(self):
         """xiaozhi 注入的 face_* 参数必须从 inputSchema 里排除，
