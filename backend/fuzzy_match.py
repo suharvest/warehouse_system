@@ -106,6 +106,28 @@ class FuzzyMatcher:
         engine = get_engine()
         with engine.connect() as conn:
             if entity_type == "material":
+                # 先查 variant：同一 material 的 distinct 非空 variant 列表，
+                # 供普通条目（extra.variants）与 name+variant 组合条目共用。
+                variant_stmt = select(
+                    materials.c.id, materials.c.name, materials.c.sku,
+                    materials.c.category, materials.c.tenant_id, materials.c.warehouse_id,
+                    batches.c.variant,
+                ).select_from(
+                    batches.join(materials, batches.c.material_id == materials.c.id)
+                ).where(
+                    and_(
+                        materials.c.is_disabled == 0,
+                        batches.c.variant.isnot(None),
+                        batches.c.variant != "",
+                    )
+                ).distinct()
+                variant_rows = conn.execute(variant_stmt).fetchall()
+                variants_by_mid: dict[int, list[str]] = {}
+                for vrow in variant_rows:
+                    variants_by_mid.setdefault(vrow.id, []).append(vrow.variant)
+                for _vlist in variants_by_mid.values():
+                    _vlist.sort()  # 排序保证稳定
+
                 stmt = select(
                     materials.c.id, materials.c.name, materials.c.sku,
                     materials.c.category, materials.c.tenant_id, materials.c.warehouse_id,
@@ -113,7 +135,8 @@ class FuzzyMatcher:
                 for row in conn.execute(stmt).fetchall():
                     mid, name, sku, category = row.id, row.name, row.sku, row.category
                     tid, whid = row.tenant_id, row.warehouse_id
-                    extra = {"sku": sku, "category": category, "canonical_name": name}
+                    extra = {"sku": sku, "category": category, "canonical_name": name,
+                             "variants": variants_by_mid.get(mid, [])}
                     self._add_entry("material", mid, {
                         "name": name, "entity_type": "material", "entity_id": mid,
                         "tenant_id": tid, "warehouse_id": whid, "extra": extra,
@@ -144,21 +167,8 @@ class FuzzyMatcher:
                             "pinyin": self._get_pinyin(self._normalize(combined_rev)),
                         }, bucket)
 
-                # 索引 "name + variant" 组合
-                stmt = select(
-                    materials.c.id, materials.c.name, materials.c.sku,
-                    materials.c.category, materials.c.tenant_id, materials.c.warehouse_id,
-                    batches.c.variant,
-                ).select_from(
-                    batches.join(materials, batches.c.material_id == materials.c.id)
-                ).where(
-                    and_(
-                        materials.c.is_disabled == 0,
-                        batches.c.variant.isnot(None),
-                        batches.c.variant != "",
-                    )
-                ).distinct()
-                for row in conn.execute(stmt).fetchall():
+                # 索引 "name + variant" 组合（复用上面查好的 variant_rows）
+                for row in variant_rows:
                     mid, name, sku, category, tid, whid, variant = (
                         row.id, row.name, row.sku, row.category,
                         row.tenant_id, row.warehouse_id, row.variant,
@@ -170,6 +180,7 @@ class FuzzyMatcher:
                         "extra": {
                             "sku": sku, "category": category,
                             "canonical_name": name, "variant": variant,
+                            "variants": variants_by_mid.get(mid, []),
                         },
                         "tokens": self._tokenize(combined),
                         "pinyin": self._get_pinyin(self._normalize(combined)),
@@ -486,6 +497,65 @@ class FuzzyMatcher:
                     "name": loc,
                     "score": round(score, 1),
                     "entity_type": "location",
+                    "entity_id": None,
+                    "extra": {},
+                })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        if scored:
+            top_score = scored[0]["score"]
+            scored = [r for r in scored if top_score - r["score"] <= 20]
+
+        if not scored:
+            return {"best_match": None, "confident": False, "candidates": []}
+
+        best = scored[0]
+        confident = self._judge_confident(scored)
+        return {"best_match": best, "confident": confident, "candidates": scored[:5]}
+
+    def resolve_variant_in_scope(self, material_id: int, warehouse_id: int | None,
+                                  query: str) -> dict:
+        """按产品（+可选仓库）作用域对 variant 做模糊匹配（绕过全局索引）。
+
+        用于把语音表述的规格（"黑色 10 毫米"）归一到库内实际值（"黑色 10mm"）。
+        warehouse_id 为 None 时不过滤仓库。
+        """
+        if not query:
+            return {"best_match": None, "confident": False, "candidates": []}
+
+        engine = get_engine()
+        preds = [
+            batches.c.material_id == material_id,
+            batches.c.is_exhausted == 0,
+            batches.c.quantity > 0,
+            batches.c.variant.isnot(None),
+            batches.c.variant != "",
+        ]
+        if warehouse_id is not None:
+            preds.append(batches.c.warehouse_id == warehouse_id)
+        stmt = select(batches.c.variant).where(and_(*preds)).distinct()
+        with engine.connect() as conn:
+            variants = sorted({r.variant for r in conn.execute(stmt).fetchall()})
+
+        if not variants:
+            return {"best_match": None, "confident": False, "candidates": []}
+
+        norm_query = self._normalize(query)
+        if not norm_query:
+            return {"best_match": None, "confident": False, "candidates": []}
+        query_pinyin = self._get_pinyin(norm_query)
+
+        scored = []
+        for variant in variants:
+            norm_variant = self._normalize(variant)
+            variant_pinyin = self._get_pinyin(norm_variant)
+            score = self._calc_score(norm_query, query_pinyin,
+                                     norm_variant, variant_pinyin)
+            if score >= 50.0:
+                scored.append({
+                    "name": variant,
+                    "score": round(score, 1),
+                    "entity_type": "variant",
                     "entity_id": None,
                     "extra": {},
                 })

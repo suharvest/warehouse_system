@@ -164,6 +164,7 @@ class BaseProvider(ABC):
         location: str | None = None,
         contact_id: int | None = None,
         variant: str | None = None,
+        allow_new_variant: bool = False,
     ) -> dict:
         """产品入库。
 
