@@ -420,7 +420,7 @@ tenant_face_config = Table(
     Column("endpoint", Text),
     Column("auth_token", Text),
     Column("embedding_model_tag", String(64)),
-    Column("min_confidence", Float, nullable=False, server_default="0.65"),
+    Column("min_confidence", Float, nullable=False, server_default="0.45"),
     # Passive greeting (visual wake) on/off — independent of the out-of-stock
     # auth switch (`enabled`). xiaozhi reads this on device connect / voice sync
     # and aligns the device's local passive-recognition state via self.face.enable.

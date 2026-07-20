@@ -11,7 +11,7 @@ const DEFAULT_CONFIG = {
     endpoint: '',
     auth_token: '',
     embedding_model_tag: '',
-    min_confidence: 0.7,
+    min_confidence: 0.45,
     verify_frequency: 'always'
 };
 const SUB_TABS = ['setup', 'logs'];
@@ -375,7 +375,7 @@ function renderSetupTab() {
                         </div>
                         <div class="form-group">
                             <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span>${pendingBadge('min_confidence')}</label>
-                            <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
+                            <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.45)}">
                         </div>
                     </div>
                     <div class="face-config-grid" style="margin-top:12px;">
@@ -603,7 +603,7 @@ function attachSetupAutoSave() {
         conf.addEventListener('blur', () => {
             let v = parseFloat(conf.value);
             if (!Number.isFinite(v)) {
-                conf.value = Number(currentConfig.min_confidence ?? 0.7);
+                conf.value = Number(currentConfig.min_confidence ?? 0.45);
                 return;
             }
             v = Math.min(1, Math.max(0, Math.round(v * 100) / 100));

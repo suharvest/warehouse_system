@@ -616,7 +616,7 @@ def init_database():
             endpoint TEXT,
             auth_token TEXT,
             embedding_model_tag TEXT,
-            min_confidence REAL NOT NULL DEFAULT 0.65,
+            min_confidence REAL NOT NULL DEFAULT 0.45,
             greeting_enabled INTEGER NOT NULL DEFAULT 0,
             verify_mode TEXT NOT NULL DEFAULT 'interface' CHECK(verify_mode IN('session','interface')),
             verify_frequency TEXT NOT NULL DEFAULT 'always' CHECK(verify_frequency IN('always','session')),
