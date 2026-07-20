@@ -825,29 +825,73 @@ async def list_all_agent_devices(
     ]
 
 
+def _find_device_by_ip_port(conn_id: str, ip: str, port: int):
+    """按 (connection_id, ip, port) 查找已注册的设备行，找不到返回 None。"""
+    with get_engine().connect() as sa_conn:
+        return sa_conn.execute(
+            select(_t_mcp_agent_devices.c.id).where(
+                and_(
+                    _t_mcp_agent_devices.c.connection_id == conn_id,
+                    _t_mcp_agent_devices.c.ip == ip,
+                    _t_mcp_agent_devices.c.port == port,
+                )
+            )
+        ).first()
+
+
 @router.post("/api/mcp/connections/{conn_id}/devices")
 async def create_mcp_agent_device(
     conn_id: str,
     request: MCPAgentDeviceCreateRequest,
     current_user: CurrentUser = Depends(require_permission(Resource.MCP, Action.ADMIN)),
 ):
-    """为某智能体新增一个物理设备。"""
+    """为某智能体新增一个物理设备。
+
+    xiaozhi 注册设备时从不带 device_id，只带 ip+port。若每次都无脑 insert，
+    同一物理设备每次连接都会在 mcp_agent_devices 里多插一行，下游按
+    connection_id 解析物理设备时会因为命中多条而无法唯一确定。因此
+    device_id 为空时按 (connection_id, ip, port) upsert：命中已有行就更新
+    并直接返回，否则才新建；device_id 非空时保持原有唯一性校验语义不变。
+    """
     _assert_conn_in_tenant(conn_id, current_user)
     ip, port = _validate_device_fields(request.ip, request.port)
     device_id = request.device_id.strip() if request.device_id else None
     _ensure_device_id_unique(conn_id, device_id)
 
     now = datetime.now().isoformat()
+    name = request.name.strip() if request.name else None
+    model_tag = request.model_tag.strip() if request.model_tag else None
+
+    if device_id is None:
+        existing = _find_device_by_ip_port(conn_id, ip, port)
+        if existing is not None:
+            update_values = {
+                'name': name,
+                'model_tag': model_tag,
+                'last_seen': request.last_seen,
+                'updated_at': now,
+            }
+            if device_id is not None:
+                update_values['device_id'] = device_id
+            with get_engine().begin() as sa_conn:
+                sa_conn.execute(
+                    update(_t_mcp_agent_devices)
+                    .where(_t_mcp_agent_devices.c.id == existing.id)
+                    .values(**update_values)
+                )
+            row = _load_device_or_404(conn_id, existing.id)
+            return {"success": True, "message": "设备已更新", "device": _serialize_device(row)}
+
     with get_engine().begin() as sa_conn:
         try:
             res = sa_conn.execute(
                 insert(_t_mcp_agent_devices).values(
                     connection_id=conn_id,
                     device_id=device_id,
-                    name=(request.name.strip() if request.name else None),
+                    name=name,
                     ip=ip,
                     port=port,
-                    model_tag=(request.model_tag.strip() if request.model_tag else None),
+                    model_tag=model_tag,
                     # face_enabled 列已废弃（deprecated）：不再读写入参，DB 列 NOT NULL
                     # server_default '0' 会自动填 0，省略即可。
                     last_seen=request.last_seen,
