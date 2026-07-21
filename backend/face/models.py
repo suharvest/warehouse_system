@@ -11,7 +11,7 @@ class FaceConfig:
     endpoint: Optional[str] = None
     auth_token: Optional[str] = None
     embedding_model_tag: Optional[str] = None
-    min_confidence: float = 0.65
+    min_confidence: float = 0.45
     # 人脸验证频率（与 mode 正交，只控制会话缓存）：
     #   'always'  — 每次操作都现场验证（默认）
     #   'session' — 同会话首验通过后免验（session_cached）
@@ -51,3 +51,6 @@ class Decision:
     failure_reason: Optional[str] = None
     confidence: Optional[float] = None
     matched_subject_id: Optional[int] = None
+    # 识别到的人员姓名（face_subjects.name 快照），仅 pass 时填充；
+    # 供出入库记录在操作人后追加显示 "operator (姓名)"。
+    matched_subject_name: Optional[str] = None

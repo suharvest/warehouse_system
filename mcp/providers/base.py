@@ -164,6 +164,8 @@ class BaseProvider(ABC):
         location: str | None = None,
         contact_id: int | None = None,
         variant: str | None = None,
+        allow_new_variant: bool = False,
+        actual_operator: str | None = None,
     ) -> dict:
         """产品入库。
 
@@ -184,6 +186,7 @@ class BaseProvider(ABC):
         location: str | None = None,
         batch_no: str | None = None,
         location_fuzzy: bool = False,
+        actual_operator: str | None = None,
     ) -> dict:
         """产品出库。
 

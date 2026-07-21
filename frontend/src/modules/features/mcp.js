@@ -1,32 +1,8 @@
 // ============ MCP 连接管理模块 ============
 import { t } from '../../../i18n.js';
-import { API_BASE_URL } from '../state.js';
-import { getCurrentWarehouseId, warehousesApi } from '../api.js';
+import { fetchJson as mcpFetch, getCurrentWarehouseId, warehousesApi } from '../api.js';
 import { getCurrentUser } from '../state.js';
 import { showToast } from '../ui-components.js';
-
-// API 封装
-async function mcpFetch(url, options = {}) {
-    const response = await fetch(`${API_BASE_URL}${url}`, {
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', ...options.headers },
-        ...options
-    });
-    if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}`);
-        try {
-            error.data = await response.json();
-            if (error.data?.detail) {
-                error.message = typeof error.data.detail === 'string'
-                    ? error.data.detail
-                    : JSON.stringify(error.data.detail);
-            }
-        } catch {}
-        error.status = response.status;
-        throw error;
-    }
-    return response.json();
-}
 
 // 状态
 let connections = [];
@@ -41,11 +17,10 @@ export async function loadMCPConnections() {
     if (!tbody) return;
 
     try {
-        const whId = getCurrentWarehouseId();
-        const url = whId ? `/mcp/connections?warehouse_id=${whId}` : '/mcp/connections';
-        connections = await mcpFetch(url);
+        connections = await mcpFetch('/mcp/connections');
         renderConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('加载MCP连接失败:', error);
         const detail = error.status ? `HTTP ${error.status}: ${escapeHtml(error.message)}` : escapeHtml(error.message || t('loadError'));
         tbody.innerHTML = `<tr><td colspan="8" class="text-center text-gray-400 py-8">${t('loadError')}<br><span class="text-xs">${detail}</span></td></tr>`;
@@ -216,6 +191,7 @@ export async function showAddMCPModal() {
         const curWhId = getCurrentWarehouseId();
         if (curWhId) whSelect.value = curWhId;
     } catch (e) {
+        if (e.status === 401) return;
         console.error('加载仓库列表失败:', e);
     }
 
@@ -264,8 +240,9 @@ export async function handleSaveMCP() {
         closeMCPModal();
         await loadMCPConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('保存MCP连接失败:', error);
-        errorDiv.textContent = error.data?.detail || t('operationFailed');
+        errorDiv.textContent = error.message || t('operationFailed');
         errorDiv.style.display = 'block';
     }
 }
@@ -299,6 +276,7 @@ export async function editMCPConnection(connId) {
         });
         if (conn.warehouse_id) whSelect.value = conn.warehouse_id;
     } catch (e) {
+        if (e.status === 401) return;
         console.error('加载仓库列表失败:', e);
     }
 
@@ -311,8 +289,9 @@ export async function startMCPConnection(connId) {
         await mcpFetch(`/mcp/connections/${connId}/start`, { method: 'POST' });
         await loadMCPConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('启动失败:', error);
-        alert(error.data?.detail || t('operationFailed'));
+        alert(error.message || t('operationFailed'));
     }
 }
 
@@ -321,8 +300,9 @@ export async function stopMCPConnection(connId) {
         await mcpFetch(`/mcp/connections/${connId}/stop`, { method: 'POST' });
         await loadMCPConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('停止失败:', error);
-        alert(error.data?.detail || t('operationFailed'));
+        alert(error.message || t('operationFailed'));
     }
 }
 
@@ -331,8 +311,9 @@ export async function restartMCPConnection(connId) {
         await mcpFetch(`/mcp/connections/${connId}/restart`, { method: 'POST' });
         await loadMCPConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('重启失败:', error);
-        alert(error.data?.detail || t('operationFailed'));
+        alert(error.message || t('operationFailed'));
     }
 }
 
@@ -345,8 +326,9 @@ export async function deleteMCPConnection(connId) {
         await mcpFetch(`/mcp/connections/${connId}`, { method: 'DELETE' });
         await loadMCPConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('删除失败:', error);
-        alert(error.data?.detail || t('operationFailed'));
+        alert(error.message || t('operationFailed'));
     }
 }
 
@@ -367,6 +349,7 @@ export async function showMCPLogs(connId) {
             alert(logs.join('\n'));
         }
     } catch (error) {
+        if (error.status === 401) return;
         console.error('获取日志失败:', error);
     }
 }
@@ -380,8 +363,9 @@ export async function toggleMCPDebug(connId, enable) {
         });
         await loadMCPConnections();
     } catch (error) {
+        if (error.status === 401) return;
         console.error('切换调试模式失败:', error);
-        alert(error.data?.detail || t('operationFailed'));
+        alert(error.message || t('operationFailed'));
     }
 }
 
@@ -414,6 +398,7 @@ async function loadDevices(connId) {
         renderDevicePanel(connId);
         updateDeviceButtonCount(connId);
     } catch (error) {
+        if (error.status === 401) return;
         console.error('加载设备失败:', error);
         panel.innerHTML = `<div class="text-sm" style="color:#ef4444;">${escapeHtml(error.message || t('loadError'))}</div>`;
     }
@@ -537,8 +522,9 @@ export async function saveMCPDevice() {
         closeMCPDeviceModal();
         await loadDevices(connId);
     } catch (error) {
+        if (error.status === 401) return;
         console.error('保存设备失败:', error);
-        errorDiv.textContent = error.data?.detail || t('operationFailed');
+        errorDiv.textContent = error.message || t('operationFailed');
         errorDiv.style.display = 'block';
     }
 }
@@ -557,8 +543,9 @@ export async function pushFacesToDevice(connId, devId) {
             showToast(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', (result && result.error) || t('operationFailed')), 'error');
         }
     } catch (error) {
+        if (error.status === 401) return;
         console.error('下发人脸失败:', error);
-        showToast(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', error.data?.detail || error.message || t('operationFailed')), 'error');
+        showToast(t('mcpDevicePushFailed').replace('{name}', name).replace('{error}', error.message || t('operationFailed')), 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = origLabel; }
     }
@@ -572,8 +559,9 @@ export async function deleteMCPDevice(connId, devId) {
         await deviceFetch(connId, `/${devId}`, { method: 'DELETE' });
         await loadDevices(connId);
     } catch (error) {
+        if (error.status === 401) return;
         console.error('删除设备失败:', error);
-        alert(error.data?.detail || t('operationFailed'));
+        alert(error.message || t('operationFailed'));
     }
 }
 

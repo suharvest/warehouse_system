@@ -354,8 +354,13 @@ def _enforce_face(
     image_b64: str = None,
     embedding_b64: str = None,
     embedding_model_tag: str = None,
-) -> dict | None:
-    """Run the face gate; return a tool-error dict to surface, or None to proceed.
+) -> tuple[dict | None, str | None]:
+    """Run the face gate; return ``(blocked, face_name)``.
+
+    ``blocked`` is a tool-error dict to surface, or None to proceed.
+    ``face_name`` is the recognized person's name (face_subjects.name) when the
+    backend verified a concrete subject — callers pass it through to the stock
+    write so the inventory record can snapshot who was physically recognized.
 
     Single authoritative gate: forward EVERYTHING we have (server-injected
     embedding AND LLM/device-supplied speaker identity) to ``/face/verify-mcp``
@@ -391,19 +396,20 @@ def _enforce_face(
                     "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
                     "若仍失败，请联系管理员确认人脸是否已录入。"
                 ),
-            }
+            }, None
         if reason == "device_unresolved":
             return {
                 "success": False,
                 "error": f"face_auth_denied:{reason}",
                 "message": "无法连接到人脸识别设备，出入库已阻止。请联系管理员检查设备在线状态。",
-            }
+            }, None
         return {
             "success": False,
             "error": f"face_auth_denied:{reason}",
             "message": f"人脸校验未通过：{reason}。请由本人操作或联系管理员检查权限规则。",
-        }
-    return None
+        }, None
+    face_name = decision.get("matched_subject_name")
+    return None, (face_name if isinstance(face_name, str) and face_name else None)
 
 
 # ============================================================================
@@ -438,6 +444,21 @@ _RULES_FOOTER = """\
 _WRITE_OPS = {"stock_in", "stock_out", "move_batch_location"}
 
 
+def _fmt_candidate_say(c: dict) -> str:
+    """歧义候选的播报文案：优先 名称（规格），无规格用 名称（SKU），再拼库存。"""
+    n = c.get("name", "")
+    spec = c.get("spec") or ""
+    sku = c.get("sku") or ""
+    if spec:
+        n += f"（{spec}）"
+    elif sku:
+        n += f"（{sku}）"
+    stock = c.get("stock")
+    if stock is not None:
+        n += f"库存{stock}"
+    return n
+
+
 def _wrap_response(operation: str, resp: dict) -> dict:
     """把 provider 响应压缩为 MCP 对外稳定 schema。"""
     if not isinstance(resp, dict):
@@ -451,13 +472,18 @@ def _wrap_response(operation: str, resp: dict) -> dict:
     awaiting_confirm = None
 
     def _candidates(limit=3):
-        return [
-            {"name": c.get("name", ""),
-             "sku": (c.get("extra") or {}).get("sku", "") or c.get("sku", ""),
-             "score": c.get("score"),
-             "stock": c.get("stock") or (c.get("extra") or {}).get("stock")}
-            for c in (resp.get("candidates") or [])[:limit]
-        ]
+        out = []
+        for c in (resp.get("candidates") or [])[:limit]:
+            extra = c.get("extra") or {}
+            spec = extra.get("variant") or "/".join(extra.get("variants") or [])
+            out.append({
+                "name": c.get("name", ""),
+                "sku": extra.get("sku", "") or c.get("sku", ""),
+                "spec": spec or "",
+                "score": c.get("score"),
+                "stock": c.get("stock") or extra.get("stock"),
+            })
+        return out
 
     def _copy(keys):
         return {k: resp[k] for k in keys if k in resp}
@@ -499,18 +525,8 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-            if err in ("ambiguous_name", "location_ambiguous"):
-                parts = []
-                for c in candidates:
-                    n = c["name"]
-                    sku = c.get("sku", "")
-                    stock = c.get("stock")
-                    if sku:
-                        n += f"（{sku}）"
-                    if stock is not None:
-                        n += f"库存{stock}"
-                    parts.append(n)
-                names = "、".join(parts)
+            if err in ("ambiguous_name", "location_ambiguous", "variant_ambiguous"):
+                names = "、".join(_fmt_candidate_say(c) for c in candidates)
                 say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
                 say_kind = "ask"
             elif err == "batch_insufficient_stock":
@@ -552,17 +568,22 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                 "batch_no": bn,
             }
         else:
+            err = resp.get("error") or ""
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-                parts = []
-                for c in candidates:
-                    n = c["name"]
-                    sku, stock = c.get("sku", ""), c.get("stock")
-                    if sku: n += f"（{sku}）"
-                    if stock is not None: n += f"库存{stock}"
-                    parts.append(n)
-                say = f"我不确定你说的是哪一个，候选有：{'、'.join(parts)}。请告诉我具体是哪个。"
+            if err == "variant_ambiguous" and candidates:
+                names = "、".join(_fmt_candidate_say(c) for c in candidates)
+                say = (
+                    f"库里已有相近规格：{names}。"
+                    f"你要的是其中一个已有规格，还是新建规格？"
+                    f"已有请说规格名，新建请确认。"
+                )
+                say_kind = "ask"
+                awaiting_confirm = {"patch": {"allow_new_variant": True}}
+            elif candidates:
+                names = "、".join(_fmt_candidate_say(c) for c in candidates)
+                say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
                 say_kind = "ask"
             else:
                 say = f"本次没有入库。{_fail_text('入库失败')}"
@@ -588,27 +609,54 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             else:
                 unit = p.get("unit") or "个"
                 qty = p.get("current_stock", "?")
-                batch_count = len(resp.get("batches") or [])
+                blist = resp.get("batches") or []
+                batch_count = len(blist)
                 extra = f"，共{batch_count}个批次" if batch_count else ""
-                say = f"{p.get('name', '')}当前库存{qty}{unit}{extra}。"
+                variant = p.get("variant")
+                disp_name = p.get("name", "")
+                if variant:
+                    disp_name = f"{disp_name}（{variant}）"
+                # 库位聚合：按库位汇总活跃批次数量，让"X放在哪"能直接播报。
+                # 批次无库位信息时退回 material 级 location 字段。
+                loc_qty: dict = {}
+                for b in blist:
+                    loc = (b.get("location") or "").strip()
+                    if loc:
+                        loc_qty[loc] = loc_qty.get(loc, 0) + (b.get("quantity") or 0)
+                locations = [
+                    {"location": k, "qty": v}
+                    for k, v in sorted(loc_qty.items(), key=lambda kv: -kv[1])
+                ]
+                if not locations and p.get("location"):
+                    locations = [{"location": p["location"], "qty": None}]
+                if len(locations) == 1:
+                    loc_say = f"，位于{locations[0]['location']}"
+                elif locations:
+                    shown = locations[:3]
+                    parts = "、".join(
+                        f"{l['location']}({l['qty']}{unit})" for l in shown
+                    )
+                    more = "等" if len(locations) > 3 else ""
+                    loc_say = f"，分布在{parts}{more}"
+                else:
+                    loc_say = ""
+                say = f"{disp_name}当前库存{qty}{unit}{extra}{loc_say}。"
                 data = {
                     "name": p.get("name"),
                     "qty": qty,
                     "unit": unit,
                     "batch_count": batch_count,
                 }
+                if locations:
+                    data["locations"] = locations[:5]
+                if variant:
+                    data["variant"] = variant
         else:
             candidates = _candidates()
             if candidates:
                 data["candidates"] = candidates
-                parts = []
-                for c in candidates:
-                    n = c["name"]
-                    sku, stock = c.get("sku", ""), c.get("stock")
-                    if sku: n += f"（{sku}）"
-                    if stock is not None: n += f"库存{stock}"
-                    parts.append(n)
-                say = f"找到多个相似产品：{'、'.join(parts)}。请告诉我具体是哪个。"
+                names = "、".join(_fmt_candidate_say(c) for c in candidates)
+                say = f"找到多个相似产品：{names}。请告诉我具体是哪个。"
                 say_kind = "ask"
             else:
                 say = _fail_text("查询失败，未找到该产品。")
@@ -642,14 +690,8 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         elif resp.get("candidates"):
             candidates = _candidates()
             data["candidates"] = candidates
-            parts = []
-            for c in candidates:
-                n = c["name"]
-                sku, stock = c.get("sku", ""), c.get("stock")
-                if sku: n += f"（{sku}）"
-                if stock is not None: n += f"库存{stock}"
-                parts.append(n)
-            say = f"我不确定你说的是哪一个，候选有：{'、'.join(parts)}。请告诉我具体是哪个。"
+            names = "、".join(_fmt_candidate_say(c) for c in candidates)
+            say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
             say_kind = "ask"
         else:
             say = _fail_text("没有找到匹配的名称。")
@@ -837,9 +879,14 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 @log_mcp_call
 @_antihallucination("query_stock")
 def query_stock(product_name: str) -> dict:
-    """按产品名查库存。"""
+    """按产品名查库存，也用于查询物料的存放位置（"X放在哪/在哪个库位"）。"""
+    # 查询类共用 operation='query' 规则（按名称/SKU/批次/今日统计一体配置）。
+    # 未配置规则时后端返回 skipped，零开销放行。
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
-        resp = _get_provider().query_stock(product_name)
+        resp = _get_provider().query_stock(product_name, show_batches=True)
     except Exception as e:
         resp = _tool_error("查询库存", e)
     return resp
@@ -850,6 +897,9 @@ def query_stock(product_name: str) -> dict:
 @_antihallucination("query_batch")
 def query_batch(batch_no: str) -> dict:
     """按批次号查批次。"""
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         resp = _get_provider().query_batch(batch_no)
     except Exception as e:
@@ -858,7 +908,7 @@ def query_batch(batch_no: str) -> dict:
 
 
 @mcp.tool(
-    exclude_args=["contact_id", "variant",
+    exclude_args=["contact_id", "allow_new_variant",
                   "face_image_b64", "face_embedding_b64", "face_model_tag"],
     # requires_face 已移除：拍照/识别决策统一在后端按规则驱动（option 3——规则需要时
     # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
@@ -870,11 +920,13 @@ def stock_in(product_name: str, quantity: int,
              operator: str = "MCP系统",
              location: str = None, contact_id: int = None,
              variant: str = None,
+             allow_new_variant: bool = False,
              face_image_b64: str = None,
              face_embedding_b64: str = None,
              face_model_tag: str = None) -> dict:
-    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。"""
-    blocked = _enforce_face(
+    """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
+    同名多规格物料歧义时，候选会带规格；追问用户后把规格填入 variant 参数（或"名称 规格"一起放 product_name）。"""
+    blocked, face_name = _enforce_face(
         "stock_in",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
@@ -884,7 +936,9 @@ def stock_in(product_name: str, quantity: int,
         return blocked
     try:
         return _get_provider().stock_in(product_name, quantity, reason_category, reason_note,
-                                  operator, True, location, contact_id, variant)
+                                  operator, True, location, contact_id, variant,
+                                  allow_new_variant=allow_new_variant,
+                                  actual_operator=face_name)
     except Exception as e:
         return _tool_error("入库", e)
 
@@ -906,8 +960,9 @@ def stock_out(product_name: str, quantity: int,
               face_image_b64: str = None,
               face_embedding_b64: str = None,
               face_model_tag: str = None) -> dict:
-    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。"""
-    blocked = _enforce_face(
+    """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
+    同名多规格物料歧义时，候选会带规格；追问用户后把规格填入 variant 参数（或"名称 规格"一起放 product_name）。"""
+    blocked, face_name = _enforce_face(
         "stock_out",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
@@ -919,7 +974,8 @@ def stock_out(product_name: str, quantity: int,
         return _get_provider().stock_out(product_name, quantity, reason_category, reason_note,
                                    operator, True, variant, location,
                                    batch_no=batch_no, location_fuzzy=True,
-                                   allow_partial_fallback=allow_partial_fallback)
+                                   allow_partial_fallback=allow_partial_fallback,
+                                   actual_operator=face_name)
     except Exception as e:
         return _tool_error("出库", e)
 
@@ -932,6 +988,9 @@ def search(query: str = None, entity_type: str = "material",
            contact_type: str = None, include_batches: bool = False,
            max_results: int = 0) -> dict:
     """搜索物料、联系方或操作员。"""
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         return _get_provider().search(query, entity_type, category, status, contact_type, True,
                                 include_batches, max_results)
@@ -956,7 +1015,7 @@ def move_batch_location(batch_no: str, new_location: str,
     quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
     注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
     """
-    blocked = _enforce_face(
+    blocked, _face_name = _enforce_face(
         "move_batch_location",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
@@ -980,6 +1039,9 @@ def move_batch_location(batch_no: str, new_location: str,
 @_antihallucination("get_today_statistics")
 def get_today_statistics() -> dict:
     """今日入出库与库存概览。"""
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         return _get_provider().get_today_statistics()
     except Exception as e:

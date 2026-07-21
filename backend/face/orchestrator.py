@@ -195,6 +195,16 @@ def _resolve_speaker_subject(
     return None
 
 
+def _subject_name(conn, subject_id: Optional[int]) -> Optional[str]:
+    """按 id 查 face_subjects.name（pass 时给出入库记录做操作人姓名快照）。"""
+    if subject_id is None:
+        return None
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM face_subjects WHERE id = ?", (subject_id,))
+    row = cur.fetchone()
+    return row["name"] if row else None
+
+
 def _log_decision(
     conn,
     *,
@@ -617,6 +627,7 @@ async def verify_mcp_face(
         decision = Decision(
             status="pass", failure_reason=reason,
             matched_subject_id=matched, confidence=confidence,
+            matched_subject_name=_subject_name(conn, matched),
         )
         _log_decision(
             conn, request_id=request_id, user_id=user_id, matched_subject_id=matched,
@@ -811,6 +822,7 @@ async def verify_mcp_face(
     decision = Decision(
         status="pass", failure_reason=None,
         confidence=best.confidence, matched_subject_id=best.subject_id,
+        matched_subject_name=_subject_name(conn, best.subject_id),
     )
     _log_decision(
         conn, request_id=request_id, user_id=user_id, matched_subject_id=best.subject_id,

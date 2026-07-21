@@ -3627,13 +3627,14 @@ def get_categories(
 
 @app.get("/api/materials/product-stats", response_model=ProductStats)
 def get_product_stats(
-    name: str = Query(..., description="产品名称"),
+    name: Optional[str] = Query(None, description="产品名称"),
+    material_id: Optional[int] = Query(None, description="物料ID（提供时优先，精确定位同名多料）"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取单个产品的统计数据 — Phase 2e: SA Core read."""
-    if not name:
-        raise HTTPException(status_code=400, detail="缺少产品名称参数")
+    if material_id is None and not name:
+        raise HTTPException(status_code=400, detail="缺少产品名称或物料ID参数")
 
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
@@ -3641,15 +3642,20 @@ def get_product_stats(
     today = datetime.now().strftime('%Y-%m-%d')
     yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
+    if material_id is not None:
+        ident_pred = _t_materials.c.id == material_id
+    else:
+        ident_pred = or_(_t_materials.c.name == name, _t_materials.c.sku == name)
+
     with get_engine().connect() as sa_conn:
-        # 查询产品基本信息（支持 name 或 SKU）
+        # 查询产品基本信息（支持 material_id 或 name/SKU）
         m_stmt = select(
             _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
             # 注：保留 quantity 列只为兼容（过渡期 cache），库存以下方 batches 聚合为准
             _t_materials.c.quantity, _t_materials.c.unit,
             _t_materials.c.safe_stock, _t_materials.c.location,
         ).where(and_(
-            or_(_t_materials.c.name == name, _t_materials.c.sku == name),
+            ident_pred,
             *m_scope,
         ))
         product = sa_conn.execute(m_stmt).fetchone()
@@ -3709,20 +3715,27 @@ def get_product_stats(
 
 @app.get("/api/materials/batches")
 def get_material_batches(
-    name: str = Query(..., description="产品名称"),
+    name: Optional[str] = Query(None, description="产品名称"),
+    material_id: Optional[int] = Query(None, description="物料ID（提供时优先，精确定位同名多料）"),
     warehouse_id: Optional[int] = Query(None, description="仓库ID"),
     current_user: CurrentUser = Depends(require_permission(Resource.MATERIALS, Action.READ))
 ):
     """获取物料的活跃批次列表 — Phase 2f: SA Core read."""
+    if material_id is None and not name:
+        raise HTTPException(status_code=400, detail="缺少产品名称或物料ID参数")
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
     if wh_id is not None:
         with get_db() as conn:
             check_warehouse_access(conn, current_user, wh_id)
     m_scope = list(build_authorized_scope_predicates(_t_materials, current_user, wh_id))
     b_scope = list(build_authorized_scope_predicates(_t_batches, current_user, wh_id))
+    if material_id is not None:
+        ident_pred = _t_materials.c.id == material_id
+    else:
+        ident_pred = _t_materials.c.name == name
     with get_engine().connect() as sa_conn:
         material = sa_conn.execute(
-            select(_t_materials.c.id).where(and_(_t_materials.c.name == name, *m_scope))
+            select(_t_materials.c.id).where(and_(ident_pred, *m_scope))
         ).first()
         if not material:
             raise HTTPException(status_code=404, detail="产品不存在")
@@ -4062,6 +4075,7 @@ def get_inventory_records_paginated(
         _t_inventory_records.c.quantity,
         _t_inventory_records.c.operator,
         _t_inventory_records.c.operator_user_id,
+        _t_inventory_records.c.actual_operator,
         _t_inventory_records.c.reason_category,
         _t_inventory_records.c.reason_note,
         _t_inventory_records.c.created_at,
@@ -4125,10 +4139,15 @@ def get_inventory_records_paginated(
             if isinstance(ca, datetime):
                 ca = ca.strftime('%Y-%m-%d %H:%M:%S')
 
+            # 规格来源：入库记录经 batch_id join 拿到 batches.variant；出库记录
+            # batch_id 为 NULL（FIFO 跨批次消耗，记于 batch_consumptions），需从
+            # 被消耗批次里取规格（同一物料通常一致，取第一个非空）。
+            derived_variant = row.variant or ''
             if record_type_val == RecordType.OUT.value:
                 cj = _t_batch_consumptions.join(_t_batches, _t_batch_consumptions.c.batch_id == _t_batches.c.id)
                 consumptions = sa_conn.execute(
-                    select(_t_batches.c.batch_no, _t_batch_consumptions.c.quantity)
+                    select(_t_batches.c.batch_no, _t_batch_consumptions.c.quantity,
+                           _t_batches.c.variant)
                     .select_from(cj)
                     .where(_t_batch_consumptions.c.record_id == record_id)
                     .order_by(_t_batches.c.created_at.asc())
@@ -4136,6 +4155,10 @@ def get_inventory_records_paginated(
                 if consumptions:
                     details = [f"{c.batch_no}×{c.quantity}" for c in consumptions]
                     batch_details = ', '.join(details)
+                    for c in consumptions:
+                        if c.variant:
+                            derived_variant = c.variant
+                            break
 
             operator_name = row.operator_display_name or row.operator_username or row.operator
 
@@ -4158,6 +4181,7 @@ def get_inventory_records_paginated(
                     operator=row.operator,
                     operator_user_id=row.operator_user_id,
                     operator_name=operator_name,
+                    actual_operator=row.actual_operator,
                     reason_category=row.reason_category,
                     reason_note=row.reason_note,
                     created_at=ca,
@@ -4168,7 +4192,7 @@ def get_inventory_records_paginated(
                     batch_id=row.batch_id,
                     batch_no=row.batch_no,
                     batch_details=batch_details,
-                    variant=row.variant or '',
+                    variant=derived_variant,
                     warehouse_id=row.warehouse_id,
                     warehouse_name=row.warehouse_name,
                 ))
@@ -4230,6 +4254,65 @@ def get_inventory_records_paginated(
 
 # ============ Stock Operation APIs (for MCP) ============
 
+def _list_active_variants(material_id: int, warehouse_id: Optional[int]) -> list:
+    """该物料在（可选仓库范围内）活跃批次上的 distinct 非空 variant，排序保证稳定。"""
+    preds = [
+        _t_batches.c.material_id == material_id,
+        _t_batches.c.is_exhausted == 0,
+        _t_batches.c.quantity > 0,
+        _t_batches.c.variant.isnot(None),
+        _t_batches.c.variant != '',
+    ]
+    if warehouse_id is not None:
+        preds.append(_t_batches.c.warehouse_id == warehouse_id)
+    with get_engine().connect() as sa_conn:
+        return sorted({r.variant for r in sa_conn.execute(
+            select(_t_batches.c.variant).where(and_(*preds)).distinct()
+        ).fetchall()})
+
+
+def _disambiguate_rows_by_variant(rows, wh_id, variant):
+    """同名多行 + 用户给了 variant：逐行做规格归一，恰好一行 confident 命中则选定。
+
+    返回 (row, normalized_variant)；无法唯一确定时返回 (None, None)。
+    """
+    matcher = get_fuzzy_matcher()
+    matches = []
+    for r in rows:
+        vres = matcher.resolve_variant_in_scope(r.id, wh_id, variant)
+        if vres['confident'] and vres['best_match']:
+            matches.append((r, vres['best_match']['name']))
+    if len(matches) == 1:
+        return matches[0]
+    return None, None
+
+
+def _ambiguous_name_candidates(rows, wh_id):
+    """同名多行的候选列表（带 sku 与各自的 active variants，供语音端播报规格）。"""
+    return [
+        {
+            "name": r.name,
+            "score": None,
+            "entity_type": "material",
+            "entity_id": r.id,
+            "extra": {"sku": r.sku, "variants": _list_active_variants(r.id, wh_id)},
+        }
+        for r in rows
+    ]
+
+
+def _fmt_ambiguous_names(candidates) -> str:
+    parts = []
+    for c in candidates:
+        variants = (c.get("extra") or {}).get("variants") or []
+        if variants:
+            parts.append(f"{c['name']}（{'/'.join(variants)}）")
+        else:
+            sku = (c.get("extra") or {}).get("sku") or ''
+            parts.append(f"{c['name']}（SKU: {sku}）" if sku else c['name'])
+    return '、'.join(parts)
+
+
 @app.post("/api/materials/stock-in", response_model=StockInResponse)
 async def stock_in(
     request: StockOperationRequest,
@@ -4268,19 +4351,36 @@ async def stock_in(
     m_scope = build_authorized_scope_predicates(_t_materials, current_user, wh_id)
 
     # 查询产品（先精确匹配，按仓库过滤；排除已禁用物料）
+    normalized_variant = None
     with get_engine().connect() as sa_conn:
-        row = sa_conn.execute(
-            select(_t_materials.c.id, _t_materials.c.name, _t_materials.c.unit).where(
+        exact_rows = sa_conn.execute(
+            select(_t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
+                   _t_materials.c.unit).where(
                 and_(
                     or_(_t_materials.c.name == product_name, _t_materials.c.sku == product_name),
                     _t_materials.c.is_disabled == 0,
                     *m_scope,
                 )
             )
-        ).first()
-        if row and row.name != product_name:
-            resolved_from = product_name
-            product_name = row.name
+        ).fetchall()
+    row = exact_rows[0] if len(exact_rows) == 1 else None
+    if len(exact_rows) > 1:
+        # 同名多行：若带 variant，逐行做规格归一，恰好一行命中则选定；否则请用户澄清
+        if request.variant:
+            row, normalized_variant = _disambiguate_rows_by_variant(
+                exact_rows, wh_id, request.variant)
+        if row is None:
+            cand = _ambiguous_name_candidates(exact_rows, wh_id)
+            return StockInResponse(
+                success=False,
+                error="ambiguous_name",
+                message=f"'{product_name}' 有 {len(exact_rows)} 个同名产品："
+                        f"{_fmt_ambiguous_names(cand)}。请提供规格以区分",
+                candidates=cand,
+            )
+    if row and row.name != product_name:
+        resolved_from = product_name
+        product_name = row.name
 
     # 模糊匹配
     if not row and request.fuzzy:
@@ -4326,6 +4426,24 @@ async def stock_in(
     material_id = row.id
     unit = row.unit
 
+    # variant 归一：material 已存在且带 variant 时，把语音表述归一到库内实际值。
+    # confident → 替换；不 confident 且库内有相近规格 → 先追问（variant_ambiguous），
+    # 用户确认新建（allow_new_variant=True）或库内无相近规格 → 保留原值创建新规格。
+    effective_variant = normalized_variant or request.variant
+    if request.variant and not normalized_variant:
+        vres = get_fuzzy_matcher().resolve_variant_in_scope(
+            material_id, wh_id, request.variant)
+        if vres['confident'] and vres['best_match']:
+            effective_variant = vres['best_match']['name']
+        elif vres['candidates'] and not request.allow_new_variant:
+            v_names = [c['name'] for c in vres['candidates'][:5]]
+            return StockInResponse(
+                success=False, error="variant_ambiguous",
+                message=f"库里已有相近规格：{'、'.join(v_names)}。"
+                        f"你要的是其中一个，还是新建规格 '{request.variant}'？",
+                candidates=vres['candidates'],
+            )
+
     record_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
     user_supplied_batch_no = bool(request.batch_no and request.batch_no.strip())
     batch_no = request.batch_no.strip() if user_supplied_batch_no else generate_batch_no(material_id, warehouse_id=wh_id)
@@ -4353,7 +4471,7 @@ async def stock_in(
                     insert(_t_batches).values(
                         batch_no=batch_no, material_id=material_id, quantity=quantity,
                         initial_quantity=quantity, contact_id=request.contact_id,
-                        location=request.location, variant=request.variant,
+                        location=request.location, variant=effective_variant,
                         warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
                     )
                 )
@@ -4374,6 +4492,7 @@ async def stock_in(
             insert(_t_inventory_records).values(
                 material_id=material_id, type=RecordType.IN.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
+                actual_operator=request.actual_operator,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=request.contact_id, batch_id=batch_id,
                 warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
@@ -4404,7 +4523,7 @@ async def stock_in(
             new_quantity=new_quantity,
             unit=unit
         ),
-        batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity, variant=request.variant),
+        batch=BatchInfo(batch_no=batch_no, batch_id=batch_id, quantity=quantity, variant=effective_variant),
         message=f"入库成功：{product_name} 入库 {quantity} {unit}（批次 {batch_no}），库存从 {old_quantity} 更新到 {new_quantity} {unit}",
         resolved_from=resolved_from,
     )
@@ -4447,10 +4566,11 @@ async def stock_out(
     m_scope = build_authorized_scope_predicates(_t_materials, current_user, wh_id)
     b_scope = build_authorized_scope_predicates(_t_batches, current_user, wh_id)
 
+    normalized_variant = None
     with get_engine().connect() as sa_conn:
-        row = sa_conn.execute(
+        exact_rows = sa_conn.execute(
             select(
-                _t_materials.c.id, _t_materials.c.name,
+                _t_materials.c.id, _t_materials.c.name, _t_materials.c.sku,
                 _t_materials.c.unit, _t_materials.c.safe_stock,
             ).where(
                 and_(
@@ -4459,10 +4579,34 @@ async def stock_out(
                     *m_scope,
                 )
             )
-        ).first()
-        if row and row.name != product_name:
-            resolved_from = product_name
-            product_name = row.name
+        ).fetchall()
+    row = exact_rows[0] if len(exact_rows) == 1 else None
+    if len(exact_rows) > 1:
+        # 同名多行：若带 variant，逐行做规格归一，恰好一行命中则选定；否则请用户澄清
+        if stock_data.variant:
+            row, normalized_variant = _disambiguate_rows_by_variant(
+                exact_rows, wh_id, stock_data.variant)
+        if row is None and stock_data.batch_no:
+            # 带 batch_no 时批次已能唯一定位物料：批次归属恰是同名行之一 → 选定该行
+            with get_engine().connect() as sa_conn:
+                bn_row = sa_conn.execute(
+                    select(_t_batches.c.material_id).where(and_(
+                        _t_batches.c.batch_no == stock_data.batch_no, *b_scope,
+                    ))
+                ).first()
+            if bn_row:
+                row = next((r for r in exact_rows if r.id == bn_row.material_id), None)
+        if row is None:
+            cand = _ambiguous_name_candidates(exact_rows, wh_id)
+            return StockOutResponse(
+                success=False, error="ambiguous_name",
+                message=f"'{product_name}' 有 {len(exact_rows)} 个同名产品："
+                        f"{_fmt_ambiguous_names(cand)}。请提供规格以区分",
+                candidates=cand,
+            )
+    if row and row.name != product_name:
+        resolved_from = product_name
+        product_name = row.name
 
     if not row and stock_data.fuzzy:
         matcher = get_fuzzy_matcher()
@@ -4511,7 +4655,23 @@ async def stock_out(
     unit = row.unit
     safe_stock = row.safe_stock
 
-    effective_variant = stock_data.variant or resolved_variant
+    effective_variant = normalized_variant or stock_data.variant or resolved_variant
+    # variant 归一：把语音表述（"黑色 10 毫米"）归一到库内实际值（"黑色 10mm"）。
+    # confident → 替换；不 confident 但有候选 → 返回失败请用户澄清；
+    # 无候选 → 保持原值（走既有的"库存不足/0"报错路径）。
+    if effective_variant and not normalized_variant:
+        vres = get_fuzzy_matcher().resolve_variant_in_scope(
+            material_id, wh_id, effective_variant)
+        if vres['confident'] and vres['best_match']:
+            effective_variant = vres['best_match']['name']
+        elif vres['candidates']:
+            v_names = [c['name'] for c in vres['candidates'][:5]]
+            return StockOutResponse(
+                success=False, error="variant_ambiguous",
+                message=f"规格 '{effective_variant}' 匹配到多个：{'、'.join(v_names)}。"
+                        f"请明确是哪一种规格",
+                candidates=vres['candidates'],
+            )
     effective_location = stock_data.location
 
     if stock_data.location_fuzzy and effective_location:
@@ -4593,15 +4753,23 @@ async def stock_out(
                 # 预检会把其他 scope 的批次数量算进 can_fallback，让 wrapper
                 # 生成"其他批次可补"的 speak_ask 骗用户答"是"，然后真扣时
                 # FIFO 的 *b_scope 又把那些批次拒之门外，导致 409 回滚。
+                # fallback 候选批次谓词：与分支 B precheck 同口径 —— 指定了
+                # variant / location 时补扣只能来自同规格/同库位的批次，
+                # 否则确认补扣会扣到其他规格/库位的库存。
+                fallback_preds = [
+                    _t_batches.c.material_id == material_id,
+                    _t_batches.c.id != batch.id,
+                    _t_batches.c.is_exhausted == 0,
+                    _t_batches.c.quantity > 0,
+                    *b_scope,
+                ]
+                if effective_variant:
+                    fallback_preds.append(_t_batches.c.variant == effective_variant)
+                if effective_location:
+                    fallback_preds.append(_t_batches.c.location == effective_location)
                 other_avail = int(sa_conn.execute(
                     select(_sa_func.coalesce(_sa_func.sum(_t_batches.c.quantity), 0))
-                    .where(and_(
-                        _t_batches.c.material_id == material_id,
-                        _t_batches.c.id != batch.id,
-                        _t_batches.c.is_exhausted == 0,
-                        _t_batches.c.quantity > 0,
-                        *b_scope,
-                    ))
+                    .where(and_(*fallback_preds))
                 ).scalar() or 0)
                 can_fallback = other_avail >= shortfall
 
@@ -4642,6 +4810,7 @@ async def stock_out(
                     insert(_t_inventory_records).values(
                         material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                         operator=operator, operator_user_id=operator_user_id,
+                        actual_operator=stock_data.actual_operator,
                         reason_category=reason_category, reason_note=reason_note,
                         contact_id=stock_data.contact_id, warehouse_id=wh_id,
                         tenant_id=record_tenant_id, created_at=now_dt,
@@ -4682,13 +4851,7 @@ async def stock_out(
                         _t_batches.c.id, _t_batches.c.batch_no, _t_batches.c.quantity,
                         _t_batches.c.variant,
                     )
-                    .where(and_(
-                        _t_batches.c.material_id == material_id,
-                        _t_batches.c.id != batch.id,
-                        _t_batches.c.is_exhausted == 0,
-                        _t_batches.c.quantity > 0,
-                        *b_scope,
-                    ))
+                    .where(and_(*fallback_preds))
                     .order_by(_t_batches.c.created_at.asc())
                     .with_for_update()
                 )
@@ -4773,6 +4936,7 @@ async def stock_out(
                 insert(_t_inventory_records).values(
                     material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                     operator=operator, operator_user_id=operator_user_id,
+                    actual_operator=stock_data.actual_operator,
                     reason_category=reason_category, reason_note=reason_note,
                     contact_id=stock_data.contact_id, warehouse_id=wh_id,
                     tenant_id=record_tenant_id, created_at=now_dt,
@@ -4886,6 +5050,7 @@ async def stock_out(
             insert(_t_inventory_records).values(
                 material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
+                actual_operator=stock_data.actual_operator,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=stock_data.contact_id, warehouse_id=wh_id,
                 tenant_id=record_tenant_id, created_at=now_dt,
@@ -6366,6 +6531,7 @@ def export_inventory_records(
             _t_inventory_records.c.quantity,
             _t_inventory_records.c.operator,
             _t_inventory_records.c.operator_user_id,
+            _t_inventory_records.c.actual_operator,
             _t_inventory_records.c.reason_category,
             _t_inventory_records.c.reason_note,
             _t_inventory_records.c.created_at,
@@ -6391,8 +6557,9 @@ def export_inventory_records(
     with get_engine().connect() as sa_conn:
         records = sa_conn.execute(rec_stmt).fetchall()
 
-        # 为出库记录获取批次消耗详情
+        # 为出库记录获取批次消耗详情 + 规格（出库 batch_id 为 NULL，规格需从被消耗批次取）
         batch_details_map = {}
+        out_variant_map = {}
         out_record_ids = [r.id for r in records if r.type == RecordType.OUT.value]
         if out_record_ids:
             cons_stmt = (
@@ -6400,6 +6567,7 @@ def export_inventory_records(
                     _t_batch_consumptions.c.record_id,
                     _t_batches.c.batch_no,
                     _t_batch_consumptions.c.quantity,
+                    _t_batches.c.variant,
                     _t_batches.c.created_at,
                 )
                 .select_from(
@@ -6412,13 +6580,16 @@ def export_inventory_records(
                 batch_details_map.setdefault(cons.record_id, []).append(
                     f"{cons.batch_no}×{cons.quantity}"
                 )
+                # 取第一个非空规格（同一物料的批次规格通常一致）
+                if cons.variant and cons.record_id not in out_variant_map:
+                    out_variant_map[cons.record_id] = cons.variant
             batch_details_map = {k: ', '.join(v) for k, v in batch_details_map.items()}
 
     wb = Workbook()
     ws = wb.active
     ws.title = "出入库记录"
 
-    headers = ['物料名称', '规格', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '操作人', '原因类别', '备注', '时间']
+    headers = ['物料名称', '规格', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '账号', '操作人', '原因类别', '备注', '时间']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
@@ -6433,23 +6604,31 @@ def export_inventory_records(
         created_at_str = (record.created_at.strftime('%Y-%m-%d %H:%M:%S')
                           if isinstance(record.created_at, datetime) else record.created_at)
 
+        # 规格：入库用 batch_id join 的 variant；出库从被消耗批次取（batch_id 为 NULL）
+        if record.type == RecordType.OUT.value:
+            variant_val = out_variant_map.get(record.id, '') or ''
+        else:
+            variant_val = record.variant or ''
+
         ws.cell(row=row_idx, column=1, value=record.name)
-        ws.cell(row=row_idx, column=2, value=record.variant or '')
+        ws.cell(row=row_idx, column=2, value=variant_val)
         ws.cell(row=row_idx, column=3, value=record.sku)
         ws.cell(row=row_idx, column=4, value=record.category)
         ws.cell(row=row_idx, column=5, value='入库' if record.type == RecordType.IN.value else '出库')
         ws.cell(row=row_idx, column=6, value=record.quantity)
         ws.cell(row=row_idx, column=7, value=batch_info)
         ws.cell(row=row_idx, column=8, value=record.contact_name or '')
-        # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段
+        # 账号（列9）：设备/登录账号，优先用户表显示名，回退 operator 字段
         operator_name = record.operator_display_name or record.operator_username or record.operator
         ws.cell(row=row_idx, column=9, value=operator_name)
-        ws.cell(row=row_idx, column=10, value=REASON_CATEGORY_LABELS.get(record.reason_category, record.reason_category or ''))
-        ws.cell(row=row_idx, column=11, value=record.reason_note or '')
-        ws.cell(row=row_idx, column=12, value=created_at_str)
+        # 操作人（列10）：实际执行操作的人（人脸识别姓名快照或手工填写）
+        ws.cell(row=row_idx, column=10, value=record.actual_operator or '')
+        ws.cell(row=row_idx, column=11, value=REASON_CATEGORY_LABELS.get(record.reason_category, record.reason_category or ''))
+        ws.cell(row=row_idx, column=12, value=record.reason_note or '')
+        ws.cell(row=row_idx, column=13, value=created_at_str)
 
     # 设置列宽
-    column_widths = [22, 10, 18, 14, 12, 10, 28, 16, 14, 14, 24, 22]
+    column_widths = [22, 10, 18, 14, 12, 10, 28, 16, 14, 14, 14, 24, 22]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -6483,6 +6662,7 @@ async def add_inventory_record(
                 reason_category=request.reason_category,
                 reason_note=request.reason_note,
                 operator=operator,
+                actual_operator=request.actual_operator,
                 contact_id=request.contact_id,
                 location=request.location,
                 batch_no=request.batch_no,
@@ -6516,6 +6696,7 @@ async def add_inventory_record(
                 reason_category=request.reason_category,
                 reason_note=request.reason_note,
                 operator=operator,
+                actual_operator=request.actual_operator,
                 contact_id=request.contact_id,
                 location=request.location,
                 batch_no=request.batch_no,
