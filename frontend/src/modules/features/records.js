@@ -184,7 +184,7 @@ function renderRecordsTable(items) {
             <td><strong>${item.display_quantity}</strong></td>
             <td>${item.display_batch_no}</td>
             <td>${item.contact_name || '-'}</td>
-            <td>${item.operator_name || item.operator}</td>
+            <td>${(item.operator_name || item.operator) + (item.operator_face_name ? ` (${item.operator_face_name})` : '')}</td>
             <td>${getReasonCategoryLabel(item.reason_category)}</td>
             <td>${item.reason_note || '-'}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>

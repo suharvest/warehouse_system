@@ -240,6 +240,9 @@ inventory_records = Table(
     Column("contact_id", Integer, ForeignKey("contacts.id")),
     Column("batch_id", Integer, ForeignKey("batches.id")),
     Column("operator_user_id", Integer, ForeignKey("users.id")),
+    # 人脸识别通过时识别到的人员姓名快照（face_subjects.name），写入时冻结；
+    # 展示层组合为 "operator (姓名)"。非人脸链路写入为 NULL。
+    Column("operator_face_name", String(255)),
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Index("idx_records_warehouse", "warehouse_id"),

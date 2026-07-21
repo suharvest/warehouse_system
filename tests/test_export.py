@@ -49,3 +49,29 @@ class TestRecordsExport:
         wb = load_workbook(filename=BytesIO(resp.content))
         ws = wb.active
         assert ws.max_row >= 1  # At least header
+
+    def test_export_records_operator_face_name_composed(self, admin_client,
+                                                        sample_material):
+        """操作人 cell shows "operator (face_name)" when face name was snapshot."""
+        resp = admin_client.post("/api/materials/stock-in", json={
+            "product_name": sample_material['name'],
+            "quantity": 7,
+            "reason_category": "purchase",
+            "warehouse_id": sample_material['warehouse_id'],
+            "operator_face_name": "张三",
+        })
+        assert resp.status_code == 200 and resp.json()['success'] is True
+
+        resp = admin_client.get("/api/inventory/export-excel",
+                                params={"product_name": sample_material['name']})
+        assert resp.status_code == 200
+
+        from openpyxl import load_workbook
+        wb = load_workbook(filename=BytesIO(resp.content))
+        ws = wb.active
+        headers = [c.value for c in ws[1]]
+        op_col = headers.index('操作人') + 1
+        operator_cells = [ws.cell(row=r, column=op_col).value
+                          for r in range(2, ws.max_row + 1)]
+        assert any(v and v.endswith(' (张三)') for v in operator_cells), \
+            operator_cells

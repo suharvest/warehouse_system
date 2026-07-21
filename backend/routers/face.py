@@ -708,6 +708,7 @@ async def face_verify_mcp(
         "failure_reason": decision.failure_reason,
         "confidence": decision.confidence,
         "matched_subject_id": decision.matched_subject_id,
+        "matched_subject_name": decision.matched_subject_name,
     }
 
 

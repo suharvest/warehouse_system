@@ -4075,6 +4075,7 @@ def get_inventory_records_paginated(
         _t_inventory_records.c.quantity,
         _t_inventory_records.c.operator,
         _t_inventory_records.c.operator_user_id,
+        _t_inventory_records.c.operator_face_name,
         _t_inventory_records.c.reason_category,
         _t_inventory_records.c.reason_note,
         _t_inventory_records.c.created_at,
@@ -4171,6 +4172,7 @@ def get_inventory_records_paginated(
                     operator=row.operator,
                     operator_user_id=row.operator_user_id,
                     operator_name=operator_name,
+                    operator_face_name=row.operator_face_name,
                     reason_category=row.reason_category,
                     reason_note=row.reason_note,
                     created_at=ca,
@@ -4481,6 +4483,7 @@ async def stock_in(
             insert(_t_inventory_records).values(
                 material_id=material_id, type=RecordType.IN.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
+                operator_face_name=request.operator_face_name,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=request.contact_id, batch_id=batch_id,
                 warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
@@ -4798,6 +4801,7 @@ async def stock_out(
                     insert(_t_inventory_records).values(
                         material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                         operator=operator, operator_user_id=operator_user_id,
+                        operator_face_name=stock_data.operator_face_name,
                         reason_category=reason_category, reason_note=reason_note,
                         contact_id=stock_data.contact_id, warehouse_id=wh_id,
                         tenant_id=record_tenant_id, created_at=now_dt,
@@ -4923,6 +4927,7 @@ async def stock_out(
                 insert(_t_inventory_records).values(
                     material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                     operator=operator, operator_user_id=operator_user_id,
+                    operator_face_name=stock_data.operator_face_name,
                     reason_category=reason_category, reason_note=reason_note,
                     contact_id=stock_data.contact_id, warehouse_id=wh_id,
                     tenant_id=record_tenant_id, created_at=now_dt,
@@ -5036,6 +5041,7 @@ async def stock_out(
             insert(_t_inventory_records).values(
                 material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
+                operator_face_name=stock_data.operator_face_name,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=stock_data.contact_id, warehouse_id=wh_id,
                 tenant_id=record_tenant_id, created_at=now_dt,
@@ -6516,6 +6522,7 @@ def export_inventory_records(
             _t_inventory_records.c.quantity,
             _t_inventory_records.c.operator,
             _t_inventory_records.c.operator_user_id,
+            _t_inventory_records.c.operator_face_name,
             _t_inventory_records.c.reason_category,
             _t_inventory_records.c.reason_note,
             _t_inventory_records.c.created_at,
@@ -6591,8 +6598,11 @@ def export_inventory_records(
         ws.cell(row=row_idx, column=6, value=record.quantity)
         ws.cell(row=row_idx, column=7, value=batch_info)
         ws.cell(row=row_idx, column=8, value=record.contact_name or '')
-        # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段
+        # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段；
+        # 人脸识别到具体人时追加 "(姓名)"（同一列内组合，不新增列）
         operator_name = record.operator_display_name or record.operator_username or record.operator
+        if record.operator_face_name:
+            operator_name = f"{operator_name} ({record.operator_face_name})"
         ws.cell(row=row_idx, column=9, value=operator_name)
         ws.cell(row=row_idx, column=10, value=REASON_CATEGORY_LABELS.get(record.reason_category, record.reason_category or ''))
         ws.cell(row=row_idx, column=11, value=record.reason_note or '')

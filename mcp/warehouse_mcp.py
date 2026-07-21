@@ -354,8 +354,13 @@ def _enforce_face(
     image_b64: str = None,
     embedding_b64: str = None,
     embedding_model_tag: str = None,
-) -> dict | None:
-    """Run the face gate; return a tool-error dict to surface, or None to proceed.
+) -> tuple[dict | None, str | None]:
+    """Run the face gate; return ``(blocked, face_name)``.
+
+    ``blocked`` is a tool-error dict to surface, or None to proceed.
+    ``face_name`` is the recognized person's name (face_subjects.name) when the
+    backend verified a concrete subject — callers pass it through to the stock
+    write so the inventory record can snapshot who was physically recognized.
 
     Single authoritative gate: forward EVERYTHING we have (server-injected
     embedding AND LLM/device-supplied speaker identity) to ``/face/verify-mcp``
@@ -391,19 +396,20 @@ def _enforce_face(
                     "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
                     "若仍失败，请联系管理员确认人脸是否已录入。"
                 ),
-            }
+            }, None
         if reason == "device_unresolved":
             return {
                 "success": False,
                 "error": f"face_auth_denied:{reason}",
                 "message": "无法连接到人脸识别设备，出入库已阻止。请联系管理员检查设备在线状态。",
-            }
+            }, None
         return {
             "success": False,
             "error": f"face_auth_denied:{reason}",
             "message": f"人脸校验未通过：{reason}。请由本人操作或联系管理员检查权限规则。",
-        }
-    return None
+        }, None
+    face_name = decision.get("matched_subject_name")
+    return None, (face_name if isinstance(face_name, str) and face_name else None)
 
 
 # ============================================================================
@@ -912,7 +918,7 @@ def stock_in(product_name: str, quantity: int,
              face_model_tag: str = None) -> dict:
     """入库。reason_category: purchase|return|refund|produce|transfer_in|other_in（也接受中文别名）。
     同名多规格物料歧义时，候选会带规格；追问用户后把规格填入 variant 参数（或"名称 规格"一起放 product_name）。"""
-    blocked = _enforce_face(
+    blocked, face_name = _enforce_face(
         "stock_in",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
@@ -923,7 +929,8 @@ def stock_in(product_name: str, quantity: int,
     try:
         return _get_provider().stock_in(product_name, quantity, reason_category, reason_note,
                                   operator, True, location, contact_id, variant,
-                                  allow_new_variant=allow_new_variant)
+                                  allow_new_variant=allow_new_variant,
+                                  operator_face_name=face_name)
     except Exception as e:
         return _tool_error("入库", e)
 
@@ -947,7 +954,7 @@ def stock_out(product_name: str, quantity: int,
               face_model_tag: str = None) -> dict:
     """出库。reason_category: sell|lend|consume|loss|transfer_out|other_out（也接受中文别名/use→consume/scrap→loss）。
     同名多规格物料歧义时，候选会带规格；追问用户后把规格填入 variant 参数（或"名称 规格"一起放 product_name）。"""
-    blocked = _enforce_face(
+    blocked, face_name = _enforce_face(
         "stock_out",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,
@@ -959,7 +966,8 @@ def stock_out(product_name: str, quantity: int,
         return _get_provider().stock_out(product_name, quantity, reason_category, reason_note,
                                    operator, True, variant, location,
                                    batch_no=batch_no, location_fuzzy=True,
-                                   allow_partial_fallback=allow_partial_fallback)
+                                   allow_partial_fallback=allow_partial_fallback,
+                                   operator_face_name=face_name)
     except Exception as e:
         return _tool_error("出库", e)
 
@@ -996,7 +1004,7 @@ def move_batch_location(batch_no: str, new_location: str,
     quantity 不传=整批移；传了=拆分（该数量移到新库位，余量留在原位）。
     注意：不需要传 product_name 或 from_location，batch_no 已足够定位。
     """
-    blocked = _enforce_face(
+    blocked, _face_name = _enforce_face(
         "move_batch_location",
         image_b64=face_image_b64,
         embedding_b64=face_embedding_b64,

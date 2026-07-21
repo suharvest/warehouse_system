@@ -51,3 +51,6 @@ class Decision:
     failure_reason: Optional[str] = None
     confidence: Optional[float] = None
     matched_subject_id: Optional[int] = None
+    # 识别到的人员姓名（face_subjects.name 快照），仅 pass 时填充；
+    # 供出入库记录在操作人后追加显示 "operator (姓名)"。
+    matched_subject_name: Optional[str] = None

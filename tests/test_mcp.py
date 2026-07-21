@@ -394,7 +394,9 @@ class TestMCPMoveBatchTool:
             return {"success": True, "message": "ok"}
 
         # face disabled / allowed, and stub the provider so no HTTP is needed.
-        monkeypatch.setattr(warehouse_mcp, "_enforce_face", lambda *a, **k: None)
+        # _enforce_face returns (blocked, face_name); None blocked → allowed.
+        monkeypatch.setattr(warehouse_mcp, "_enforce_face",
+                            lambda *a, **k: (None, None))
         class _ProviderStub:
             move_batch_location = staticmethod(_stub_move)
 
