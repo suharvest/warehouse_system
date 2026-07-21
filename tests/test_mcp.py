@@ -515,6 +515,42 @@ class TestMCPAgentDeviceCRUD:
         r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json=body)
         assert r.status_code == 409
 
+    def test_device_upsert_by_ip_port_when_no_device_id(self, admin_client):
+        """xiaozhi 注册设备从不带 device_id，只带 ip+port。同一 (connection, ip, port)
+        重复注册必须 upsert 成一条记录，而不是每次都新插一行（否则下游按
+        connection_id 解析物理设备时会因命中多条而无法唯一确定）。"""
+        conn_id = self._make_conn(admin_client)
+
+        r1 = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "name": "门口摄像头", "ip": "192.168.1.77", "port": 80,
+        })
+        assert r1.status_code == 200, r1.text
+        dev1 = r1.json()["device"]
+        assert dev1["device_id"] is None
+
+        # 同一 ip+port 再次注册（模拟设备重连/心跳），应更新同一行而非新增
+        r2 = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "name": "门口摄像头-v2", "ip": "192.168.1.77", "port": 80,
+            "model_tag": "we2-mfn128-v1",
+        })
+        assert r2.status_code == 200, r2.text
+        dev2 = r2.json()["device"]
+        assert dev2["id"] == dev1["id"]
+        assert dev2["name"] == "门口摄像头-v2"
+        assert dev2["model_tag"] == "we2-mfn128-v1"
+
+        r = admin_client.get(f"/api/mcp/connections/{conn_id}/devices")
+        assert r.status_code == 200
+        assert len(r.json()) == 1
+
+        # 不同 port 视为不同物理设备，应各自成行
+        r3 = admin_client.post(f"/api/mcp/connections/{conn_id}/devices", json={
+            "ip": "192.168.1.77", "port": 8080,
+        })
+        assert r3.status_code == 200, r3.text
+        r = admin_client.get(f"/api/mcp/connections/{conn_id}/devices")
+        assert len(r.json()) == 2
+
     def test_device_on_unknown_connection_404(self, admin_client):
         r = admin_client.get("/api/mcp/connections/nope1234/devices")
         assert r.status_code == 404
