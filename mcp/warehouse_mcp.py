@@ -880,6 +880,11 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 @_antihallucination("query_stock")
 def query_stock(product_name: str) -> dict:
     """按产品名查库存，也用于查询物料的存放位置（"X放在哪/在哪个库位"）。"""
+    # 查询类共用 operation='query' 规则（按名称/SKU/批次/今日统计一体配置）。
+    # 未配置规则时后端返回 skipped，零开销放行。
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         resp = _get_provider().query_stock(product_name, show_batches=True)
     except Exception as e:
@@ -892,6 +897,9 @@ def query_stock(product_name: str) -> dict:
 @_antihallucination("query_batch")
 def query_batch(batch_no: str) -> dict:
     """按批次号查批次。"""
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         resp = _get_provider().query_batch(batch_no)
     except Exception as e:
@@ -980,6 +988,9 @@ def search(query: str = None, entity_type: str = "material",
            contact_type: str = None, include_batches: bool = False,
            max_results: int = 0) -> dict:
     """搜索物料、联系方或操作员。"""
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         return _get_provider().search(query, entity_type, category, status, contact_type, True,
                                 include_batches, max_results)
@@ -1028,6 +1039,9 @@ def move_batch_location(batch_no: str, new_location: str,
 @_antihallucination("get_today_statistics")
 def get_today_statistics() -> dict:
     """今日入出库与库存概览。"""
+    blocked, _ = _enforce_face("query")
+    if blocked is not None:
+        return blocked
     try:
         return _get_provider().get_today_statistics()
     except Exception as e:
