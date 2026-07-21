@@ -377,6 +377,7 @@ def init_database():
             type TEXT NOT NULL,
             quantity INTEGER NOT NULL,
             operator TEXT DEFAULT '系统',
+            operator_face_name TEXT,
             reason_category TEXT,
             reason_note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -498,6 +499,12 @@ def init_database():
         cursor.execute('SELECT operator_user_id FROM inventory_records LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_user_id INTEGER REFERENCES users(id)')
+
+    # 检查并添加 operator_face_name 字段到 inventory_records（人脸识别到的人员姓名快照）
+    try:
+        cursor.execute('SELECT operator_face_name FROM inventory_records LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_face_name TEXT')
 
     # 检查并添加 location 字段到 batches（批次级别存放位置）
     try:

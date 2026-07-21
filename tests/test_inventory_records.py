@@ -42,17 +42,19 @@ def _reset_admin_tenant(test_db):
 def _seed_record(*, material_id, type_, quantity, warehouse_id, tenant_id,
                  created_at=None, contact_id=None, operator='sys',
                  operator_user_id=None, reason_category='purchase',
-                 reason_note=None):
+                 reason_note=None, operator_face_name=None):
     from database import get_db_connection
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO inventory_records "
         "(material_id, type, quantity, operator, operator_user_id, "
-        " reason_category, reason_note, contact_id, warehouse_id, tenant_id,"
-        " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " operator_face_name, reason_category, reason_note, contact_id, "
+        " warehouse_id, tenant_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (material_id, type_, quantity, operator, operator_user_id,
-         reason_category, reason_note, contact_id, warehouse_id, tenant_id,
+         operator_face_name, reason_category, reason_note, contact_id,
+         warehouse_id, tenant_id,
          created_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     rid = cur.lastrowid
     conn.commit()
@@ -95,6 +97,34 @@ def test_records_pagination_shape(admin_client, default_warehouse_id,
     assert isinstance(data['items'], list)
     assert data['page'] == 1
     assert data['page_size'] == 10
+
+
+# ---------------------------------------------------------------------------
+# 1b. operator_face_name passthrough（人脸识别姓名快照）
+# ---------------------------------------------------------------------------
+
+def test_records_returns_operator_face_name(admin_client,
+                                            default_warehouse_id):
+    name = f"FaceMat-{uuid.uuid4().hex[:6]}"
+    sku = f"FC-{uuid.uuid4().hex[:6]}"
+    mid = _seed_material(name, sku, warehouse_id=default_warehouse_id,
+                         tenant_id=1)
+
+    _seed_record(material_id=mid, type_='in', quantity=1,
+                 warehouse_id=default_warehouse_id, tenant_id=1,
+                 operator='seeed', operator_face_name='张三')
+    _seed_record(material_id=mid, type_='in', quantity=2,
+                 warehouse_id=default_warehouse_id, tenant_id=1,
+                 operator='seeed')
+
+    resp = admin_client.get("/api/inventory/records", params={
+        "page_size": 100, "product_name": name, "sort_order": "asc",
+    })
+    assert resp.status_code == 200
+    items = resp.json()['items']
+    assert len(items) == 2
+    assert items[0]['operator_face_name'] == '张三'
+    assert items[1]['operator_face_name'] is None
 
 
 # ---------------------------------------------------------------------------

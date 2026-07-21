@@ -71,6 +71,53 @@ class TestStockOut:
         assert data['product']['out_quantity'] == 10
         assert data['product']['new_quantity'] == 40  # 50 - 10
 
+    def test_stock_out_stores_operator_face_name(self, admin_client, stocked_material):
+        """POST with operator_face_name should snapshot it on the OUT record."""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 5,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+            "operator_face_name": "李四",
+        })
+        assert resp.status_code == 200
+        assert resp.json()['success'] is True
+
+        from database import get_db_connection
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT r.operator_face_name FROM inventory_records r "
+            "JOIN materials m ON r.material_id = m.id "
+            "WHERE m.name = ? AND r.type = 'out' ORDER BY r.id DESC LIMIT 1",
+            (stocked_material['name'],))
+        row = cur.fetchone()
+        conn.close()
+        assert row['operator_face_name'] == '李四'
+
+    def test_stock_out_face_name_absent_is_null(self, admin_client, stocked_material):
+        """Without operator_face_name the OUT record column stays NULL."""
+        resp = admin_client.post("/api/materials/stock-out", json={
+            "product_name": stocked_material['name'],
+            "quantity": 4,
+            "reason_category": "sell",
+            "warehouse_id": stocked_material['warehouse_id'],
+        })
+        assert resp.status_code == 200
+        assert resp.json()['success'] is True
+
+        from database import get_db_connection
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT r.operator_face_name FROM inventory_records r "
+            "JOIN materials m ON r.material_id = m.id "
+            "WHERE m.name = ? AND r.type = 'out' ORDER BY r.id DESC LIMIT 1",
+            (stocked_material['name'],))
+        row = cur.fetchone()
+        conn.close()
+        assert row['operator_face_name'] is None
+
     def test_stock_out_insufficient_inventory(self, admin_client, stocked_material):
         """Stock-out exceeding inventory should be rejected."""
         resp = admin_client.post("/api/materials/stock-out", json={

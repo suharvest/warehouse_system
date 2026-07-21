@@ -196,6 +196,9 @@ class StockOperationRequest(BaseModel):
     # 入库 variant 归一不 confident 且库内有相近规格时，是否允许直接新建规格。
     # 默认 False —— 先追问用户（variant_ambiguous），确认新建后由 MCP 重发时置 True。
     allow_new_variant: bool = False
+    # 人脸识别通过时识别到的人员姓名（face_subjects.name 快照），由 MCP 层透传；
+    # 仅用于记录展示 "operator (姓名)"，不参与鉴权。
+    operator_face_name: Optional[str] = None
 
 
 class StockOperationProduct(BaseModel):
@@ -357,6 +360,7 @@ class InventoryRecordItem(BaseModel):
     operator: str  # 保留用于向后兼容（旧记录）
     operator_user_id: Optional[int] = None  # 关联用户ID
     operator_name: Optional[str] = None  # 从用户表获取的当前显示名称
+    operator_face_name: Optional[str] = None  # 人脸识别到的人员姓名快照（写入时冻结）
     reason_category: Optional[str] = None
     reason_note: Optional[str] = None
     created_at: str
