@@ -377,7 +377,7 @@ def init_database():
             type TEXT NOT NULL,
             quantity INTEGER NOT NULL,
             operator TEXT DEFAULT '系统',
-            operator_face_name TEXT,
+            actual_operator TEXT,
             reason_category TEXT,
             reason_note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -500,11 +500,15 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_user_id INTEGER REFERENCES users(id)')
 
-    # 检查并添加 operator_face_name 字段到 inventory_records（人脸识别到的人员姓名快照）
-    try:
-        cursor.execute('SELECT operator_face_name FROM inventory_records LIMIT 1')
-    except sqlite3.OperationalError:
-        cursor.execute('ALTER TABLE inventory_records ADD COLUMN operator_face_name TEXT')
+    # 检查并协调 actual_operator 字段到 inventory_records（实际操作人：人脸识别姓名快照或手工填写）
+    # 若已有旧列 operator_face_name → 重命名保留数据；两列都无 → 新建；否则 no-op。
+    # 避免在已重命名的库上又凭空补回一个空的 operator_face_name 列。
+    _rec_cols = {row[1] for row in cursor.execute('PRAGMA table_info(inventory_records)')}
+    if 'actual_operator' not in _rec_cols:
+        if 'operator_face_name' in _rec_cols:
+            cursor.execute('ALTER TABLE inventory_records RENAME COLUMN operator_face_name TO actual_operator')
+        else:
+            cursor.execute('ALTER TABLE inventory_records ADD COLUMN actual_operator TEXT')
 
     # 检查并添加 location 字段到 batches（批次级别存放位置）
     try:

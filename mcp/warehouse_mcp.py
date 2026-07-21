@@ -930,7 +930,7 @@ def stock_in(product_name: str, quantity: int,
         return _get_provider().stock_in(product_name, quantity, reason_category, reason_note,
                                   operator, True, location, contact_id, variant,
                                   allow_new_variant=allow_new_variant,
-                                  operator_face_name=face_name)
+                                  actual_operator=face_name)
     except Exception as e:
         return _tool_error("入库", e)
 
@@ -967,7 +967,7 @@ def stock_out(product_name: str, quantity: int,
                                    operator, True, variant, location,
                                    batch_no=batch_no, location_fuzzy=True,
                                    allow_partial_fallback=allow_partial_fallback,
-                                   operator_face_name=face_name)
+                                   actual_operator=face_name)
     except Exception as e:
         return _tool_error("出库", e)
 

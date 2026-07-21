@@ -4075,7 +4075,7 @@ def get_inventory_records_paginated(
         _t_inventory_records.c.quantity,
         _t_inventory_records.c.operator,
         _t_inventory_records.c.operator_user_id,
-        _t_inventory_records.c.operator_face_name,
+        _t_inventory_records.c.actual_operator,
         _t_inventory_records.c.reason_category,
         _t_inventory_records.c.reason_note,
         _t_inventory_records.c.created_at,
@@ -4139,10 +4139,15 @@ def get_inventory_records_paginated(
             if isinstance(ca, datetime):
                 ca = ca.strftime('%Y-%m-%d %H:%M:%S')
 
+            # 规格来源：入库记录经 batch_id join 拿到 batches.variant；出库记录
+            # batch_id 为 NULL（FIFO 跨批次消耗，记于 batch_consumptions），需从
+            # 被消耗批次里取规格（同一物料通常一致，取第一个非空）。
+            derived_variant = row.variant or ''
             if record_type_val == RecordType.OUT.value:
                 cj = _t_batch_consumptions.join(_t_batches, _t_batch_consumptions.c.batch_id == _t_batches.c.id)
                 consumptions = sa_conn.execute(
-                    select(_t_batches.c.batch_no, _t_batch_consumptions.c.quantity)
+                    select(_t_batches.c.batch_no, _t_batch_consumptions.c.quantity,
+                           _t_batches.c.variant)
                     .select_from(cj)
                     .where(_t_batch_consumptions.c.record_id == record_id)
                     .order_by(_t_batches.c.created_at.asc())
@@ -4150,6 +4155,10 @@ def get_inventory_records_paginated(
                 if consumptions:
                     details = [f"{c.batch_no}×{c.quantity}" for c in consumptions]
                     batch_details = ', '.join(details)
+                    for c in consumptions:
+                        if c.variant:
+                            derived_variant = c.variant
+                            break
 
             operator_name = row.operator_display_name or row.operator_username or row.operator
 
@@ -4172,7 +4181,7 @@ def get_inventory_records_paginated(
                     operator=row.operator,
                     operator_user_id=row.operator_user_id,
                     operator_name=operator_name,
-                    operator_face_name=row.operator_face_name,
+                    actual_operator=row.actual_operator,
                     reason_category=row.reason_category,
                     reason_note=row.reason_note,
                     created_at=ca,
@@ -4183,7 +4192,7 @@ def get_inventory_records_paginated(
                     batch_id=row.batch_id,
                     batch_no=row.batch_no,
                     batch_details=batch_details,
-                    variant=row.variant or '',
+                    variant=derived_variant,
                     warehouse_id=row.warehouse_id,
                     warehouse_name=row.warehouse_name,
                 ))
@@ -4483,7 +4492,7 @@ async def stock_in(
             insert(_t_inventory_records).values(
                 material_id=material_id, type=RecordType.IN.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
-                operator_face_name=request.operator_face_name,
+                actual_operator=request.actual_operator,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=request.contact_id, batch_id=batch_id,
                 warehouse_id=wh_id, tenant_id=record_tenant_id, created_at=now_dt,
@@ -4801,7 +4810,7 @@ async def stock_out(
                     insert(_t_inventory_records).values(
                         material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                         operator=operator, operator_user_id=operator_user_id,
-                        operator_face_name=stock_data.operator_face_name,
+                        actual_operator=stock_data.actual_operator,
                         reason_category=reason_category, reason_note=reason_note,
                         contact_id=stock_data.contact_id, warehouse_id=wh_id,
                         tenant_id=record_tenant_id, created_at=now_dt,
@@ -4927,7 +4936,7 @@ async def stock_out(
                 insert(_t_inventory_records).values(
                     material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                     operator=operator, operator_user_id=operator_user_id,
-                    operator_face_name=stock_data.operator_face_name,
+                    actual_operator=stock_data.actual_operator,
                     reason_category=reason_category, reason_note=reason_note,
                     contact_id=stock_data.contact_id, warehouse_id=wh_id,
                     tenant_id=record_tenant_id, created_at=now_dt,
@@ -5041,7 +5050,7 @@ async def stock_out(
             insert(_t_inventory_records).values(
                 material_id=material_id, type=RecordType.OUT.value, quantity=quantity,
                 operator=operator, operator_user_id=operator_user_id,
-                operator_face_name=stock_data.operator_face_name,
+                actual_operator=stock_data.actual_operator,
                 reason_category=reason_category, reason_note=reason_note,
                 contact_id=stock_data.contact_id, warehouse_id=wh_id,
                 tenant_id=record_tenant_id, created_at=now_dt,
@@ -6522,7 +6531,7 @@ def export_inventory_records(
             _t_inventory_records.c.quantity,
             _t_inventory_records.c.operator,
             _t_inventory_records.c.operator_user_id,
-            _t_inventory_records.c.operator_face_name,
+            _t_inventory_records.c.actual_operator,
             _t_inventory_records.c.reason_category,
             _t_inventory_records.c.reason_note,
             _t_inventory_records.c.created_at,
@@ -6548,8 +6557,9 @@ def export_inventory_records(
     with get_engine().connect() as sa_conn:
         records = sa_conn.execute(rec_stmt).fetchall()
 
-        # 为出库记录获取批次消耗详情
+        # 为出库记录获取批次消耗详情 + 规格（出库 batch_id 为 NULL，规格需从被消耗批次取）
         batch_details_map = {}
+        out_variant_map = {}
         out_record_ids = [r.id for r in records if r.type == RecordType.OUT.value]
         if out_record_ids:
             cons_stmt = (
@@ -6557,6 +6567,7 @@ def export_inventory_records(
                     _t_batch_consumptions.c.record_id,
                     _t_batches.c.batch_no,
                     _t_batch_consumptions.c.quantity,
+                    _t_batches.c.variant,
                     _t_batches.c.created_at,
                 )
                 .select_from(
@@ -6569,13 +6580,16 @@ def export_inventory_records(
                 batch_details_map.setdefault(cons.record_id, []).append(
                     f"{cons.batch_no}×{cons.quantity}"
                 )
+                # 取第一个非空规格（同一物料的批次规格通常一致）
+                if cons.variant and cons.record_id not in out_variant_map:
+                    out_variant_map[cons.record_id] = cons.variant
             batch_details_map = {k: ', '.join(v) for k, v in batch_details_map.items()}
 
     wb = Workbook()
     ws = wb.active
     ws.title = "出入库记录"
 
-    headers = ['物料名称', '规格', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '操作人', '原因类别', '备注', '时间']
+    headers = ['物料名称', '规格', '物料编码', '商品类型', '记录类型', '数量', '批次', '联系方', '账号', '操作人', '原因类别', '备注', '时间']
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
 
@@ -6590,26 +6604,31 @@ def export_inventory_records(
         created_at_str = (record.created_at.strftime('%Y-%m-%d %H:%M:%S')
                           if isinstance(record.created_at, datetime) else record.created_at)
 
+        # 规格：入库用 batch_id join 的 variant；出库从被消耗批次取（batch_id 为 NULL）
+        if record.type == RecordType.OUT.value:
+            variant_val = out_variant_map.get(record.id, '') or ''
+        else:
+            variant_val = record.variant or ''
+
         ws.cell(row=row_idx, column=1, value=record.name)
-        ws.cell(row=row_idx, column=2, value=record.variant or '')
+        ws.cell(row=row_idx, column=2, value=variant_val)
         ws.cell(row=row_idx, column=3, value=record.sku)
         ws.cell(row=row_idx, column=4, value=record.category)
         ws.cell(row=row_idx, column=5, value='入库' if record.type == RecordType.IN.value else '出库')
         ws.cell(row=row_idx, column=6, value=record.quantity)
         ws.cell(row=row_idx, column=7, value=batch_info)
         ws.cell(row=row_idx, column=8, value=record.contact_name or '')
-        # 操作员：优先使用用户表中的显示名称，否则回退到旧的operator字段；
-        # 人脸识别到具体人时追加 "(姓名)"（同一列内组合，不新增列）
+        # 账号（列9）：设备/登录账号，优先用户表显示名，回退 operator 字段
         operator_name = record.operator_display_name or record.operator_username or record.operator
-        if record.operator_face_name:
-            operator_name = f"{operator_name} ({record.operator_face_name})"
         ws.cell(row=row_idx, column=9, value=operator_name)
-        ws.cell(row=row_idx, column=10, value=REASON_CATEGORY_LABELS.get(record.reason_category, record.reason_category or ''))
-        ws.cell(row=row_idx, column=11, value=record.reason_note or '')
-        ws.cell(row=row_idx, column=12, value=created_at_str)
+        # 操作人（列10）：实际执行操作的人（人脸识别姓名快照或手工填写）
+        ws.cell(row=row_idx, column=10, value=record.actual_operator or '')
+        ws.cell(row=row_idx, column=11, value=REASON_CATEGORY_LABELS.get(record.reason_category, record.reason_category or ''))
+        ws.cell(row=row_idx, column=12, value=record.reason_note or '')
+        ws.cell(row=row_idx, column=13, value=created_at_str)
 
     # 设置列宽
-    column_widths = [22, 10, 18, 14, 12, 10, 28, 16, 14, 14, 24, 22]
+    column_widths = [22, 10, 18, 14, 12, 10, 28, 16, 14, 14, 14, 24, 22]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
 
@@ -6643,6 +6662,7 @@ async def add_inventory_record(
                 reason_category=request.reason_category,
                 reason_note=request.reason_note,
                 operator=operator,
+                actual_operator=request.actual_operator,
                 contact_id=request.contact_id,
                 location=request.location,
                 batch_no=request.batch_no,
@@ -6676,6 +6696,7 @@ async def add_inventory_record(
                 reason_category=request.reason_category,
                 reason_note=request.reason_note,
                 operator=operator,
+                actual_operator=request.actual_operator,
                 contact_id=request.contact_id,
                 location=request.location,
                 batch_no=request.batch_no,

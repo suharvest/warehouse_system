@@ -29,14 +29,14 @@ class TestStockIn:
         assert data['product']['old_quantity'] == 100
         assert data['product']['new_quantity'] == 150
 
-    def test_stock_in_stores_operator_face_name(self, admin_client, sample_material):
-        """POST with operator_face_name should snapshot it on the record."""
+    def test_stock_in_stores_actual_operator(self, admin_client, sample_material):
+        """POST with actual_operator should snapshot it on the record."""
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 3,
             "reason_category": "purchase",
             "warehouse_id": sample_material['warehouse_id'],
-            "operator_face_name": "张三",
+            "actual_operator": "张三",
         })
         assert resp.status_code == 200
         assert resp.json()['success'] is True
@@ -45,15 +45,15 @@ class TestStockIn:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT operator_face_name FROM inventory_records "
+            "SELECT actual_operator FROM inventory_records "
             "WHERE material_id = ? ORDER BY id DESC LIMIT 1",
             (sample_material['id'],))
         row = cur.fetchone()
         conn.close()
-        assert row['operator_face_name'] == '张三'
+        assert row['actual_operator'] == '张三'
 
     def test_stock_in_face_name_absent_is_null(self, admin_client, sample_material):
-        """Without operator_face_name the column stays NULL."""
+        """Without actual_operator the column stays NULL."""
         resp = admin_client.post("/api/materials/stock-in", json={
             "product_name": sample_material['name'],
             "quantity": 2,
@@ -67,12 +67,12 @@ class TestStockIn:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT operator_face_name FROM inventory_records "
+            "SELECT actual_operator FROM inventory_records "
             "WHERE material_id = ? ORDER BY id DESC LIMIT 1",
             (sample_material['id'],))
         row = cur.fetchone()
         conn.close()
-        assert row['operator_face_name'] is None
+        assert row['actual_operator'] is None
 
     def test_stock_in_creates_batch(self, admin_client, sample_material):
         """Stock-in should automatically create a batch record."""

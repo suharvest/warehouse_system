@@ -321,7 +321,7 @@ class DefaultProvider(BaseProvider):
 
     def stock_in(self, product_name, quantity, reason_category, reason_note,
                  operator, fuzzy, location=None, contact_id=None, variant=None,
-                 allow_new_variant=False, operator_face_name=None):
+                 allow_new_variant=False, actual_operator=None):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
@@ -338,15 +338,15 @@ class DefaultProvider(BaseProvider):
             payload["variant"] = variant
         if allow_new_variant:
             payload["allow_new_variant"] = True
-        if operator_face_name:
-            payload["operator_face_name"] = operator_face_name
+        if actual_operator:
+            payload["actual_operator"] = actual_operator
 
         return self.http_post("/materials/stock-in", payload)
 
     def stock_out(self, product_name, quantity, reason_category, reason_note,
                   operator, fuzzy, variant=None, location=None,
                   batch_no=None, location_fuzzy=False,
-                  allow_partial_fallback=False, operator_face_name=None):
+                  allow_partial_fallback=False, actual_operator=None):
         payload = {
             "product_name": product_name,
             "quantity": quantity,
@@ -365,8 +365,8 @@ class DefaultProvider(BaseProvider):
             payload["location_fuzzy"] = True
         if allow_partial_fallback:
             payload["allow_partial_fallback"] = True
-        if operator_face_name:
-            payload["operator_face_name"] = operator_face_name
+        if actual_operator:
+            payload["actual_operator"] = actual_operator
         return self.http_post("/materials/stock-out", payload)
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,

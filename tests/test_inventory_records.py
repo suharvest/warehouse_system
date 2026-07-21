@@ -42,18 +42,18 @@ def _reset_admin_tenant(test_db):
 def _seed_record(*, material_id, type_, quantity, warehouse_id, tenant_id,
                  created_at=None, contact_id=None, operator='sys',
                  operator_user_id=None, reason_category='purchase',
-                 reason_note=None, operator_face_name=None):
+                 reason_note=None, actual_operator=None):
     from database import get_db_connection
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO inventory_records "
         "(material_id, type, quantity, operator, operator_user_id, "
-        " operator_face_name, reason_category, reason_note, contact_id, "
+        " actual_operator, reason_category, reason_note, contact_id, "
         " warehouse_id, tenant_id, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (material_id, type_, quantity, operator, operator_user_id,
-         operator_face_name, reason_category, reason_note, contact_id,
+         actual_operator, reason_category, reason_note, contact_id,
          warehouse_id, tenant_id,
          created_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     rid = cur.lastrowid
@@ -100,10 +100,10 @@ def test_records_pagination_shape(admin_client, default_warehouse_id,
 
 
 # ---------------------------------------------------------------------------
-# 1b. operator_face_name passthrough（人脸识别姓名快照）
+# 1b. actual_operator passthrough（人脸识别姓名快照）
 # ---------------------------------------------------------------------------
 
-def test_records_returns_operator_face_name(admin_client,
+def test_records_returns_actual_operator(admin_client,
                                             default_warehouse_id):
     name = f"FaceMat-{uuid.uuid4().hex[:6]}"
     sku = f"FC-{uuid.uuid4().hex[:6]}"
@@ -112,7 +112,7 @@ def test_records_returns_operator_face_name(admin_client,
 
     _seed_record(material_id=mid, type_='in', quantity=1,
                  warehouse_id=default_warehouse_id, tenant_id=1,
-                 operator='seeed', operator_face_name='张三')
+                 operator='seeed', actual_operator='张三')
     _seed_record(material_id=mid, type_='in', quantity=2,
                  warehouse_id=default_warehouse_id, tenant_id=1,
                  operator='seeed')
@@ -123,8 +123,74 @@ def test_records_returns_operator_face_name(admin_client,
     assert resp.status_code == 200
     items = resp.json()['items']
     assert len(items) == 2
-    assert items[0]['operator_face_name'] == '张三'
-    assert items[1]['operator_face_name'] is None
+    assert items[0]['actual_operator'] == '张三'
+    assert items[1]['actual_operator'] is None
+
+
+def test_manual_add_record_stores_actual_operator(admin_client,
+                                                  default_warehouse_id):
+    """手工 add-record 表单填写 actual_operator，出入库均落库并由列表 API 返回。"""
+    name = f"ManualMat-{uuid.uuid4().hex[:6]}"
+    sku = f"MN-{uuid.uuid4().hex[:6]}"
+    _seed_material(name, sku, warehouse_id=default_warehouse_id, tenant_id=1)
+
+    # 手工入库，填写实际操作人
+    resp = admin_client.post("/api/inventory/add-record", json={
+        "product_name": name,
+        "type": "in",
+        "quantity": 10,
+        "reason_category": "purchase",
+        "actual_operator": "王五",
+        "warehouse_id": default_warehouse_id,
+    })
+    assert resp.status_code == 200 and resp.json()['success'] is True
+
+    # 手工出库，填写不同的实际操作人
+    resp = admin_client.post("/api/inventory/add-record", json={
+        "product_name": name,
+        "type": "out",
+        "quantity": 3,
+        "reason_category": "sell",
+        "actual_operator": "赵六",
+        "warehouse_id": default_warehouse_id,
+    })
+    assert resp.status_code == 200 and resp.json()['success'] is True
+
+    resp = admin_client.get("/api/inventory/records", params={
+        "page_size": 100, "product_name": name, "sort_order": "asc",
+    })
+    assert resp.status_code == 200
+    items = resp.json()['items']
+    by_type = {it['type']: it for it in items}
+    assert by_type['in']['actual_operator'] == '王五'
+    assert by_type['out']['actual_operator'] == '赵六'
+
+
+def test_out_record_variant_from_consumed_batch(admin_client, default_warehouse_id):
+    """出库记录 batch_id 为 NULL，规格须从被消耗批次带出（回归：原来显示 '-'）。"""
+    name = f"VarMat-{uuid.uuid4().hex[:6]}"
+    sku = f"VR-{uuid.uuid4().hex[:6]}"
+    _seed_material(name, sku, warehouse_id=default_warehouse_id, tenant_id=1)
+
+    resp = admin_client.post("/api/materials/stock-in", json={
+        "product_name": name, "quantity": 6, "reason_category": "purchase",
+        "warehouse_id": default_warehouse_id, "variant": "红",
+    })
+    assert resp.status_code == 200 and resp.json()['success'] is True
+    resp = admin_client.post("/api/materials/stock-out", json={
+        "product_name": name, "quantity": 6, "reason_category": "sell",
+        "warehouse_id": default_warehouse_id, "variant": "红",
+    })
+    assert resp.status_code == 200 and resp.json()['success'] is True
+
+    resp = admin_client.get("/api/inventory/records", params={
+        "page_size": 100, "product_name": name, "sort_order": "asc",
+    })
+    assert resp.status_code == 200
+    items = resp.json()['items']
+    out_items = [it for it in items if it['type'] == 'out']
+    assert out_items
+    assert all(it['variant'] == '红' for it in out_items), out_items
 
 
 # ---------------------------------------------------------------------------
