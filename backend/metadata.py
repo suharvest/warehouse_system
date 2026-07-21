@@ -240,6 +240,10 @@ inventory_records = Table(
     Column("contact_id", Integer, ForeignKey("contacts.id")),
     Column("batch_id", Integer, ForeignKey("batches.id")),
     Column("operator_user_id", Integer, ForeignKey("users.id")),
+    # 实际操作人（实际执行操作的人）：人脸识别通过时自动写入识别到的姓名快照
+    # （face_subjects.name），或由新增记录表单手工填写。与 operator（设备/登录账号）
+    # 相互独立。非人脸且未手填时为 NULL。
+    Column("actual_operator", String(255)),
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Index("idx_records_warehouse", "warehouse_id"),
@@ -420,7 +424,7 @@ tenant_face_config = Table(
     Column("endpoint", Text),
     Column("auth_token", Text),
     Column("embedding_model_tag", String(64)),
-    Column("min_confidence", Float, nullable=False, server_default="0.65"),
+    Column("min_confidence", Float, nullable=False, server_default="0.45"),
     # Passive greeting (visual wake) on/off — independent of the out-of-stock
     # auth switch (`enabled`). xiaozhi reads this on device connect / voice sync
     # and aligns the device's local passive-recognition state via self.face.enable.

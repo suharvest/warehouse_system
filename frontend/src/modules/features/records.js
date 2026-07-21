@@ -149,7 +149,7 @@ function renderRecordsTable(items) {
     tbody.innerHTML = '';
 
     if (items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="13" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" style="text-align: center; color: #999;">${t('noRecords')}</td></tr>`;
         return;
     }
 
@@ -185,6 +185,7 @@ function renderRecordsTable(items) {
             <td>${item.display_batch_no}</td>
             <td>${item.contact_name || '-'}</td>
             <td>${item.operator_name || item.operator}</td>
+            <td>${item.actual_operator || '-'}</td>
             <td>${getReasonCategoryLabel(item.reason_category)}</td>
             <td>${item.reason_note || '-'}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
@@ -522,6 +523,7 @@ export async function submitAddRecord() {
     const quantity = parseInt(document.getElementById('record-quantity').value);
     const reasonCategory = document.getElementById('record-reason-category').value;
     const reasonNote = document.getElementById('record-reason-note').value.trim() || null;
+    const actualOperator = document.getElementById('record-actual-operator')?.value.trim() || null;
     const contactId = document.getElementById('record-contact')?.value || null;
 
     const location = document.getElementById('record-location')?.value.trim() || null;
@@ -567,6 +569,7 @@ export async function submitAddRecord() {
             quantity: quantity,
             reason_category: reasonCategory,
             reason_note: reasonNote,
+            actual_operator: actualOperator,
             contact_id: contactId ? parseInt(contactId) : null,
             warehouse_id: getCurrentWarehouseId(),
         };

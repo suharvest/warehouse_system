@@ -5,6 +5,14 @@ Each entry: short title + date + context + takeaway.
 
 ---
 
+## 2026-07-20 — 智能体配置页的偶发 401 是失效会话处理漏网
+
+线上复现到：页面右上角仍保留全局管理员信息，但 `/api/mcp/connections` 每 10 秒持续返回 401，表格显示“加载数据失败…HTTP 401”。无 Cookie 直连线上接口确认 401 body 是应用返回的 `{"error":"请先登录"}`，不是 CDN/反向代理故障。会话失效的常规触发包括登录 session/Cookie 固定 24 小时，以及任一同账号客户端调用 logout 时当前实现会删除该用户的全部 sessions；失效后，已打开页面内存里的 `currentUser` 不会自行变化。仅凭截图和当前日志无法区分这两种触发。
+
+通用 `frontend/src/modules/api.js::fetchJson` 会把非 auth API 的 401 转给 `handleSessionExpired`，清理旧用户状态、停止受限页展示并弹出重新登录；但 `frontend/src/modules/features/mcp.js` 从最初实现起一直保留独立 `mcpFetch()`，完全绕过这套全局处理。结果 MCP 自动刷新碰到失效 session 时，只把 401 当普通加载失败写入表格，同时页头仍显示旧管理员。整页刷新会重新跑 `/api/auth/status`，所以能重新同步登录状态，造成“刷新后好了”的表象。另一个次要契约问题是 `mcpFetch` 只读取错误 JSON 的 `detail`，而全局 HTTPException handler 实际返回 `error`，因此页面丢掉了“请先登录”信息，只显示重复的 `HTTP 401: HTTP 401`。
+
+修复已让 MCP 全部请求复用统一 `fetchJson`，并让统一层同时识别后端的 `detail` / `error` 错误结构；MCP 各操作捕获到 401 后不再渲染普通错误。新增 E2E 覆盖已登录页面的 MCP 请求返回 401：旧登录态被清空、页面切回看板、重新登录弹窗出现，且等待超过一个 10 秒刷新周期后请求数仍不增加。另可把 24 小时硬编码提为配置或采用滑动续期，但那是会话策略优化，不是本次 UI 假登录的直接原因。
+
 ## 2026-07-06 — MCP 人脸校验必须继承 API Key 仓库作用域
 
 排查 session 级 MCP 人脸链路时发现：`/api/face/verify-mcp` 原本只把 `payload.warehouse_id` 传给 `verify_mcp_face`。但 warehouse MCP wrapper 默认不传 `warehouse_id`，库存写接口是在后续 provider 调用里才通过 API key 推导仓库；因此人脸 gate 先执行时会使用 `warehouse_id=None`，只命中租户默认规则，可能跳过仓库级 `require_face` / `allowed_subject_ids`。

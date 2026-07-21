@@ -50,7 +50,7 @@ class FaceConfigPayload(BaseModel):
     endpoint: Optional[str] = None
     auth_token: Optional[str] = None
     embedding_model_tag: Optional[str] = None
-    min_confidence: float = 0.65
+    min_confidence: float = 0.45
     greeting_enabled: bool = False
     # 人脸验证频率（与推理拓扑 mode 正交，只控制会话缓存）：
     #   'always'（默认，每次操作都验证）或 'session'（首验通过后本会话免验）。
@@ -133,7 +133,7 @@ async def face_get_config(
         ).first()
     if not row:
         return {"tenant_id": tid, "enabled": False, "mode": None, "endpoint": None,
-                "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.65,
+                "auth_token": None, "embedding_model_tag": None, "min_confidence": 0.45,
                 "greeting_enabled": False, "verify_frequency": "always",
                 "verify_mode": "interface",  # deprecated echo
                 "recompute_status": _get_recompute_status(tid)}
@@ -708,6 +708,7 @@ async def face_verify_mcp(
         "failure_reason": decision.failure_reason,
         "confidence": decision.confidence,
         "matched_subject_id": decision.matched_subject_id,
+        "matched_subject_name": decision.matched_subject_name,
     }
 
 
@@ -816,7 +817,7 @@ async def face_device_recognize(payload: DeviceRecognizePayload, request: Reques
             query_emb_bytes=result["embedding"], k=1,
         )
         best = matches[0] if matches else None
-        threshold = cfg.min_confidence if cfg else 0.65
+        threshold = cfg.min_confidence if cfg else 0.45
         if best is None or best.confidence < threshold:
             reason = "no_match" if best is None else "low_confidence"
             _audit(

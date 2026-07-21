@@ -11,11 +11,13 @@ const DEFAULT_CONFIG = {
     endpoint: '',
     auth_token: '',
     embedding_model_tag: '',
-    min_confidence: 0.7,
+    min_confidence: 0.45,
     verify_frequency: 'always'
 };
 const SUB_TABS = ['setup', 'logs'];
-const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust'];
+// query = 查询类统一规则：按名称/SKU 查库存、按批次查询、统一搜索、今日统计
+// 四个 MCP 查询工具共用 operation='query' 走同一条人脸规则。
+const FACE_OPERATIONS = ['stock_in', 'stock_out', 'transfer', 'adjust', 'query'];
 
 // 本机(local)模式设备端人脸库上限。与固件 FACE_MAX_COUNT=20 / 后端 MAX_PUSH_FACES=20
 // 对齐：设备最多存 20 条 embedding（= 20 张图片，不是 20 个人）。lan 模式在端点比对、
@@ -88,6 +90,7 @@ const FACE_OP_I18N_KEYS = {
     stock_out: 'outbound',
     transfer: 'faceOp_transfer',
     adjust: 'faceOp_adjust',
+    query: 'faceOp_query',
 };
 function opLabel(op) {
     if (!op) return '-';
@@ -375,7 +378,7 @@ function renderSetupTab() {
                         </div>
                         <div class="form-group">
                             <label>${tt('faceMinConfidence', '最低识别置信度')} <span class="face-inline-hint">(0.0 - 1.0)</span>${pendingBadge('min_confidence')}</label>
-                            <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.7)}">
+                            <input type="number" id="face-config-min-confidence" min="0" max="1" step="0.01" value="${Number(c.min_confidence ?? 0.45)}">
                         </div>
                     </div>
                     <div class="face-config-grid" style="margin-top:12px;">
@@ -603,7 +606,7 @@ function attachSetupAutoSave() {
         conf.addEventListener('blur', () => {
             let v = parseFloat(conf.value);
             if (!Number.isFinite(v)) {
-                conf.value = Number(currentConfig.min_confidence ?? 0.7);
+                conf.value = Number(currentConfig.min_confidence ?? 0.45);
                 return;
             }
             v = Math.min(1, Math.max(0, Math.round(v * 100) / 100));
@@ -680,6 +683,7 @@ function openRuleModal(rule) {
                         <select id="face-rule-operation">
                             ${operations.map(op => `<option value="${op}" ${r.operation === op ? 'selected' : ''}>${escapeHtml(opLabel(op))}</option>`).join('')}
                         </select>
+                        <div class="form-hint" id="face-rule-op-hint" ${r.operation === 'query' ? '' : 'hidden'}>${tt('faceOpQueryHint', '查询规则覆盖：按名称/SKU 查库存、按批次查询、统一搜索、今日统计')}</div>
                     </div>
                     <div class="form-group">
                         <label class="face-enable-toggle">
@@ -716,6 +720,12 @@ function openRuleModal(rule) {
         </div>
     `;
     modal.classList.add('show');
+    // 选中「查询」时显示覆盖范围提示
+    const opSel = document.getElementById('face-rule-operation');
+    const opHint = document.getElementById('face-rule-op-hint');
+    if (opSel && opHint) {
+        opSel.addEventListener('change', () => { opHint.hidden = opSel.value !== 'query'; });
+    }
     // 规则停用时,"允许人员/自定义阈值"无意义 → 置灰(与录入弹窗同款联动)
     const requireBox = document.getElementById('face-rule-require');
     const dependent = document.getElementById('face-rule-dependent');

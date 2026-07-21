@@ -51,7 +51,7 @@ async function request(url, options = {}) {
   return response;
 }
 
-async function fetchJson(url, options = {}) {
+export async function fetchJson(url, options = {}) {
   const response = await request(url, options);
   if (!response.ok) {
     // 检测 session 过期（排除 auth 相关的 API）
@@ -63,6 +63,10 @@ async function fetchJson(url, options = {}) {
     try {
       error.data = await response.json();
     } catch {}
+    const detail = error.data?.detail ?? error.data?.error;
+    if (detail !== undefined && detail !== null) {
+      error.message = typeof detail === 'string' ? detail : JSON.stringify(detail);
+    }
     throw error;
   }
   return response.json();

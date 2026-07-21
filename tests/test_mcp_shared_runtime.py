@@ -11,7 +11,7 @@ class _ProviderStub:
     def __init__(self, api_key):
         self.api_key = api_key
 
-    def query_stock(self, product_name):
+    def query_stock(self, product_name, show_batches=False):
         return {
             'success': True,
             'product': {
