@@ -1004,6 +1004,12 @@ MAX_PUSH_FACES = 20
 # 保留作未来多模型扩展，现阶段不对用户暴露、不参与下发）。
 DEVICE_FACE_MODEL_TAG = "we2-mfnr6-128-v1"
 
+# 该模型 canonical embedding 的期望字节数：128 维 × IEEE-754 binary32 LE = 512。
+# 下发前用它校验每条 enrollment：长度不符即视为损坏（截断写入 / 跨模型串入 /
+# 脏数据），跳过并告警，绝不 POST 给设备——否则一条坏行会让整个 payload 被固件
+# 判 bad_embedding 拒收，连累同批正常人脸一起下发失败。
+DEVICE_FACE_EMBEDDING_F32_BYTES = 512
+
 # ---- Embedding 量化（仅 push 路径） -------------------------------------
 #
 # DB（face_enrollments.embedding）与 /api/face/library 始终是 **canonical 满精度
@@ -1152,19 +1158,42 @@ async def push_faces_to_device(
             "push-faces lazy re-embed failed (non-fatal)")
 
     library = build_face_library(tid, model_tag=model_tag)
-    # 服务端强制上限：超过设备固件容量（FACE_MAX_COUNT=20）直接拒绝，不 POST、
-    # 不截断。错误信息用户友好，前端会 alert 出来。
-    if len(library) > MAX_PUSH_FACES:
+    # 长度校验（fail-closed，防一条坏行拖垮整批）：canonical embedding 必须恰好是
+    # DEVICE_FACE_EMBEDDING_F32_BYTES 字节，否则视为损坏（截断写入 / 跨模型串入 /
+    # 脏数据），跳过 + 告警，绝不进 payload。解出的 f32_bytes 一并缓存，量化时复用。
+    import logging as _logging
+    valid_library = []
+    skipped_names = []
+    for e in library:
+        f32_bytes = base64.b64decode(e["embedding_b64"])
+        if len(f32_bytes) != DEVICE_FACE_EMBEDDING_F32_BYTES:
+            skipped_names.append(e.get("name"))
+            _logging.getLogger("warehouse.face").warning(
+                "push-faces skip malformed embedding: subject_id=%s name=%r "
+                "model_tag=%s got %d bytes, expected %d",
+                e.get("subject_id"), e.get("name"), model_tag,
+                len(f32_bytes), DEVICE_FACE_EMBEDDING_F32_BYTES,
+            )
+            continue
+        valid_library.append((e, f32_bytes))
+    # 库非空但无一条合法 → 明确失败，不 POST 空/坏库让用户误以为成功。
+    if library and not valid_library:
         return {
             "success": False,
-            "error": f"人脸库共 {len(library)} 张，超过设备上限 {MAX_PUSH_FACES} 张，请减少启用的人脸后再下发",
+            "error": f"人脸库共 {len(library)} 张，全部 embedding 损坏（长度不符），无法下发，请重新录入这些人脸",
+        }
+    # 服务端强制上限：按**过滤后**的合法条数判，超过设备固件容量（FACE_MAX_COUNT=20）
+    # 直接拒绝，不 POST、不截断。错误信息用户友好，前端会 alert 出来。
+    if len(valid_library) > MAX_PUSH_FACES:
+        return {
+            "success": False,
+            "error": f"人脸库共 {len(valid_library)} 张，超过设备上限 {MAX_PUSH_FACES} 张，请减少启用的人脸后再下发",
         }
     # build_face_library 返回 canonical float32 的 embedding_b64；下发前按
     # DEVICE_EMBEDDING_FORMAT 量化（解码 → 量化 → 重新 base64），library/DB 不变。
     fmt = DEVICE_EMBEDDING_FORMAT
     faces = []
-    for e in library:
-        f32_bytes = base64.b64decode(e["embedding_b64"])
+    for e, f32_bytes in valid_library:
         emb_bytes = quantize_embedding(f32_bytes, fmt)
         faces.append({
             "name": e["name"],
@@ -1251,9 +1280,17 @@ async def push_faces_to_device(
         device_response = resp.json()
     except Exception:
         device_response = resp.text[:300]
-    return {
+    result = {
         "success": True,
         "pushed_count": len(faces),
         "model_tag": model_tag,
         "device_response": device_response,
     }
+    if skipped_names:
+        # 有正常人脸成功下发，但跳过了 N 条损坏行 → 明确告知用户，别静默。
+        result["skipped_count"] = len(skipped_names)
+        result["warning"] = (
+            f"已跳过 {len(skipped_names)} 条损坏的人脸（embedding 长度不符，"
+            f"建议重新录入）：{', '.join(str(n) for n in skipped_names)}"
+        )
+    return result

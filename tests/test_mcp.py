@@ -610,6 +610,11 @@ class TestPushFacesToDevice:
         return resp.json()["connection"]["id"]
 
     def _enroll(self, admin_client, name, model_tag, vec):
+        # 真实 canonical embedding 是 128 维 float32（512 字节）；测试给的短签名
+        # 向量补零到 128 维，满足 push 路径的长度校验（DEVICE_FACE_EMBEDDING_F32_BYTES）。
+        vec = list(vec)
+        if len(vec) < 128:
+            vec = vec + [0.0] * (128 - len(vec))
         sid = admin_client.post("/api/face/subjects", json={"name": name}).json()["id"]
         r = admin_client.post("/api/face/enrollments", json={
             "subject_id": sid,
@@ -827,6 +832,106 @@ class TestPushFacesToDevice:
         # 关键：拒绝发生在 POST 之前，设备从未被调用。
         assert "called" not in captured, "over-limit push must NOT POST to device"
 
+    def _insert_malformed_we2(self, admin_client, name, nbytes):
+        """直接插一条 WE2 tag 但 embedding 字节数不符（损坏行，模拟脏数据/截断写入）。
+        走底层 insert 绕过 API 校验，返回 sid。"""
+        import struct as _s
+        sub = admin_client.post("/api/face/subjects", json={"name": name}).json()
+        sid = sub["id"]
+        tid = admin_client.get("/api/face/subjects").json()[0]["tenant_id"]
+        from db import get_engine
+        from metadata import face_enrollments as _t_fe
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+        with get_engine().begin() as c:
+            c.execute(_t_fe.insert().values(
+                subject_id=sid, tenant_id=tid, model_tag=DEVICE_FACE_MODEL_TAG,
+                embedding=b"\x00" * nbytes, is_active=1,
+            ))
+        return sid
+
+    def test_push_skips_malformed_embedding_pushes_valid(self, admin_client, monkeypatch):
+        """一条损坏行（embedding 长度不符）不能拖垮整批：跳过损坏、正常人脸照发，
+        响应带 skipped_count/warning。复现 bad_embedding 现场（12 字节脏数据）。"""
+        from routers.mcp_admin import DEVICE_FACE_MODEL_TAG
+        good_sid = self._enroll(admin_client, "GoodFace", DEVICE_FACE_MODEL_TAG, [1.0, 0.0, 0.0])
+        bad_sid = self._insert_malformed_we2(admin_client, "BadFace", 12)
+
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                captured["body"] = _json.loads(self.rfile.read(n))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true, "applied": 1}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", port)
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            conn_id = self._make_conn(admin_client)
+            dev_id = self._add_device(admin_client, conn_id, port=port)
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["success"] is True, data
+            # session 共享 sqlite 里可能有其它测试残留的正常人脸，故用容忍断言：
+            # 只验损坏行被跳过、正常行照发，不假设租户库里只有本测试两条。
+            assert data.get("skipped_count", 0) >= 1, data
+            assert "BadFace" in data.get("warning", ""), data
+            th.join(timeout=5)
+            names = [f["name"] for f in captured["body"]["faces"]]
+            assert "GoodFace" in names, names          # 正常行照发
+            assert "BadFace" not in names, names        # 损坏行绝不进 payload
+        finally:
+            srv.server_close()
+            admin_client.delete(f"/api/face/subjects/{good_sid}")
+            admin_client.delete(f"/api/face/subjects/{bad_sid}")
+
+    def test_push_all_malformed_fails_without_posting(self, admin_client, monkeypatch):
+        """库非空但全部损坏 → success:false，且不 POST 空/坏库给设备。"""
+        # 清空 session 共享库里其它测试残留的正常人脸，保证"全部损坏"前提成立。
+        for s in admin_client.get("/api/face/subjects").json():
+            admin_client.delete(f"/api/face/subjects/{s['id']}")
+        bad_sid = self._insert_malformed_we2(admin_client, "AllBad", 12)
+
+        captured = {}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured["called"] = True
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        monkeypatch.setattr("routers.mcp_admin.DEVICE_HTTP_PORT", port)
+        th = _threading.Thread(target=srv.handle_request, daemon=True)
+        th.start()
+        try:
+            conn_id = self._make_conn(admin_client)
+            dev_id = self._add_device(admin_client, conn_id, port=port)
+            r = admin_client.post(f"/api/mcp/connections/{conn_id}/devices/{dev_id}/push-faces")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["success"] is False, data
+            assert "损坏" in data.get("error", ""), data
+        finally:
+            srv.server_close()
+            admin_client.delete(f"/api/face/subjects/{bad_sid}")
+        assert "called" not in captured, "all-malformed push must NOT POST to device"
+
     def test_push_unknown_connection_404(self, admin_client):
         r = admin_client.post("/api/mcp/connections/nope1234/devices/1/push-faces")
         assert r.status_code == 404
@@ -893,7 +998,9 @@ class TestPushFacesToDevice:
         sid, tid = self._insert_lan_only_subject(
             admin_client, "LanOnly Person", "photo:lan-only")
         calls = {"local": 0}
-        we2_emb = b"".join(_s.pack("<f", x) for x in [1.0, 0.0, 0.0, 0.0])
+        # WE2 模拟器输出必须是真实 128 维 float32（512 字节），否则会被 push 路径
+        # 的长度校验判为损坏而跳过。
+        we2_emb = b"".join(_s.pack("<f", x) for x in ([1.0] + [0.0] * 127))
 
         def fake_local(image_b64):
             calls["local"] += 1
