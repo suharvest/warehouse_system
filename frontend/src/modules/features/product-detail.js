@@ -3,6 +3,13 @@ import * as echarts from 'echarts';
 import { t } from '../../../i18n.js';
 import { productApi } from '../api.js';
 
+// 用户可控字段经 innerHTML 拼接前必须转义，防存储型 XSS。
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
 const _REASON_I18N = {
     purchase: 'reasonPurchase', return: 'reasonReturn', refund: 'reasonRefund',
     produce: 'reasonProduce', transfer_in: 'reasonTransferIn', other_in: 'reasonOtherIn',
@@ -206,12 +213,12 @@ async function loadProductBatches() {
         batches.forEach(batch => {
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td>${batch.batch_no || '-'}</td>
-                <td>${batch.variant || '-'}</td>
+                <td>${escapeHtml(batch.batch_no || '-')}</td>
+                <td>${escapeHtml(batch.variant || '-')}</td>
                 <td>${batch.quantity != null ? batch.quantity : '-'}</td>
-                <td>${batch.location || '-'}</td>
-                <td>${batch.contact_name || '-'}</td>
-                <td>${batch.created_at || '-'}</td>
+                <td>${escapeHtml(batch.location || '-')}</td>
+                <td>${escapeHtml(batch.contact_name || '-')}</td>
+                <td>${escapeHtml(batch.created_at || '-')}</td>
             `;
             tbody.appendChild(tr);
         });
@@ -251,11 +258,11 @@ function renderDetailRecordsTable(items) {
         tr.innerHTML = `
             <td>${item.created_at}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
-            <td>${item.variant || '-'}</td>
+            <td>${escapeHtml(item.variant || '-')}</td>
             <td><strong>${item.quantity}</strong></td>
-            <td>${item.operator}</td>
+            <td>${escapeHtml(item.operator)}</td>
             <td>${categoryLabel}</td>
-            <td>${item.reason_note || '-'}</td>
+            <td>${escapeHtml(item.reason_note || '-')}</td>
         `;
 
         tbody.appendChild(tr);
