@@ -8,6 +8,14 @@ import {
 } from '../state.js';
 import { getDropdownSelectedValues, resetDropdownSelection, clearRecordProductSelector } from '../ui/dropdown.js';
 
+// 用户可控字段（物料名/规格/联系人/操作人/人脸姓名快照/备注等）经 innerHTML
+// 拼接前必须转义，防存储型 XSS。
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
 // 回调函数引用
 let loadDashboardDataFn = null;
 let loadInventoryFn = null;
@@ -176,18 +184,18 @@ function renderRecordsTable(items) {
 
         tr.innerHTML = `
             <td>${item.created_at}</td>
-            <td>${item.material_name}</td>
-            <td>${item.variant || '-'}</td>
-            <td>${item.material_sku}</td>
-            <td>${item.category || '-'}</td>
+            <td>${escapeHtml(item.material_name)}</td>
+            <td>${escapeHtml(item.variant || '-')}</td>
+            <td>${escapeHtml(item.material_sku)}</td>
+            <td>${escapeHtml(item.category || '-')}</td>
             <td><span class="type-badge ${typeClass}">${typeText}</span></td>
             <td><strong>${item.display_quantity}</strong></td>
-            <td>${item.display_batch_no}</td>
-            <td>${item.contact_name || '-'}</td>
-            <td>${item.operator_name || item.operator}</td>
-            <td>${item.actual_operator || '-'}</td>
+            <td>${escapeHtml(item.display_batch_no)}</td>
+            <td>${escapeHtml(item.contact_name || '-')}</td>
+            <td>${escapeHtml(item.operator_name || item.operator)}</td>
+            <td>${escapeHtml(item.actual_operator || '-')}</td>
             <td>${getReasonCategoryLabel(item.reason_category)}</td>
-            <td>${item.reason_note || '-'}</td>
+            <td>${escapeHtml(item.reason_note || '-')}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
         `;
 
@@ -349,7 +357,7 @@ async function loadContactsForRecord(recordType) {
         select.innerHTML = `<option value="">${t('pleaseSelect')}</option>`;
         if (data.items) {
             data.items.forEach(contact => {
-                select.innerHTML += `<option value="${contact.id}">${contact.name}</option>`;
+                select.innerHTML += `<option value="${contact.id}">${escapeHtml(contact.name)}</option>`;
             });
         }
     } catch (error) {
