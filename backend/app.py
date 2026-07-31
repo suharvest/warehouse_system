@@ -1587,6 +1587,46 @@ def _user_values_for_create(sa_conn, current_user, request: CreateUserRequest) -
     }
 
 
+_LAST_ADMIN_DETAIL = (
+    "该账号是当前租户唯一启用的管理员，不能降级或禁用。"
+    "请先创建/启用另一名管理员，再修改本账号。"
+)
+
+
+def _count_other_active_admins(sa_conn, tenant_id, exclude_user_id) -> int:
+    """同租户内除 ``exclude_user_id`` 外还有几个启用状态的管理员。
+
+    ``tenant_id is None`` 表示全局管理员分区（users.tenant_id IS NULL），
+    同一条规则顺带保住最后一个全局管理员。
+    """
+    preds = [
+        _t_users.c.role == RoleName.ADMIN.value,
+        _t_users.c.is_disabled == 0,
+        _t_users.c.id != exclude_user_id,
+        _t_users.c.tenant_id.is_(None) if tenant_id is None
+        else _t_users.c.tenant_id == tenant_id,
+    ]
+    return sa_conn.execute(
+        select(_sa_func.count()).select_from(_t_users).where(and_(*preds))
+    ).scalar() or 0
+
+
+def _guard_last_admin(sa_conn, row, *, new_role=None, disabling=False):
+    """租户级不变量：每个租户至少保留一名启用的管理员。
+
+    仅在被改的这一行本身就是「启用中的管理员」时才检查 —— 已禁用/非管理员
+    的账号怎么改都不会造成锁死。前端也有防呆，但这里是唯一可信的一道，
+    API Key / MCP 直连同样走这里。
+    """
+    if row.role != RoleName.ADMIN.value or row.is_disabled:
+        return
+    losing_admin = disabling or (new_role is not None and new_role != RoleName.ADMIN.value)
+    if not losing_admin:
+        return
+    if _count_other_active_admins(sa_conn, row.tenant_id, row.id) == 0:
+        raise HTTPException(status_code=400, detail=_LAST_ADMIN_DETAIL)
+
+
 def _user_values_for_update(sa_conn, current_user, request: UpdateUserRequest, row) -> dict:
     user_id = row.id
     new_password_hash = None
@@ -1626,6 +1666,12 @@ def _user_values_for_update(sa_conn, current_user, request: UpdateUserRequest, r
     if request.is_disabled is not None:
         values['is_disabled'] = 1 if request.is_disabled else 0
 
+    _guard_last_admin(
+        sa_conn, row,
+        new_role=values.get('role'),
+        disabling=values.get('is_disabled') == 1,
+    )
+
     # 密码变更或禁用用户时吊销所有会话 — done as a side effect, not a
     # column update, so it has to live here (we still have the conn).
     if request.password is not None or (request.is_disabled is not None and request.is_disabled):
@@ -1642,6 +1688,7 @@ def _user_before_delete(sa_conn, current_user, row):
     user_id = row.id
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="不能禁用自己")
+    _guard_last_admin(sa_conn, row, disabling=True)
     sa_conn.execute(
         update(_t_users).where(_t_users.c.id == user_id).values(is_disabled=1)
     )
@@ -1679,6 +1726,11 @@ _user_router = _ResourceRouterUser(
     list_handler=None,
     get_columns=_USER_OUT_COLUMNS,
     update_select_columns=_USER_OUT_COLUMNS,
+    # 默认只加载 id/tenant_id；_guard_last_admin 还要看当前 role 与启用状态
+    load_columns=[
+        _t_users.c.id, _t_users.c.tenant_id,
+        _t_users.c.role, _t_users.c.is_disabled,
+    ],
     enable_get=False,
     delete_response={"success": True, "message": "用户已禁用"},
 )

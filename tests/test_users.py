@@ -216,3 +216,73 @@ class TestApiKeys:
                 "disabled": True
             })
             assert resp.status_code == 200
+
+
+class TestLastAdminGuard:
+    """租户级不变量：至少保留一名启用的管理员。
+
+    客户现场事故：新租户的唯一管理员把自己改成操作员后，再没人能改回来。
+    """
+
+    def _me(self, admin_client):
+        return admin_client.get("/api/auth/me").json()
+
+    def _fetch(self, admin_client, user_id):
+        users = admin_client.get("/api/users").json()
+        return next(u for u in users if u['id'] == user_id)
+
+    def test_last_admin_cannot_self_demote(self, admin_client):
+        me = self._me(admin_client)
+        resp = admin_client.put(f"/api/users/{me['id']}", json={"role": "operate"})
+        assert resp.status_code == 400
+        assert "管理员" in resp.json()['error']
+        assert self._fetch(admin_client, me['id'])['role'] == 'admin'
+
+    def test_last_admin_cannot_self_disable(self, admin_client):
+        me = self._me(admin_client)
+        resp = admin_client.put(f"/api/users/{me['id']}", json={"is_disabled": True})
+        assert resp.status_code == 400
+        assert self._fetch(admin_client, me['id'])['is_disabled'] is False
+
+    def test_last_admin_cannot_be_disabled_via_delete(self, admin_client):
+        """DELETE = 禁用；自禁用先被 '不能禁用自己' 挡住，这里验证不变量本身
+        对另一名管理员生效（同租户只剩一名启用管理员时不许再禁）。"""
+        import uuid
+        me = self._me(admin_client)
+        created = admin_client.post("/api/users", json={
+            "username": f"adm_{uuid.uuid4().hex[:6]}", "password": "Pass123!",
+            "role": "admin",
+        })
+        assert created.status_code == 200
+        second_id = created.json()['id']
+        # 两名管理员在场：禁掉第二名是允许的
+        assert admin_client.delete(f"/api/users/{second_id}").status_code == 200
+        # 再把第一名（现在是唯一启用管理员）降级 → 拒绝
+        resp = admin_client.put(f"/api/users/{me['id']}", json={"role": "view"})
+        assert resp.status_code == 400
+
+    def test_demote_second_admin_allowed(self, admin_client):
+        import uuid
+        created = admin_client.post("/api/users", json={
+            "username": f"adm_{uuid.uuid4().hex[:6]}", "password": "Pass123!",
+            "role": "admin",
+        })
+        assert created.status_code == 200
+        second_id = created.json()['id']
+        resp = admin_client.put(f"/api/users/{second_id}", json={"role": "operate"})
+        assert resp.status_code == 200
+        assert resp.json()['role'] == 'operate'
+        admin_client.delete(f"/api/users/{second_id}")
+
+    def test_non_admin_role_change_unaffected(self, admin_client):
+        import uuid
+        created = admin_client.post("/api/users", json={
+            "username": f"plain_{uuid.uuid4().hex[:6]}", "password": "Pass123!",
+            "role": "view",
+        })
+        assert created.status_code == 200
+        uid = created.json()['id']
+        resp = admin_client.put(f"/api/users/{uid}", json={"role": "operate"})
+        assert resp.status_code == 200
+        assert resp.json()['role'] == 'operate'
+        admin_client.delete(f"/api/users/{uid}")
