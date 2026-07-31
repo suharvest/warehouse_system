@@ -6,6 +6,30 @@ import { getCurrentUser, getDeployMode } from '../state.js';
 // 回调函数引用
 let checkAuthStatusFn = null;
 
+// 最近一次拉到的用户列表 — 供「最后一名管理员」防呆判断使用
+let cachedUsers = [];
+
+function lastAdminMessage() {
+    return tt(
+        'lastAdminLocked',
+        '该账号是当前租户唯一启用的管理员，不能降级或禁用。请先创建/启用另一名管理员，再修改本账号。'
+    );
+}
+
+// 同租户内除自己外是否还有启用状态的管理员。后端有同样的硬校验，
+// 这里只是提前拦住、给出解释，避免用户把自己锁死。
+function isLastActiveAdmin(userId) {
+    const target = cachedUsers.find(u => String(u.id) === String(userId));
+    if (!target || target.role !== 'admin' || target.is_disabled) return false;
+    const tid = target.tenant_id ?? null;
+    return !cachedUsers.some(u =>
+        String(u.id) !== String(userId)
+        && u.role === 'admin'
+        && !u.is_disabled
+        && (u.tenant_id ?? null) === tid
+    );
+}
+
 function tt(key, fallback) {
     const value = t(key);
     return value === key ? fallback : value;
@@ -36,6 +60,7 @@ export async function loadUsers() {
 }
 
 function renderUsersTable(users) {
+    cachedUsers = Array.isArray(users) ? users : [];
     const tbody = document.getElementById('users-tbody');
     if (!tbody) return;
 
@@ -147,10 +172,32 @@ export function showEditUserModal(userId, username, displayName, role) {
     document.getElementById('edit-user-username').value = username;
     document.getElementById('edit-user-display-name').value = displayName || '';
     document.getElementById('edit-user-password').value = '';
-    document.getElementById('edit-user-role').value = role;
+    const roleSelect = document.getElementById('edit-user-role');
+    roleSelect.value = role;
+    applyLastAdminGuard(roleSelect, userId);
     document.getElementById('edit-user-modal').classList.add('show');
     document.getElementById('edit-user-username').focus();
     document.getElementById('edit-user-error').style.display = 'none';
+}
+
+// 唯一管理员：角色下拉一旦被调离 admin 就弹窗说明并回滚选择
+function applyLastAdminGuard(roleSelect, userId) {
+    const hint = document.getElementById('edit-user-last-admin-hint');
+    const locked = isLastActiveAdmin(userId);
+    roleSelect.dataset.lastAdmin = locked ? '1' : '';
+    if (hint) {
+        hint.textContent = locked ? lastAdminMessage() : '';
+        hint.style.display = locked ? '' : 'none';
+    }
+    if (!roleSelect.dataset.lastAdminBound) {
+        roleSelect.dataset.lastAdminBound = '1';
+        roleSelect.addEventListener('change', () => {
+            if (roleSelect.dataset.lastAdmin === '1' && roleSelect.value !== 'admin') {
+                roleSelect.value = 'admin';
+                alert(lastAdminMessage());
+            }
+        });
+    }
 }
 
 export function closeEditUserModal() {
@@ -169,6 +216,12 @@ export async function handleEditUser() {
 
     if (!username) {
         errorDiv.textContent = t('fillAllFields');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    if (role !== 'admin' && isLastActiveAdmin(userId)) {
+        errorDiv.textContent = lastAdminMessage();
         errorDiv.style.display = 'block';
         return;
     }
@@ -204,6 +257,11 @@ export async function handleEditUser() {
 
 // ============ 切换用户状态 ============
 export async function toggleUserStatus(userId, isDisabled) {
+    // isDisabled 是当前状态；!isDisabled 即本次要禁用
+    if (!isDisabled && isLastActiveAdmin(userId)) {
+        alert(lastAdminMessage());
+        return;
+    }
     try {
         await usersApi.toggleStatus(userId, !isDisabled);
         loadUsers();
