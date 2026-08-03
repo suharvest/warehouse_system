@@ -186,12 +186,17 @@ class BaseProvider(ABC):
         location: str | None = None,
         batch_no: str | None = None,
         location_fuzzy: bool = False,
+        allow_partial_fallback: bool = False,
         actual_operator: str | None = None,
     ) -> dict:
         """产品出库。
 
         batch_no 非空时只从该批次扣减（不足报错，不 fallback）。
         location_fuzzy=True 时对 location 做作用域模糊（仅 MCP 使用）。
+        allow_partial_fallback=True 时允许指定批次/库位不足时从其余库存补足；
+        默认 False —— 工具层先返回 awaiting_confirm 让用户确认，同意后才带上
+        该参数重发。**必须声明**：warehouse_mcp.py 的 stock_out 无条件按关键字
+        传入本参数，第三方 Provider 漏掉它会在每次出库时 TypeError。
         返回: {success, ...}
         """
         ...
