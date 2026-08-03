@@ -2,6 +2,10 @@
 
 [English](MCP_README_EN.md) | 中文
 
+> 📖 **要做系统集成请先看 [README.md](README.md)** —— 那里说明了两条路径（把自己的系统封装成 MCP / 把第三方系统桥接进来）。本文只是工具的返回字段参考。
+>
+> ⚠️ 本文的工具名已过时：`query_xiaozhi_stock` / `list_xiaozhi_products` 已被通用的 `query_stock` / `search` 取代，当前工具集以 `warehouse_mcp.py` 里的 `@mcp.tool()` 为准（见 README.md §1）。返回字段结构仍可参考。
+
 ## 概述
 
 本 MCP 服务器为仓库管理系统提供了 API 接口，专门用于管理 watcher-xiaozhi 产品的库存。
@@ -226,7 +230,7 @@ export WAREHOUSE_API_KEY="your-api-key"
       "type": "stdio",
       "command": "uv",
       "args": ["run", "python", "warehouse_mcp.py"],
-      "cwd": "/Users/harvest/project/test_dataset/warehouse_system/mcp"
+      "cwd": "/absolute/path/to/warehouse_system/mcp"
     }
   }
 }
@@ -444,12 +448,8 @@ $env:MCP_ENDPOINT = "ws://localhost:8080/mcp"
 ### 方法 1：使用测试脚本
 
 ```bash
-# 从项目根目录运行
-python3 test/test_mcp.py
-
-# 或从 test 目录运行
-cd test
-python3 test_mcp.py
+# 从项目根目录运行（pytest 在 test 可选组里，必须带 --extra test）
+uv run --extra test pytest tests/test_mcp.py -q
 ```
 
 ### 方法 2：使用 MCP Inspector
@@ -477,7 +477,7 @@ MCP 服务器会记录所有操作日志，包括：
 ## 安全注意事项
 
 1. MCP 工具通过 API 操作数据库，请谨慎使用
-2. 建议定期备份数据库文件 `backend/warehouse.db`
+2. 建议定期备份数据库文件（默认在项目根 `warehouse.db`，可用 `DATABASE_PATH` 覆盖；Docker 部署在 `/data` 卷内）
 3. 出库操作会自动检查库存是否足够
 4. 入库/出库数量必须大于0
 5. 使用 MCP 前需确保后端服务已启动
