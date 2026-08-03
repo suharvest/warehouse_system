@@ -2,6 +2,10 @@
 
 English | [中文](MCP_README.md)
 
+> 📖 **For system integration, start with [README_EN.md](README_EN.md)** — it covers both paths (wrap your own system as MCP / bridge a third-party system in). This file is just the tool response-field reference.
+>
+> ⚠️ Tool names here are outdated: `query_xiaozhi_stock` / `list_xiaozhi_products` were replaced by the generic `query_stock` / `search`. The current tool set is whatever `@mcp.tool()` declares in `warehouse_mcp.py` (see README_EN.md §1). The response field structures are still a useful reference.
+
 ## Overview
 
 This MCP server provides API interfaces for the warehouse management system, specifically designed for managing watcher-xiaozhi product inventory.
@@ -226,7 +230,7 @@ Edit the Claude Desktop configuration file and add the following:
       "type": "stdio",
       "command": "uv",
       "args": ["run", "python", "warehouse_mcp.py"],
-      "cwd": "/Users/harvest/project/test_dataset/warehouse_system/mcp"
+      "cwd": "/absolute/path/to/warehouse_system/mcp"
     }
   }
 }
@@ -444,12 +448,8 @@ $env:MCP_ENDPOINT = "ws://localhost:8080/mcp"
 ### Method 1: Use Test Script
 
 ```bash
-# Run from project root directory
-python3 test/test_mcp.py
-
-# Or run from test directory
-cd test
-python3 test_mcp.py
+# Run from project root (pytest lives in the optional `test` group — `--extra test` is required)
+uv run --extra test pytest tests/test_mcp.py -q
 ```
 
 ### Method 2: Use MCP Inspector
@@ -477,7 +477,7 @@ The MCP server logs all operations, including:
 ## Security Notes
 
 1. MCP tools operate on database via API, use with caution
-2. Recommend regular backups of database file `backend/warehouse.db`
+2. Recommend regular backups of the database file (defaults to `warehouse.db` in the project root, override with `DATABASE_PATH`; inside the `/data` volume for Docker deployments)
 3. Outbound operations automatically check if stock is sufficient
 4. Inbound/outbound quantities must be greater than 0
 5. Ensure backend service is running before using MCP

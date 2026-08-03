@@ -1,5 +1,14 @@
 # MCP 提示词与响应系统精简设计（面向 8K 上下文小模型）
 
+> ✅ **状态：已实施（历史设计文档，非待办）。**
+> 本方案的核心部分已落地到 `warehouse_mcp.py`：扁平响应 schema
+> `{ok, executed, say, say_kind, data, awaiting_confirm}` 见 `warehouse_mcp.py:790`，
+> 精简后的 `_RULES_FOOTER` 见 `warehouse_mcp.py:432`（当前 7 条）。
+>
+> 下文「现状盘点」描述的是**实施前**的状态（13 条规则 / 7 个 tool），与今天的代码
+> 不一致是正常的 —— 当前工具数为 8。阅读时请以代码为准，本文保留作为设计依据与
+> 取舍理由的记录。
+
 > 背景：本地推理引擎专用于驱动 warehouse MCP，上下文上限 ~8K token。当前
 > `warehouse_mcp.py` 的 `_RULES_FOOTER`（13 条规则）+ 7 个 tool docstring +
 > `_wrap_response` 注入的多字段响应，已经在多轮调用下逼近上限。本文档给出
