@@ -81,6 +81,7 @@ irm https://astral.sh/uv/install.ps1 | iex
 
 ## Documentation
 
+- [MCP Integration Overview](mcp/README_EN.md) — **entry point for both integration paths**: wrap your own system as MCP, or bridge a third-party system in
 - [MCP Integration Guide](docs/MCP_External_System_Integration.md)
 - [WMS Provider Development Guide](docs/WMS_Provider_Development.md) — Integrate with third-party WMS
 - [System User Guide](docs/Warehouse_System_Guide.md)

@@ -81,6 +81,7 @@ irm https://astral.sh/uv/install.ps1 | iex
 
 ## 文档
 
+- [MCP 集成总览](mcp/README.md) — **两条集成路径的入口**：把自己的系统封装成 MCP，或把第三方系统桥接进来
 - [MCP 集成指南](docs/MCP_External_System_Integration.md)
 - [WMS Provider 开发指南](docs/WMS_Provider_Development.md) — 对接第三方 WMS 系统
 - [系统使用指南](docs/Warehouse_System_Guide.md)
