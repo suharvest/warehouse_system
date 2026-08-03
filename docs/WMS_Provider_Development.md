@@ -4,6 +4,10 @@
 
 本文档说明如何编写自定义 Provider，让 MCP 语音控制对接你自己的 WMS（仓库管理系统）后端，**无需修改任何 MCP 工具代码**。
 
+> 📖 **先读 [mcp/README.md](../mcp/README.md)** —— 那里说明了两条集成路径（自己部署 MCP / 把 Provider 上传给我们托管）、人脸闸门、以及上传校验流程。本文只讲 **Provider 接口契约**本身。
+>
+> ⚠️ **签名以 `mcp/providers/base.py` 为准。** 本文档已于 2026-08 对齐到当前代码。如果你看到的示例和 `base.py` 不一致，以 `base.py` 为准并提 issue。
+
 ## 架构概览
 
 ```
@@ -16,11 +20,11 @@ Watcher 语音 → MCP Endpoint → warehouse_mcp.py → Provider → 你的 WMS
 
 MCP 工具层（`warehouse_mcp.py`）通过 Provider 接口与后端通信。切换 WMS 只需：
 
-1. 在 `mcp/providers/` 目录新建一个 `.py` 文件
-2. 继承 `BaseProvider`，实现 6 个方法
+1. 在 `mcp/providers/` 目录新建一个 `.py` 文件（上传托管的话放 `providers/custom/`）
+2. 继承 `BaseProvider`，实现 6 个必需方法（另有 2 个可选）
 3. 在 `config.yml` 中指定 `provider` 名称
 
-系统会自动扫描 `providers/` 目录，发现并注册所有 Provider，无需手动注册。
+系统会自动扫描 `providers/` 及 `providers/custom/` 目录，发现并注册所有 Provider，无需手动注册。
 
 ## 快速开始
 
@@ -40,17 +44,23 @@ class MyWmsProvider(BaseProvider):
     # 此名称对应 config.yml 的 provider 字段
     PROVIDER_NAME = "my_wms"
 
+    # ── 6 个必需方法 ──
+
     def resolve_name(self, text, entity_type="all"):
         ...
 
     def query_stock(self, product_name, show_batches=False):
         ...
 
-    def stock_in(self, product_name, quantity, reason, operator, fuzzy,
-                 location=None, contact_id=None):
+    def stock_in(self, product_name, quantity, reason_category, reason_note,
+                 operator, fuzzy, location=None, contact_id=None,
+                 variant=None, allow_new_variant=False, actual_operator=None):
         ...
 
-    def stock_out(self, product_name, quantity, reason, operator, fuzzy):
+    def stock_out(self, product_name, quantity, reason_category, reason_note,
+                  operator, fuzzy, variant=None, location=None, batch_no=None,
+                  location_fuzzy=False, allow_partial_fallback=False,
+                  actual_operator=None):
         ...
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,
@@ -59,7 +69,19 @@ class MyWmsProvider(BaseProvider):
 
     def get_today_statistics(self):
         ...
+
+    # ── 2 个可选方法（不实现则对应工具返回 not_implemented）──
+
+    def query_batch(self, batch_no):
+        ...
+
+    def move_batch_location(self, batch_no, new_location, quantity=None,
+                            from_location=None, product_name=None,
+                            operator="MCP系统"):
+        ...
 ```
+
+> ⚠️ **参数顺序不能改。** 工具层和连通性测试都**按位置**传参。参数名可以自己取，顺序错了就是 TypeError。尤其注意 `stock_out` 的 `allow_partial_fallback` —— 工具层无条件按关键字传入，漏声明会导致**每次出库都失败**。
 
 ### 2. 修改配置
 
@@ -73,6 +95,8 @@ auth:
   token: "your-access-token"
 timeout: 15
 ```
+
+> 如果你要同时用我们的人脸识别，`api_base_url` 必须留给我们的后端，你的 WMS 地址另用自定义字段。原因和写法见 [mcp/README.md §2.5](../mcp/README.md)。
 
 ### 3. 启动
 
@@ -91,7 +115,7 @@ cd mcp
 def __init__(self, config: dict):
 ```
 
-`config` 是 `config.yml` 的完整内容。你可以在其中添加自定义字段：
+`config` 是 `config.yml` 的完整内容（上传托管时是该 Provider 在数据库里的 `config` JSON 与 `config.yml` 的合并结果）。你可以在其中添加自定义字段：
 
 ```yaml
 provider: "my_wms"
@@ -113,6 +137,8 @@ def __init__(self, config: dict):
     self.company_code = config.get("company_code", "")
 ```
 
+> 一律用 `config.get(k, default)`，不要用 `config[k]`。构造函数抛异常会让连通性测试整体判为「Provider 加载失败」，四个方法一起变红，很难定位。
+
 ### 内置 HTTP 工具
 
 基类提供了 `http_get` 和 `http_post` 方法，自动处理认证头和错误：
@@ -125,7 +151,9 @@ data = self.http_get("/inventory/items", params={"sku": "ABC123"})
 result = self.http_post("/inventory/inbound", data={"sku": "ABC123", "qty": 10})
 ```
 
-如果你的 WMS API 格式与默认不同，可以 override 这两个方法或 `get_auth_headers()`。
+出错时返回 `{"error": "..."}` 而不是抛异常，所以每个方法都要检查 `"error" in data`。
+
+如果你的 WMS API 格式与默认不同，可以 override 这两个方法或 `get_auth_headers()`。基类把 `config["api_base_url"]` 读进 `self.base_url`；要让 HTTP 打到别的地址，在 `__init__` 里覆盖 `self.base_url` 即可。
 
 ### 认证方式
 
@@ -160,7 +188,7 @@ class MyWmsProvider(BaseProvider):
         }
 ```
 
-## 6 个必须实现的方法
+## 6 个必需方法
 
 ### 1. `resolve_name(text, entity_type) -> dict`
 
@@ -183,9 +211,11 @@ class MyWmsProvider(BaseProvider):
 }
 ```
 
+**必需字段（连通性测试会校验）：** `best_match`、`confident`
+
 **实现建议：** 如果外部 WMS 有搜索 API，直接调用即可。如果没有，可以拉取物料列表后用 `rapidfuzz` 本地匹配。
 
-### 2. `query_stock(product_name, show_batches) -> dict`
+### 2. `query_stock(product_name, show_batches=False) -> dict`
 
 查询产品库存。
 
@@ -203,6 +233,7 @@ class MyWmsProvider(BaseProvider):
         "safe_stock": 100,
         "location": "A区-01架",
         "status": "正常",            # "正常" | "偏低" | "告急"
+        "variant": "M3x10",          # 可选：同名多规格时的规格
     },
     "batches": [...],                 # show_batches=True 时提供
     "message": "查询成功：M3螺丝 当前库存 500 个",
@@ -217,9 +248,27 @@ class MyWmsProvider(BaseProvider):
 }
 ```
 
-### 3. `stock_in(product_name, quantity, reason, operator, fuzzy, location, contact_id) -> dict`
+**必需字段：** `success`
+
+### 3. `stock_in(...) -> dict`
 
 产品入库。
+
+```python
+def stock_in(self, product_name, quantity, reason_category, reason_note,
+             operator, fuzzy, location=None, contact_id=None,
+             variant=None, allow_new_variant=False, actual_operator=None):
+```
+
+| 参数 | 说明 |
+|---|---|
+| `reason_category` | 入库原因枚举：`purchase` \| `return` \| `refund` \| `produce` \| `transfer_in` \| `other_in`（也接受中文别名，建议自己做一次归一化并对未知值 fail-closed） |
+| `reason_note` | 自由文本备注，可能为空字符串或 `None` |
+| `operator` | LLM/设备填的操作人，默认 `"MCP系统"`，**不可信**（可被话术伪造） |
+| `fuzzy` | 是否允许模糊匹配物料名，工具层恒传 `True` |
+| `variant` | 同名多规格时的规格值 |
+| `allow_new_variant` | 允许创建新规格；默认 `False`，需用户确认后才为 `True` |
+| `actual_operator` | **人脸识别到的真实操作人姓名快照**，可信；未启用人脸时为 `None` |
 
 **返回格式：**
 
@@ -233,13 +282,42 @@ class MyWmsProvider(BaseProvider):
 }
 ```
 
-### 4. `stock_out(product_name, quantity, reason, operator, fuzzy) -> dict`
+**必需字段：** `success`
 
-产品出库。返回格式同 `stock_in`。
+> `operator` 与 `actual_operator` 是两个独立字段，**不要合并**。要不要在自己库里存 `actual_operator`、怎么建那一列，见 [mcp/README.md §2.5](../mcp/README.md)。
 
-### 5. `search(query, entity_type, category, status, contact_type, fuzzy, include_batches, max_results) -> dict`
+### 4. `stock_out(...) -> dict`
+
+产品出库。
+
+```python
+def stock_out(self, product_name, quantity, reason_category, reason_note,
+              operator, fuzzy, variant=None, location=None, batch_no=None,
+              location_fuzzy=False, allow_partial_fallback=False,
+              actual_operator=None):
+```
+
+除与 `stock_in` 同名的参数外：
+
+| 参数 | 说明 |
+|---|---|
+| `reason_category` | 出库原因枚举：`sell` \| `lend` \| `consume` \| `loss` \| `transfer_out` \| `other_out`（`use`→`consume`、`scrap`→`loss` 等别名建议一并处理） |
+| `batch_no` | 非空时**只**从该批次扣减，不足即报错，不要自动 fallback 到其他批次 |
+| `location_fuzzy` | 对 `location` 做作用域模糊匹配（仅 MCP 调用时为 `True`） |
+| `allow_partial_fallback` | 指定批次/库位不足时，是否允许从其余库存补足。**默认 `False`** —— 工具层会先返回 `awaiting_confirm` 让用户确认，同意后才带 `True` 重发。**必须声明这个参数**，否则每次出库都 TypeError |
+
+返回格式同 `stock_in`。**必需字段：** `success`
+
+### 5. `search(...) -> dict`
 
 统一搜索。
+
+```python
+def search(self, query, entity_type, category, status, contact_type, fuzzy,
+           include_batches=False, max_results=0):
+```
+
+`max_results=0` 表示用配置里的默认上限。
 
 **返回格式：**
 
@@ -255,6 +333,10 @@ class MyWmsProvider(BaseProvider):
     "message": "搜索物料成功，找到 15 条匹配记录",
 }
 ```
+
+**必需字段：** `success`、`items`
+
+> **注意响应体积。** 云端单帧约 13 KB，返回过长会触发 WebSocket close 1009 直接断连。`DefaultProvider` 的做法是按相关度从尾部裁剪直到序列化后小于预算，建议照做。
 
 ### 6. `get_today_statistics() -> dict`
 
@@ -277,6 +359,53 @@ class MyWmsProvider(BaseProvider):
 }
 ```
 
+**必需字段：** `success`、`statistics`
+
+> 这个方法同时被用作**健康探针**（`GET /api/erp/providers/{id}/status`），请保证它足够轻量。
+
+## 2 个可选方法
+
+这两个在 `BaseProvider` 里有默认实现（返回结构化的 `not_implemented`），不实现也能实例化，但对应的 MCP 工具会一直失败。**新 Provider 建议都实现。**
+
+### `query_batch(batch_no) -> dict`
+
+按批次号查询批次详情（只读）。
+
+```python
+{
+    "success": True,
+    "batch": {"batch_no": "B003", "product_name": "M3螺丝",
+              "quantity": 12, "location": "A区-01架", ...},
+    "message": "批次 B003：M3螺丝，余量 12 个，位于 A区-01架",
+}
+```
+
+查不到时返回 `{"success": False, "error": "batch_not_found", "message": ...}`。
+
+### `move_batch_location(...) -> dict`
+
+批次库位移动，支持部分数量拆分。
+
+```python
+def move_batch_location(self, batch_no, new_location, quantity=None,
+                        from_location=None, product_name=None,
+                        operator="MCP系统"):
+```
+
+- `quantity` 为 `None` 或等于批次余量 → 整批移位
+- `quantity` 小于余量 → 拆分：源批次扣减，目标库位创建同物料新批次
+
+```python
+{
+    "success": True,
+    "operation": "move_batch_location",
+    "moved_quantity": 5,
+    "source_batch": {...},
+    "target_batch": {...},
+    "message": "已将批次 B003 的 5 个移至 B区-02架",
+}
+```
+
 ## 完整示例
 
 以下是一个对接假想 "AcmeWMS" 系统的完整 Provider 示例：
@@ -294,6 +423,16 @@ from .base import BaseProvider
 
 logger = logging.getLogger("WarehouseMCP")
 
+# 出入库原因枚举 → AcmeWMS 自己的单据类型
+_IN_REASON = {
+    "purchase": "PO", "return": "RTN", "refund": "RFD",
+    "produce": "MO", "transfer_in": "TRI", "other_in": "OTH",
+}
+_OUT_REASON = {
+    "sell": "SO", "lend": "LND", "consume": "CSM",
+    "loss": "LOS", "transfer_out": "TRO", "other_out": "OTH",
+}
+
 
 class AcmeWmsProvider(BaseProvider):
     """AcmeWMS 后端适配器。"""
@@ -307,7 +446,6 @@ class AcmeWmsProvider(BaseProvider):
     # ── 1. 模糊名称解析 ──
 
     def resolve_name(self, text, entity_type="all"):
-        # AcmeWMS 有内置的模糊搜索 API
         result = self.http_get("/search/fuzzy", params={
             "q": text,
             "type": entity_type,
@@ -370,17 +508,28 @@ class AcmeWmsProvider(BaseProvider):
 
     # ── 3. 入库 ──
 
-    def stock_in(self, product_name, quantity, reason, operator, fuzzy,
-                 location=None, contact_id=None):
+    def stock_in(self, product_name, quantity, reason_category, reason_note,
+                 operator, fuzzy, location=None, contact_id=None,
+                 variant=None, allow_new_variant=False, actual_operator=None):
         payload = {
             "item_name": product_name,
             "quantity": quantity,
-            "reason": reason,
+            "doc_type": _IN_REASON.get(reason_category, "OTH"),
+            "remark": reason_note or "",
             "operator": operator,
             "warehouse": self.warehouse_id,
         }
         if location:
             payload["location"] = location
+        if contact_id is not None:
+            payload["supplier_id"] = contact_id
+        if variant:
+            payload["spec"] = variant
+        if allow_new_variant:
+            payload["create_spec_if_missing"] = True
+        # 人脸识别到的真实操作人（可信），与 operator 分开记账
+        if actual_operator:
+            payload["verified_operator"] = actual_operator
 
         result = self.http_post("/inventory/inbound", data=payload)
         if "error" in result:
@@ -396,14 +545,30 @@ class AcmeWmsProvider(BaseProvider):
 
     # ── 4. 出库 ──
 
-    def stock_out(self, product_name, quantity, reason, operator, fuzzy):
-        result = self.http_post("/inventory/outbound", data={
+    def stock_out(self, product_name, quantity, reason_category, reason_note,
+                  operator, fuzzy, variant=None, location=None, batch_no=None,
+                  location_fuzzy=False, allow_partial_fallback=False,
+                  actual_operator=None):
+        payload = {
             "item_name": product_name,
             "quantity": quantity,
-            "reason": reason,
+            "doc_type": _OUT_REASON.get(reason_category, "OTH"),
+            "remark": reason_note or "",
             "operator": operator,
             "warehouse": self.warehouse_id,
-        })
+        }
+        if variant:
+            payload["spec"] = variant
+        if location:
+            payload["location"] = location
+        if batch_no:
+            # 指定批次时严格扣该批次，不足直接失败
+            payload["batch_no"] = batch_no
+            payload["strict_batch"] = not allow_partial_fallback
+        if actual_operator:
+            payload["verified_operator"] = actual_operator
+
+        result = self.http_post("/inventory/outbound", data=payload)
         if "error" in result:
             return {"success": False, "error": result["error"], "message": f"出库失败: {result['error']}"}
 
@@ -419,7 +584,7 @@ class AcmeWmsProvider(BaseProvider):
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,
                include_batches=False, max_results=0):
-        params = {"type": entity_type, "limit": max_results or 30}
+        params = {"type": entity_type, "limit": max_results or 10}
         if query:
             params["q"] = query
         if category:
@@ -470,6 +635,53 @@ class AcmeWmsProvider(BaseProvider):
                 f"当前库存总量 {data.get('total_stock', 0)} 件"
             ),
         }
+
+    # ── 可选：批次查询 ──
+
+    def query_batch(self, batch_no):
+        data = self.http_get("/batches/detail", params={
+            "batch_no": batch_no,
+            "warehouse": self.warehouse_id,
+        })
+        if "error" in data or not data.get("batch"):
+            return {
+                "success": False,
+                "error": "batch_not_found",
+                "message": f"未找到批次 {batch_no}",
+            }
+        b = data["batch"]
+        return {
+            "success": True,
+            "batch": b,
+            "message": f"批次 {batch_no}：{b.get('item_name')}，余量 {b.get('quantity')} 件",
+        }
+
+    # ── 可选：批次移库 ──
+
+    def move_batch_location(self, batch_no, new_location, quantity=None,
+                            from_location=None, product_name=None,
+                            operator="MCP系统"):
+        payload = {
+            "batch_no": batch_no,
+            "target_location": new_location,
+            "operator": operator,
+            "warehouse": self.warehouse_id,
+        }
+        if quantity is not None:
+            payload["quantity"] = quantity   # 不传 = 整批移
+
+        result = self.http_post("/batches/move", data=payload)
+        if "error" in result:
+            return {"success": False, "error": result["error"], "message": f"移库失败: {result['error']}"}
+
+        return {
+            "success": True,
+            "operation": "move_batch_location",
+            "moved_quantity": result.get("moved", quantity or 0),
+            "source_batch": result.get("source"),
+            "target_batch": result.get("target"),
+            "message": f"已将批次 {batch_no} 移至 {new_location}",
+        }
 ```
 
 对应的 `config.yml`：
@@ -483,6 +695,21 @@ auth:
 timeout: 15
 warehouse_id: "WH-SHENZHEN-01"
 ```
+
+## 上传托管时的额外约束
+
+如果你不是自己部署 MCP，而是把 `.py` 上传到我们的系统（[mcp/README.md](../mcp/README.md) 的路径 B），文件还要通过 AST 安全扫描：
+
+- 文件 ≤ 100 KB，扩展名 `.py`
+- 禁止导入：`os` `sys` `subprocess` `shutil` `socket` `ctypes` `code` `codeop`
+- 禁止调用：`eval` `exec` `compile` `open` `__import__`
+- **禁用调用是按函数名匹配的，含属性调用** —— `re.compile(...)` 会被判 `*.compile()` 违规，即使 `re` 在白名单里。改用 `re.match` / `re.search` 直接调
+- 必须有一个 `BaseProvider` 子类且 `PROVIDER_NAME` 非空
+- 必须实现上述 6 个必需方法
+
+因为禁用了 `os`，所有配置都从构造函数的 `config` 读，不要读环境变量或文件。
+
+完整的上传 → L1/L2 测试 → 激活 → 切模式流程见 [mcp/README.md §3.3](../mcp/README.md)。
 
 ## 调试技巧
 
@@ -505,9 +732,20 @@ print(provider.query_stock("M3螺丝"))
 print(provider.get_today_statistics())
 ```
 
-### 日志级别
+### 跑一遍连通性测试
 
-设置环境变量查看详细日志：
+```bash
+cd mcp
+uv run python -c "
+from providers.test_runner import run_level1_tests, run_level2_tests
+print(run_level1_tests('providers/custom/my_wms.py', {'api_base_url': 'https://...'}))
+print(run_level2_tests('providers/custom/my_wms.py', {'api_base_url': 'https://...'}))
+"
+```
+
+L2 会真的往你的 WMS 里写 `test_item` 各 1 件，**请指向测试环境**。
+
+### 日志级别
 
 ```bash
 export LOG_LEVEL=DEBUG
@@ -518,10 +756,16 @@ export LOG_LEVEL=DEBUG
 
 | 问题 | 原因 | 解决方案 |
 |------|------|---------|
-| `未知的 provider 'xxx'` | PROVIDER_NAME 与 config.yml 不匹配 | 检查拼写，确保 `.py` 文件在 `mcp/providers/` 目录下 |
+| `未知的 provider 'xxx'` | PROVIDER_NAME 与 config.yml 不匹配 | 检查拼写，确保 `.py` 在 `mcp/providers/` 或 `providers/custom/` 目录下 |
+| 查询和入库都正常，**只有出库 TypeError** | `stock_out` 漏了 `allow_partial_fallback` 参数 | 按本文签名补齐；工具层无条件按关键字传它 |
+| `TypeError: missing ... 'fuzzy'` | 用了旧的 `reason` 单参签名 | `reason` 已拆成 `reason_category` + `reason_note`，共 6 个必需位置参数 |
+| 某工具恒返回 `not_implemented` | 没实现 `query_batch` / `move_batch_location` | 见「2 个可选方法」 |
 | `无法连接到后端服务` | `api_base_url` 不可达 | 检查 URL、网络和防火墙 |
 | `401 Unauthorized` | 认证配置错误 | 检查 `auth` 块的 type 和凭证 |
+| 所有工具返回 `face_auth_denied:http_404` | `api_base_url` 指向的后端没有 `/face/verify-mcp` | 见 [mcp/README.md §2.5](../mcp/README.md) |
+| L1 四个方法一起失败，error 是「Provider 加载失败」 | 构造函数抛异常 | 用 `config.get(k, default)` 而不是 `config[k]` |
 | 方法返回空结果 | 外部 WMS API 响应格式不匹配 | 用日志打印原始响应，对照 API 文档调整字段映射 |
+| 返回长列表时连接被断（1009） | 单帧超过约 13 KB | 裁剪 `items`，收紧 `max_results` |
 
 ---
 
@@ -532,6 +776,10 @@ export LOG_LEVEL=DEBUG
 English | [中文](#wms-provider-开发指南)
 
 This guide explains how to write a custom Provider to connect MCP voice control to your own WMS backend, **without modifying any MCP tool code**.
+
+> 📖 **Read [mcp/README_EN.md](../mcp/README_EN.md) first** — it covers the two integration paths, the face gate, and the upload validation flow. This document covers the **Provider interface contract** only.
+>
+> ⚠️ **`mcp/providers/base.py` is the source of truth for signatures.** This document was realigned to the current code in 2026-08.
 
 ## Architecture
 
@@ -545,17 +793,15 @@ Watcher Voice → MCP Endpoint → warehouse_mcp.py → Provider → Your WMS AP
 
 The MCP tool layer (`warehouse_mcp.py`) communicates with backends through the Provider interface. To switch WMS:
 
-1. Create a new `.py` file in `mcp/providers/`
-2. Extend `BaseProvider` and implement 6 methods
+1. Create a new `.py` file in `mcp/providers/` (or `providers/custom/` for hosted uploads)
+2. Extend `BaseProvider` and implement 6 required methods (2 more are optional)
 3. Set `provider` name in `config.yml`
 
-The system auto-discovers all Providers in the `providers/` directory — no manual registration needed.
+The system auto-discovers all Providers in `providers/` and `providers/custom/` — no manual registration needed.
 
 ## Quick Start
 
 ### 1. Create Provider File
-
-Create a new file in `mcp/providers/`, e.g., `my_wms.py`:
 
 ```python
 """Provider for MyWMS system"""
@@ -568,30 +814,38 @@ class MyWmsProvider(BaseProvider):
 
     PROVIDER_NAME = "my_wms"   # matches config.yml provider field
 
-    def resolve_name(self, text, entity_type="all"):
-        ...
+    # ── 6 required methods ──
 
-    def query_stock(self, product_name, show_batches=False):
-        ...
+    def resolve_name(self, text, entity_type="all"): ...
 
-    def stock_in(self, product_name, quantity, reason, operator, fuzzy,
-                 location=None, contact_id=None):
-        ...
+    def query_stock(self, product_name, show_batches=False): ...
 
-    def stock_out(self, product_name, quantity, reason, operator, fuzzy):
-        ...
+    def stock_in(self, product_name, quantity, reason_category, reason_note,
+                 operator, fuzzy, location=None, contact_id=None,
+                 variant=None, allow_new_variant=False, actual_operator=None): ...
+
+    def stock_out(self, product_name, quantity, reason_category, reason_note,
+                  operator, fuzzy, variant=None, location=None, batch_no=None,
+                  location_fuzzy=False, allow_partial_fallback=False,
+                  actual_operator=None): ...
 
     def search(self, query, entity_type, category, status, contact_type, fuzzy,
-               include_batches=False, max_results=0):
-        ...
+               include_batches=False, max_results=0): ...
 
-    def get_today_statistics(self):
-        ...
+    def get_today_statistics(self): ...
+
+    # ── 2 optional methods (tools return not_implemented if omitted) ──
+
+    def query_batch(self, batch_no): ...
+
+    def move_batch_location(self, batch_no, new_location, quantity=None,
+                            from_location=None, product_name=None,
+                            operator="MCP系统"): ...
 ```
 
-### 2. Update Config
+> ⚠️ **Parameter order is fixed.** Both the tool layer and the connectivity tests pass arguments **positionally**. You may rename parameters; reordering them is a TypeError. Watch `stock_out`'s `allow_partial_fallback` in particular — the tool layer always passes it as a keyword, so omitting it makes **every outbound call fail**.
 
-Edit `mcp/config.yml`:
+### 2. Update Config
 
 ```yaml
 provider: "my_wms"
@@ -602,6 +856,8 @@ auth:
 timeout: 15
 ```
 
+> If you also use our face recognition, `api_base_url` must stay pointed at our backend and your WMS address goes in a custom field. See [mcp/README_EN.md §2.5](../mcp/README_EN.md).
+
 ### 3. Start
 
 ```bash
@@ -609,13 +865,13 @@ cd mcp
 ./start_mcp.sh
 ```
 
-Log output will show `使用 provider: my_wms (MyWmsProvider)` to confirm the switch.
+Log output shows `使用 provider: my_wms (MyWmsProvider)` to confirm the switch.
 
 ## BaseProvider Interface
 
 ### Constructor
 
-`config` contains the full `config.yml` content. Add custom fields as needed:
+`config` contains the full `config.yml` content (merged with the Provider's DB `config` JSON for hosted uploads). Add custom fields as needed:
 
 ```yaml
 provider: "my_wms"
@@ -629,6 +885,8 @@ def __init__(self, config: dict):
     self.warehouse_id = config.get("warehouse_id", "")
 ```
 
+> Always use `config.get(k, default)`, never `config[k]`. A constructor exception makes the whole connectivity test report "Provider load failed" with all four methods red at once — hard to diagnose.
+
 ### Built-in HTTP Helpers
 
 The base class provides `http_get` and `http_post` with automatic auth headers and error handling:
@@ -638,9 +896,11 @@ data = self.http_get("/items", params={"sku": "ABC"})
 result = self.http_post("/inbound", data={"sku": "ABC", "qty": 10})
 ```
 
-### Authentication
+They return `{"error": "..."}` instead of raising, so check `"error" in data` in every method.
 
-Configured in the `auth` block of `config.yml`:
+The base class reads `config["api_base_url"]` into `self.base_url`; override it in `__init__` to point HTTP calls elsewhere.
+
+### Authentication
 
 | type | Fields | Generated Header |
 |------|--------|-----------------|
@@ -651,16 +911,47 @@ Configured in the `auth` block of `config.yml`:
 
 ## Required Methods
 
-Each method must return a `dict`. See the Chinese section above for detailed return format specifications for all 6 methods:
+Each method must return a `dict`. See the Chinese section above for full return-format specs.
 
-| Method | Purpose | Key Return Fields |
+| Method | Purpose | Required return keys |
 |--------|---------|------------------|
-| `resolve_name(text, entity_type)` | Fuzzy name resolution | `best_match`, `confident`, `candidates` |
-| `query_stock(product_name, show_batches)` | Query inventory | `success`, `product`, `message` |
-| `stock_in(...)` | Record inbound | `success`, `message`, `new_stock` |
-| `stock_out(...)` | Record outbound | `success`, `message`, `new_stock` |
-| `search(...)` | Unified search | `success`, `count`, `total`, `items` |
-| `get_today_statistics()` | Daily summary | `success`, `date`, `statistics` |
+| `resolve_name(text, entity_type)` | Fuzzy name resolution | `best_match`, `confident` |
+| `query_stock(product_name, show_batches)` | Query inventory | `success` |
+| `stock_in(...)` | Record inbound | `success` |
+| `stock_out(...)` | Record outbound | `success` |
+| `search(...)` | Unified search | `success`, `items` |
+| `get_today_statistics()` | Daily summary | `success`, `statistics` |
+
+Key argument semantics:
+
+| Argument | Meaning |
+|---|---|
+| `reason_category` (in) | `purchase` \| `return` \| `refund` \| `produce` \| `transfer_in` \| `other_in` |
+| `reason_category` (out) | `sell` \| `lend` \| `consume` \| `loss` \| `transfer_out` \| `other_out` |
+| `reason_note` | Free-text note; may be `""` or `None` |
+| `operator` | LLM/device-supplied, defaults to `"MCP系统"` — **untrusted** (forgeable via prompt injection) |
+| `actual_operator` | Name snapshot from face verification — **trusted**; `None` when face is off |
+| `batch_no` | When set, deduct **only** from that batch; fail rather than fall back |
+| `allow_partial_fallback` | Whether an insufficient batch/location may draw from other stock. Defaults to `False`; the tool layer asks the user first and resends with `True` |
+
+`get_today_statistics()` doubles as the health probe for `GET /api/erp/providers/{id}/status` — keep it lightweight.
+
+## Optional Methods
+
+`query_batch(batch_no)` and `move_batch_location(...)` have default implementations returning a structured `not_implemented`, so a Provider without them still instantiates — but the corresponding MCP tools will always fail. New Providers should implement both. See the Chinese section for return formats.
+
+## Hosted Upload Constraints
+
+If you upload the `.py` to our system rather than self-hosting, it must also pass an AST security scan:
+
+- ≤ 100 KB, `.py` extension
+- Forbidden imports: `os` `sys` `subprocess` `shutil` `socket` `ctypes` `code` `codeop`
+- Forbidden calls: `eval` `exec` `compile` `open` `__import__`
+- **Forbidden calls match by function name, including attribute calls** — `re.compile(...)` is flagged as `*.compile()` even though `re` is whitelisted. Use `re.match` / `re.search` directly
+- Must contain a `BaseProvider` subclass with a non-empty `PROVIDER_NAME`
+- Must implement the 6 required methods
+
+Since `os` is forbidden, read all configuration from the constructor's `config` dict.
 
 ## Debugging
 
@@ -677,3 +968,27 @@ provider = load_provider(config)
 print(provider.query_stock("M3 Screw"))
 print(provider.get_today_statistics())
 ```
+
+Run the connectivity tests directly:
+
+```bash
+cd mcp
+uv run python -c "
+from providers.test_runner import run_level1_tests, run_level2_tests
+print(run_level1_tests('providers/custom/my_wms.py', {'api_base_url': 'https://...'}))
+print(run_level2_tests('providers/custom/my_wms.py', {'api_base_url': 'https://...'}))
+"
+```
+
+L2 really writes 1 unit of `test_item` into your WMS — **point it at a test environment**.
+
+### Common Issues
+
+| Issue | Cause | Fix |
+|------|------|---------|
+| Queries and inbound work, **only outbound raises TypeError** | `stock_out` is missing `allow_partial_fallback` | Add it; the tool layer always passes it as a keyword |
+| `TypeError: missing ... 'fuzzy'` | Using the old single-`reason` signature | `reason` split into `reason_category` + `reason_note` — 6 required positional args |
+| A tool always returns `not_implemented` | `query_batch` / `move_batch_location` not implemented | See Optional Methods |
+| L1 fails on all four methods with "Provider load failed" | Constructor raised | Use `config.get(k, default)` |
+| All tools return `face_auth_denied:http_404` | Backend at `api_base_url` has no `/face/verify-mcp` | See [mcp/README_EN.md §2.5](../mcp/README_EN.md) |
+| Connection drops on long lists (1009) | Frame exceeded ~13 KB | Trim `items`, lower `max_results` |
