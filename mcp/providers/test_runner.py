@@ -202,17 +202,20 @@ def run_level2_tests(filepath: str, config: dict) -> dict:
 
     results: dict = {}
 
-    # stock_in("test_item", 1, "API connectivity test", "system", False) → 需要 success
+    # 位置参数必须与 BaseProvider 的签名逐一对齐：
+    #   stock_in (product_name, quantity, reason_category, reason_note, operator, fuzzy)
+    #   stock_out(product_name, quantity, reason_category, reason_note, operator, fuzzy)
+    # 旧版这里只传 5 个（reason 未拆分成 category+note 之前的签名），导致任何严格
+    # 按 BaseProvider 实现的 Provider 都会 TypeError: missing 'fuzzy' 而 L2 必挂。
     r = _run_single_test(
         provider, "stock_in",
-        ("test_item", 1, "API connectivity test", "system", False)
+        ("test_item", 1, "other_in", "API connectivity test", "system", False)
     )
     results["stock_in"] = _check_keys(r, {"success"}, "stock_in")
 
-    # stock_out("test_item", 1, "API connectivity test", "system", False) → 需要 success
     r = _run_single_test(
         provider, "stock_out",
-        ("test_item", 1, "API connectivity test", "system", False)
+        ("test_item", 1, "other_out", "API connectivity test", "system", False)
     )
     results["stock_out"] = _check_keys(r, {"success"}, "stock_out")
 
