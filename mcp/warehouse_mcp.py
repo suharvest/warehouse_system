@@ -97,6 +97,12 @@ def load_config():
         config['api_key'] = os.environ.get("WAREHOUSE_API_KEY")
     if os.environ.get("WAREHOUSE_PROVIDER"):
         config['provider'] = os.environ.get("WAREHOUSE_PROVIDER")
+    # 外部 ERP 模式下本连接绑定的对方租户/仓库。子进程模式（mcp_pipe）靠这两个
+    # env 传递；共享运行时模式走 create_runtime_state 的入参，两条路径等价。
+    if os.environ.get("WAREHOUSE_EXTERNAL_TENANT_ID"):
+        config['external_tenant_id'] = os.environ["WAREHOUSE_EXTERNAL_TENANT_ID"]
+    if os.environ.get("WAREHOUSE_EXTERNAL_WAREHOUSE_ID"):
+        config['external_warehouse_id'] = os.environ["WAREHOUSE_EXTERNAL_WAREHOUSE_ID"]
 
     # 兼容旧版顶层 api_key 字段：归一化为 auth.api_key 结构，
     # 让 _face_guard / BaseProvider.get_auth_headers 等统一逻辑都能拿到。
@@ -185,6 +191,13 @@ def _load_provider_from_db_or_default(default_config: dict):
     merged_config = {**default_config, **stored_config}
     merged_config['provider'] = provider_name
 
+    # 连接级的外部作用域比 Provider 存的静态配置更具体，必须在 merge 之后重新覆盖
+    # ——否则 stored_config 里若也写了同名键，会把本连接绑定的仓库盖掉，
+    # 多个智能体就会全部打到同一个外部仓库。
+    for _k in ('external_tenant_id', 'external_warehouse_id'):
+        if default_config.get(_k):
+            merged_config[_k] = default_config[_k]
+
     custom_dir = os.path.join(os.path.dirname(__file__), 'providers', 'custom')
 
     # 上传接口（backend/routers/erp.py:_get_providers_custom_dir）把文件写到
@@ -226,8 +239,15 @@ def create_runtime_state(
     *,
     debug: bool = False,
     provider: str | None = None,
+    external_tenant_id: str | None = None,
+    external_warehouse_id: str | None = None,
 ) -> dict:
-    """Create isolated configuration and provider cache for one MCP session."""
+    """Create isolated configuration and provider cache for one MCP session.
+
+    external_tenant_id / external_warehouse_id 是本连接绑定的**对方系统**的
+    租户与仓库编码（外部 ERP 模式）。runtime state 每连接一份、Provider 实例
+    也缓存在各自的 state 里，所以多个智能体各自绑不同的外部仓库时天然隔离。
+    """
     config = deepcopy(_config)
     config['api_base_url'] = api_base_url.rstrip('/')
     config['api_key'] = api_key
@@ -238,6 +258,10 @@ def create_runtime_state(
     }
     if provider:
         config['provider'] = provider
+    if external_tenant_id:
+        config['external_tenant_id'] = external_tenant_id
+    if external_warehouse_id:
+        config['external_warehouse_id'] = external_warehouse_id
     return {
         'config': config,
         'provider': None,

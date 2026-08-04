@@ -138,6 +138,8 @@ class SharedMCPRuntime:
         api_key: str,
         *,
         debug: bool = False,
+        external_tenant_id: Optional[str] = None,
+        external_warehouse_id: Optional[str] = None,
     ) -> dict:
         if self._warehouse_mcp is None:
             raise RuntimeError("Shared MCP runtime has not started")
@@ -145,6 +147,8 @@ class SharedMCPRuntime:
             api_base_url,
             api_key,
             debug=debug,
+            external_tenant_id=external_tenant_id,
+            external_warehouse_id=external_warehouse_id,
         )
 
     async def run_connection(

@@ -227,6 +227,12 @@ class MCPProcessManager:
         for key, value in log_context.items():
             env[f"MCP_LOG_{key.upper()}"] = str(value)
 
+        external_scope = self._load_external_scope(conn_id)
+        if external_scope.get('external_tenant_id'):
+            env['WAREHOUSE_EXTERNAL_TENANT_ID'] = external_scope['external_tenant_id']
+        if external_scope.get('external_warehouse_id'):
+            env['WAREHOUSE_EXTERNAL_WAREHOUSE_ID'] = external_scope['external_warehouse_id']
+
         if self._shared_runtime_enabled:
             return await self._start_shared_connection(
                 conn_id=conn_id,
@@ -235,6 +241,7 @@ class MCPProcessManager:
                 debug_mode=effective_debug,
                 log_context=log_context,
                 api_url=env['WAREHOUSE_API_URL'],
+                external_scope=external_scope,
             )
 
         try:
@@ -293,14 +300,18 @@ class MCPProcessManager:
         debug_mode: bool,
         log_context: dict,
         api_url: str,
+        external_scope: dict | None = None,
     ) -> bool:
         """Start one watcher session on the process-wide FastMCP runtime."""
         try:
             runtime = await self._get_shared_runtime()
+            external_scope = external_scope or {}
             session_state = runtime.create_session_state(
                 api_url,
                 api_key,
                 debug=debug_mode,
+                external_tenant_id=external_scope.get('external_tenant_id'),
+                external_warehouse_id=external_scope.get('external_warehouse_id'),
             )
             mcp_proc = MCPProcess(
                 conn_id=conn_id,
@@ -441,6 +452,32 @@ class MCPProcessManager:
             if text:
                 clean[key] = text[:160]
         return clean
+
+    @staticmethod
+    def _load_external_scope(conn_id: str) -> dict:
+        """读取本连接绑定的**对方系统**租户/仓库编码（外部 ERP 模式）。
+
+        自有模式下这两列为空，返回空 dict，行为与改动前完全一致。
+        """
+        try:
+            from db import get_engine
+            from metadata import mcp_connections as _t_mcp
+            from sqlalchemy import select as _sa_select
+
+            stmt = _sa_select(
+                _t_mcp.c.external_tenant_id,
+                _t_mcp.c.external_warehouse_id,
+            ).where(_t_mcp.c.id == conn_id)
+            with get_engine().connect() as conn:
+                row = conn.execute(stmt).first()
+            if not row:
+                return {}
+            return {
+                k: v for k, v in dict(row._mapping).items() if v
+            }
+        except Exception as e:
+            logger.debug(f"Failed to load external scope for '{conn_id}': {e}")
+            return {}
 
     @staticmethod
     def _load_log_context(conn_id: str) -> dict:

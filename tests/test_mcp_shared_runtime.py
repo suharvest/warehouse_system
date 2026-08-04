@@ -34,11 +34,16 @@ class _FakeSharedRuntime:
     async def stop(self):
         self.stopped = True
 
-    def create_session_state(self, api_base_url, api_key, *, debug=False):
+    def create_session_state(self, api_base_url, api_key, *, debug=False,
+                             external_tenant_id=None, external_warehouse_id=None):
+        # 签名要跟真实的 SharedMCPRuntime 对齐：外部 ERP 模式下管理器会把本连接
+        # 绑定的对方租户/仓库一并传进来，缺参数会让启动直接失败。
         return {
             'api_base_url': api_base_url,
             'api_key': api_key,
             'debug': debug,
+            'external_tenant_id': external_tenant_id,
+            'external_warehouse_id': external_warehouse_id,
         }
 
     async def run_connection(self, endpoint, state, log_target, callback):
