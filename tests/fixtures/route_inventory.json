@@ -241,6 +241,22 @@
   },
   {
     "method": "GET",
+    "name": "probe_external_tenants",
+    "path": "/api/erp/external/tenants",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
+    "name": "probe_external_warehouses",
+    "path": "/api/erp/external/warehouses",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
+    "method": "GET",
     "name": "list_erp_providers",
     "path": "/api/erp/providers",
     "response_model": null,
