@@ -306,3 +306,29 @@ class BaseProvider(ABC):
             "error": "not_implemented",
             "message": "当前 Provider 未实现外部仓库探测（list_warehouses）",
         }
+
+    def list_users(self, tenant_id: str | None = None) -> dict:
+        """列出外部系统的用户/账号（只读探测）。
+
+        用途与租户/仓库探测不同：**授权是我方的责任，推不出去**。
+        谁能登录、谁能配哪个智能体、谁能改人脸规则，都由我方的
+        users(role, tenant_id) + user_warehouses 判定。外部 ERP 模式下库存
+        数据虽然全在对方，这份「用户 → 租户/角色」的归属数据仍然必须落在我方，
+        否则整个权限体系是空的。本方法用于把对方的账号**导入**为我方用户，
+        避免管理员手工照抄一遍。
+
+        注意「账号」与「操作人」是两层：一个账号可能被多人共用（如白班夜班共用
+        作业账号），账号是配置期的静态绑定，操作人是每次调用时由人脸识别得出的
+        `actual_operator`。两者正交，不要混为一谈。
+
+        Args:
+            tenant_id: 已选定的外部租户 ID；对方无租户概念时为 None。
+
+        返回: {success, items: [{"id": str, "name": str, "display_name"?: str}], message}
+        默认实现返回 not_implemented；子类应当 override。
+        """
+        return {
+            "success": False,
+            "error": "not_implemented",
+            "message": "当前 Provider 未实现外部用户探测（list_users）",
+        }

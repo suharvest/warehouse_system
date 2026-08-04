@@ -96,6 +96,10 @@ warehouses = Table(
     Column("is_disabled", Boolean, nullable=False, server_default="0"),
     _ts_col(),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
+    # 对方系统没有租户概念时，仓库就是唯一的作用域维度——此时把对方仓库导入为
+    # 本地行**仅作权限锚点**（user_warehouses 要绑本地 warehouse_id），
+    # 不承载任何库存数据，库存仍全部在对方。对方有租户概念时这一列为空。
+    Column("external_warehouse_id", String(128), nullable=True),
     Index("idx_warehouses_tenant", "tenant_id"),
     Index("idx_warehouses_slug_tenant", "slug", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
@@ -120,6 +124,10 @@ users = Table(
     Column("created_by", Integer, ForeignKey("users.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Column("last_login_at", DateTime, nullable=True),
+    # 外部 ERP 模式下对应的对方账号 ID。授权始终由我方判定（role + tenant_id +
+    # user_warehouses），这一列只做「我方用户 ↔ 对方账号」的对应关系：用于导入
+    # 去重/增量同步，以及把人脸识别出的操作人反查回对方系统认的账号。
+    Column("external_user_id", String(128), nullable=True),
     Index("idx_users_tenant", "tenant_id"),
     Index("idx_users_username_tenant", "username", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,

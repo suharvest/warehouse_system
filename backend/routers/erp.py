@@ -35,6 +35,8 @@ from deps import (
 from metadata import (
     erp_providers as _t_erp_providers,
     system_settings as _t_system_settings,
+    users as _t_users,
+    warehouses as _t_warehouses,
 )
 from resource_router import ResourceRouter
 
@@ -383,6 +385,232 @@ async def probe_external_warehouses(
     tid = _resolve_probe_tenant(current_user, tenant_id)
     provider = _load_active_provider_instance(tid)
     return _probe(provider.list_warehouses, external_tenant_id)
+
+
+@router.get("/api/erp/external/users")
+async def probe_external_users(
+    external_tenant_id: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
+):
+    """探测外部系统的用户/账号列表（供导入使用）。
+
+    要 ADMIN：这是拿来建我方登录账号的，比只读的租户/仓库探测敏感。
+    """
+    tid = _resolve_probe_tenant(current_user, tenant_id)
+    provider = _load_active_provider_instance(tid)
+    return _probe(provider.list_users, external_tenant_id)
+
+
+# ============ 外部身份导入 ============
+# 授权是我方的责任，推不出去：谁能登录、谁能配哪个智能体、谁能改人脸规则，
+# 走的是 users(role, tenant_id) + user_warehouses 这条链。所以即便库存数据
+# 全在对方，「用户 → 租户/角色」这份归属数据仍必须落在我方。导入只是免去
+# 管理员照着对方的用户表手工重敲一遍，不改变授权由我方判定这一事实。
+
+
+class _ImportUserItem(BaseModel):
+    external_user_id: str
+    username: str
+    display_name: Optional[str] = None
+    role: str = "operate"
+
+
+class _ImportUsersRequest(BaseModel):
+    users: list[_ImportUserItem]
+    # 导入只建身份，密码本地管：统一初始密码，导入后应要求用户自行修改。
+    default_password: str
+    tenant_id: Optional[int] = None
+
+
+class _ImportWarehouseItem(BaseModel):
+    external_warehouse_id: str
+    name: str
+
+
+class _ImportWarehousesRequest(BaseModel):
+    warehouses: list[_ImportWarehouseItem]
+    tenant_id: Optional[int] = None
+
+
+def _resolve_import_tenant(current_user: CurrentUser, tenant_id: Optional[int]) -> int:
+    return _resolve_probe_tenant(current_user, tenant_id)
+
+
+@router.post("/api/erp/external/import/users")
+async def import_external_users(
+    request: _ImportUsersRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN)),
+):
+    """把外部系统的账号导入为我方用户（幂等，按 external_user_id 增量同步）。
+
+    - 已存在同 external_user_id 的用户 → 更新 username/display_name/role，**不动密码**
+    - 不存在 → 新建，用 default_password 作为初始密码
+    - 同租户下 username 撞车但 external_user_id 不同 → 跳过并回报，不静默覆盖
+    """
+    from database import hash_password
+
+    tid = _resolve_import_tenant(current_user, request.tenant_id)
+    if not request.users:
+        return {"created": 0, "updated": 0, "skipped": [], "message": "没有要导入的用户"}
+    if len(request.default_password) < 4:
+        raise HTTPException(status_code=400, detail="初始密码长度至少 4 位")
+
+    valid_roles = {"admin", "operate", "view"}
+    now_dt = datetime.now()
+    # bcrypt 很慢，整批共用一个初始密码，只算一次
+    pw_hash = hash_password(request.default_password)
+
+    created = updated = 0
+    skipped: list[dict] = []
+
+    with get_engine().begin() as sa_conn:
+        for item in request.users:
+            ext_id = (item.external_user_id or "").strip()
+            username = (item.username or "").strip()
+            if not ext_id or not username:
+                skipped.append({"external_user_id": item.external_user_id,
+                                "reason": "external_user_id 或 username 为空"})
+                continue
+            role = item.role if item.role in valid_roles else "operate"
+
+            existing = sa_conn.execute(
+                select(_t_users.c.id).where(and_(
+                    _t_users.c.tenant_id == tid,
+                    _t_users.c.external_user_id == ext_id,
+                ))
+            ).first()
+
+            if existing:
+                sa_conn.execute(
+                    update(_t_users).where(_t_users.c.id == existing.id).values(
+                        username=username,
+                        display_name=item.display_name,
+                        role=role,
+                    )
+                )
+                updated += 1
+                continue
+
+            # 同租户重名但不是同一个外部账号：不覆盖，交给管理员决定
+            clash = sa_conn.execute(
+                select(_t_users.c.id, _t_users.c.external_user_id).where(and_(
+                    _t_users.c.tenant_id == tid,
+                    _t_users.c.username == username,
+                ))
+            ).first()
+            if clash:
+                skipped.append({
+                    "external_user_id": ext_id,
+                    "username": username,
+                    "reason": "该租户下已存在同名用户且并非同一外部账号，未覆盖",
+                })
+                continue
+
+            sa_conn.execute(
+                insert(_t_users).values(
+                    username=username,
+                    password_hash=pw_hash,
+                    role=role,
+                    display_name=item.display_name,
+                    tenant_id=tid,
+                    external_user_id=ext_id,
+                    created_by=current_user.id,
+                    created_at=now_dt,
+                )
+            )
+            created += 1
+
+    logger.info(
+        f"导入外部用户: tenant={tid} 新建={created} 更新={updated} 跳过={len(skipped)}"
+        f"，操作人: {current_user.display_name}"
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个",
+    }
+
+
+@router.post("/api/erp/external/import/warehouses")
+async def import_external_warehouses(
+    request: _ImportWarehousesRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN)),
+):
+    """把外部仓库导入为本地仓库行，**仅作权限锚点**。
+
+    只在对方系统没有租户概念时才需要：那时仓库是唯一的作用域维度，
+    而 user_warehouses 必须绑本地 warehouse_id。导入的行不承载任何库存数据，
+    库存仍全部在对方。幂等：按 (tenant_id, external_warehouse_id) 增量同步。
+    """
+    tid = _resolve_import_tenant(current_user, request.tenant_id)
+    if not request.warehouses:
+        return {"created": 0, "updated": 0, "skipped": [], "message": "没有要导入的仓库"}
+
+    created = updated = 0
+    skipped: list[dict] = []
+
+    with get_engine().begin() as sa_conn:
+        for item in request.warehouses:
+            ext_id = (item.external_warehouse_id or "").strip()
+            name = (item.name or "").strip()
+            if not ext_id or not name:
+                skipped.append({"external_warehouse_id": item.external_warehouse_id,
+                                "reason": "external_warehouse_id 或 name 为空"})
+                continue
+
+            existing = sa_conn.execute(
+                select(_t_warehouses.c.id).where(and_(
+                    _t_warehouses.c.tenant_id == tid,
+                    _t_warehouses.c.external_warehouse_id == ext_id,
+                ))
+            ).first()
+            if existing:
+                sa_conn.execute(
+                    update(_t_warehouses).where(_t_warehouses.c.id == existing.id)
+                    .values(name=name)
+                )
+                updated += 1
+                continue
+
+            # slug 取外部编码（该租户内唯一），撞车说明本地已有同 slug 的仓库
+            slug = ext_id[:64]
+            clash = sa_conn.execute(
+                select(_t_warehouses.c.id).where(and_(
+                    _t_warehouses.c.tenant_id == tid,
+                    _t_warehouses.c.slug == slug,
+                ))
+            ).first()
+            if clash:
+                skipped.append({
+                    "external_warehouse_id": ext_id,
+                    "reason": "该租户下已存在同 slug 的本地仓库，未覆盖",
+                })
+                continue
+
+            sa_conn.execute(
+                insert(_t_warehouses).values(
+                    slug=slug,
+                    name=name,
+                    tenant_id=tid,
+                    external_warehouse_id=ext_id,
+                    is_default=0,
+                    is_disabled=0,
+                )
+            )
+            created += 1
+
+    logger.info(
+        f"导入外部仓库: tenant={tid} 新建={created} 更新={updated} 跳过={len(skipped)}"
+        f"，操作人: {current_user.display_name}"
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个",
+    }
 
 
 # ---- ERP Providers GET / PUT / DELETE migrated to ResourceRouter (R2 phase 3) ----
