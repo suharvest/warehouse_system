@@ -36,3 +36,9 @@ test/
 # 其他
 .DS_Store
 *.log
+
+# 第三方 Provider 运行时投放目录：本地调试/客户对接用的 .py 绝不能进镜像。
+# providers/__init__.py 的 _discover() 会自动注册这里的所有 BaseProvider 子类，
+# 一旦打进公共镜像，等于把某个客户的 Provider 注册进了所有人的部署。
+# 目录本身靠 .gitkeep 保留（上传接口和 bind mount 都需要它存在）。
+mcp/providers/custom/*.py
