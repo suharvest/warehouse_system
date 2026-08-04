@@ -786,7 +786,7 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         say = _fail_text("操作失败。")
         say_kind = "fail"
 
-    return {
+    out = {
         "ok": success,
         "executed": executed,
         "say": say,
@@ -794,6 +794,18 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         "data": data,
         "awaiting_confirm": awaiting_confirm,
     }
+    # 反幻觉哨兵（写操作失败专用）：实测部分云端 LLM 会无视 ok/executed 字段、
+    # 向用户宣称"已出库"。对策是把失败写进 say 的显式前缀 + 顶层祈使句 notice
+    # ——LLM 对返回体内自然语言指令的服从度远高于布尔字段。仅 say_kind='fail'
+    # 时注入；'ask'（歧义追问/确认）不是失败，不加。
+    if operation in _WRITE_OPS and not success and say_kind == "fail":
+        out["say"] = f"【操作失败，未执行】{say}"
+        out["notice"] = (
+            f"重要：本次{operation}没有执行，库存没有任何变化。"
+            "你必须如实告知用户操作失败及原因（照 say 内容播报），"
+            "严禁告诉用户操作已完成或已出库/已入库。"
+        )
+    return out
 
 
 def _antihallucination(operation: str):
