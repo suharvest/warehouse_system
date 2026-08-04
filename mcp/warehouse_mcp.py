@@ -186,10 +186,22 @@ def _load_provider_from_db_or_default(default_config: dict):
     merged_config['provider'] = provider_name
 
     custom_dir = os.path.join(os.path.dirname(__file__), 'providers', 'custom')
-    filepath = os.path.join(custom_dir, filename)
 
-    if not os.path.exists(filepath):
-        logger.warning(f"激活的 Provider 文件不存在: {filepath}，回退到默认 Provider")
+    # 上传接口（backend/routers/erp.py:_get_providers_custom_dir）把文件写到
+    # custom/<tenant_id>/<filename>，而这里历史上只找扁平的 custom/<filename>，
+    # 导致「UI 上传 → 激活」后 MCP 始终找不到文件、静默回退到默认 Provider。
+    # 按 租户子目录 → 扁平路径 的顺序解析，两种布局都能命中。
+    tenant_id = provider_info.get('tenant_id')
+    candidates = []
+    if tenant_id is not None:
+        candidates.append(os.path.join(custom_dir, str(tenant_id), filename))
+    candidates.append(os.path.join(custom_dir, filename))
+
+    filepath = next((p for p in candidates if os.path.exists(p)), None)
+    if filepath is None:
+        logger.warning(
+            f"激活的 Provider 文件不存在（已尝试: {candidates}），回退到默认 Provider"
+        )
         return load_provider(default_config)
 
     try:

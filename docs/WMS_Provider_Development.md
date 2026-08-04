@@ -276,13 +276,23 @@ def stock_in(self, product_name, quantity, reason_category, reason_note,
 {
     "success": True,
     "message": "入库成功：M3螺丝 入库 100 个",
-    "product_name": "M3螺丝",
-    "quantity": 100,
-    "new_stock": 600,
+    "product": {
+        "name": "M3螺丝",
+        "unit": "个",
+        "in_quantity": 100,    # 本次入库量
+        "new_quantity": 600,   # 入库后库存
+    },
+    "batch": {},               # 不做批次管理就给空 dict
 }
 ```
 
 **必需字段：** `success`
+
+> ⚠️ **字段名必须完全一致。** 工具层的语音播报直接读
+> `product.name` / `product.unit` / `product.in_quantity` / `product.new_quantity`
+> （见 `mcp/warehouse_mcp.py` 的 `stock_in` 分支）。用 `product_name` / `quantity` /
+> `new_stock` 这类平铺字段**不会报错**，只会让小智播成
+> 「已入库M3螺丝**?**个，当前库存**?**个」——排查起来非常费时。
 
 > `operator` 与 `actual_operator` 是两个独立字段，**不要合并**。要不要在自己库里存 `actual_operator`、怎么建那一列，见 [mcp/README.md §2.5](../mcp/README.md)。
 
@@ -306,7 +316,27 @@ def stock_out(self, product_name, quantity, reason_category, reason_note,
 | `location_fuzzy` | 对 `location` 做作用域模糊匹配（仅 MCP 调用时为 `True`） |
 | `allow_partial_fallback` | 指定批次/库位不足时，是否允许从其余库存补足。**默认 `False`** —— 工具层会先返回 `awaiting_confirm` 让用户确认，同意后才带 `True` 重发。**必须声明这个参数**，否则每次出库都 TypeError |
 
-返回格式同 `stock_in`。**必需字段：** `success`
+返回格式同 `stock_in`，但出库量的字段名是 **`out_quantity`**（不是 `in_quantity`）：
+
+```python
+{
+    "success": True,
+    "message": "出库成功：M3螺丝 出库 20 个",
+    "product": {
+        "name": "M3螺丝",
+        "unit": "个",
+        "out_quantity": 20,
+        "new_quantity": 580,
+    },
+    "batch_consumptions": [],  # 不做批次管理就给空 list
+}
+```
+
+**必需字段：** `success`
+
+失败时若是「名称对不上唯一物料」，`error` 必须是 **`ambiguous_name`** 并带 `candidates`，
+工具层才会转成「我不确定你说的是哪一个，候选有……」的追问；用别的错误码（如 `ambiguous`）
+会直接播成一句失败，用户无从选择。
 
 ### 5. `search(...) -> dict`
 
@@ -538,9 +568,13 @@ class AcmeWmsProvider(BaseProvider):
         return {
             "success": True,
             "message": f"入库成功：{product_name} 入库 {quantity} 件",
-            "product_name": product_name,
-            "quantity": quantity,
-            "new_stock": result.get("new_quantity", 0),
+            "product": {
+                "name": product_name,
+                "unit": result.get("unit", "个"),
+                "in_quantity": quantity,
+                "new_quantity": result.get("new_quantity", 0),
+            },
+            "batch": {},
         }
 
     # ── 4. 出库 ──
@@ -575,9 +609,13 @@ class AcmeWmsProvider(BaseProvider):
         return {
             "success": True,
             "message": f"出库成功：{product_name} 出库 {quantity} 件",
-            "product_name": product_name,
-            "quantity": quantity,
-            "new_stock": result.get("new_quantity", 0),
+            "product": {
+                "name": product_name,
+                "unit": result.get("unit", "个"),
+                "out_quantity": quantity,
+                "new_quantity": result.get("new_quantity", 0),
+            },
+            "batch_consumptions": [],
         }
 
     # ── 5. 搜索 ──
