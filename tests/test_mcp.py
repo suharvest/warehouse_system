@@ -282,6 +282,45 @@ class TestMCPSlimResponse:
         assert resp["executed"] is False
         assert resp["say_kind"] == "ask"
         assert resp["awaiting_confirm"] == {"patch": {"allow_partial_fallback": True}}
+        # say_kind='ask' 不是失败（是追问用户），不得注入 notice —— 字段集必须保持 6 个
+        assert set(resp) == {"ok", "executed", "say", "say_kind", "data", "awaiting_confirm"}
+
+    def test_notice_injected_on_write_failure(self):
+        """写操作失败时附加第 7 个字段 notice，并给 say 加显式失败前缀。
+
+        契约约定：六字段是稳定基底，notice 仅在 (写操作 ∧ 失败 ∧ say_kind='fail')
+        时附加。部分云端 LLM 会无视 ok/executed 布尔字段宣称"已出库"，故把失败
+        写进自然语言。此前该路径无字段断言覆盖，加字段不会让任何测试变红。
+        """
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = warehouse_mcp._wrap_response("stock_out", {
+            "success": False,
+            "error": "库存不足",
+            "message": "库存不足",
+        })
+
+        assert resp["ok"] is False
+        assert resp["executed"] is False
+        assert resp["say_kind"] == "fail"
+        assert set(resp) == {
+            "ok", "executed", "say", "say_kind", "data", "awaiting_confirm", "notice",
+        }
+        assert resp["say"].startswith("【操作失败，未执行】")
+        assert "stock_out" in resp["notice"]
+        assert "严禁" in resp["notice"]
+
+    def test_notice_not_injected_on_query_failure(self):
+        """查询类失败不是写操作，不注入 notice —— 字段集保持 6 个。"""
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = warehouse_mcp._wrap_response("query_stock", {
+            "success": False,
+            "error": "未找到产品",
+            "message": "未找到产品",
+        })
+
+        assert resp["ok"] is False
+        assert set(resp) == {"ok", "executed", "say", "say_kind", "data", "awaiting_confirm"}
+        assert not resp["say"].startswith("【操作失败，未执行】")
 
     def test_no_routing_retry_param(self):
         warehouse_mcp = _import_warehouse_mcp()

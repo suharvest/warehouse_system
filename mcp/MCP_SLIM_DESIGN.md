@@ -5,6 +5,14 @@
 > `{ok, executed, say, say_kind, data, awaiting_confirm}` 见 `warehouse_mcp.py:790`，
 > 精简后的 `_RULES_FOOTER` 见 `warehouse_mcp.py:432`（当前 7 条）。
 >
+> ⚠️ **对原设计的一处偏离**：上述六字段是**稳定基底**，但在
+> `(写操作 ∧ 失败 ∧ say_kind='fail')` 时会附加第七个字段 `notice`，同时给 `say`
+> 加 `【操作失败，未执行】` 前缀。原因是实测部分云端 LLM 无视 `ok`/`executed`
+> 布尔字段、在出库失败时仍宣称"已出库"——LLM 对返回体内自然语言指令的服从度
+> 远高于布尔字段，`_RULES_FOOTER` 第 3 条的系统提示词约束不足以兜住。
+> 查询类失败与 `say_kind='ask'`（歧义追问/确认）**不注入**，仍是六字段。
+> 契约断言见 `tests/test_mcp.py::TestMCPSlimResponse`。
+>
 > 下文「现状盘点」描述的是**实施前**的状态（13 条规则 / 7 个 tool），与今天的代码
 > 不一致是正常的 —— 当前工具数为 8。阅读时请以代码为准，本文保留作为设计依据与
 > 取舍理由的记录。
@@ -96,6 +104,8 @@ error / message / product / batch / candidates / batches / ...`
   "awaiting_confirm": null
 }
 ```
+
+> 实施时的偏离：写操作失败会附加第七个字段 `notice`（祈使句），详见文首状态说明。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
