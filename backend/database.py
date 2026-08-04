@@ -579,6 +579,8 @@ def init_database():
             restart_count INTEGER DEFAULT 0,
             debug_mode INTEGER DEFAULT 0,
             device_id TEXT UNIQUE,
+            external_tenant_id TEXT,
+            external_warehouse_id TEXT,
             created_at TEXT,
             updated_at TEXT
         )
@@ -725,6 +727,17 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN device_id TEXT')
         cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_device_id ON mcp_connections(device_id)')
+
+    # 外部 ERP 绑定的对方租户/仓库编码：旧库兜底补列（新库由上方 CREATE TABLE 带）。
+    try:
+        cursor.execute('SELECT external_tenant_id FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN external_tenant_id TEXT')
+
+    try:
+        cursor.execute('SELECT external_warehouse_id FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN external_warehouse_id TEXT')
 
     # tenants.device_id：旧库兜底补列（新库由上方 CREATE TABLE 带 UNIQUE）。
     try:

@@ -354,6 +354,12 @@ mcp_connections = Table(
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Column("device_id", String(64), nullable=True, unique=True),
+    # 外部 ERP 模式下这个智能体绑定的**对方**租户/仓库编码。存对方的原始字符串，
+    # 不做翻译、也不在本地建对应的 tenants/warehouses 行——我们的 warehouse_id
+    # （上面那个 Integer FK）只服务于自有模式。两者互不影响：自有模式下这两列为空，
+    # 外部模式下 warehouse_id 可以为空。
+    Column("external_tenant_id", String(128), nullable=True),
+    Column("external_warehouse_id", String(128), nullable=True),
     Index("idx_mcp_connections_tenant", "tenant_id"),
     **MYSQL_TABLE_KW,
 )
