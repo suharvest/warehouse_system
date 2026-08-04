@@ -1282,11 +1282,35 @@
                         </label>
                         <input type="text" id="mcp-conn-endpoint" placeholder="wss://sensecraft..." required>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="mcp-conn-warehouse-group">
                         <label><span data-i18n="warehouseColumn">仓库</span> <span class="required">*</span></label>
                         <select id="mcp-conn-warehouse" required>
                             <option value="" data-i18n="selectWarehouse">请选择仓库</option>
                         </select>
+                    </div>
+                    <!-- 外部 ERP 模式：绑定对方系统的租户/仓库。数据由 Provider 探测而来，
+                         我们只存选中的原始编码并原样透传，不在本地建对应的租户/仓库。 -->
+                    <div id="mcp-conn-external-scope" style="display:none;">
+                        <div class="form-group">
+                            <label>
+                                <span data-i18n="externalTenant">外部租户</span>
+                                <span class="help-icon">?
+                                    <span class="help-tooltip" data-i18n="externalTenantHelp">来自外部 ERP 系统，由系统自动探测。若外部系统没有租户概念，可留空。</span>
+                                </span>
+                            </label>
+                            <select id="mcp-conn-ext-tenant">
+                                <option value="" data-i18n="externalTenantPlaceholder">加载中…</option>
+                            </select>
+                            <input type="text" id="mcp-conn-ext-tenant-text" style="display:none;" placeholder="外部租户编码">
+                        </div>
+                        <div class="form-group">
+                            <label><span data-i18n="externalWarehouse">外部仓库</span></label>
+                            <select id="mcp-conn-ext-warehouse">
+                                <option value="" data-i18n="externalWarehousePlaceholder">请先选择外部租户</option>
+                            </select>
+                            <input type="text" id="mcp-conn-ext-warehouse-text" style="display:none;" placeholder="外部仓库编码">
+                        </div>
+                        <div class="form-hint" id="mcp-conn-ext-hint" style="display:none;"></div>
                     </div>
                     <div class="form-group">
                         <label class="checkbox-label">
