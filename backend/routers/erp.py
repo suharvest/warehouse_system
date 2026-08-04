@@ -257,6 +257,8 @@ async def get_active_provider_for_mcp(
             "id": provider_row.id,
             "provider_name": provider_row.provider_name,
             "filename": provider_row.filename,
+            # MCP 侧据此定位 custom/<tenant_id>/<filename>（上传时的实际布局）
+            "tenant_id": current_user.tenant_id,
             "config": cfg_obj,
         },
     }
