@@ -195,6 +195,8 @@ export async function showAddMCPModal() {
         console.error('加载仓库列表失败:', e);
     }
 
+    await setupExternalScope(null);
+
     modal.classList.add('show');
 }
 
@@ -210,6 +212,7 @@ export async function handleSaveMCP() {
     const role = 'operate';  // MCP 智能体固定使用操作员权限
     const autoStart = document.getElementById('mcp-conn-autostart').checked;
     const whId = document.getElementById('mcp-conn-warehouse').value;
+    const extScope = readExternalScope();
     const errorDiv = document.getElementById('mcp-modal-error');
 
     if (!name || !endpoint) {
@@ -228,13 +231,13 @@ export async function handleSaveMCP() {
             // 编辑模式
             await mcpFetch(`/mcp/connections/${connId}`, {
                 method: 'PUT',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10) })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10), ...(extScope || {}) })
             });
         } else {
             // 新建模式
             await mcpFetch('/mcp/connections', {
                 method: 'POST',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10) })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10), ...(extScope || {}) })
             });
         }
         closeMCPModal();
@@ -245,6 +248,149 @@ export async function handleSaveMCP() {
         errorDiv.textContent = error.message || t('operationFailed');
         errorDiv.style.display = 'block';
     }
+}
+
+
+// ============ 外部 ERP：对方系统的租户/仓库探测 ============
+// 接了外部 WMS 后，库存数据全在对方，我们的租户/仓库跟对方的没有对应关系。
+// 不在本地镜像一套对方的组织结构，而是让 Provider 把"对方有什么"报上来，
+// 用户直接选，我们只存选中的原始编码并原样透传。
+// Provider 未实现探测（not_implemented）是预期路径 —— 逐字段退化成手工填写，
+// 所以只实现了其中一个方法的 Provider 也照样能用。
+
+function _extEls() {
+    return {
+        group: document.getElementById('mcp-conn-external-scope'),
+        tSel: document.getElementById('mcp-conn-ext-tenant'),
+        wSel: document.getElementById('mcp-conn-ext-warehouse'),
+        tTxt: document.getElementById('mcp-conn-ext-tenant-text'),
+        wTxt: document.getElementById('mcp-conn-ext-warehouse-text'),
+        hint: document.getElementById('mcp-conn-ext-hint'),
+    };
+}
+
+function _fillSelect(sel, items, placeholder, selected) {
+    const list = items || [];
+    sel.innerHTML = `<option value="">${placeholder}</option>`;
+    list.forEach(it => {
+        const opt = document.createElement('option');
+        opt.value = it.id != null ? String(it.id) : '';
+        opt.textContent = it.name || String(it.id ?? '');
+        sel.appendChild(opt);
+    });
+    if (selected != null && selected !== '') {
+        sel.value = String(selected);
+    } else if (list.length === 1) {
+        // 只有一个候选就直接选中：对方是"单租户/单仓库"形态时，用户什么都不用点
+        sel.value = String(list[0].id ?? '');
+    }
+}
+
+function _degradeField(sel, txt, value) {
+    sel.style.display = 'none';
+    txt.style.display = '';
+    if (value != null) txt.value = value;
+}
+
+function _showHint(hint, msg, field) {
+    if (!msg) return;
+    // 逐字段提示并追加：只有一个接口没实现时（如对方没有租户概念），
+    // 不能让提示看起来像"整个探测都挂了"——另一个下拉其实是好用的。
+    const line = field ? `${field}：${msg}` : msg;
+    const prev = hint.textContent ? hint.textContent + ' ' : '';
+    if (prev.includes(line)) return;
+    hint.textContent = prev + line;
+    hint.style.display = 'block';
+}
+
+async function _loadExternalWarehouses(extTenantId, selected) {
+    const { wSel, wTxt, hint } = _extEls();
+    const qs = extTenantId ? `?external_tenant_id=${encodeURIComponent(extTenantId)}` : '';
+    let resp;
+    try {
+        resp = await mcpFetch(`/erp/external/warehouses${qs}`);
+    } catch (e) {
+        if (e.status === 401) return;
+        _degradeField(wSel, wTxt, selected);
+        _showHint(hint, e.status === 404 ? t('externalNoProvider') : t('externalProbeFailed'), t('externalWarehouse'));
+        return;
+    }
+    if (!resp || !resp.success) {
+        _degradeField(wSel, wTxt, selected);
+        _showHint(hint, resp && resp.error === 'not_implemented'
+            ? t('externalProbeUnsupported') : t('externalProbeFailed'), t('externalWarehouse'));
+        return;
+    }
+    wSel.style.display = '';
+    wTxt.style.display = 'none';
+    _fillSelect(wSel, resp.items, t('externalSelectWarehouse'), selected);
+}
+
+async function setupExternalScope(conn) {
+    const { group, tSel, wSel, tTxt, wTxt, hint } = _extEls();
+    if (!group) return;
+
+    // 每次打开都重置，避免上一次的退化状态/选项残留
+    group.style.display = 'none';
+    hint.style.display = 'none';
+    hint.textContent = '';
+    tSel.style.display = '';
+    wSel.style.display = '';
+    tTxt.style.display = 'none';
+    wTxt.style.display = 'none';
+    tTxt.value = (conn && conn.external_tenant_id) || '';
+    wTxt.value = (conn && conn.external_warehouse_id) || '';
+    tSel.onchange = null;
+
+    let mode = 'self_owned';
+    try {
+        const d = await mcpFetch('/system/mode');
+        mode = (d && d.mode) || 'self_owned';
+    } catch (e) {
+        if (e.status === 401) return;
+        return;  // 取不到模式就按自有模式处理，不显示外部字段
+    }
+    if (mode !== 'external_erp') return;
+
+    group.style.display = '';
+    const selTenant = (conn && conn.external_tenant_id) || '';
+    const selWarehouse = (conn && conn.external_warehouse_id) || '';
+
+    let resp;
+    try {
+        resp = await mcpFetch('/erp/external/tenants');
+    } catch (e) {
+        if (e.status === 401) return;
+        _degradeField(tSel, tTxt, selTenant);
+        _degradeField(wSel, wTxt, selWarehouse);
+        _showHint(hint, e.status === 404 ? t('externalNoProvider') : t('externalProbeFailed'));
+        return;
+    }
+
+    if (resp && resp.success) {
+        _fillSelect(tSel, resp.items, t('externalSelectTenant'), selTenant);
+        tSel.onchange = () => _loadExternalWarehouses(tSel.value, null);
+        // 只有一个租户时 _fillSelect 会自动选中，要按选中值去拉仓库，
+        // 否则会用空租户去探测、拿回错误的列表
+        await _loadExternalWarehouses(tSel.value, selWarehouse);
+        return;
+    } else {
+        // 对方系统可能压根没有租户概念 —— 租户退化成手填，仓库照样探测
+        _degradeField(tSel, tTxt, selTenant);
+        _showHint(hint, resp && resp.error === 'not_implemented'
+            ? t('externalProbeUnsupported') : t('externalProbeFailed'), t('externalTenant'));
+    }
+    await _loadExternalWarehouses(selTenant, selWarehouse);
+}
+
+function readExternalScope() {
+    const { group, tSel, wSel, tTxt, wTxt } = _extEls();
+    if (!group || group.style.display === 'none') return null;
+    const pick = (sel, txt) => (txt.style.display === 'none' ? sel.value : txt.value).trim();
+    return {
+        external_tenant_id: pick(tSel, tTxt),
+        external_warehouse_id: pick(wSel, wTxt),
+    };
 }
 
 // ============ 编辑连接 ============
@@ -279,6 +425,8 @@ export async function editMCPConnection(connId) {
         if (e.status === 401) return;
         console.error('加载仓库列表失败:', e);
     }
+
+    await setupExternalScope(conn);
 
     modal.classList.add('show');
 }
