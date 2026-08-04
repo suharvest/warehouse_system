@@ -436,6 +436,70 @@ def move_batch_location(self, batch_no, new_location, quantity=None,
 }
 ```
 
+## 外部作用域探测（可选，多仓库/多组织时需要）
+
+绑定外部 ERP 后，我方的租户/仓库跟贵方的**没有任何对应关系**。我们不会在本地
+镜像一套贵方的组织结构（那必然带来双重维护和数据漂移），而是反过来：由 Provider
+把"贵方有什么"报上来，用户在配置智能体时直接选，我们只存选中的**原始编码**并在
+调用时原样透传。
+
+这两个方法同样是可选的（基类默认返回 `not_implemented`），按贵方系统的形态实现即可：
+
+| 贵方系统形态 | 需要实现 | 配置界面的表现 |
+|---|---|---|
+| 单组织、单仓库 | 都不用实现 | 两个字段留空即可，调用时用 Provider 自身配置里的固定值 |
+| 单组织、多仓库 | 只实现 `list_warehouses` | 租户退化为手工输入（留空），仓库是下拉 |
+| 多组织、多仓库 | 两个都实现 | 两级联动下拉：先选组织，再选该组织下的仓库 |
+
+只返回一个候选时，界面会自动选中，用户无需操作。
+
+### `list_tenants() -> dict`
+
+```python
+def list_tenants(self):
+    data = self.http_get("/api/orgs")
+    return {
+        "success": True,
+        "items": [{"id": o["code"], "name": o["title"]} for o in data["list"]],
+        "message": "ok",
+    }
+```
+
+`items[].id` 是会被原样存下来、并在后续调用中回传给你的编码；`name` 只用于界面显示。
+
+### `list_warehouses(tenant_id=None) -> dict`
+
+```python
+def list_warehouses(self, tenant_id=None):
+    params = {"org": tenant_id} if tenant_id else None
+    data = self.http_get("/api/warehouses", params=params)
+    return {
+        "success": True,
+        "items": [{"id": w["code"], "name": w["name"]} for w in data["list"]],
+        "message": "ok",
+    }
+```
+
+`tenant_id` 是用户选中的组织编码；贵方系统若没有组织概念，忽略该参数即可。
+
+失败时返回 `{"success": False, "error": "...", "items": [], "message": "..."}`，
+界面会退化成手工填写，不会阻断配置。
+
+### 调用时怎么拿到用户选的值
+
+用户选定后，这两个编码会注入 Provider 的 `config`，在 `__init__` 里读即可：
+
+```python
+def __init__(self, config: dict):
+    super().__init__(config)
+    # 用户在"智能体配置"里选的贵方组织/仓库；未配置时回退到自己的默认值
+    self.tenant_id = config.get("external_tenant_id") or config.get("tenant_id")
+    self.warehouse_id = config.get("external_warehouse_id") or config.get("warehouse_id", "default")
+```
+
+**每个智能体一个 Provider 实例**，所以多个智能体绑不同仓库时天然隔离，
+不需要你在方法里自己区分。
+
 ## 完整示例
 
 以下是一个对接假想 "AcmeWMS" 系统的完整 Provider 示例：
@@ -977,6 +1041,54 @@ Key argument semantics:
 ## Optional Methods
 
 `query_batch(batch_no)` and `move_batch_location(...)` have default implementations returning a structured `not_implemented`, so a Provider without them still instantiates — but the corresponding MCP tools will always fail. New Providers should implement both. See the Chinese section for return formats.
+
+## External Scope Discovery (optional; needed for multi-warehouse / multi-org)
+
+Once an external ERP is bound, our tenants/warehouses have **no relationship** to
+yours. Rather than mirroring your org structure locally (which guarantees dual
+maintenance and drift), we invert it: the Provider reports what *your* system has,
+the user picks it while configuring an agent, and we store the **raw codes** and
+pass them back to you verbatim on every call.
+
+Both methods are optional (the base class returns `not_implemented`). Implement
+whichever match your system's shape:
+
+| Your system | Implement | What the config UI shows |
+|---|---|---|
+| Single org, single warehouse | neither | Leave both blank; calls use the fixed values in your Provider config |
+| Single org, multiple warehouses | `list_warehouses` only | Tenant degrades to a text box (leave empty), warehouse is a dropdown |
+| Multiple orgs and warehouses | both | Two-level cascade: pick org, then a warehouse within it |
+
+When only one candidate is returned, the UI auto-selects it — no user action needed.
+
+```python
+def list_tenants(self) -> dict:
+    return {"success": True,
+            "items": [{"id": "ORG-BJ", "name": "Beijing HQ"}],
+            "message": "ok"}
+
+def list_warehouses(self, tenant_id=None) -> dict:
+    # tenant_id is the org code the user selected; ignore it if you have no orgs
+    return {"success": True,
+            "items": [{"id": "WH-01", "name": "Main Warehouse"}],
+            "message": "ok"}
+```
+
+`items[].id` is the code stored and handed back to you; `name` is display-only.
+On failure return `{"success": False, "error": "...", "items": [], "message": "..."}`
+— the UI falls back to manual entry instead of blocking configuration.
+
+Read the user's selection from `config` in `__init__`:
+
+```python
+def __init__(self, config: dict):
+    super().__init__(config)
+    self.tenant_id = config.get("external_tenant_id") or config.get("tenant_id")
+    self.warehouse_id = config.get("external_warehouse_id") or config.get("warehouse_id", "default")
+```
+
+There is **one Provider instance per agent**, so agents bound to different
+warehouses are isolated automatically — no need to branch inside your methods.
 
 ## Hosted Upload Constraints
 
