@@ -512,9 +512,9 @@ def list_users(self, tenant_id=None):
 导入是幂等的：同 `external_user_id` 再导一次是更新而非重复创建；若我方已存在
 同名但非同一外部账号的用户，会跳过并回报，不会静默覆盖（尤其保护本地管理员账号）。
 
-> **「账号」不等于「操作人」。** 一个账号可能被多人共用（白班夜班共用作业账号）。
-> 账号是配置期的静态绑定，操作人是每次出入库时由人脸识别得出的 `actual_operator`。
-> 两者正交，`operator` 参数仍按原语义传递。
+> **导入进来的用户只承载权限，不参与业务链路。** 它既不是出入库的 `operator`
+> （那是自由填写的文本），也不对应人脸库里的人（人脸是单独录入的）。用户的作用
+> 只是决定谁有权修改这些配置。不要在三者之间建隐式关联。
 
 ### 调用时怎么拿到用户选的值
 
@@ -1134,10 +1134,10 @@ duplicating; a local user with the same name but a different external id is
 skipped and reported rather than silently overwritten (this notably protects the
 local admin account).
 
-> **An account is not an operator.** One account may be shared by several people
-> (day/night shift sharing one operating account). The account is a static
-> config-time binding; the operator is `actual_operator`, derived per call from
-> face recognition. They are orthogonal.
+> **Imported users carry permissions only** — they take no part in the business
+> flow. An imported user is neither the stock-movement `operator` (free-form text)
+> nor a face-library subject (enrolled separately). Users exist solely to decide
+> who may change these configurations. Do not build implicit links between the three.
 
 Read the user's selection from `config` in `__init__`:
 
