@@ -316,6 +316,7 @@ def init_database():
             address TEXT,
             is_default INTEGER DEFAULT 0,
             is_disabled INTEGER DEFAULT 0,
+            external_warehouse_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -397,7 +398,8 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             created_by INTEGER REFERENCES users(id),
             tenant_id INTEGER DEFAULT 1,
-            last_login_at TIMESTAMP
+            last_login_at TIMESTAMP,
+            external_user_id TEXT
         )
     ''')
 
@@ -738,6 +740,17 @@ def init_database():
         cursor.execute('SELECT external_warehouse_id FROM mcp_connections LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN external_warehouse_id TEXT')
+
+    # 外部账号映射：users 关联对方账号；warehouses 在对方无租户概念时作权限锚点。
+    try:
+        cursor.execute('SELECT external_user_id FROM users LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE users ADD COLUMN external_user_id TEXT')
+
+    try:
+        cursor.execute('SELECT external_warehouse_id FROM warehouses LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE warehouses ADD COLUMN external_warehouse_id TEXT')
 
     # tenants.device_id：旧库兜底补列（新库由上方 CREATE TABLE 带 UNIQUE）。
     try:

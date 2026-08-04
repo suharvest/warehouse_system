@@ -485,6 +485,37 @@ def list_warehouses(self, tenant_id=None):
 失败时返回 `{"success": False, "error": "...", "items": [], "message": "..."}`，
 界面会退化成手工填写，不会阻断配置。
 
+### `list_users(tenant_id=None) -> dict`（可选）
+
+用途跟租户/仓库探测不同：**授权是我方的责任，推不出去。** 谁能登录我方系统、
+谁能配哪个智能体、谁能改人脸规则，走的是我方 `users(role, tenant_id)` +
+`user_warehouses` 这条链。所以即便库存数据全在贵方，「用户 → 租户/角色」这份
+归属数据仍必须落在我方——本方法只是免去管理员照着贵方的用户表手工重敲一遍。
+
+```python
+def list_users(self, tenant_id=None):
+    data = self.http_get("/api/users")
+    return {
+        "success": True,
+        "items": [
+            {"id": u["id"], "name": u["login"], "display_name": u["realName"]}
+            for u in data["list"]
+        ],
+        "message": "ok",
+    }
+```
+
+导入后：`items[].id` 存进我方 `users.external_user_id`（用于增量同步与去重），
+`name` 作为登录名，`display_name` 作为显示名。**密码由我方本地管理**，
+贵方无需提供任何认证接口。
+
+导入是幂等的：同 `external_user_id` 再导一次是更新而非重复创建；若我方已存在
+同名但非同一外部账号的用户，会跳过并回报，不会静默覆盖（尤其保护本地管理员账号）。
+
+> **「账号」不等于「操作人」。** 一个账号可能被多人共用（白班夜班共用作业账号）。
+> 账号是配置期的静态绑定，操作人是每次出入库时由人脸识别得出的 `actual_operator`。
+> 两者正交，`operator` 参数仍按原语义传递。
+
 ### 调用时怎么拿到用户选的值
 
 用户选定后，这两个编码会注入 Provider 的 `config`，在 `__init__` 里读即可：
@@ -1077,6 +1108,36 @@ def list_warehouses(self, tenant_id=None) -> dict:
 `items[].id` is the code stored and handed back to you; `name` is display-only.
 On failure return `{"success": False, "error": "...", "items": [], "message": "..."}`
 — the UI falls back to manual entry instead of blocking configuration.
+
+### `list_users(tenant_id=None) -> dict` (optional)
+
+Different purpose from tenant/warehouse discovery: **authorization stays on our
+side and cannot be delegated.** Who may log in, configure which agent, or change
+face rules is decided by our `users(role, tenant_id)` + `user_warehouses` chain.
+So even though inventory lives entirely in your system, the "user → tenant/role"
+mapping must exist on ours. This method just saves an admin from retyping your
+user table by hand.
+
+```python
+def list_users(self, tenant_id=None):
+    return {"success": True,
+            "items": [{"id": "u1001", "name": "zhangsan", "display_name": "Zhang San"}],
+            "message": "ok"}
+```
+
+`items[].id` is stored as `users.external_user_id` (used for incremental sync and
+dedup). **Passwords are managed locally on our side** — you do not need to expose
+any authentication endpoint.
+
+Import is idempotent: re-importing the same `external_user_id` updates instead of
+duplicating; a local user with the same name but a different external id is
+skipped and reported rather than silently overwritten (this notably protects the
+local admin account).
+
+> **An account is not an operator.** One account may be shared by several people
+> (day/night shift sharing one operating account). The account is a static
+> config-time binding; the operator is `actual_operator`, derived per call from
+> face recognition. They are orthogonal.
 
 Read the user's selection from `config` in `__init__`:
 
