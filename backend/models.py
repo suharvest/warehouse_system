@@ -737,6 +737,10 @@ class CreateMCPConnectionRequest(BaseModel):
     auto_start: bool = True
     warehouse_id: Optional[int] = None  # 仓库ID（关联的MCP代理归属仓库）
     device_id: Optional[str] = None  # Legacy: 旧版设备级绑定字段；新配置以 mcp_endpoint 代表云端智能体入口
+    # 外部 ERP 模式：绑定的是**对方系统**的租户/仓库编码，原样存原样传，
+    # 不在本地建对应行。自有模式下这两个为空、继续用 warehouse_id。
+    external_tenant_id: Optional[str] = None
+    external_warehouse_id: Optional[str] = None
 
 
 class UpdateMCPConnectionRequest(BaseModel):
@@ -747,6 +751,10 @@ class UpdateMCPConnectionRequest(BaseModel):
     auto_start: Optional[bool] = None
     warehouse_id: Optional[int] = None
     device_id: Optional[str] = None  # Legacy: 旧版设备级绑定字段；新配置以 mcp_endpoint 代表云端智能体入口
+    # 外部 ERP 模式：绑定的是**对方系统**的租户/仓库编码，原样存原样传，
+    # 不在本地建对应行。自有模式下这两个为空、继续用 warehouse_id。
+    external_tenant_id: Optional[str] = None
+    external_warehouse_id: Optional[str] = None
 
 
 class MCPConnectionItem(BaseModel):
@@ -771,6 +779,10 @@ class MCPConnectionItem(BaseModel):
     tenant_id: Optional[int] = None
     tenant_name: Optional[str] = None
     device_id: Optional[str] = None
+    # 外部 ERP 模式：绑定的是**对方系统**的租户/仓库编码，原样存原样传，
+    # 不在本地建对应行。自有模式下这两个为空、继续用 warehouse_id。
+    external_tenant_id: Optional[str] = None
+    external_warehouse_id: Optional[str] = None
 
 
 class MCPConnectionResponse(BaseModel):

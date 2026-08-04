@@ -95,6 +95,8 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
         tenant_id=row['tenant_id'] if 'tenant_id' in row.keys() else None,
         tenant_name=tenant_name,
         device_id=row.get('device_id'),
+        external_tenant_id=row.get('external_tenant_id'),
+        external_warehouse_id=row.get('external_warehouse_id'),
     )
 
 
@@ -158,6 +160,8 @@ async def list_mcp_connections(
             _t_mcp_connections.c.created_at, _t_mcp_connections.c.updated_at,
             _t_mcp_connections.c.warehouse_id, _t_mcp_connections.c.tenant_id,
             _t_mcp_connections.c.device_id,
+            _t_mcp_connections.c.external_tenant_id,
+            _t_mcp_connections.c.external_warehouse_id,
             _t_warehouses.c.name.label('warehouse_name'),
             _t_tenants.c.name.label('tenant_name'),
         )
@@ -276,6 +280,8 @@ async def create_mcp_connection(
                     warehouse_id=wh_id,
                     tenant_id=conn_tenant_id,
                     device_id=device_id,
+                    external_tenant_id=(request.external_tenant_id or None),
+                    external_warehouse_id=(request.external_warehouse_id or None),
                     status='stopped',
                     created_at=now,
                     updated_at=now,
@@ -367,6 +373,11 @@ async def update_mcp_connection(
         mcp_values['tenant_id'] = new_tenant_id
         apikey_values['warehouse_id'] = new_wh_id
         apikey_values['tenant_id'] = new_tenant_id
+    # 外部作用域：空字符串视为解绑（存 NULL），与 device_id 的语义一致
+    if request.external_tenant_id is not None:
+        mcp_values['external_tenant_id'] = request.external_tenant_id.strip() or None
+    if request.external_warehouse_id is not None:
+        mcp_values['external_warehouse_id'] = request.external_warehouse_id.strip() or None
     if request.device_id is not None:
         # Legacy compatibility: strip 后空字符串视为解除绑定（传 NULL）
         raw = request.device_id.strip()

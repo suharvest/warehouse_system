@@ -264,6 +264,127 @@ async def get_active_provider_for_mcp(
     }
 
 
+# ============ 外部作用域探测（external_erp 模式下配置智能体用） ============
+# 接了外部 WMS 之后，库存数据全在对方，我们的租户/仓库跟对方的没有任何对应关系。
+# 与其在本地镜像一套对方的组织结构（双重维护、必然漂移），不如让 Provider 把
+# "对方有什么"报上来，用户在配置智能体时直接选，我们只存原始编码并原样透传。
+#
+# 探测哪个租户的？不需要推导——用调用方登录态的 tenant_id，与 active-for-mcp
+# 同一套解析；全局 admin（tenant_id 为 None）必须显式传 tenant_id，与上传接口
+# 的既有约定一致。
+
+
+def _resolve_probe_tenant(current_user: CurrentUser, tenant_id: Optional[int]) -> int:
+    """确定要探测哪个租户的外部系统。"""
+    if current_user.tenant_id is not None:
+        return current_user.tenant_id
+    if tenant_id is None:
+        raise HTTPException(
+            status_code=400, detail="全局管理员探测外部作用域时需指定 tenant_id"
+        )
+    return tenant_id
+
+
+def _load_active_provider_instance(tid: int):
+    """按租户加载其激活的 Provider 实例，用于只读探测。
+
+    与 mcp/warehouse_mcp.py 的加载逻辑保持一致：文件按
+    「租户子目录 → 扁平路径」顺序解析，配置取 erp_providers.config
+    （其中含对方 WMS 的地址与鉴权）。
+    """
+    with get_engine().connect() as sa_conn:
+        preds = [_t_erp_providers.c.is_active == 1]
+        preds.extend(build_scope_predicates(_t_erp_providers, tid, None))
+        row = sa_conn.execute(
+            select(
+                _t_erp_providers.c.provider_name,
+                _t_erp_providers.c.filename,
+                _t_erp_providers.c.config,
+            ).where(and_(*preds)).order_by(_t_erp_providers.c.id.asc()).limit(1)
+        ).first()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="当前租户没有激活的 ERP Provider，无法探测外部租户/仓库",
+        )
+
+    cfg = _erp_decode_config({"config": row.config}) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg = {**cfg, "provider": row.provider_name}
+
+    base = os.path.join(_mcp_dir, "providers", "custom")
+    candidates = [
+        os.path.join(base, str(tid), row.filename),
+        os.path.join(base, row.filename),
+    ]
+    filepath = next((p for p in candidates if os.path.exists(p)), None)
+    if filepath is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Provider 文件不存在（已尝试: {candidates}）",
+        )
+
+    try:
+        from providers.test_runner import load_provider_from_file
+        return load_provider_from_file(filepath, cfg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"加载 Provider 失败: {e}")
+
+
+def _probe(fn, *args) -> dict:
+    """执行一次探测调用，把 Provider 抛出的异常收敛成结构化响应。
+
+    恒返回 200：前端据 success / error 决定是渲染下拉还是退化成手工填写，
+    未实现探测（not_implemented）属于预期路径，不该表现为 HTTP 错误。
+    """
+    try:
+        resp = fn(*args)
+    except Exception as e:  # noqa: BLE001 — 第三方 Provider 代码，什么都可能抛
+        logger.warning(f"外部作用域探测失败: {e}")
+        return {
+            "success": False,
+            "error": "probe_failed",
+            "items": [],
+            "message": f"探测失败: {e}",
+        }
+    if not isinstance(resp, dict):
+        return {
+            "success": False,
+            "error": "bad_response",
+            "items": [],
+            "message": "Provider 返回了非预期的响应结构",
+        }
+    resp.setdefault("items", [])
+    return resp
+
+
+@router.get("/api/erp/external/tenants")
+async def probe_external_tenants(
+    tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.READ)),
+):
+    """探测外部系统的租户/组织列表（供智能体配置的下拉使用）。"""
+    tid = _resolve_probe_tenant(current_user, tenant_id)
+    provider = _load_active_provider_instance(tid)
+    return _probe(provider.list_tenants)
+
+
+@router.get("/api/erp/external/warehouses")
+async def probe_external_warehouses(
+    external_tenant_id: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.READ)),
+):
+    """探测外部系统的仓库列表；external_tenant_id 为已选定的外部租户。"""
+    tid = _resolve_probe_tenant(current_user, tenant_id)
+    provider = _load_active_provider_instance(tid)
+    return _probe(provider.list_warehouses, external_tenant_id)
+
+
 # ---- ERP Providers GET / PUT / DELETE migrated to ResourceRouter (R2 phase 3) ----
 # LIST stays as ``list_erp_providers`` (custom shape ``{"providers": [...]}``
 # with per-row JSON/datetime decoding) and POST stays hand-rolled (multipart
