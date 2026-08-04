@@ -124,9 +124,11 @@ users = Table(
     Column("created_by", Integer, ForeignKey("users.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Column("last_login_at", DateTime, nullable=True),
-    # 外部 ERP 模式下对应的对方账号 ID。授权始终由我方判定（role + tenant_id +
-    # user_warehouses），这一列只做「我方用户 ↔ 对方账号」的对应关系：用于导入
-    # 去重/增量同步，以及把人脸识别出的操作人反查回对方系统认的账号。
+    # 外部 ERP 模式下对应的对方账号 ID。**仅用于导入去重与增量同步**，不参与
+    # 任何业务链路。授权始终由我方判定（role + tenant_id + user_warehouses）。
+    # 注意 users 与出入库的 operator、人脸库 face_subjects 都**没有**关联：
+    # operator 是自由填写的文本，人脸是单独录入的，users 只决定谁有权修改
+    # 这些配置。别在这三者之间建隐式关联。
     Column("external_user_id", String(128), nullable=True),
     Index("idx_users_tenant", "tenant_id"),
     Index("idx_users_username_tenant", "username", "tenant_id", unique=True),
