@@ -1060,6 +1060,47 @@ def quantize_embedding(f32_bytes: bytes, fmt: str) -> bytes:
     raise ValueError(f"未知 embedding_format: {fmt!r}")
 
 
+class DeviceBaseUrlUnreachable(ValueError):
+    """自动探测出的识别代理地址设备侧根本连不上，且没有显式覆盖。
+
+    这个异常存在的意义是**把静默失败提前**：以前探测到容器内网地址也照样下发，
+    push-faces 返回成功，等到设备真去识别时才失败，现场几乎无法定位。
+    """
+
+
+def _looks_unreachable_from_device(local_ip: str, device_ip: str) -> bool:
+    """判断探测到的本机 IP 对设备而言是不是明显不可达。
+
+    命中的两类：
+    1. 回环地址，而设备不在本机（测试环境设备就是 127.0.0.1，那种是合法的）
+    2. 容器内运行、且探测结果与设备不在同一 /24 —— 这几乎必然是 docker bridge
+       给的容器地址（如 172.18.0.3）。局域网上的设备永远路由不到它。
+
+    第 2 条对「设备在另一个网段」的路由型组网会误判，但代价可接受：误判的处理
+    方式恰好就是设置 WAREHOUSE_DEVICE_BASE_URL，而那本来就是这种组网该做的事。
+    """
+    import ipaddress
+
+    try:
+        local = ipaddress.ip_address(local_ip)
+        device = ipaddress.ip_address(device_ip)
+    except ValueError:
+        return False
+
+    if local.is_loopback:
+        return not device.is_loopback
+    if local.is_link_local:
+        return True
+
+    if os.path.exists("/.dockerenv"):
+        try:
+            same_subnet = local in ipaddress.ip_network(f"{device_ip}/24", strict=False)
+        except ValueError:
+            same_subnet = False
+        return not same_subnet
+    return False
+
+
 def _device_facing_base_url(device_ip: str) -> str:
     """lan 模式下发给设备的识别代理 base（设备会拼 /recognize）。
 
@@ -1083,6 +1124,13 @@ def _device_facing_base_url(device_ip: str) -> str:
         # 探测失败兜底（如设备 IP 不可路由）：回环。测试环境设备就是 127.0.0.1。
         local_ip = "127.0.0.1"
     port = int(os.environ.get("PORT", 2124))
+    if _looks_unreachable_from_device(local_ip, device_ip):
+        raise DeviceBaseUrlUnreachable(
+            f"自动探测到的本机地址是 {local_ip}，设备（{device_ip}）无法访问 —— "
+            "容器化部署时探测只能拿到容器在 docker 网络内的地址。"
+            f"请设置环境变量 WAREHOUSE_DEVICE_BASE_URL=http://<宿主机局域网IP>:{port}"
+            "/api/face/device 后重新下发。"
+        )
     return f"http://{local_ip}:{port}/api/face/device"
 
 
@@ -1226,7 +1274,12 @@ async def push_faces_to_device(
             # /api/face/device/recognize（伪装 face_rec_api /recognize 契约），
             # 不再直连租户端点——人脸库只在 warehouse 存一份，face_rec_api 保持
             # 无状态推理。identify_token 用租户级 auth_token（为空首发自动生成）。
-            payload["identify_endpoint"] = _device_facing_base_url(ip)
+            # 探测不出设备可达的地址时直接中止下发：宁可这里报一个能照着做的错，
+            # 也不要把不可达的 identify_endpoint 推给设备、让失败推迟到识别时才出现。
+            try:
+                payload["identify_endpoint"] = _device_facing_base_url(ip)
+            except DeviceBaseUrlUnreachable as e:
+                return {"success": False, "error": str(e)}
             payload["identify_token"] = _ensure_tenant_auth_token(tid, fc.auth_token)
         else:
             # local 模式行为不变：设备本地 NPU + 本地库，endpoint/token 原样透传。
