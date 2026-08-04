@@ -166,6 +166,18 @@ async def test_two_websocket_sessions_do_not_cross_tenant_provider(monkeypatch):
         '_load_provider_from_db_or_default',
         lambda config: _ProviderStub(config['auth']['key']),
     )
+    # 本用例验证的是「两个会话不会串租户 provider」，与人脸鉴权无关。但自
+    # dde66f5（查询类操作纳入人脸权限规则）起，query_stock 也要先过
+    # _enforce_face("query")；而下面的 session state 指向不可达的
+    # 127.0.0.1:9，人脸闸门 fail-closed 判 transport_error 直接 deny，工具
+    # 在到达 provider stub 之前就返回拒绝文案，断言永远拿不到 tenant-a/b。
+    # 这里把闸门桩成 skipped（等价于「未启用人脸 / 规则不要求」），让请求
+    # 落到 provider 上。_enforce_face 的决策逻辑本身仍走真实代码。
+    monkeypatch.setattr(
+        runtime._warehouse_mcp,
+        '_face_guard',
+        lambda *args, **kwargs: {'status': 'skipped', 'failure_reason': 'feature_disabled'},
+    )
 
     responses = []
     finished = asyncio.Event()
