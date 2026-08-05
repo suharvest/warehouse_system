@@ -337,6 +337,11 @@ async def update_mcp_connection(
     row = dict(_r._mapping)
 
     old_endpoint = row['mcp_endpoint']
+    # 在 UPDATE 之前把外部作用域的旧值留下来 —— 下面的 row 是更新后重新查的，
+    # 拿它比较永远相等，判不出变化。
+    old_external_scope = {
+        k: row.get(k) for k in ('external_tenant_id', 'external_warehouse_id')
+    }
     key_hash = hash_api_key(row['api_key'])
     new_endpoint = None
     if request.mcp_endpoint is not None:
@@ -438,7 +443,15 @@ async def update_mcp_connection(
         ).first()
     row = dict(_r._mapping) if _r else None
 
-    if new_endpoint is not None and new_endpoint != old_endpoint:
+    # 外部作用域是在连接启动时读进 runtime state 的，改了不重启的话，运行中的
+    # Provider 会继续按**旧的**租户/仓库往对方系统写——界面上显示已改、实际写错仓库，
+    # 且没有任何报错。所以 endpoint 和 external_* 任一变化都要重启。
+    scope_changed = any(
+        k in mcp_values and mcp_values[k] != old_external_scope.get(k)
+        for k in ('external_tenant_id', 'external_warehouse_id')
+    )
+    endpoint_changed = new_endpoint is not None and new_endpoint != old_endpoint
+    if endpoint_changed or scope_changed:
         if mcp_manager.get_connection_status(conn_id).get('status') == 'running':
             await mcp_manager.restart_connection(conn_id, row['mcp_endpoint'], row['api_key'])
 
