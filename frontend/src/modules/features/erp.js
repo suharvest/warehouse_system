@@ -68,6 +68,10 @@ export async function loadERPStatus() {
 // 角色一律由我方管理员在这里指定：对方不了解我们的权限模型，也不该由他们决定。
 
 let importCandidates = [];
+// 候选列表是「某个租户的外部系统」探测/粘贴出来的。全局管理员的租户由右上角选仓
+// 派生，探完之后他可能切到别的仓——此时若还按"当前仓库"去导，就会把 A 租户的人
+// 导进 B 租户。所以在拿到候选的那一刻把租户钉住，导入时用钉住的值并做一致性校验。
+let importCandidatesTenantId = null;
 
 function normalizeImportItems(raw) {
     // 兼容三种形态：探测响应 {items:[...]}、裸数组 [...]、{users:[...]}
@@ -133,6 +137,10 @@ function renderImportTable() {
     }
 }
 
+function _captureCandidateTenant() {
+    importCandidatesTenantId = _selectedTenantId();
+}
+
 function setImportSource(text) {
     const el = document.getElementById('erp-import-source');
     if (el) el.textContent = text || '';
@@ -196,6 +204,7 @@ export async function erpProbeUsers() {
         return;
     }
     importCandidates = normalizeImportItems(resp) || [];
+    _captureCandidateTenant();
     setImportSource(`${t('erpImportProbe')} · ${importCandidates.length}`);
     if (!importCandidates.length) showParseError(t('erpImportNoData'));
     renderImportTable();
@@ -221,6 +230,7 @@ export function erpPasteJson() {
         if (!items || !items.length) { showParseError(t('erpImportBadJson')); return; }
         showParseError('');
         importCandidates = items;
+        _captureCandidateTenant();
         setImportSource(`${t('erpImportPaste')} · ${items.length}`);
         renderImportTable();
     };
@@ -238,6 +248,7 @@ export function initImportFileInput() {
             if (!items || !items.length) { showParseError(t('erpImportBadJson')); return; }
             showParseError('');
             importCandidates = items;
+            _captureCandidateTenant();
             setImportSource(`${file.name} · ${items.length}`);
             renderImportTable();
         } catch {
@@ -259,6 +270,11 @@ export async function erpDoImport() {
         showToast(t('erpImportNeedTenant'), 'error');
         return;
     }
+    // 探测之后切过仓 → 当前租户已不是候选来源的那个，继续导入就会串租户
+    if (importCandidatesTenantId !== _selectedTenantId()) {
+        showToast(t('erpImportTenantDrift'), 'error');
+        return;
+    }
 
     let resp;
     try {
@@ -268,7 +284,7 @@ export async function erpDoImport() {
                 default_password: password,
                 users: selected.map(({ external_user_id, username, display_name, role }) =>
                     ({ external_user_id, username, display_name, role })),
-                ..._tenantBody(),
+                ...(importCandidatesTenantId ? { tenant_id: importCandidatesTenantId } : {}),
             }),
         });
     } catch (e) {

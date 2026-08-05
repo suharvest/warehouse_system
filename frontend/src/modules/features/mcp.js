@@ -1,7 +1,7 @@
 // ============ MCP 连接管理模块 ============
 import { t } from '../../../i18n.js';
 import { fetchJson as mcpFetch, getCurrentWarehouseId, warehousesApi } from '../api.js';
-import { getCurrentUser } from '../state.js';
+import { getCurrentUser, getCurrentWarehouse } from '../state.js';
 import { showToast } from '../ui-components.js';
 
 // 状态
@@ -217,8 +217,13 @@ async function _ensureLocalAnchor(extWarehouseId, displayName) {
     // 所以选定外部仓库后必须保证本地有对应锚点：没有就地建一个，让显示的即真实的。
     if (!extWarehouseId) return null;
 
+    // 必须同时匹配租户：全局管理员的仓库列表跨租户，只按外部编码找会撞上
+    // 别的租户那条同编码的锚点，导致跨租户错绑。
+    const tid = _mcpTenantId();
+    const sameTenant = w => tid == null || String(w.tenant_id) === String(tid);
     const hit = (localWarehouses || []).find(
-        w => w.external_warehouse_id && String(w.external_warehouse_id) === String(extWarehouseId)
+        w => sameTenant(w) && w.external_warehouse_id
+             && String(w.external_warehouse_id) === String(extWarehouseId)
     );
     if (hit) return hit.id;
 
@@ -230,13 +235,15 @@ async function _ensureLocalAnchor(extWarehouseId, displayName) {
                 external_warehouse_id: extWarehouseId,
                 name: displayName || extWarehouseId,
             }],
+            ...(tid ? { tenant_id: tid } : {}),
         }),
     });
 
     const data = await warehousesApi.getList();
     localWarehouses = data.warehouses || data || [];
     const created = localWarehouses.find(
-        w => w.external_warehouse_id && String(w.external_warehouse_id) === String(extWarehouseId)
+        w => sameTenant(w) && w.external_warehouse_id
+             && String(w.external_warehouse_id) === String(extWarehouseId)
     );
     return created ? created.id : null;
 }
@@ -318,6 +325,21 @@ export async function handleSaveMCP() {
 // Provider 未实现探测（not_implemented）是预期路径 —— 逐字段退化成手工填写，
 // 所以只实现了其中一个方法的 Provider 也照样能用。
 
+// 全局管理员（tenant_id 为 null）对所有租户都有权限，后端无从推断，必须显式传。
+// 与 erp.js 同源：由右上角所选仓库派生。普通用户返回 null——后端按登录态取，
+// 前端不传也不该传。
+function _mcpTenantId() {
+    const user = getCurrentUser();
+    if (!user || (user.tenant_id !== null && user.tenant_id !== undefined)) return null;
+    const wh = getCurrentWarehouse();
+    return wh && wh.tenant_id != null ? wh.tenant_id : null;
+}
+
+function _mcpTenantQuery(prefix = '?') {
+    const tid = _mcpTenantId();
+    return tid ? `${prefix}tenant_id=${encodeURIComponent(tid)}` : '';
+}
+
 function _extEls() {
     return {
         group: document.getElementById('mcp-conn-external-scope'),
@@ -370,7 +392,11 @@ function _showHint(hint, msg, field) {
 
 async function _loadExternalWarehouses(extTenantId, selected) {
     const { wSel, wTxt, hint } = _extEls();
-    const qs = extTenantId ? `?external_tenant_id=${encodeURIComponent(extTenantId)}` : '';
+    const parts = [];
+    if (extTenantId) parts.push(`external_tenant_id=${encodeURIComponent(extTenantId)}`);
+    const tq = _mcpTenantQuery('');
+    if (tq) parts.push(tq);
+    const qs = parts.length ? `?${parts.join('&')}` : '';
     let resp;
     try {
         resp = await mcpFetch(`/erp/external/warehouses${qs}`);
@@ -426,7 +452,7 @@ async function setupExternalScope(conn) {
 
     let resp;
     try {
-        resp = await mcpFetch('/erp/external/tenants');
+        resp = await mcpFetch(`/erp/external/tenants${_mcpTenantQuery()}`);
     } catch (e) {
         if (e.status === 401) return;
         _degradeField(tSel, tTxt, selTenant);
@@ -473,8 +499,11 @@ function _syncLocalWarehouseFromExternal(extWarehouseId) {
     whSelect.disabled = true;
     whSelect.title = t('warehouseDerivedFromExternal');
 
+    const _tid = _mcpTenantId();
     const anchor = (localWarehouses || []).find(
-        w => w.external_warehouse_id && String(w.external_warehouse_id) === String(extWarehouseId)
+        w => (_tid == null || String(w.tenant_id) === String(_tid))
+             && w.external_warehouse_id
+             && String(w.external_warehouse_id) === String(extWarehouseId)
     );
     if (anchor) {
         whSelect.value = String(anchor.id);
@@ -539,6 +568,9 @@ export async function editMCPConnection(connId) {
     try {
         const data = await warehousesApi.getList();
         const warehouses = data.warehouses || data || [];
+        // 编辑路径也必须刷新缓存：锚点匹配与联动都读 localWarehouses，
+        // 不刷新就会用上一次打开时的过期列表（新导入的锚点匹配不到）
+        localWarehouses = warehouses;
         warehouses.forEach(w => {
             const opt = document.createElement('option');
             opt.value = w.id;

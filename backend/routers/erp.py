@@ -12,6 +12,7 @@ Follow bare-module import style (no ``from backend.X``).
 """
 import os
 import sys as _sys
+import threading as _threading
 import json as _json
 from datetime import datetime
 from typing import Any, Optional
@@ -342,6 +343,28 @@ def _load_active_provider_instance(tid: int):
 # 拖垮整个 worker。故放线程池并设硬超时。
 _PROBE_TIMEOUT_SECONDS = 20.0
 
+# **专用**线程池，不用 asyncio 的默认 executor。超时只能让调用方不再等待，
+# 卡死的第三方代码仍占着那个线程不放；若共用默认 executor，反复触发就会把
+# 整个进程的默认线程池占满，连累所有其它 run_in_executor 调用。
+# 隔离到一个小池子：最坏情况是探测功能自己不可用（返回 probe_timeout），
+# 不会外溢。
+_PROBE_MAX_WORKERS = 4
+_probe_executor = None
+_probe_executor_lock = _threading.Lock()
+
+
+def _get_probe_executor():
+    global _probe_executor
+    if _probe_executor is None:
+        with _probe_executor_lock:
+            if _probe_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _probe_executor = ThreadPoolExecutor(
+                    max_workers=_PROBE_MAX_WORKERS,
+                    thread_name_prefix="erp-probe",
+                )
+    return _probe_executor
+
 
 async def _probe(fn, *args) -> dict:
     """执行一次探测调用，把 Provider 抛出的异常收敛成结构化响应。
@@ -355,12 +378,16 @@ async def _probe(fn, *args) -> dict:
     try:
         resp = await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
-                None, functools.partial(fn, *args)
+                _get_probe_executor(), functools.partial(fn, *args)
             ),
             timeout=_PROBE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logger.warning("外部作用域探测超时（>%ss）", _PROBE_TIMEOUT_SECONDS)
+        logger.warning(
+            "外部作用域探测超时（>%ss）。注意：卡死的 Provider 线程无法强制终止，"
+            "反复超时会占满探测专用线程池（上限 %s）",
+            _PROBE_TIMEOUT_SECONDS, _PROBE_MAX_WORKERS,
+        )
         return {
             "success": False,
             "error": "probe_timeout",
