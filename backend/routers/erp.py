@@ -171,7 +171,10 @@ async def upload_erp_provider(
     display_name = file.filename.replace('.py', '')
     try:
         with get_engine().begin() as sa_conn:
-            result = sa_conn.execute(
+            # 变量名不要复用 result——上面 result 是校验结果，被这里的 CursorResult
+            # 覆盖后，函数末尾的 result['methods'] 会抛
+            # "'CursorResult' object is not subscriptable"，UI 上传必 500。
+            ins = sa_conn.execute(
                 insert(_t_erp_providers).values(
                     name=display_name,
                     provider_name=provider_name,
@@ -182,7 +185,7 @@ async def upload_erp_provider(
                     updated_at=now_dt,
                 )
             )
-            provider_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
+            provider_id = ins.inserted_primary_key[0] if ins.inserted_primary_key else None
     except IntegrityError:
         # provider_name 在当前租户内唯一约束冲突
         os.unlink(dest_path)
