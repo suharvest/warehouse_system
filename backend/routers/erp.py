@@ -351,6 +351,9 @@ _PROBE_TIMEOUT_SECONDS = 20.0
 _PROBE_MAX_WORKERS = 4
 _probe_executor = None
 _probe_executor_lock = _threading.Lock()
+# 池满时**不排队**：卡死的线程收不回来，无界排队只会让请求越积越多且都等不到结果。
+# 用信号量卡在入口直接返回"稍后重试"，比挂住强。
+_probe_slots = _threading.BoundedSemaphore(_PROBE_MAX_WORKERS)
 
 
 def _get_probe_executor():
@@ -375,6 +378,14 @@ async def _probe(fn, *args) -> dict:
     import asyncio
     import functools
 
+    if not _probe_slots.acquire(blocking=False):
+        logger.warning("外部作用域探测并发已满（%s），拒绝新请求", _PROBE_MAX_WORKERS)
+        return {
+            "success": False,
+            "error": "probe_busy",
+            "items": [],
+            "message": "探测请求过多，或此前的探测仍卡在外部系统里，请稍后重试",
+        }
     try:
         resp = await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
@@ -382,7 +393,10 @@ async def _probe(fn, *args) -> dict:
             ),
             timeout=_PROBE_TIMEOUT_SECONDS,
         )
+        _probe_slots.release()
     except asyncio.TimeoutError:
+        # 故意**不**释放名额：超时只是调用方不再等待，那个线程仍卡在第三方代码里
+        # 占着 worker。立刻归还会让并发限制形同虚设，名额随进程重启恢复。
         logger.warning(
             "外部作用域探测超时（>%ss）。注意：卡死的 Provider 线程无法强制终止，"
             "反复超时会占满探测专用线程池（上限 %s）",
@@ -395,6 +409,7 @@ async def _probe(fn, *args) -> dict:
             "message": f"探测超时（超过 {int(_PROBE_TIMEOUT_SECONDS)} 秒），请检查外部系统响应速度",
         }
     except Exception as e:  # noqa: BLE001 — 第三方 Provider 代码，什么都可能抛
+        _probe_slots.release()
         logger.warning(f"外部作用域探测失败: {e}")
         return {
             "success": False,
