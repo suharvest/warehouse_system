@@ -63,6 +63,10 @@ class WarehouseItem(BaseModel):
     created_at: str
     tenant_id: Optional[int] = None
     tenant_name: Optional[str] = None
+    # 外部 ERP 模式下由「导入外部仓库」建出的权限锚点，值为对方的仓库编码。
+    # 前端据此把本地锚点与智能体绑定的外部仓库对应起来（人脸规则挂在本地
+    # warehouse_id 上，两者对不上会导致规则静默不生效）。本地仓库为空。
+    external_warehouse_id: Optional[str] = None
 
 
 class CreateWarehouseRequest(BaseModel):
