@@ -160,9 +160,16 @@ def _cleanup_stray_provider_files():
         for f in glob.glob(os.path.join(base, pat)) + \
                  glob.glob(os.path.join(base, "*", pat)):
             os.path.exists(f) and os.unlink(f)
-        # 原子改名遗留的临时文件
-        for f in glob.glob(os.path.join(base, "*", "*.py.tmp")):
+        # 动态 import 留下的字节码。只删 .py 的话 __pycache__ 会一直涨——
+        # 实测这里积了 40+ 个历史用例的 .pyc，其中还有客户 Provider 的编译产物。
+        stem = pat[:-3]
+        for f in glob.glob(os.path.join(base, "__pycache__", stem + "*.pyc")) + \
+                 glob.glob(os.path.join(base, "*", "__pycache__", stem + "*.pyc")):
             os.path.exists(f) and os.unlink(f)
+    # 原子改名遗留的临时文件
+    for f in glob.glob(os.path.join(base, "*.py.tmp")) + \
+             glob.glob(os.path.join(base, "*", "*.py.tmp")):
+        os.path.exists(f) and os.unlink(f)
 
 
 @pytest.fixture()
@@ -748,3 +755,65 @@ class UploadTestProvider(BaseProvider):
         import glob
         assert glob.glob(os.path.join(custom_dir, "*.py.tmp")) == [], \
             "失败路径遗留了临时文件"
+
+
+    def test_uploaded_file_is_world_readable(self, external_mode):
+        """上传落盘的 Provider 必须保持 0644。
+
+        改用 mkstemp 做原子替换后，权限从 open() 的 0644 变成了 0600。加载 Provider
+        的可能是另一个进程/用户（MCP 侧），0600 会让它读不到、静默回退到默认
+        Provider——症状是"配了没生效"，比直接报错难查得多。
+        """
+        from io import BytesIO
+        from routers import erp as erp_router
+        import stat
+
+        marker = f"uploadtest_{uuid.uuid4().hex[:8]}"
+        r = external_mode.post(
+            "/api/erp/providers",
+            files={"file": (f"{marker}.py",
+                            BytesIO(TestUploadDoesNotDestroyExistingProvider._body(marker)),
+                            "text/x-python")})
+        assert r.status_code == 200, r.text
+        dest = os.path.join(
+            erp_router._get_providers_custom_dir(tenant_id=1), f"{marker}.py")
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        assert mode & 0o044, f"落盘权限 {oct(mode)}，其他用户读不到"
+
+
+class TestSavepointSemantics:
+    """导入的逐条隔离依赖 SAVEPOINT，这里钉死它在部署栈上确实生效。
+
+    为什么单独测机制而不是走接口：撞名的常见情形被写入前的预检拦掉了，savepoint
+    是留给**先查后插之间那段竞态窗口**的兜底——在单进程测试里没法确定性地触发。
+    而 pysqlite 的事务处理有名地不老实（SQLAlchemy 默认不主动 BEGIN），
+    SAVEPOINT 能不能正确回滚不能想当然，所以直接对 get_engine() 验一遍。
+    """
+
+    def test_nested_rollback_keeps_outer_writes(self):
+        from sqlalchemy import text
+        from sqlalchemy.exc import IntegrityError
+        from db import get_engine
+
+        eng = get_engine()
+        with eng.begin() as c:
+            c.execute(text("DROP TABLE IF EXISTS _sp_probe"))
+            c.execute(text(
+                "CREATE TABLE _sp_probe (id INTEGER PRIMARY KEY, u TEXT UNIQUE)"))
+        try:
+            with eng.begin() as c:
+                c.execute(text("INSERT INTO _sp_probe (u) VALUES ('a')"))
+                with pytest.raises(IntegrityError):
+                    with c.begin_nested():
+                        c.execute(text("INSERT INTO _sp_probe (u) VALUES ('b')"))
+                        c.execute(text("INSERT INTO _sp_probe (u) VALUES ('a')"))
+                # 外层事务必须还能继续写
+                c.execute(text("INSERT INTO _sp_probe (u) VALUES ('c')"))
+
+            with eng.connect() as c:
+                rows = sorted(r[0] for r in c.execute(text("SELECT u FROM _sp_probe")))
+            assert rows == ["a", "c"], (
+                f"SAVEPOINT 没有正确回滚（'b' 应随失败的那条一起消失）：{rows}")
+        finally:
+            with eng.begin() as c:
+                c.execute(text("DROP TABLE IF EXISTS _sp_probe"))

@@ -181,6 +181,10 @@ async def upload_erp_provider(
         tmp_fd2, tmp_dest = tempfile.mkstemp(suffix='.py.tmp', dir=custom_dir)
         with os.fdopen(tmp_fd2, 'wb') as f:
             f.write(content)
+        # mkstemp 固定建 0600，而原先的 open() 走 umask 得到 0644。加载 Provider 的
+        # 可能是另一个进程/用户（MCP 侧），沿用 0600 会让它读不到文件、静默回退到
+        # 默认 Provider——症状是"配了没生效"，比直接报错难查得多。
+        os.chmod(tmp_dest, 0o644)
 
         with get_engine().begin() as sa_conn:
             # 变量名不要复用 result——上面 result 是校验结果，被这里的 CursorResult
@@ -199,8 +203,26 @@ async def upload_erp_provider(
             )
             provider_id = ins.inserted_primary_key[0] if ins.inserted_primary_key else None
 
-        os.replace(tmp_dest, dest_path)
-        tmp_dest = None
+        try:
+            os.replace(tmp_dest, dest_path)
+            tmp_dest = None
+        except OSError as e:
+            # DB 已经提交，文件却没能就位。放着不管的话状态是「有记录、无文件」：
+            # 加载器找不到文件会静默回退到默认 Provider，而 provider_name 上的唯一
+            # 索引又让用户重传必得 409——自己把自己锁死，UI 上除了删记录没有出路。
+            # 这里补偿掉那条记录，让接口恢复成「什么都没发生」。
+            try:
+                with get_engine().begin() as sa_conn:
+                    sa_conn.execute(
+                        delete(_t_erp_providers).where(
+                            _t_erp_providers.c.id == provider_id))
+            except Exception:
+                logger.exception(
+                    f"Provider 文件就位失败后回滚 DB 记录也失败，"
+                    f"残留记录 id={provider_id}，需手工清理")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Provider 文件写入失败：{e}") from e
     except IntegrityError:
         # provider_name 在当前租户内唯一约束冲突。dest_path 原封不动。
         raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 在当前租户下已存在")
@@ -641,6 +663,8 @@ async def import_external_users(
     now_dt = datetime.now()
 
     unmatched: set[tuple] = set()      # {(tenant_id, external_user_id, code)}
+    # 本条的暂存，每轮循环重置；_grant 往这里写，条目写库成功后才并入 unmatched
+    pending_unmatched: set[tuple] = set()
     # bcrypt 很慢，整批共用一个初始密码，只算一次
     pw_hash = hash_password(request.default_password)
 
@@ -667,9 +691,13 @@ async def import_external_users(
                 continue
             wid = anchor_by_code.get(c)
             if wid is None:
+                # 先攒在本条的暂存里，等这一条真的写成功了才并入总集合。
+                # 直接往 unmatched 里加的话，savepoint 回滚掉的那条（记进了 skipped、
+                # 一行都没写）仍会在响应里报「这些编码没建授权」——而它压根没被导入，
+                # 看的人会去查一个不存在的锚点问题。
                 # 带上租户和外部账号：多租户下同一个编码可能只在部分租户建过锚点，
-                # 只报一个裸编码的话无法判断是哪个用户的哪次授权没落上。
-                unmatched.add((tid, ext_id, c))
+                # 只报裸编码无法判断是哪个用户的哪次授权没落上。
+                pending_unmatched.add((tid, ext_id, c))
                 continue
             ids.append(wid)
         sa_conn.execute(
@@ -719,6 +747,13 @@ async def import_external_users(
 
             # 每条一个 SAVEPOINT：并发导入等竞态下仍可能撞唯一索引（先查后插之间
             # 有窗口），届时只回滚这一条并记入 skipped，不牵连整批。
+            #
+            # 计数器和 unmatched 都是 Python 变量，**不随事务回滚**。所以块内只记
+            # 本条的增量，等 savepoint 成功释放之后才落账——否则回滚掉的那条会在
+            # 响应里被算成"已导入"，或者报出一堆它根本没走到的未匹配编码。
+            pending_unmatched = set()
+            _g = 0
+            _is_new = existing is None
             try:
                 with sa_conn.begin_nested():
                     if existing:
@@ -729,9 +764,8 @@ async def import_external_users(
                                 role=role,
                             )
                         )
-                        granted += _grant(
+                        _g = _grant(
                             sa_conn, existing.id, item.warehouses, role, tid, ext_id)
-                        updated += 1
                     else:
                         _ins = sa_conn.execute(
                             insert(_t_users).values(
@@ -747,15 +781,22 @@ async def import_external_users(
                         )
                         _uid = _ins.inserted_primary_key[0] if _ins.inserted_primary_key else None
                         if _uid is not None:
-                            granted += _grant(
+                            _g = _grant(
                                 sa_conn, _uid, item.warehouses, role, tid, ext_id)
-                        created += 1
             except IntegrityError:
                 skipped.append({
                     "external_user_id": ext_id,
                     "username": username,
                     "reason": "写入时与既有账号冲突（用户名或外部账号已被占用），已跳过",
                 })
+                continue
+
+            granted += _g
+            unmatched |= pending_unmatched
+            if _is_new:
+                created += 1
+            else:
+                updated += 1
 
     logger.info(
         f"导入外部用户: tenants={sorted(_tids)} 新建={created} 更新={updated} "
