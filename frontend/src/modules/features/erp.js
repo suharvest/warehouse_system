@@ -1,6 +1,6 @@
 // ============ ERP 系统模式管理模块 ============
 import { t } from '../../../i18n.js';
-import { API_BASE_URL } from '../state.js';
+import { API_BASE_URL, currentTenant, getCurrentUser } from '../state.js';
 import { showToast } from '../ui-components.js';
 
 // API 封装
@@ -145,12 +145,32 @@ function showParseError(msg) {
     el.style.display = msg ? 'block' : 'none';
 }
 
+// 全局管理员（tenant_id 为 null）没有自己的租户，后端要求显式指定要操作哪个租户，
+// 否则返回 400。这里沿用「当前选中仓库所属租户」，与上传 Provider 的既有约定一致。
+function _tenantQuery(prefix = '?') {
+    const user = getCurrentUser();
+    if (user && (user.tenant_id === null || user.tenant_id === undefined)) {
+        const tid = currentTenant && currentTenant.id;
+        if (tid) return `${prefix}tenant_id=${encodeURIComponent(tid)}`;
+    }
+    return '';
+}
+
+function _tenantBody() {
+    const user = getCurrentUser();
+    if (user && (user.tenant_id === null || user.tenant_id === undefined)) {
+        const tid = currentTenant && currentTenant.id;
+        if (tid) return { tenant_id: tid };
+    }
+    return {};
+}
+
 export async function erpProbeUsers() {
     showParseError('');
     document.getElementById('erp-import-json').style.display = 'none';
     let resp;
     try {
-        resp = await erpFetch('/erp/external/users');
+        resp = await erpFetch(`/erp/external/users${_tenantQuery()}`);
     } catch (e) {
         if (e.status === 401) return;
         showParseError(e.message || t('operationFailed'));
@@ -230,6 +250,7 @@ export async function erpDoImport() {
                 default_password: password,
                 users: selected.map(({ external_user_id, username, display_name, role }) =>
                     ({ external_user_id, username, display_name, role })),
+                ..._tenantBody(),
             }),
         });
     } catch (e) {

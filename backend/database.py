@@ -752,6 +752,7 @@ def init_database():
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE warehouses ADD COLUMN external_warehouse_id TEXT')
 
+
     # tenants.device_id：旧库兜底补列（新库由上方 CREATE TABLE 带 UNIQUE）。
     try:
         cursor.execute('SELECT device_id FROM tenants LIMIT 1')
@@ -803,6 +804,13 @@ def init_database():
         cursor.execute('SELECT warehouse_id FROM contacts LIMIT 1')
     except sqlite3.OperationalError:
         cursor.execute('ALTER TABLE contacts ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)')
+
+    # 外部映射唯一性：导入是先查后插，并发时应用层挡不住，靠 DB 锁死。
+    # NULL 不参与唯一性，手工建的本地用户/仓库不受影响。
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ext_uid_tenant '
+                   'ON users(tenant_id, external_user_id)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_warehouses_ext_wid_tenant '
+                   'ON warehouses(tenant_id, external_warehouse_id)')
 
 
     # ============================================

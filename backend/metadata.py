@@ -101,6 +101,7 @@ warehouses = Table(
     # 不承载任何库存数据，库存仍全部在对方。对方有租户概念时这一列为空。
     Column("external_warehouse_id", String(128), nullable=True),
     Index("idx_warehouses_tenant", "tenant_id"),
+    Index("idx_warehouses_ext_wid_tenant", "tenant_id", "external_warehouse_id", unique=True),
     Index("idx_warehouses_slug_tenant", "slug", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
@@ -131,6 +132,10 @@ users = Table(
     # 这些配置。别在这三者之间建隐式关联。
     Column("external_user_id", String(128), nullable=True),
     Index("idx_users_tenant", "tenant_id"),
+    # 导入是「先查后插」，并发导入同一批可能各自查空后双双插入。数据库层面锁死：
+    # 同一租户内一个外部账号只能对应一个本地用户。NULL 不参与唯一性（SQLite/MySQL
+    # 均如此），所以手工建的本地用户不受影响。
+    Index("idx_users_ext_uid_tenant", "tenant_id", "external_user_id", unique=True),
     Index("idx_users_username_tenant", "username", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
