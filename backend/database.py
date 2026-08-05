@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import os
 import hashlib
@@ -7,6 +8,8 @@ from typing import Optional
 import random
 
 from models import RecordType, RoleName
+
+logger = logging.getLogger('warehouse')
 
 # 尝试导入bcrypt（生产环境使用）
 try:
@@ -316,6 +319,7 @@ def init_database():
             address TEXT,
             is_default INTEGER DEFAULT 0,
             is_disabled INTEGER DEFAULT 0,
+            external_warehouse_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -397,7 +401,8 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             created_by INTEGER REFERENCES users(id),
             tenant_id INTEGER DEFAULT 1,
-            last_login_at TIMESTAMP
+            last_login_at TIMESTAMP,
+            external_user_id TEXT
         )
     ''')
 
@@ -579,6 +584,8 @@ def init_database():
             restart_count INTEGER DEFAULT 0,
             debug_mode INTEGER DEFAULT 0,
             device_id TEXT UNIQUE,
+            external_tenant_id TEXT,
+            external_warehouse_id TEXT,
             created_at TEXT,
             updated_at TEXT
         )
@@ -726,6 +733,29 @@ def init_database():
         cursor.execute('ALTER TABLE mcp_connections ADD COLUMN device_id TEXT')
         cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_device_id ON mcp_connections(device_id)')
 
+    # 外部 ERP 绑定的对方租户/仓库编码：旧库兜底补列（新库由上方 CREATE TABLE 带）。
+    try:
+        cursor.execute('SELECT external_tenant_id FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN external_tenant_id TEXT')
+
+    try:
+        cursor.execute('SELECT external_warehouse_id FROM mcp_connections LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE mcp_connections ADD COLUMN external_warehouse_id TEXT')
+
+    # 外部账号映射：users 关联对方账号；warehouses 在对方无租户概念时作权限锚点。
+    try:
+        cursor.execute('SELECT external_user_id FROM users LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE users ADD COLUMN external_user_id TEXT')
+
+    try:
+        cursor.execute('SELECT external_warehouse_id FROM warehouses LIMIT 1')
+    except sqlite3.OperationalError:
+        cursor.execute('ALTER TABLE warehouses ADD COLUMN external_warehouse_id TEXT')
+
+
     # tenants.device_id：旧库兜底补列（新库由上方 CREATE TABLE 带 UNIQUE）。
     try:
         cursor.execute('SELECT device_id FROM tenants LIMIT 1')
@@ -779,10 +809,12 @@ def init_database():
         cursor.execute('ALTER TABLE contacts ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)')
 
 
+
     # ============================================
     # 多租户迁移：回填 tenant_id 到默认租户
     # ============================================
     cursor.execute('UPDATE warehouses SET tenant_id = 1 WHERE tenant_id IS NULL')
+
     if get_deploy_mode() == 'multi_tenant':
         cursor.execute('SELECT COUNT(*) as cnt FROM users WHERE role = "admin" AND tenant_id IS NULL')
         has_global_admin = cursor.fetchone()['cnt'] > 0
@@ -799,6 +831,27 @@ def init_database():
         cursor.execute('UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL AND role != "admin"')
     else:
         cursor.execute('UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL')
+
+    # 外部映射唯一性：导入是先查后插，并发时应用层挡不住，靠 DB 锁死。
+    # NULL 不参与唯一性，手工建的本地用户/仓库不受影响。
+    #
+    # 必须放在**所有** tenant_id 回填之后：索引键含 tenant_id。warehouses 与 users
+    # 的回填分处两段，早先只挪到 warehouses 之后，users 的回填仍在索引之后执行——
+    # 回填把多行的 tenant_id 从 NULL 改成 1 时可能撞上已建好的唯一索引并抛异常。
+    # 存量若已有重复外部映射，建索引会失败——这里只告警不抛，避免旧库直接起不来；
+    # 权威修复走 Alembic 迁移 s8t9u0v1w2x3，那里会明确报错要求人工处理
+    # （两张表都被出入库记录等多表外键引用，绝不能自动删行）。
+    for _idx, _tbl, _cols in (
+        ('idx_users_ext_uid_tenant', 'users', 'tenant_id, external_user_id'),
+        ('idx_warehouses_ext_wid_tenant', 'warehouses', 'tenant_id, external_warehouse_id'),
+    ):
+        try:
+            cursor.execute(
+                f'CREATE UNIQUE INDEX IF NOT EXISTS {_idx} ON {_tbl}({_cols})')
+        except sqlite3.IntegrityError as _e:
+            logger.warning(
+                "跳过唯一索引 %s：%s 存在重复的外部映射，请人工处理后重跑迁移（%s）",
+                _idx, _tbl, _e)
     cursor.execute('UPDATE api_keys SET tenant_id = 1 WHERE tenant_id IS NULL')
     cursor.execute('UPDATE mcp_connections SET tenant_id = 1 WHERE tenant_id IS NULL')
     cursor.execute('UPDATE contacts SET tenant_id = 1 WHERE tenant_id IS NULL')

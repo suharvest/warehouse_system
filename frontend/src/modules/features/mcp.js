@@ -1,11 +1,14 @@
 // ============ MCP 连接管理模块 ============
 import { t } from '../../../i18n.js';
 import { fetchJson as mcpFetch, getCurrentWarehouseId, warehousesApi } from '../api.js';
-import { getCurrentUser } from '../state.js';
+import { getCurrentUser, getCurrentWarehouse } from '../state.js';
 import { showToast } from '../ui-components.js';
 
 // 状态
 let connections = [];
+// 本地仓库列表（含 external_warehouse_id）。外部模式下用来把"导入的权限锚点"
+// 与智能体绑定的外部仓库对应起来。
+let localWarehouses = [];
 let refreshInterval = null;
 // 设备子面板状态：connId -> { devices: [...] }；openDevicePanels 记录哪些智能体的设备区已展开。
 let deviceState = {};
@@ -63,7 +66,7 @@ function renderConnections() {
                     </div>
                 </td>
                 ${showTenantCol ? `<td class="mcp-tenant-col text-sm">${escapeHtml(conn.tenant_name || '-')}</td>` : ''}
-                <td class="text-sm">${escapeHtml(conn.warehouse_name || '-')}</td>
+                <td class="text-sm">${escapeHtml(conn.warehouse_name || '-')}${conn.external_warehouse_id ? `<div class="text-xs text-gray-400">${escapeHtml(conn.external_warehouse_id)}</div>` : ''}</td>
                 <td>
                     <span class="mcp-status-badge ${conn.status}">${statusText}</span>
                 </td>
@@ -182,6 +185,7 @@ export async function showAddMCPModal() {
     try {
         const data = await warehousesApi.getList();
         const warehouses = data.warehouses || data || [];
+        localWarehouses = warehouses;
         warehouses.forEach(w => {
             const opt = document.createElement('option');
             opt.value = w.id;
@@ -195,12 +199,68 @@ export async function showAddMCPModal() {
         console.error('加载仓库列表失败:', e);
     }
 
+    await setupExternalScope(null);
+
     modal.classList.add('show');
 }
 
 export function closeMCPModal() {
     const modal = document.getElementById('mcp-modal');
     if (modal) modal.classList.remove('show');
+}
+
+
+async function _ensureLocalAnchor(extWarehouseId, displayName) {
+    // 外部模式下「仓库」不是自由选择——人脸规则、user_warehouses 权限、审计日志
+    // 全都挂在本地 warehouse_id 上，而调用透传的是外部编码。若两者不对应，界面上
+    // 显示的仓库就不是操作实际落到的仓库，规则也会配到错的那条上。
+    // 所以选定外部仓库后必须保证本地有对应锚点：没有就地建一个，让显示的即真实的。
+    if (!extWarehouseId) return null;
+
+    // 必须同时匹配租户：全局管理员的仓库列表跨租户，只按外部编码找会撞上
+    // 别的租户那条同编码的锚点，导致跨租户错绑。
+    const user = getCurrentUser();
+    const isGlobalAdmin = !!user && (user.tenant_id === null || user.tenant_id === undefined);
+    const tid = _mcpTenantId();
+    if (isGlobalAdmin && tid == null) {
+        // 全局管理员选的是「全部仓库」——推不出租户，此时按编码匹配会对所有租户
+        // 放行，可能绑到别人的锚点上。宁可报错也不能猜。
+        throw Object.assign(new Error(t('warehouseNeedTenantForAnchor')), { status: 400 });
+    }
+    const sameTenant = w => tid == null || String(w.tenant_id) === String(tid);
+    const hit = (localWarehouses || []).find(
+        w => sameTenant(w) && w.external_warehouse_id
+             && String(w.external_warehouse_id) === String(extWarehouseId)
+    );
+    if (hit) return hit.id;
+
+    // 复用已有的导入接口（幂等、带重名保护），不在连接接口里塞副作用
+    await mcpFetch('/erp/external/import/warehouses', {
+        method: 'POST',
+        body: JSON.stringify({
+            warehouses: [{
+                external_warehouse_id: extWarehouseId,
+                name: displayName || extWarehouseId,
+            }],
+            ...(tid ? { tenant_id: tid } : {}),
+        }),
+    });
+
+    const data = await warehousesApi.getList();
+    localWarehouses = data.warehouses || data || [];
+    const created = localWarehouses.find(
+        w => sameTenant(w) && w.external_warehouse_id
+             && String(w.external_warehouse_id) === String(extWarehouseId)
+    );
+    return created ? created.id : null;
+}
+
+function _externalWarehouseLabel() {
+    const sel = document.getElementById('mcp-conn-ext-warehouse');
+    if (sel && sel.style.display !== 'none' && sel.selectedIndex > 0) {
+        return sel.options[sel.selectedIndex].textContent;
+    }
+    return null;
 }
 
 export async function handleSaveMCP() {
@@ -210,6 +270,7 @@ export async function handleSaveMCP() {
     const role = 'operate';  // MCP 智能体固定使用操作员权限
     const autoStart = document.getElementById('mcp-conn-autostart').checked;
     const whId = document.getElementById('mcp-conn-warehouse').value;
+    const extScope = readExternalScope();
     const errorDiv = document.getElementById('mcp-modal-error');
 
     if (!name || !endpoint) {
@@ -217,7 +278,23 @@ export async function handleSaveMCP() {
         errorDiv.style.display = 'block';
         return;
     }
-    if (!whId) {
+    let effectiveWhId = whId;
+    try {
+        // 外部模式：本地仓库由外部仓库派生，保证界面显示的就是操作实际落到的那个
+        if (extScope && extScope.external_warehouse_id) {
+            const anchorId = await _ensureLocalAnchor(
+                extScope.external_warehouse_id, _externalWarehouseLabel());
+            if (anchorId) effectiveWhId = String(anchorId);
+        }
+    } catch (e) {
+        if (e.status === 401) return;
+        errorDiv.textContent = e.message || t('operationFailed');
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    // 锚点创建失败时 effectiveWhId 仍是预览哨兵，parseInt 会得到 NaN 打成坏请求
+    if (!effectiveWhId || effectiveWhId === '__pending_anchor__') {
         errorDiv.textContent = t('selectWarehouse');
         errorDiv.style.display = 'block';
         return;
@@ -228,13 +305,13 @@ export async function handleSaveMCP() {
             // 编辑模式
             await mcpFetch(`/mcp/connections/${connId}`, {
                 method: 'PUT',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10) })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(effectiveWhId, 10), ...(extScope || {}) })
             });
         } else {
             // 新建模式
             await mcpFetch('/mcp/connections', {
                 method: 'POST',
-                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(whId, 10) })
+                body: JSON.stringify({ name, mcp_endpoint: endpoint, role, auto_start: autoStart, warehouse_id: parseInt(effectiveWhId, 10), ...(extScope || {}) })
             });
         }
         closeMCPModal();
@@ -245,6 +322,243 @@ export async function handleSaveMCP() {
         errorDiv.textContent = error.message || t('operationFailed');
         errorDiv.style.display = 'block';
     }
+}
+
+
+// ============ 外部 ERP：对方系统的租户/仓库探测 ============
+// 接了外部 WMS 后，库存数据全在对方，我们的租户/仓库跟对方的没有对应关系。
+// 不在本地镜像一套对方的组织结构，而是让 Provider 把"对方有什么"报上来，
+// 用户直接选，我们只存选中的原始编码并原样透传。
+// Provider 未实现探测（not_implemented）是预期路径 —— 逐字段退化成手工填写，
+// 所以只实现了其中一个方法的 Provider 也照样能用。
+
+// 全局管理员（tenant_id 为 null）对所有租户都有权限，后端无从推断，必须显式传。
+// 与 erp.js 同源：由右上角所选仓库派生。普通用户返回 null——后端按登录态取，
+// 前端不传也不该传。
+function _mcpTenantId() {
+    const user = getCurrentUser();
+    if (!user || (user.tenant_id !== null && user.tenant_id !== undefined)) return null;
+    const wh = getCurrentWarehouse();
+    return wh && wh.tenant_id != null ? wh.tenant_id : null;
+}
+
+function _mcpTenantQuery(prefix = '?') {
+    const tid = _mcpTenantId();
+    return tid ? `${prefix}tenant_id=${encodeURIComponent(tid)}` : '';
+}
+
+function _extEls() {
+    return {
+        group: document.getElementById('mcp-conn-external-scope'),
+        tSel: document.getElementById('mcp-conn-ext-tenant'),
+        wSel: document.getElementById('mcp-conn-ext-warehouse'),
+        tTxt: document.getElementById('mcp-conn-ext-tenant-text'),
+        wTxt: document.getElementById('mcp-conn-ext-warehouse-text'),
+        hint: document.getElementById('mcp-conn-ext-hint'),
+    };
+}
+
+function _fillSelect(sel, items, placeholder, selected) {
+    const list = items || [];
+    sel.innerHTML = `<option value="">${placeholder}</option>`;
+    list.forEach(it => {
+        const opt = document.createElement('option');
+        opt.value = it.id != null ? String(it.id) : '';
+        opt.textContent = it.name || String(it.id ?? '');
+        sel.appendChild(opt);
+    });
+    if (selected != null && selected !== '') {
+        sel.value = String(selected);
+    } else if (list.length === 1) {
+        // 只有一个候选就直接选中：对方是"单租户/单仓库"形态时，用户什么都不用点
+        sel.value = String(list[0].id ?? '');
+    }
+}
+
+function _degradeField(sel, txt, value) {
+    sel.style.display = 'none';
+    txt.style.display = '';
+    if (value != null) txt.value = value;
+    // 手填外部编码时同样要联动本地锚点，否则人脸规则一样对不上
+    if (txt.id === 'mcp-conn-ext-warehouse-text') {
+        txt.oninput = () => _syncLocalWarehouseFromExternal(txt.value.trim());
+        if (value) _syncLocalWarehouseFromExternal(String(value).trim());
+    }
+}
+
+function _showHint(hint, msg, field) {
+    if (!msg) return;
+    // 逐字段提示并追加：只有一个接口没实现时（如对方没有租户概念），
+    // 不能让提示看起来像"整个探测都挂了"——另一个下拉其实是好用的。
+    const line = field ? `${field}：${msg}` : msg;
+    const prev = hint.textContent ? hint.textContent + ' ' : '';
+    if (prev.includes(line)) return;
+    hint.textContent = prev + line;
+    hint.style.display = 'block';
+}
+
+async function _loadExternalWarehouses(extTenantId, selected) {
+    const { wSel, wTxt, hint } = _extEls();
+    const parts = [];
+    if (extTenantId) parts.push(`external_tenant_id=${encodeURIComponent(extTenantId)}`);
+    const tq = _mcpTenantQuery('');
+    if (tq) parts.push(tq);
+    const qs = parts.length ? `?${parts.join('&')}` : '';
+    let resp;
+    try {
+        resp = await mcpFetch(`/erp/external/warehouses${qs}`);
+    } catch (e) {
+        if (e.status === 401) return;
+        _degradeField(wSel, wTxt, selected);
+        _showHint(hint, e.status === 404 ? t('externalNoProvider') : t('externalProbeFailed'), t('externalWarehouse'));
+        return;
+    }
+    if (!resp || !resp.success) {
+        _degradeField(wSel, wTxt, selected);
+        _showHint(hint, resp && resp.error === 'not_implemented'
+            ? t('externalProbeUnsupported') : t('externalProbeFailed'), t('externalWarehouse'));
+        return;
+    }
+    wSel.style.display = '';
+    wTxt.style.display = 'none';
+    _fillSelect(wSel, resp.items, t('externalSelectWarehouse'), selected);
+    wSel.onchange = () => _syncLocalWarehouseFromExternal(wSel.value);
+    _syncLocalWarehouseFromExternal(wSel.value);
+}
+
+async function setupExternalScope(conn) {
+    const { group, tSel, wSel, tTxt, wTxt, hint } = _extEls();
+    if (!group) return;
+
+    // 每次打开都重置，避免上一次的退化状态/选项残留
+    group.style.display = 'none';
+    hint.style.display = 'none';
+    hint.textContent = '';
+    tSel.style.display = '';
+    wSel.style.display = '';
+    tTxt.style.display = 'none';
+    wTxt.style.display = 'none';
+    tTxt.value = (conn && conn.external_tenant_id) || '';
+    wTxt.value = (conn && conn.external_warehouse_id) || '';
+    tSel.onchange = null;
+    _releaseLocalWarehouse();
+
+    let mode = 'self_owned';
+    try {
+        const d = await mcpFetch('/system/mode');
+        mode = (d && d.mode) || 'self_owned';
+    } catch (e) {
+        if (e.status === 401) return;
+        return;  // 取不到模式就按自有模式处理，不显示外部字段
+    }
+    if (mode !== 'external_erp') return;
+
+    group.style.display = '';
+    const selTenant = (conn && conn.external_tenant_id) || '';
+    const selWarehouse = (conn && conn.external_warehouse_id) || '';
+
+    let resp;
+    try {
+        resp = await mcpFetch(`/erp/external/tenants${_mcpTenantQuery()}`);
+    } catch (e) {
+        if (e.status === 401) return;
+        _degradeField(tSel, tTxt, selTenant);
+        _degradeField(wSel, wTxt, selWarehouse);
+        _showHint(hint, e.status === 404 ? t('externalNoProvider') : t('externalProbeFailed'));
+        return;
+    }
+
+    if (resp && resp.success) {
+        _fillSelect(tSel, resp.items, t('externalSelectTenant'), selTenant);
+        tSel.onchange = () => _loadExternalWarehouses(tSel.value, null);
+        // 只有一个租户时 _fillSelect 会自动选中，要按选中值去拉仓库，
+        // 否则会用空租户去探测、拿回错误的列表
+        await _loadExternalWarehouses(tSel.value, selWarehouse);
+        return;
+    } else {
+        // 对方系统可能压根没有租户概念 —— 租户退化成手填，仓库照样探测
+        _degradeField(tSel, tTxt, selTenant);
+        _showHint(hint, resp && resp.error === 'not_implemented'
+            ? t('externalProbeUnsupported') : t('externalProbeFailed'), t('externalTenant'));
+    }
+    await _loadExternalWarehouses(selTenant, selWarehouse);
+}
+
+
+function _syncLocalWarehouseFromExternal(extWarehouseId) {
+    // 人脸规则、审计、权限都挂在**本地** warehouse_id 上，而调用透传的是外部编码。
+    // 两者若各选各的，就会出现"规则配在北京仓、智能体其实绑了上海仓"——规则静默
+    // 不生效，且完全没有报错。所以选了外部仓库后，自动把本地仓库切到对应的
+    // 导入锚点（导入时写了 external_warehouse_id 的那一行）。
+    const whSelect = document.getElementById('mcp-conn-warehouse');
+    if (!whSelect) return;
+
+    // 没选外部仓库（对方单仓库，或 Provider 未实现探测且用户留空）→ 本地仓库仍由
+    // 用户自由选择，走租户级规则。多仓库用户在这种情况下照常切换。
+    if (!extWarehouseId) {
+        _releaseLocalWarehouse();
+        return;
+    }
+
+    // 选了外部仓库 → 本地仓库是**派生**的，锁住不让改：两者若不一致，界面显示的
+    // 仓库就不是操作实际落到的仓库。要换仓库应该换上面那个「外部仓库」下拉，
+    // 换完这里会跟着变。锚点还不存在时，保存前由 _ensureLocalAnchor 就地创建。
+    whSelect.disabled = true;
+    whSelect.title = t('warehouseDerivedFromExternal');
+
+    // 与 _ensureLocalAnchor 保持同一判据：全局管理员选「全部仓库」时推不出租户，
+    // 此时按编码匹配会命中**别的租户**的锚点并显示上去——保存路径虽然会拒绝，
+    // 但用户在点保存之前看到的就已经是错的仓库了。该场景一律不匹配，
+    // 走下面的待创建预览，由保存时给出明确报错。
+    const _user = getCurrentUser();
+    const _isGlobalAdmin = !!_user && (_user.tenant_id === null || _user.tenant_id === undefined);
+    const _tid = _mcpTenantId();
+    const _canMatch = !(_isGlobalAdmin && _tid == null);
+    const anchor = !_canMatch ? null : (localWarehouses || []).find(
+        w => (_tid == null || String(w.tenant_id) === String(_tid))
+             && w.external_warehouse_id
+             && String(w.external_warehouse_id) === String(extWarehouseId)
+    );
+    if (anchor) {
+        whSelect.value = String(anchor.id);
+        return;
+    }
+
+    // 锚点还没建（保存时才创建）。锁住的下拉若停在"请选择仓库"，用户根本看不出
+    // 会绑到哪个仓库——补一个预览项，把即将创建的名字显示出来。
+    const label = _externalWarehouseLabel() || extWarehouseId;
+    let preview = whSelect.querySelector('option[data-anchor-preview]');
+    if (!preview) {
+        preview = document.createElement('option');
+        preview.setAttribute('data-anchor-preview', '1');
+        whSelect.appendChild(preview);
+    }
+    preview.value = '__pending_anchor__';
+    preview.textContent = label;
+    whSelect.value = '__pending_anchor__';
+}
+
+function _releaseLocalWarehouse() {
+    const whSelect = document.getElementById('mcp-conn-warehouse');
+    if (!whSelect) return;
+    whSelect.disabled = false;
+    whSelect.title = '';
+    // 清掉锚点预览项，否则解锁后它会变成一个可选但无效的选项
+    const preview = whSelect.querySelector('option[data-anchor-preview]');
+    if (preview) {
+        if (whSelect.value === '__pending_anchor__') whSelect.value = '';
+        preview.remove();
+    }
+}
+
+function readExternalScope() {
+    const { group, tSel, wSel, tTxt, wTxt } = _extEls();
+    if (!group || group.style.display === 'none') return null;
+    const pick = (sel, txt) => (txt.style.display === 'none' ? sel.value : txt.value).trim();
+    return {
+        external_tenant_id: pick(tSel, tTxt),
+        external_warehouse_id: pick(wSel, wTxt),
+    };
 }
 
 // ============ 编辑连接 ============
@@ -268,6 +582,9 @@ export async function editMCPConnection(connId) {
     try {
         const data = await warehousesApi.getList();
         const warehouses = data.warehouses || data || [];
+        // 编辑路径也必须刷新缓存：锚点匹配与联动都读 localWarehouses，
+        // 不刷新就会用上一次打开时的过期列表（新导入的锚点匹配不到）
+        localWarehouses = warehouses;
         warehouses.forEach(w => {
             const opt = document.createElement('option');
             opt.value = w.id;
@@ -279,6 +596,8 @@ export async function editMCPConnection(connId) {
         if (e.status === 401) return;
         console.error('加载仓库列表失败:', e);
     }
+
+    await setupExternalScope(conn);
 
     modal.classList.add('show');
 }

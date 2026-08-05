@@ -96,7 +96,12 @@ warehouses = Table(
     Column("is_disabled", Boolean, nullable=False, server_default="0"),
     _ts_col(),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
+    # 对方系统没有租户概念时，仓库就是唯一的作用域维度——此时把对方仓库导入为
+    # 本地行**仅作权限锚点**（user_warehouses 要绑本地 warehouse_id），
+    # 不承载任何库存数据，库存仍全部在对方。对方有租户概念时这一列为空。
+    Column("external_warehouse_id", String(128), nullable=True),
     Index("idx_warehouses_tenant", "tenant_id"),
+    Index("idx_warehouses_ext_wid_tenant", "tenant_id", "external_warehouse_id", unique=True),
     Index("idx_warehouses_slug_tenant", "slug", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
@@ -120,7 +125,17 @@ users = Table(
     Column("created_by", Integer, ForeignKey("users.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Column("last_login_at", DateTime, nullable=True),
+    # 外部 ERP 模式下对应的对方账号 ID。**仅用于导入去重与增量同步**，不参与
+    # 任何业务链路。授权始终由我方判定（role + tenant_id + user_warehouses）。
+    # 注意 users 与出入库的 operator、人脸库 face_subjects 都**没有**关联：
+    # operator 是自由填写的文本，人脸是单独录入的，users 只决定谁有权修改
+    # 这些配置。别在这三者之间建隐式关联。
+    Column("external_user_id", String(128), nullable=True),
     Index("idx_users_tenant", "tenant_id"),
+    # 导入是「先查后插」，并发导入同一批可能各自查空后双双插入。数据库层面锁死：
+    # 同一租户内一个外部账号只能对应一个本地用户。NULL 不参与唯一性（SQLite/MySQL
+    # 均如此），所以手工建的本地用户不受影响。
+    Index("idx_users_ext_uid_tenant", "tenant_id", "external_user_id", unique=True),
     Index("idx_users_username_tenant", "username", "tenant_id", unique=True),
     **MYSQL_TABLE_KW,
 )
@@ -354,6 +369,12 @@ mcp_connections = Table(
     Column("warehouse_id", Integer, ForeignKey("warehouses.id")),
     Column("tenant_id", Integer, ForeignKey("tenants.id"), server_default="1"),
     Column("device_id", String(64), nullable=True, unique=True),
+    # 外部 ERP 模式下这个智能体绑定的**对方**租户/仓库编码。存对方的原始字符串，
+    # 不做翻译、也不在本地建对应的 tenants/warehouses 行——我们的 warehouse_id
+    # （上面那个 Integer FK）只服务于自有模式。两者互不影响：自有模式下这两列为空，
+    # 外部模式下 warehouse_id 可以为空。
+    Column("external_tenant_id", String(128), nullable=True),
+    Column("external_warehouse_id", String(128), nullable=True),
     Index("idx_mcp_connections_tenant", "tenant_id"),
     **MYSQL_TABLE_KW,
 )

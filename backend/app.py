@@ -397,6 +397,52 @@ def _seed_base_data() -> None:
         logger.warning(f"_seed_base_data() skipped: {e}")
 
 
+def _seed_face_endpoint() -> None:
+    """把 FACE_REC_API_URL 种进 tenant_face_config.endpoint（仅当该行 endpoint 为空）。
+
+    背景：人脸端点的唯一事实源是 tenant_face_config.endpoint，而 compose 里的
+    FACE_REC_API_URL 以前**没有任何代码读取**——单机部署起来后端点是空的，
+    人脸链路直接 endpoint_not_configured，但那个 env 的存在又让人误以为已经接好了。
+    现场排查过一次，代价很高。
+
+    这里选择"种进 DB"而不是"运行时兜底"：DB 始终是唯一事实源，Web UI 里看到的
+    就是实际生效的值。运行时兜底会造成 UI 显示为空但功能正常的不一致，日后必然
+    再坑人一次。
+
+    只填空值，不覆盖用户已配置的端点（比如指向外部人脸服务的地址）。
+
+    multi_tenant 除外：各租户可能各自对接不同的人脸服务，不能拿本机 compose 里
+    的地址去填别人的配置（与 _seed_base_data 同样的理由）。
+    """
+    endpoint = (os.environ.get("FACE_REC_API_URL") or "").strip().rstrip("/")
+    if not endpoint or get_deploy_mode() == "multi_tenant":
+        return
+    try:
+        sqlite = _is_sqlite()
+        ignore_kw = "OR IGNORE" if sqlite else "IGNORE"
+        with get_engine().begin() as conn:
+            # 全新部署时该行根本不存在（UI 首次保存人脸配置才会 INSERT），
+            # 只 UPDATE 会打空。先补一行 enabled=0 的占位：功能默认关闭、
+            # 但端点已填好，运维在 UI 只需打开开关，不用再去查该填什么地址。
+            conn.execute(
+                text(
+                    f"INSERT {ignore_kw} INTO tenant_face_config "
+                    "(tenant_id, enabled, mode, endpoint) "
+                    "VALUES (1, 0, 'lan', :ep)"
+                ),
+                {"ep": endpoint},
+            )
+            conn.execute(
+                text(
+                    "UPDATE tenant_face_config SET endpoint = :ep "
+                    "WHERE endpoint IS NULL OR endpoint = ''"
+                ),
+                {"ep": endpoint},
+            )
+    except Exception as e:
+        logger.warning(f"_seed_face_endpoint() skipped: {e}")
+
+
 def _validate_schema_matches_metadata() -> None:
     """启动时校验：SQLAlchemy metadata 声明的每一列都真实存在于 db。
 
@@ -547,6 +593,7 @@ async def list_warehouses(
         _t_warehouses.c.address, _t_warehouses.c.is_default,
         _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
         _t_warehouses.c.tenant_id,
+        _t_warehouses.c.external_warehouse_id,
         _t_tenants.c.name.label('tenant_name'),
     ).select_from(
         _t_warehouses.outerjoin(_t_tenants, _t_warehouses.c.tenant_id == _t_tenants.c.id)
@@ -564,6 +611,7 @@ async def list_warehouses(
                     if isinstance(r.created_at, datetime) else r.created_at),
         tenant_id=r.tenant_id,
         tenant_name=r.tenant_name,
+        external_warehouse_id=r.external_warehouse_id,
     ) for r in rows]
 
 
@@ -6868,6 +6916,9 @@ async def _run_migrations():
     # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。
     # Docker 部署走纯 Alembic 路径，Alembic 只建表不插数据，需在此补齐。
     _seed_base_data()
+
+    # 人脸端点补种：必须在 _seed_base_data() 之后（依赖 tenant 1 存在的外键）。
+    _seed_face_endpoint()
 
     # Schema 不变式校验 — 防止 metadata.py 加列忘写迁移（曾踩坑两次）。
     # 故意让异常向上抛：缺列时拒绝启动，不该被吞掉。

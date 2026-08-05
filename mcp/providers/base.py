@@ -269,3 +269,66 @@ class BaseProvider(ABC):
             "error": "not_implemented",
             "message": f"当前 Provider 未实现批次库位移动（move_batch_location）",
         }
+
+    # ↓↓↓ 外部 ERP 模式下的「作用域探测」（同样是可选扩展，非 @abstractmethod）。
+    #
+    # 背景：接了外部 WMS 之后，库存数据全在对方，我们这边的租户/仓库跟对方的
+    # 租户/仓库**没有任何对应关系**。硬要在本地镜像一套对方的组织结构，只会带来
+    # 双重维护和必然的数据漂移。所以改成反过来——让 Provider 把"对方有什么"报上来，
+    # 用户在配置智能体时直接选，我们只存选中的原始编码并原样透传，不做任何翻译。
+    #
+    # 不实现也完全没问题：返回 not_implemented 时，前端会退化成手工填写编码。
+
+    def list_tenants(self) -> dict:
+        """列出当前凭据可访问的外部租户/组织（只读探测）。
+
+        返回: {success, items: [{"id": str, "name": str}], message}
+        对方系统若没有租户概念，可以不实现，或返回单条占位。
+        默认实现返回 not_implemented；需要多租户绑定时子类应当 override。
+        """
+        return {
+            "success": False,
+            "error": "not_implemented",
+            "message": "当前 Provider 未实现外部租户探测（list_tenants）",
+        }
+
+    def list_warehouses(self, tenant_id: str | None = None) -> dict:
+        """列出外部仓库（只读探测）。
+
+        Args:
+            tenant_id: 已选定的外部租户 ID；对方无租户概念时为 None。
+
+        返回: {success, items: [{"id": str, "name": str}], message}
+        默认实现返回 not_implemented；子类应当 override。
+        """
+        return {
+            "success": False,
+            "error": "not_implemented",
+            "message": "当前 Provider 未实现外部仓库探测（list_warehouses）",
+        }
+
+    def list_users(self, tenant_id: str | None = None) -> dict:
+        """列出外部系统的用户/账号（只读探测）。
+
+        用途与租户/仓库探测不同：**授权是我方的责任，推不出去**。
+        谁能登录、谁能配哪个智能体、谁能改人脸规则，都由我方的
+        users(role, tenant_id) + user_warehouses 判定。外部 ERP 模式下库存
+        数据虽然全在对方，这份「用户 → 租户/角色」的归属数据仍然必须落在我方，
+        否则整个权限体系是空的。本方法用于把对方的账号**导入**为我方用户，
+        避免管理员手工照抄一遍。
+
+        注意：导入进来的用户**只承载权限**，与出入库的 `operator`、人脸库都没有
+        关联。`operator` 是自由填写的文本，人脸是单独录入的；用户的作用是决定
+        谁有权修改这些配置。不要在三者之间建隐式关联。
+
+        Args:
+            tenant_id: 已选定的外部租户 ID；对方无租户概念时为 None。
+
+        返回: {success, items: [{"id": str, "name": str, "display_name"?: str}], message}
+        默认实现返回 not_implemented；子类应当 override。
+        """
+        return {
+            "success": False,
+            "error": "not_implemented",
+            "message": "当前 Provider 未实现外部用户探测（list_users）",
+        }

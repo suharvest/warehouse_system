@@ -41,4 +41,9 @@ test/
 # providers/__init__.py 的 _discover() 会自动注册这里的所有 BaseProvider 子类，
 # 一旦打进公共镜像，等于把某个客户的 Provider 注册进了所有人的部署。
 # 目录本身靠 .gitkeep 保留（上传接口和 bind mount 都需要它存在）。
+# 注意：必须同时写 */** 两条。.dockerignore 用的是 Go filepath.Match 语义，
+# `*` 不跨越 `/`，只写第一条会漏掉 custom/<tenant_id>/xxx.py —— 而上传接口
+# （backend/routers/erp.py:_get_providers_custom_dir）正是按租户建子目录存放的，
+# 也就是恰好漏掉真实客户 Provider 所在的位置。
 mcp/providers/custom/*.py
+mcp/providers/custom/**/*.py
