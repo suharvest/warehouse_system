@@ -426,8 +426,31 @@ def __init__(self, config: dict):
 There is **one Provider instance per agent**, so agents bound to different warehouses are
 isolated automatically.
 
-Endpoints: `GET /api/erp/external/tenants`, `GET /api/erp/external/warehouses`
-(always HTTP 200 — `not_implemented` is an expected path, not an error).
+Endpoints: `GET /api/erp/external/tenants`, `GET /api/erp/external/warehouses`,
+`GET /api/erp/external/users` — all require **`ERP:ADMIN`** (they use stored credentials
+to reach your system and enumerate its org structure, so they are not open to read-only roles).
+
+**Always HTTP 200**; success and reason live in the body — a provider not implementing
+discovery is an expected path, not an HTTP error. Possible `error` values:
+
+| error | Meaning | UI behaviour |
+|---|---|---|
+| (none, `success: true`) | Discovery succeeded | Render dropdown |
+| `not_implemented` | Provider doesn't implement the method | Fall back to manual entry |
+| `probe_failed` | Provider raised, or returned a shape off-contract | Report failure, fall back to manual entry |
+| `probe_timeout` | No response within 20 seconds | Ask you to check your system's latency |
+| `probe_busy` | Concurrent probes exhausted (max 4), or earlier probes still stuck in your system | Ask the user to retry later |
+
+> Why `probe_busy` happens: discovery calls your code synchronously, so we run it in a
+> dedicated thread pool with a hard 20-second timeout. **A timeout only stops us waiting —
+> the stuck thread cannot be reclaimed.** If your endpoint hangs, those slots stay occupied
+> until the calls actually finish. Please make discovery return within seconds.
+
+**Where the tenant comes from for a global admin**: a normal user's tenant is decided by
+their login (the frontend neither sends nor should send it). A global admin (`tenant_id`
+NULL) has access to every tenant, so it is derived from the **warehouse selected in the
+top-right**; with "All warehouses" selected no tenant can be derived and the UI asks them
+to pick a specific warehouse first.
 
 ### 3.6 Identity import: authorization always stays on our side
 
@@ -467,6 +490,20 @@ UI: **Settings → Data Management → "Import Identities from External System"*
 (only shown in `external_erp` mode). Endpoint: `POST /api/erp/external/import/users`,
 requires `USERS:ADMIN`.
 
+**Uniqueness constraint**: a composite unique index on `(tenant_id, external_user_id)`
+enforces this at the database level — import is check-then-insert, which the application layer
+alone cannot make safe against concurrent submissions. Different tenants may share the same
+external account ID (composite key); manually created local users have a NULL
+`external_user_id`, do not participate in uniqueness, and are unaffected. Warehouse anchors
+are constrained the same way on `(tenant_id, external_warehouse_id)`.
+
+> **Upgrade note**: if duplicate external mappings already exist, the migration **deletes
+> nothing** (these tables are referenced by stock records and others via foreign keys). It skips
+> index creation and prints the duplicates plus remediation steps to the deploy log. After
+> resolving them you must run the printed `CREATE UNIQUE INDEX` statement **manually** —
+> re-running `alembic upgrade head` is a no-op. Until then everything works; only the
+> concurrency guard is missing.
+
 Idempotency:
 
 - Same `external_user_id` again → **updates** username/display_name/role, **leaves the password alone**
@@ -493,9 +530,17 @@ Endpoint: `POST /api/erp/external/import/warehouses`. Imported rows carry
 ⚠️ **Agent binding must line up with the anchor.** Face rules hang off the local
 `warehouse_id` while calls pass through `external_warehouse_id`. Picking them independently
 produces "rule configured on Beijing, agent actually bound to Shanghai" — the rule
-**silently does not apply, with no error**. The config UI links them automatically (choosing an
-external warehouse switches the local warehouse to the matching anchor), but when creating
-connections directly via the API you must keep them consistent yourself.
+**silently does not apply, with no error**.
+
+What the UI does: once an external warehouse is chosen, the local warehouse becomes
+**derived and locked** and can no longer be changed on its own; if no local anchor exists yet,
+one is created on save (reusing the idempotent import endpoint). To switch warehouses, change
+the *external* warehouse dropdown and the local one follows. With no external warehouse
+selected (single-warehouse systems, or discovery not implemented and the field left blank),
+the local warehouse stays freely selectable and tenant-level rules apply.
+
+**Creating connections directly via the API has none of this protection** — you must ensure
+the row referenced by `warehouse_id` carries the same `external_warehouse_id` you send.
 
 ### 3.8 Local pages are empty in external mode
 
@@ -577,6 +622,10 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # GUI tool 
 | Discovery returns "no active ERP Provider for this tenant" | No Provider activated yet | Upload and activate per §3.3, or use paste-JSON import instead (no Provider needed) |
 | Some users missing after import | A local user with the same name but a different external account exists and was skipped for safety | Check the returned `skipped` array — each entry carries a reason |
 | Imported users can't log in | Not using the initial password set at import time | Log in with that initial password, then change it |
+| Discovery returns `probe_busy` | Concurrency exhausted (max 4), or earlier probes are still stuck in your system | Retry later; if it persists, check whether your discovery endpoint hangs (stuck threads can't be reclaimed — slots free up only when those calls actually finish) |
+| Discovery returns `probe_timeout` | Your system did not respond within 20s | Make discovery return within seconds |
+| Deploy log says "skipped unique index" | Duplicate external mappings existed before the upgrade | The migration deletes nothing. Use the SQL in the log to inspect and resolve duplicates, then run the printed CREATE UNIQUE INDEX **manually** — re-running upgrade is a no-op |
+| Global admin gets "pick a specific warehouse first" | "All warehouses" is selected, so no tenant can be derived | Pick a specific warehouse in the top-right; the tenant is derived from it |
 | Re-importing created duplicate users | The external account `id` is not stable (the dedup key changed) | Ask for a stable account ID — see §3.6 |
 
 ## Related docs
