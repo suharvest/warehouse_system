@@ -66,3 +66,12 @@ stock-out-modal-*-mobile.png
 /*.png
 /*.yml
 /exec
+
+# 第三方 Provider 运行时投放目录：这里的 .py 是客户/调试用的对接实现，
+# 属于别人的代码，绝不能进仓库。此前两次误提交都是 `git add -A mcp/` 顺手收走的
+# （其中一份客户实现进了公开仓库的历史，最后只能重写历史 + force push 清理）。
+# .dockerignore 里有对应的两条（镜像侧），这里是 git 侧。
+# 目录本身靠 .gitkeep 保留——上传接口和 bind mount 都需要它存在。
+mcp/providers/custom/*.py
+mcp/providers/custom/**/*.py
+!mcp/providers/custom/.gitkeep
