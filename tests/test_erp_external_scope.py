@@ -98,8 +98,12 @@ def _snapshot_ids():
     users = {r[0] for r in cur.fetchall()}
     cur.execute("SELECT id FROM warehouses")
     whs = {r[0] for r in cur.fetchall()}
+    # 连接也要快照：用例建的智能体绑的是**默认仓库**，不在"新增仓库"集合里，
+    # 只按仓库差集删会把它和它自动创建的 API Key 一起漏掉。
+    cur.execute("SELECT id FROM mcp_connections")
+    conns = {r[0] for r in cur.fetchall()}
     conn.close()
-    return users, whs
+    return users, whs, conns
 
 
 def _cleanup_imported_rows(snapshot=None):
@@ -114,7 +118,7 @@ def _cleanup_imported_rows(snapshot=None):
     warehouses，避免外键悬挂。
     """
     from database import get_db_connection
-    old_users, old_whs = snapshot if snapshot else (set(), set())
+    old_users, old_whs, old_conns = snapshot if snapshot else (set(), set(), set())
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT id FROM users WHERE external_user_id IS NOT NULL")
@@ -125,6 +129,14 @@ def _cleanup_imported_rows(snapshot=None):
         cur.execute("DELETE FROM user_warehouses WHERE user_id = ?", (uid,))
     for uid in uids:
         cur.execute("DELETE FROM users WHERE id = ?", (uid,))
+    # 先收连接（含其自动创建的 API Key），再收仓库——顺序反了会留下悬挂引用。
+    # API Key 的名字是 f"Agent: {连接名}"（见 mcp_admin.create_mcp_connection），
+    # 按连接名精确删，不要按 'Agent: %' 模糊删——那会波及其它用例建的连接。
+    cur.execute("SELECT id, name FROM mcp_connections")
+    for cid, cname in [(r[0], r[1]) for r in cur.fetchall() if r[0] not in old_conns]:
+        cur.execute("DELETE FROM mcp_agent_devices WHERE connection_id = ?", (cid,))
+        cur.execute("DELETE FROM api_keys WHERE name = ?", (f"Agent: {cname}",))
+        cur.execute("DELETE FROM mcp_connections WHERE id = ?", (cid,))
     cur.execute("SELECT id FROM warehouses WHERE external_warehouse_id IS NOT NULL")
     for wid in [r[0] for r in cur.fetchall() if r[0] not in old_whs]:
         cur.execute("DELETE FROM mcp_connections WHERE warehouse_id = ?", (wid,))
