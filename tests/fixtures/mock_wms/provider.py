@@ -495,5 +495,9 @@ class CustomWmsProvider(BaseProvider):
             return {"success": False, "error": "api_error", "items": [],
                     "message": f"拉取用户失败: {(data or {}).get('msg')}"}
         return {"success": True, "message": "ok",
-                "items": [{"id": u["id"], "name": u["login"], "display_name": u["realName"]}
+                "items": [{"id": u["id"], "name": u["login"],
+                           "display_name": u["realName"],
+                           # 对方系统里这个账号能访问哪些仓库——我方据此建仓库授权，
+                           # 否则导入的用户登录后仓库列表是空的、什么也做不了
+                           "warehouses": u.get("warehouses") or []}
                           for u in data.get("data") or []]}

@@ -35,6 +35,7 @@ from deps import (
 )
 from metadata import (
     erp_providers as _t_erp_providers,
+    user_warehouses as _t_user_warehouses,
     system_settings as _t_system_settings,
     users as _t_users,
     warehouses as _t_warehouses,
@@ -516,12 +517,24 @@ class _ImportUserItem(BaseModel):
     username: str
     display_name: Optional[str] = None
     role: str = "operate"
+    # 单条的目标租户，仅**全局管理员**可用：一次调用把对方不同组织的账号分别导入
+    # 我方不同租户。租户管理员传了会 403（不能越权往别的租户塞人），留空即按登录态。
+    tenant_id: Optional[int] = None
+    # 该账号在**对方系统**里能访问的仓库编码。我方据此建 user_warehouses 授权：
+    # 不建的话，导入进来的非 admin 用户登录后仓库列表是空的、几乎什么都做不了
+    # （get_authorized_warehouses 对非 admin 只认显式授权）。
+    # 编码需先作为锚点导入过（POST /api/erp/external/import/warehouses），
+    # 未匹配到本地锚点的编码会在结果里回报，不静默丢弃。
+    warehouses: list[str] = []
 
 
 class _ImportUsersRequest(BaseModel):
     users: list[_ImportUserItem]
     # 导入只建身份，密码本地管：统一初始密码，导入后应要求用户自行修改。
     default_password: str
+    # 整批的目标租户。租户管理员留空即可（按登录态）；全局管理员可用它给整批指定
+    # 同一个租户，也可以留空、改为在每个 user 上单独写 tenant_id（见下），
+    # 这样一次调用就能把对方多个组织的人分别导进我方多个租户。
     tenant_id: Optional[int] = None
 
 
@@ -552,22 +565,80 @@ async def import_external_users(
     """
     from database import hash_password
 
-    tid = _resolve_import_tenant(current_user, request.tenant_id)
     if not request.users:
-        return {"created": 0, "updated": 0, "skipped": [], "message": "没有要导入的用户"}
+        return {"created": 0, "updated": 0, "granted": 0,
+                "unmatched_warehouses": [], "skipped": [],
+                "message": "没有要导入的用户"}
     if len(request.default_password) < 4:
         raise HTTPException(status_code=400, detail="初始密码长度至少 4 位")
 
+    def _tenant_of(item: "_ImportUserItem") -> int:
+        """逐条确定目标租户。
+
+        租户管理员：一律按登录态；显式传了别的租户则 403（与人脸接口同语义，
+        显式拒绝比静默忽略更容易暴露调用方的错误假设）。
+        全局管理员：用条目上的 tenant_id，没有就退到整批的 tenant_id，都没有则 400。
+        """
+        want = item.tenant_id if item.tenant_id is not None else request.tenant_id
+        if current_user.tenant_id is not None:
+            if want is not None and want != current_user.tenant_id:
+                raise HTTPException(status_code=403, detail="无权将用户导入其他租户")
+            return current_user.tenant_id
+        if want is None:
+            raise HTTPException(
+                status_code=400,
+                detail="全局管理员导入时需指定 tenant_id（可在整批上，也可逐条指定）")
+        return want
+
+    # 涉及到的每个租户各取一份「外部仓库编码 → 本地锚点」映射
+    _tids = {_tenant_of(it) for it in request.users}
+    anchor_by_tenant: dict[int, dict] = {}
+    with get_engine().connect() as _c:
+        for _t in _tids:
+            rows = _c.execute(
+                select(_t_warehouses.c.id, _t_warehouses.c.external_warehouse_id).where(and_(
+                    _t_warehouses.c.tenant_id == _t,
+                    _t_warehouses.c.external_warehouse_id.isnot(None),
+                ))
+            ).fetchall()
+            anchor_by_tenant[_t] = {r.external_warehouse_id: r.id for r in rows}
+
     valid_roles = {"admin", "operate", "view"}
     now_dt = datetime.now()
+
+    unmatched: set[str] = set()
     # bcrypt 很慢，整批共用一个初始密码，只算一次
     pw_hash = hash_password(request.default_password)
 
     created = updated = 0
+    granted = 0
     skipped: list[dict] = []
+
+    def _grant(sa_conn, user_id: int, codes: list[str], role: str, tid: int) -> int:
+        """按外部仓库编码建仓库授权（幂等：先清后建）。"""
+        if role == "admin":
+            return 0        # admin 可见本租户全部仓库，逐个授权没有意义
+        anchor_by_code = anchor_by_tenant.get(tid) or {}
+        ids = []
+        for code in codes or []:
+            c = (code or "").strip()
+            if not c:
+                continue
+            wid = anchor_by_code.get(c)
+            if wid is None:
+                unmatched.add(c)
+                continue
+            ids.append(wid)
+        sa_conn.execute(
+            delete(_t_user_warehouses).where(_t_user_warehouses.c.user_id == user_id))
+        for wid in sorted(set(ids)):
+            sa_conn.execute(insert(_t_user_warehouses).values(
+                user_id=user_id, warehouse_id=wid))
+        return len(set(ids))
 
     with get_engine().begin() as sa_conn:
         for item in request.users:
+            tid = _tenant_of(item)
             ext_id = (item.external_user_id or "").strip()
             username = (item.username or "").strip()
             if not ext_id or not username:
@@ -591,6 +662,7 @@ async def import_external_users(
                         role=role,
                     )
                 )
+                granted += _grant(sa_conn, existing.id, item.warehouses, role, tid)
                 updated += 1
                 continue
 
@@ -609,7 +681,7 @@ async def import_external_users(
                 })
                 continue
 
-            sa_conn.execute(
+            _ins = sa_conn.execute(
                 insert(_t_users).values(
                     username=username,
                     password_hash=pw_hash,
@@ -621,17 +693,27 @@ async def import_external_users(
                     created_at=now_dt,
                 )
             )
+            _uid = _ins.inserted_primary_key[0] if _ins.inserted_primary_key else None
+            if _uid is not None:
+                granted += _grant(sa_conn, _uid, item.warehouses, role, tid)
             created += 1
 
     logger.info(
-        f"导入外部用户: tenant={tid} 新建={created} 更新={updated} 跳过={len(skipped)}"
-        f"，操作人: {current_user.display_name}"
+        f"导入外部用户: tenants={sorted(_tids)} 新建={created} 更新={updated} "
+        f"跳过={len(skipped)} 授权={granted}，操作人: {current_user.display_name}"
     )
+    msg = f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个"
+    if granted:
+        msg += f"，建立仓库授权 {granted} 条"
+    if unmatched:
+        msg += f"；以下外部仓库编码在本地没有对应锚点，未建授权：{'、'.join(sorted(unmatched))}"
     return {
         "created": created,
         "updated": updated,
+        "granted": granted,
+        "unmatched_warehouses": sorted(unmatched),
         "skipped": skipped,
-        "message": f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个",
+        "message": msg,
     }
 
 

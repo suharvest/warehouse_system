@@ -30,11 +30,17 @@ WAREHOUSES = [
     {"id": "WH-BJ-02", "name": "北京备件仓", "org": "ORG-BJ"},
     {"id": "WH-SH-01", "name": "上海保税仓", "org": "ORG-SH"},
 ]
+# 账号自带**组织**与**可访问仓库** —— 这两层关系必须由对方系统给出，
+# 我方无从推断。导入时据此建立 users.tenant_id 与 user_warehouses 授权。
 USERS = [
-    {"id": "u1001", "login": "zhangsan", "realName": "张三", "org": "ORG-BJ"},
-    {"id": "u1002", "login": "lisi",     "realName": "李四", "org": "ORG-BJ"},
-    {"id": "u1003", "login": "wangwu",   "realName": "王五", "org": "ORG-SH"},
-    {"id": "u1004", "login": "zhaoliu",  "realName": "赵六", "org": "ORG-SH"},
+    {"id": "u1001", "login": "zhangsan", "realName": "张三", "org": "ORG-BJ",
+     "warehouses": ["WH-BJ-01", "WH-BJ-02"]},
+    {"id": "u1002", "login": "lisi",     "realName": "李四", "org": "ORG-BJ",
+     "warehouses": ["WH-BJ-01"]},
+    {"id": "u1003", "login": "wangwu",   "realName": "王五", "org": "ORG-SH",
+     "warehouses": ["WH-SH-01"]},
+    {"id": "u1004", "login": "zhaoliu",  "realName": "赵六", "org": "ORG-SH",
+     "warehouses": []},
 ]
 # 物料主数据（跨仓共用）
 CATALOG = [

@@ -475,13 +475,27 @@ JSON format (bare array, `{items:[...]}`, or `{users:[...]}` are all accepted):
 
 ```json
 [
-  {"id": "u1001", "name": "zhangsan", "display_name": "Zhang San"},
-  {"id": "u1002", "name": "lisi"}
+  {"id": "u1001", "name": "zhangsan", "display_name": "Zhang San",
+   "warehouses": ["WH-BJ-01", "WH-BJ-02"]},
+  {"id": "u1002", "name": "lisi", "warehouses": ["WH-BJ-01"]}
 ]
 ```
 
-`id` and `name` are required; `display_name` is optional. **`id` must be stable** — it is the
-dedup key; if it changes on your side, re-importing creates duplicates instead of updating.
+| Field | Required | Notes |
+|---|---|---|
+| `id` | ✅ | Dedup key. **Must be stable** — if it changes on your side, re-importing creates duplicates instead of updating |
+| `name` | ✅ | Login name |
+| `display_name` | | Display name |
+| `warehouses` | | Warehouse codes this account can access **in your system** |
+
+**Supplying `warehouses` is strongly recommended.** For non-admin roles we honour only
+explicit warehouse grants (`user_warehouses`); without them an imported user logs in to an
+**empty warehouse list and can do almost nothing**, and an admin has to grant them one by one.
+
+At import time these codes are mapped to local warehouse anchors (import them first via
+`POST /api/erp/external/import/warehouses`). Codes with no matching anchor are never dropped
+silently — they come back in `unmatched_warehouses`. The `admin` role gets no per-warehouse
+grants: it can already see every warehouse in its tenant.
 
 What you do **not** need to supply:
 
@@ -494,6 +508,29 @@ What you do **not** need to supply:
 UI: **Settings → Data Management → "Import Identities from External System"**
 (only shown in `external_erp` mode). Endpoint: `POST /api/erp/external/import/users`,
 requires `USERS:ADMIN`.
+
+**Two ways to say which tenant to import into:**
+
+```jsonc
+// (1) Tenant admin: omit it — the tenant comes from their login
+{"default_password": "...", "users": [ ... ]}
+
+// (2) Global admin: one tenant for the whole batch
+{"default_password": "...", "tenant_id": 2, "users": [ ... ]}
+
+// (3) Global admin: one call, accounts from different orgs into different tenants
+{"default_password": "...", "users": [
+  {"id": "u1001", "name": "zhangsan", "tenant_id": 2},
+  {"id": "u1003", "name": "wangwu",   "tenant_id": 3}
+]}
+```
+
+A tenant admin naming a different tenant gets **403** (no importing into someone else's
+tenant); a global admin providing neither gets **400** (nothing to infer the tenant from).
+
+> Note: **your orgs play no part in choosing our tenant.** Accounts discovered under
+> `ORG-SH` still land in whatever `tenant_id` says. To map "your two orgs → our two tenants",
+> use form (3) above.
 
 **Uniqueness constraint**: a composite unique index on `(tenant_id, external_user_id)`
 enforces this at the database level — import is check-then-insert, which the application layer
