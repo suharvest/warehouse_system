@@ -1,6 +1,6 @@
 // ============ ERP 系统模式管理模块 ============
 import { t } from '../../../i18n.js';
-import { API_BASE_URL, currentTenant, getCurrentUser } from '../state.js';
+import { API_BASE_URL, getCurrentUser, getCurrentWarehouse } from '../state.js';
 import { showToast } from '../ui-components.js';
 
 // API 封装
@@ -145,28 +145,42 @@ function showParseError(msg) {
     el.style.display = msg ? 'block' : 'none';
 }
 
-// 全局管理员（tenant_id 为 null）没有自己的租户，后端要求显式指定要操作哪个租户，
-// 否则返回 400。这里沿用「当前选中仓库所属租户」，与上传 Provider 的既有约定一致。
-function _tenantQuery(prefix = '?') {
+// 租户归属以**登录态**为准：普通用户绑定在某个租户上，后端直接取
+// current_user.tenant_id 并忽略任何传参，所以前端不用也不该传。
+// 只有全局管理员（tenant_id 为 null）对所有租户都有权限、系统无从推断，
+// 才需要他显式指定——此时面板上会出现「目标租户」选择器。
+function _isGlobalAdmin() {
     const user = getCurrentUser();
-    if (user && (user.tenant_id === null || user.tenant_id === undefined)) {
-        const tid = currentTenant && currentTenant.id;
-        if (tid) return `${prefix}tenant_id=${encodeURIComponent(tid)}`;
-    }
-    return '';
+    return !!user && (user.tenant_id === null || user.tenant_id === undefined);
+}
+
+function _selectedTenantId() {
+    // 租户归属以**登录态**为准：普通用户绑定在某个租户上，后端直接取
+    // current_user.tenant_id 并忽略任何传参，所以这里返回 null、什么都不传。
+    // 只有全局管理员对所有租户都有权限、系统无从推断，才需要来源——复用右上角
+    // 已有的仓库选择器：选中的仓库属于哪个租户，这次操作就落到哪个租户。
+    // 「全部仓库」时没有具体仓库，也就推不出租户，由调用方提示用户先选一个。
+    if (!_isGlobalAdmin()) return null;
+    const wh = getCurrentWarehouse();
+    return wh && wh.tenant_id != null ? wh.tenant_id : null;
+}
+
+function _tenantQuery(prefix = '?') {
+    const tid = _selectedTenantId();
+    return tid ? `${prefix}tenant_id=${encodeURIComponent(tid)}` : '';
 }
 
 function _tenantBody() {
-    const user = getCurrentUser();
-    if (user && (user.tenant_id === null || user.tenant_id === undefined)) {
-        const tid = currentTenant && currentTenant.id;
-        if (tid) return { tenant_id: tid };
-    }
-    return {};
+    const tid = _selectedTenantId();
+    return tid ? { tenant_id: tid } : {};
 }
 
 export async function erpProbeUsers() {
     showParseError('');
+    if (_isGlobalAdmin() && !_selectedTenantId()) {
+        showParseError(t('erpImportNeedTenant'));
+        return;
+    }
     document.getElementById('erp-import-json').style.display = 'none';
     let resp;
     try {
@@ -241,6 +255,10 @@ export async function erpDoImport() {
     if (!selected.length) { showToast(t('erpImportSelectNone'), 'error'); return; }
     const password = (pwEl?.value || '').trim();
     if (password.length < 4) { showToast(t('erpImportNeedPassword'), 'error'); return; }
+    if (_isGlobalAdmin() && !_selectedTenantId()) {
+        showToast(t('erpImportNeedTenant'), 'error');
+        return;
+    }
 
     let resp;
     try {
