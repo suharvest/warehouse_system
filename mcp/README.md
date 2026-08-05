@@ -368,7 +368,7 @@ uv run python mcp_pipe.py your_server.py
 |---|---|---|
 | 1. 上传 | `POST /api/erp/providers`（multipart `file`） | 过校验后落到 `providers/custom/`，DB 记录 `provider_name` / `class_name` / `filename`；同租户内 `provider_name` 重复返回 409 |
 | 2. 填配置 | `PUT /api/erp/providers/{id}` | body `{name, config}`，`config` 是任意 JSON，原样传给你的 Provider 构造函数 |
-| 3. Level 1 测试 | `POST /api/erp/providers/{id}/test?level=1` | **只读**：`resolve_name` / `query_stock` / `search` / `get_today_statistics`。校验必需 key 是否存在，记录每个方法的延迟 |
+| 3. Level 1 测试 | `POST /api/erp/providers/{id}/test?level=1` | **只读**：`resolve_name` / `query_stock` / `search` / `get_today_statistics`，外加三个可选探测方法 `list_tenants` / `list_warehouses` / `list_users`（**未实现不算失败**，标记 `skipped`；实现了则校验 `{success, items}`）。校验必需 key 是否存在，记录每个方法的延迟 |
 | 4. Level 2 测试 | `POST /api/erp/providers/{id}/test?level=2` | **写操作**：`stock_in` / `stock_out`，会在你的 ERP 里对 `test_item` 各写 1 件。建议指向测试环境 |
 | 5. 激活 | `POST /api/erp/providers/{id}/activate` | **必须 L1 全绿**，否则 400。同租户内其余 Provider 自动停用（单激活） |
 | 6. 切模式 | `PUT /api/system/mode` → `external_erp` | 全系统开始走你的 ERP |
@@ -387,9 +387,117 @@ L1/L2 结果分别存在 `test_results.level1` / `.level2`，只有 L1 通过才
 - `external_erp` 且有激活 Provider → 动态从 `providers/custom/<filename>` 加载，配置为 `{**config.yml, **DB里的config}`；
 - **任何异常都回退到 `DefaultProvider`**（网络失败、404、文件缺失、加载抛错），并打 warning。所以「改了 ERP 却发现数据还写进本地库」时，第一件事是看 MCP 日志里的 fallback warning。
 
-> **已知限制（多租户部署）**：上传时文件按租户隔离存到 `providers/custom/<tenant_id>/<filename>`，而 MCP 加载时找的是 `providers/custom/<filename>`。单租户（`tenant_id` 为 None）路径一致、工作正常；多租户下会 fallback 到默认 Provider。多租户环境请先确认这条链路。
+> **多租户路径（2026-08 已修复）**：上传时文件按租户隔离存到
+> `providers/custom/<tenant_id>/<filename>`，而早期 MCP 加载时只找扁平的
+> `providers/custom/<filename>`，导致多租户下「上传 + 激活」后静默回退到默认
+> Provider。现在 `active-for-mcp` 会返回 `tenant_id`，加载器按
+> 「租户子目录 → 扁平路径」顺序解析，两种布局都兼容，找不到时会把尝试过的
+> 候选路径打进日志。**注意镜像版本**：旧镜像没有这个修复，那种环境下需要把
+> 文件放在扁平路径。
 
-### 3.5 端到端最小示例
+### 3.5 外部作用域绑定（多仓库 / 多组织时需要）
+
+接了外部 ERP 之后，**我方的租户/仓库与对方的没有任何对应关系**。与其在本地镜像
+一套对方的组织结构（双重维护、必然漂移），不如让 Provider 把「对方有什么」报上来，
+用户在配置智能体时直接选，我们只存**选中的原始编码**并在调用时原样透传。
+
+三个可选探测方法见
+[WMS_Provider_Development.md §外部作用域探测](../docs/WMS_Provider_Development.md)。
+按对方系统形态实现即可，**一个都不实现也能用**（界面退化为手工填写编码）：
+
+| 对方系统形态 | 需要实现 | 智能体配置界面 |
+|---|---|---|
+| 单组织、单仓库 | 都不用 | 两个字段留空，调用时用 Provider 配置里的固定值 |
+| 单组织、多仓库 | `list_warehouses` | 租户手填（留空），仓库是下拉 |
+| 多组织、多仓库 | 两个都实现 | 两级联动下拉 |
+
+只返回一个候选时界面自动选中，用户无需操作。
+
+选定后的值存在 `mcp_connections.external_tenant_id` / `external_warehouse_id`，
+运行时注入 Provider 的 `config`：
+
+```python
+def __init__(self, config: dict):
+    super().__init__(config)
+    self.tenant_id = config.get("external_tenant_id") or config.get("tenant_id")
+    self.warehouse_id = config.get("external_warehouse_id") or config.get("warehouse_id", "default")
+```
+
+**每个智能体一个 Provider 实例**，所以多个智能体绑不同仓库时天然隔离，
+不需要在方法里自己区分调用来源。
+
+相关接口：`GET /api/erp/external/tenants`、`GET /api/erp/external/warehouses`
+（恒返回 200，`not_implemented` 是预期路径，不表现为 HTTP 错误）。
+
+### 3.6 身份导入：授权始终由我方判定
+
+**这一点不能推给对方**：谁能登录我方系统、谁能配哪个智能体、谁能改人脸规则，
+走的是我方 `users(role, tenant_id)` + `user_warehouses` 这条链。即便库存数据全在
+对方，这份「用户 → 租户/角色」的归属数据仍必须落在我方，否则整个权限体系是空的。
+
+导入只是免去管理员照着对方的用户表手工重敲一遍。**两条来源，任选其一**：
+
+| 来源 | 对方要做什么 | 说明 |
+|---|---|---|
+| Provider 探测 | 实现 `list_users()` | 界面上点「从外部系统探测」 |
+| 自己组织 JSON | **什么都不用做** | 粘贴或上传文件；导入接口纯落库，不依赖 Provider |
+
+JSON 格式（三种包法都认：裸数组、`{items:[...]}`、`{users:[...]}`）：
+
+```json
+[
+  {"id": "u1001", "name": "zhangsan", "display_name": "张三"},
+  {"id": "u1002", "name": "lisi"}
+]
+```
+
+`id` 与 `name` 必需，`display_name` 可选。**`id` 必须稳定**——它是去重键，对方那边
+若会变，重复导入就会建出重复用户而不是更新。
+
+对方**不需要**提供的东西：
+
+| | 为什么 |
+|---|---|
+| 密码 | 我方本地管理，对方无需暴露任何认证接口 |
+| 角色 | 对方不了解我方权限模型，由我方管理员导入时逐行指定 |
+| 租户归属 | 同上，导入时决定归到我方哪个租户 |
+
+界面位置：**系统设置 → 数据管理 →「从外部系统导入身份」**（仅 `external_erp` 模式显示）。
+接口：`POST /api/erp/external/import/users`，需 `USERS:ADMIN`。
+
+幂等行为：
+
+- 同 `external_user_id` 再导 → **更新** username/display_name/role，**不动密码**
+- 我方已有同名但非同一外部账号 → **跳过并回报**，不覆盖（主要保护本地管理员账号）
+- 之前手工建的本地用户 `external_user_id` 为空，不受影响
+
+> **导入的用户只承载权限**，与出入库的 `operator`、人脸库都没有关联。
+> `operator` 是自由填写的文本，人脸是单独录入的。不要在三者之间建隐式关联。
+
+### 3.7 人脸识别在外部模式下的作用域
+
+人脸规则是**仓库级优先、租户级兜底**，作用域键是**我方的** `warehouse_id`：
+
+- 对方**有**租户概念 → 权限与规则做到租户级即可，本地一个仓库都不用建
+- 对方**没有**租户概念 → 仓库是唯一的作用域维度，此时把对方仓库导入为本地行
+  **仅作权限锚点**（`user_warehouses` 必须绑本地 `warehouse_id`），不承载任何库存
+
+接口：`POST /api/erp/external/import/warehouses`，导入的行会带上
+`warehouses.external_warehouse_id`。
+
+⚠️ **智能体绑定必须与锚点对齐**：人脸规则挂在本地 `warehouse_id` 上，而调用透传的是
+`external_warehouse_id`。两者若各选各的，会出现「规则配在北京仓、智能体其实绑了
+上海仓」——**规则静默不生效且没有任何报错**。配置界面已做自动联动（选定外部仓库后
+自动把本地仓库切到对应锚点），但通过 API 直接建连接时要自己保证一致。
+
+### 3.8 外部模式下本地页面是空的
+
+看板、进出库记录、库存列表、产品详情这四个页面读的是**我方本地库**，而外部模式下
+业务数据全在对方系统 —— 这些页面会是空的。界面顶部有提示横幅说明这一点。
+
+**这不是故障。** 真实数据请到对方系统查看。
+
+### 3.9 端到端最小示例
 
 完整的 `AcmeWmsProvider` 示例（6 个方法全部实现 + 对应 `config.yml`）见 [WMS_Provider_Development.md](../docs/WMS_Provider_Development.md#完整示例)。
 
@@ -446,7 +554,7 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # 图形化
 | 查询/入库正常，**只有出库 TypeError** | `stock_out` 漏了 `allow_partial_fallback` 参数 | 补上该参数（工具层无条件按关键字传它） |
 | 激活报 400「请先通过 Level 1 测试」 | 没跑或没全绿 | 先 `POST .../test?level=1` |
 | 切 `external_erp` 报 400 | 没有激活的 Provider | 先激活 |
-| 切了 `external_erp` 但数据仍写本地库 | MCP 侧 fallback 了 | 看 MCP 日志的 warning；核对 §3.4 已知限制 |
+| 切了 `external_erp` 但数据仍写本地库 | MCP 侧 fallback 了 | 看 MCP 日志的 warning，里面会列出尝试过的 Provider 文件路径；核对 §3.4 |
 | MCP 连接卡在 `Connecting to WebSocket server...` | 企业防火墙封 WSS / 端点写错 | 手机热点验证；确认 `wss://` 前缀；必要时设 `HTTPS_PROXY` |
 | 语音说了但工具没触发 | 工具名/docstring 不够清楚，或没重启 | 改 docstring 描述意图，重启 MCP 进程 |
 | 返回内容长时连接被断（1009） | 单帧超限 | 收紧 `max_results`，精简返回字段 |
@@ -455,6 +563,14 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # 图形化
 | 出入库记录里 `actual_operator` 为空 | 人脸未启用或规则未要求 | 预期行为；需要留痕请配人脸规则 |
 | 401 Unauthorized | `auth` 块配置或 API Key 失效 | Web UI「用户管理 → API 密钥」重建 |
 | `/face/verify-mcp` 返回 403 | API Key 缺 `FACE:WRITE` 权限 | 用有该权限的 Key |
+
+| 外部模式下库存/记录/看板页面是空的 | 数据在对方系统，这些页面读的是本地库 | **不是故障**，见 §3.8。真实数据到对方系统查看 |
+| 配了人脸规则但出入库根本不拦 | 智能体绑的仓库与规则的仓库对不上，规则静默不生效 | 见 §3.7 的警告。界面已自动联动；用 API 直接建连接的要自己对齐 |
+| 智能体配置里外部租户/仓库是输入框不是下拉 | Provider 没实现对应的探测方法 | 预期行为，手工填编码即可；要下拉就实现 §3.5 的方法 |
+| 探测报「当前租户没有激活的 ERP Provider」 | 还没激活 Provider | 先按 §3.3 上传并激活；或改用粘贴 JSON 导入（不依赖 Provider） |
+| 导入用户后少了几条 | 同租户下已存在同名但非同一外部账号的用户，被跳过保护 | 看返回的 `skipped` 数组，每条都带原因；改名或手工处理 |
+| 导入的用户登录不了 | 用的不是导入时设的初始密码 | 用导入时填的初始密码登录，登录后自行修改 |
+| 重复导入建出了重复用户 | 对方的账号 `id` 不稳定（去重键变了） | 让对方用稳定不变的账号 ID，见 §3.6 |
 
 ## 相关文档
 

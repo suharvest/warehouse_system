@@ -366,7 +366,7 @@ Since `os` is forbidden, read all configuration from the constructor's `config` 
 |---|---|---|
 | 1. Upload | `POST /api/erp/providers` (multipart `file`) | On pass, stored under `providers/custom/`; DB records `provider_name` / `class_name` / `filename`. Duplicate `provider_name` within a tenant → 409 |
 | 2. Set config | `PUT /api/erp/providers/{id}` | Body `{name, config}`; `config` is arbitrary JSON passed straight to your constructor |
-| 3. Level 1 test | `POST /api/erp/providers/{id}/test?level=1` | **Read-only**: `resolve_name` / `query_stock` / `search` / `get_today_statistics`. Checks required keys, records per-method latency |
+| 3. Level 1 test | `POST /api/erp/providers/{id}/test?level=1` | **Read-only**: `resolve_name` / `query_stock` / `search` / `get_today_statistics`, plus the three optional discovery methods `list_tenants` / `list_warehouses` / `list_users` (**not implementing them is not a failure** — they are marked `skipped`; if implemented, `{success, items}` is validated). Checks required keys, records per-method latency |
 | 4. Level 2 test | `POST /api/erp/providers/{id}/test?level=2` | **Writes**: `stock_in` / `stock_out` — writes 1 unit of `test_item` each into your ERP. Point at a test environment |
 | 5. Activate | `POST /api/erp/providers/{id}/activate` | **Requires L1 all-green**, else 400. Other Providers in the same tenant are auto-deactivated (single-active) |
 | 6. Switch mode | `PUT /api/system/mode` → `external_erp` | The whole system now goes through your ERP |
@@ -385,9 +385,127 @@ Contract:
 - `external_erp` with an active Provider → dynamically load `providers/custom/<filename>` with config `{**config.yml, **DB config}`;
 - **any failure falls back to `DefaultProvider`** (network error, 404, missing file, load exception), with a warning logged. So when "I switched to my ERP but data still lands in the local DB," the first thing to check is the fallback warning in the MCP log.
 
-> **Known limitation (multi-tenant deployments)**: uploads are stored tenant-isolated at `providers/custom/<tenant_id>/<filename>`, but the MCP loader looks for `providers/custom/<filename>`. Single-tenant (`tenant_id` is None) paths match and work; multi-tenant falls back to the default Provider. Verify this path before relying on it in a multi-tenant environment.
+> **Multi-tenant path (fixed 2026-08)**: uploads are stored tenant-isolated at
+> `providers/custom/<tenant_id>/<filename>`, while the MCP loader used to look only at
+> the flat `providers/custom/<filename>` — so under multi-tenancy "upload + activate"
+> silently fell back to the default Provider. `active-for-mcp` now returns `tenant_id`
+> and the loader resolves "tenant subdirectory → flat path", supporting both layouts and
+> logging every candidate path it tried when nothing is found. **Mind the image version**:
+> older images lack this fix and need the file at the flat path.
 
-### 3.5 End-to-end example
+### 3.5 External scope binding (needed for multi-warehouse / multi-org)
+
+Once an external ERP is bound, **our tenants/warehouses have no relationship to yours**.
+Rather than mirroring your org structure locally (dual maintenance, guaranteed drift),
+the Provider reports what *your* system has, the user picks it while configuring an agent,
+and we store the **raw codes** and pass them back verbatim on every call.
+
+The three optional discovery methods are documented in
+[WMS_Provider_Development.md](../docs/WMS_Provider_Development.md).
+Implement whichever match your system — **implementing none still works** (the UI falls
+back to manual code entry):
+
+| Your system | Implement | Agent config UI |
+|---|---|---|
+| Single org, single warehouse | none | Leave both blank; calls use the fixed values in your Provider config |
+| Single org, multiple warehouses | `list_warehouses` | Tenant is a text box (leave empty), warehouse is a dropdown |
+| Multiple orgs and warehouses | both | Two-level cascade |
+
+When only one candidate is returned the UI auto-selects it — no user action needed.
+
+Selected values are stored on `mcp_connections.external_tenant_id` /
+`external_warehouse_id` and injected into the Provider `config` at runtime:
+
+```python
+def __init__(self, config: dict):
+    super().__init__(config)
+    self.tenant_id = config.get("external_tenant_id") or config.get("tenant_id")
+    self.warehouse_id = config.get("external_warehouse_id") or config.get("warehouse_id", "default")
+```
+
+There is **one Provider instance per agent**, so agents bound to different warehouses are
+isolated automatically.
+
+Endpoints: `GET /api/erp/external/tenants`, `GET /api/erp/external/warehouses`
+(always HTTP 200 — `not_implemented` is an expected path, not an error).
+
+### 3.6 Identity import: authorization always stays on our side
+
+**This cannot be delegated.** Who may log into our system, configure which agent, or change
+face rules is decided by our `users(role, tenant_id)` + `user_warehouses` chain. Even though
+inventory lives entirely in your system, the "user → tenant/role" mapping must exist on ours,
+or the whole permission model is empty.
+
+Import merely saves an admin from retyping your user table. **Two sources, either works**:
+
+| Source | What you must do | Notes |
+|---|---|---|
+| Provider discovery | Implement `list_users()` | Click "Probe External System" in the UI |
+| Bring your own JSON | **nothing at all** | Paste or upload a file; the import endpoint is pure persistence and does not touch the Provider |
+
+JSON format (bare array, `{items:[...]}`, or `{users:[...]}` are all accepted):
+
+```json
+[
+  {"id": "u1001", "name": "zhangsan", "display_name": "Zhang San"},
+  {"id": "u1002", "name": "lisi"}
+]
+```
+
+`id` and `name` are required; `display_name` is optional. **`id` must be stable** — it is the
+dedup key; if it changes on your side, re-importing creates duplicates instead of updating.
+
+What you do **not** need to supply:
+
+| | Why |
+|---|---|
+| Passwords | Managed locally on our side; you expose no auth endpoint |
+| Roles | You don't know our permission model — our admin assigns them per row at import time |
+| Tenant membership | Same; decided at import time |
+
+UI: **Settings → Data Management → "Import Identities from External System"**
+(only shown in `external_erp` mode). Endpoint: `POST /api/erp/external/import/users`,
+requires `USERS:ADMIN`.
+
+Idempotency:
+
+- Same `external_user_id` again → **updates** username/display_name/role, **leaves the password alone**
+- A local user with the same name but a different external id → **skipped and reported**, never overwritten (this notably protects the local admin account)
+- Manually created local users have an empty `external_user_id` and are unaffected
+
+> **Imported users carry permissions only** — they are unrelated to the stock-movement
+> `operator` (free-form text) and to face-library subjects (enrolled separately).
+> Do not build implicit links between the three.
+
+### 3.7 Face recognition scoping in external mode
+
+Face rules are **warehouse-specific first, tenant-level as fallback**, keyed on **our**
+`warehouse_id`:
+
+- Your system **has** tenants → tenant-level rules suffice; create no local warehouses at all
+- Your system has **no** tenants → the warehouse is the only scoping dimension, so import your
+  warehouses as local rows **purely as permission anchors** (`user_warehouses` must bind a local
+  `warehouse_id`); they carry no inventory
+
+Endpoint: `POST /api/erp/external/import/warehouses`. Imported rows carry
+`warehouses.external_warehouse_id`.
+
+⚠️ **Agent binding must line up with the anchor.** Face rules hang off the local
+`warehouse_id` while calls pass through `external_warehouse_id`. Picking them independently
+produces "rule configured on Beijing, agent actually bound to Shanghai" — the rule
+**silently does not apply, with no error**. The config UI links them automatically (choosing an
+external warehouse switches the local warehouse to the matching anchor), but when creating
+connections directly via the API you must keep them consistent yourself.
+
+### 3.8 Local pages are empty in external mode
+
+The dashboard, stock-movement records, inventory list, and product detail pages read **our
+local database**, but in external mode all business data lives in your system — so these pages
+will be empty. A banner at the top of each page explains this.
+
+**This is not a fault.** Check your own system for the real data.
+
+### 3.9 End-to-end example
 
 A complete `AcmeWmsProvider` (all 6 methods plus matching `config.yml`) is in [WMS_Provider_Development.md](../docs/WMS_Provider_Development.md#wms-provider-development-guide).
 
@@ -444,7 +562,7 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # GUI tool 
 | Queries/inbound fine, **only outbound raises TypeError** | `stock_out` is missing `allow_partial_fallback` | Add it — the tool layer always passes it as a keyword |
 | Activate returns 400 "pass Level 1 first" | L1 not run or not green | Run `POST .../test?level=1` |
 | Switching to `external_erp` returns 400 | No active Provider | Activate one first |
-| Switched to `external_erp` but data still hits the local DB | MCP fell back | Check the warning in the MCP log; review the §3.4 known limitation |
+| Switched to `external_erp` but data still hits the local DB | MCP fell back | Check the warning in the MCP log; review the §3.4 |
 | MCP stuck at `Connecting to WebSocket server...` | Corporate firewall blocking WSS / wrong endpoint | Test on a mobile hotspot; confirm the `wss://` prefix; set `HTTPS_PROXY` if required |
 | Voice command doesn't trigger the tool | Tool name/docstring too vague, or process not restarted | Rewrite the docstring around intent; restart the MCP process |
 | Connection drops on long responses (1009) | Frame size exceeded | Tighten `max_results`, trim returned fields |
@@ -453,6 +571,14 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # GUI tool 
 | `actual_operator` is empty in stock records | Face recognition disabled or no rule requires it | Expected; configure a face rule if you need the audit trail |
 | 401 Unauthorized | Bad `auth` block or expired API key | Recreate the key under Web UI → User Management → API Keys |
 | `/face/verify-mcp` returns 403 | API key lacks `FACE:WRITE` | Use a key that has it |
+
+| Inventory / records / dashboard pages are empty in external mode | The data is in your system; these pages read our local DB | **Not a fault** — see §3.8. Check your own system for the real data |
+| Face rules configured but stock moves are never blocked | The agent's warehouse and the rule's warehouse don't match, so the rule silently doesn't apply | See the warning in §3.7. The UI links them automatically; if you create connections via the API, keep them consistent yourself |
+| External tenant/warehouse are text boxes instead of dropdowns | The Provider doesn't implement the matching discovery method | Expected — type the codes manually, or implement the methods in §3.5 |
+| Discovery returns "no active ERP Provider for this tenant" | No Provider activated yet | Upload and activate per §3.3, or use paste-JSON import instead (no Provider needed) |
+| Some users missing after import | A local user with the same name but a different external account exists and was skipped for safety | Check the returned `skipped` array — each entry carries a reason |
+| Imported users can't log in | Not using the initial password set at import time | Log in with that initial password, then change it |
+| Re-importing created duplicate users | The external account `id` is not stable (the dedup key changed) | Ask for a stable account ID — see §3.6 |
 
 ## Related docs
 
