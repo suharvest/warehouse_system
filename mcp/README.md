@@ -563,7 +563,6 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # 图形化
 | 出入库记录里 `actual_operator` 为空 | 人脸未启用或规则未要求 | 预期行为；需要留痕请配人脸规则 |
 | 401 Unauthorized | `auth` 块配置或 API Key 失效 | Web UI「用户管理 → API 密钥」重建 |
 | `/face/verify-mcp` 返回 403 | API Key 缺 `FACE:WRITE` 权限 | 用有该权限的 Key |
-
 | 外部模式下库存/记录/看板页面是空的 | 数据在对方系统，这些页面读的是本地库 | **不是故障**，见 §3.8。真实数据到对方系统查看 |
 | 配了人脸规则但出入库根本不拦 | 智能体绑的仓库与规则的仓库对不上，规则静默不生效 | 见 §3.7 的警告。界面已自动联动；用 API 直接建连接的要自己对齐 |
 | 智能体配置里外部租户/仓库是输入框不是下拉 | Provider 没实现对应的探测方法 | 预期行为，手工填编码即可；要下拉就实现 §3.5 的方法 |
