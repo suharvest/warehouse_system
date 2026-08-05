@@ -83,6 +83,17 @@ function escapeHtml(value) {
     return div.innerHTML;
 }
 
+// 外部 ERP 模式下，仓库列表里可能混有「导入的权限锚点」（由外部仓库导入而来）。
+// 人脸规则和录入范围都挂在本地 warehouse_id 上，管理员必须能分清哪一个对应
+// 外部系统的哪个仓库，否则很容易配到错的那一条上。
+function warehouseLabel(w) {
+    const name = escapeHtml(w.name);
+    return w.external_warehouse_id
+        ? `${name} <span class="face-inline-hint">(${escapeHtml(w.external_warehouse_id)})</span>`
+        : name;
+}
+
+
 // stock_in 等操作枚举 → 本地化文案。入库/出库复用全站 inbound/outbound 键，
 // 避免同一业务概念两套叫法；transfer/adjust 无既有独立键，用 faceOp_*。
 const FACE_OP_I18N_KEYS = {
@@ -675,7 +686,7 @@ function openRuleModal(rule) {
                         <label>${tt('warehouse', t('warehouseName') || '仓库')}</label>
                         <select id="face-rule-warehouse">
                             <option value="">${tt('faceAppliesAll', '全部仓库')}</option>
-                            ${allWarehouses.map(w => `<option value="${w.id}" ${r.warehouse_id === w.id ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}
+                            ${allWarehouses.map(w => `<option value="${w.id}" ${r.warehouse_id === w.id ? 'selected' : ''}>${w.external_warehouse_id ? `${escapeHtml(w.name)} (${escapeHtml(w.external_warehouse_id)})` : escapeHtml(w.name)}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
@@ -1056,7 +1067,7 @@ export function showFaceEnrollModal() {
                                 : allWarehouses.map(w => `
                                     <label class="checkbox-label face-enroll-wh-item">
                                         <input type="checkbox" value="${w.id}" disabled>
-                                        <span>${escapeHtml(w.name)}</span>
+                                        <span>${warehouseLabel(w)}</span>
                                     </label>
                                 `).join('')
                             }

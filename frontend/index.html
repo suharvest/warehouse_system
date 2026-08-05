@@ -190,7 +190,10 @@
                 <div class="tab-content">
                     <!-- 看板 Tab -->
                     <div id="tab-dashboard" class="tab-pane active">
-                        <div class="page-header">
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <div class="page-header">
                             <h2 class="page-title" data-i18n="subtitle">访问统计概览</h2>
                         </div>
 
@@ -296,7 +299,10 @@
 
                     <!-- 进出库记录 Tab -->
                     <div id="tab-records" class="tab-pane">
-                        <!-- 筛选区域 -->
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <!-- 筛选区域 -->
                         <div class="filter-bar">
                             <div class="filter-group">
                                 <label data-i18n="filterStartDate">开始日期</label>
@@ -461,7 +467,10 @@
 
                     <!-- 库存列表 Tab -->
                     <div id="tab-inventory" class="tab-pane">
-                        <!-- 筛选区域 -->
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <!-- 筛选区域 -->
                         <div class="filter-bar">
                             <div class="filter-group">
                                 <label data-i18n="filterProduct">名称/编码</label>
@@ -593,7 +602,10 @@
 
                     <!-- 产品详情 Tab -->
                     <div id="tab-detail" class="tab-pane">
-                        <!-- 产品选择 -->
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <!-- 产品选择 -->
                         <div class="product-selector-bar">
                             <button class="action-btn back-btn" data-action="goBackToInventory">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1017,6 +1029,61 @@
                             <div id="erp-status-footer" style="padding: 8px 16px; font-size: 12px; color: var(--text-muted);"></div>
                         </div>
 
+                        <!-- 外部身份导入：仅 external_erp 模式显示。
+                             导入只建我方的登录身份与权限；库存数据仍全在对方。 -->
+                        <div id="erp-import-section" class="table-container mt-6" style="display: none;">
+                            <div class="section-header">
+                                <div class="section-title" data-i18n="erpImportTitle">从外部系统导入身份</div>
+                            </div>
+                            <div style="padding: 16px;">
+                                <p style="font-size: 13px; color: var(--text-muted, #6b7280); margin: 0 0 12px;" data-i18n="erpImportHint">
+                                    导入只在我方建立登录身份与权限（谁能登录、谁能改配置）。库存数据仍全部在外部系统，不会复制过来。
+                                </p>
+                                <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px;">
+                                    <button class="btn" data-action="erpProbeUsers" data-i18n="erpImportProbe">从外部系统探测</button>
+                                    <button class="btn" data-action="erpPasteJson" data-i18n="erpImportPaste">粘贴 JSON</button>
+                                    <label class="btn" style="margin:0; cursor:pointer;">
+                                        <span data-i18n="erpImportUpload">上传 JSON 文件</span>
+                                        <input type="file" id="erp-import-file" accept=".json,application/json" style="display:none;">
+                                    </label>
+                                    <span id="erp-import-source" style="font-size:12px;color:var(--text-muted,#6b7280);"></span>
+                                </div>
+                                <textarea id="erp-import-json" rows="6" style="display:none;width:100%;font-family:monospace;font-size:12px;margin-bottom:12px;"
+                                          placeholder='[{"id":"u1001","name":"zhangsan","display_name":"张三"}]'></textarea>
+                                <div id="erp-import-parse-error" class="form-error" style="display:none;"></div>
+
+                                <div id="erp-import-table-wrap" style="display:none;">
+                                    <div style="overflow-x:auto;">
+                                        <table id="erp-import-table">
+                                            <thead>
+                                                <tr>
+                                                    <th style="width:36px;"><input type="checkbox" id="erp-import-check-all" checked></th>
+                                                    <th data-i18n="erpImportExtId">外部账号 ID</th>
+                                                    <th data-i18n="erpImportUsername">登录名</th>
+                                                    <th data-i18n="erpImportDisplayName">显示名</th>
+                                                    <th data-i18n="erpImportRole">角色</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="erp-import-tbody"></tbody>
+                                        </table>
+                                    </div>
+                                    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-top:12px;">
+                                        <div class="form-group" style="margin:0;">
+                                            <label>
+                                                <span data-i18n="erpImportInitPassword">初始密码</span> <span class="required">*</span>
+                                                <span class="help-icon">?
+                                                    <span class="help-tooltip" data-i18n="erpImportInitPasswordHelp">导入的用户统一使用该密码首次登录，请导入后要求他们自行修改。外部系统无需提供任何密码。</span>
+                                                </span>
+                                            </label>
+                                            <input type="password" id="erp-import-password" autocomplete="new-password">
+                                        </div>
+                                        <button class="btn confirm-btn" data-action="erpDoImport" data-i18n="erpImportSubmit">导入选中项</button>
+                                    </div>
+                                    <div id="erp-import-result" style="margin-top:12px;font-size:13px;"></div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- 数据库管理 -->
                         <div class="table-container mt-6">
                             <div class="section-header">
@@ -1282,11 +1349,35 @@
                         </label>
                         <input type="text" id="mcp-conn-endpoint" placeholder="wss://sensecraft..." required>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="mcp-conn-warehouse-group">
                         <label><span data-i18n="warehouseColumn">仓库</span> <span class="required">*</span></label>
                         <select id="mcp-conn-warehouse" required>
                             <option value="" data-i18n="selectWarehouse">请选择仓库</option>
                         </select>
+                    </div>
+                    <!-- 外部 ERP 模式：绑定对方系统的租户/仓库。数据由 Provider 探测而来，
+                         我们只存选中的原始编码并原样透传，不在本地建对应的租户/仓库。 -->
+                    <div id="mcp-conn-external-scope" style="display:none;">
+                        <div class="form-group">
+                            <label>
+                                <span data-i18n="externalTenant">外部租户</span>
+                                <span class="help-icon">?
+                                    <span class="help-tooltip" data-i18n="externalTenantHelp">来自外部 ERP 系统，由系统自动探测。若外部系统没有租户概念，可留空。</span>
+                                </span>
+                            </label>
+                            <select id="mcp-conn-ext-tenant">
+                                <option value="" data-i18n="externalTenantPlaceholder">加载中…</option>
+                            </select>
+                            <input type="text" id="mcp-conn-ext-tenant-text" style="display:none;" placeholder="外部租户编码">
+                        </div>
+                        <div class="form-group">
+                            <label><span data-i18n="externalWarehouse">外部仓库</span></label>
+                            <select id="mcp-conn-ext-warehouse">
+                                <option value="" data-i18n="externalWarehousePlaceholder">请先选择外部租户</option>
+                            </select>
+                            <input type="text" id="mcp-conn-ext-warehouse-text" style="display:none;" placeholder="外部仓库编码">
+                        </div>
+                        <div class="form-hint" id="mcp-conn-ext-hint" style="display:none;"></div>
                     </div>
                     <div class="form-group">
                         <label class="checkbox-label">

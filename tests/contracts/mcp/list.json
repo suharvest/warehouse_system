@@ -6,6 +6,8 @@
       "debug_mode": "<any>",
       "device_id": "<any>",
       "error_message": "<any>",
+      "external_tenant_id": "<any>",
+      "external_warehouse_id": "<any>",
       "id": "<any>",
       "mcp_endpoint": "<any>",
       "name": "<any>",

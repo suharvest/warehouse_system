@@ -1,6 +1,6 @@
 // ============ 主入口模块 ============
 import { t } from '../../i18n.js';
-import { inventoryApi, warehousesApi } from './api.js';
+import { fetchJson, inventoryApi, warehousesApi } from './api.js';
 import {
     getAllCategories, setAllCategories, getAllProducts, setAllProducts,
     getCurrentTab, getRecordsCurrentPage, getInventoryCurrentPage, getDetailCurrentPage, getContactsCurrentPage,
@@ -28,7 +28,7 @@ import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFi
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
 import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
-import { loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
+import { erpProbeUsers, erpPasteJson, erpDoImport, loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
 import { fetchDeployMode, renderTenantsPanel, showAddTenantModal, closeAddTenantModal, handleAddTenant, showEditTenantModal, closeEditTenantModal, handleEditTenant, handleDeleteTenant, tenantsPrevPage, tenantsNextPage, getTenantModalsHTML, setTenantsPage } from './features/tenants.js';
 import {
     renderFaceRecognitionPanel, switchFaceSubTab, refreshFacePanel,
@@ -148,7 +148,22 @@ async function loadCategories() {
 // 没就绪时发请求，多仓用户会拿到错误作用域的数据。
 async function loadUserScopedData() {
     await loadWarehouses();
-    await Promise.all([loadCategories(), loadAllProducts()]);
+    await Promise.all([loadCategories(), loadAllProducts(), refreshExternalModeBanner()]);
+}
+
+// 外部 ERP 模式下，库存/记录/看板/产品详情读的都是本地库，而真实数据在对方系统里
+// ——页面会是空的。不给提示的话，用户语音入库成功却看不到数据，第一反应是"系统坏了"。
+export async function refreshExternalModeBanner() {
+    let external = false;
+    try {
+        const d = await fetchJson('/system/mode');
+        external = (d && d.mode) === 'external_erp';
+    } catch {
+        return;   // 取不到就不显示，宁可不提示也不要误报
+    }
+    document.querySelectorAll('.external-mode-banner').forEach(el => {
+        el.style.display = external ? '' : 'none';
+    });
 }
 
 // 用户作用域数据 retry 入口。loaders 失败后用户没有 UI 按钮可触发重试，
@@ -529,6 +544,9 @@ const actionHandlers = {
     'wizardPrevStep': wizardPrevStep,
     'switchToSelfOwned': () => switchSystemMode('self_owned'),
     'switchToERP': () => switchSystemMode('external_erp'),
+    'erpProbeUsers': () => erpProbeUsers(),
+    'erpPasteJson': () => erpPasteJson(),
+    'erpDoImport': () => erpDoImport(),
     'erpActivate': (el) => activateProvider(el.dataset.providerId),
     'erpDeactivate': (el) => deactivateProvider(el.dataset.providerId),
     'erpDelete': (el) => deleteProvider(el.dataset.providerId),

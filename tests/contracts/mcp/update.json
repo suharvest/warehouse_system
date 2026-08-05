@@ -6,6 +6,8 @@
       "debug_mode": false,
       "device_id": null,
       "error_message": null,
+      "external_tenant_id": null,
+      "external_warehouse_id": null,
       "id": "<masked>",
       "mcp_endpoint": "<masked>",
       "name": "<masked>",

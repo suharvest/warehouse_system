@@ -95,6 +95,8 @@ def _build_connection_item(row, status_info: dict, warehouse_name: str = None, t
         tenant_id=row['tenant_id'] if 'tenant_id' in row.keys() else None,
         tenant_name=tenant_name,
         device_id=row.get('device_id'),
+        external_tenant_id=row.get('external_tenant_id'),
+        external_warehouse_id=row.get('external_warehouse_id'),
     )
 
 
@@ -158,6 +160,8 @@ async def list_mcp_connections(
             _t_mcp_connections.c.created_at, _t_mcp_connections.c.updated_at,
             _t_mcp_connections.c.warehouse_id, _t_mcp_connections.c.tenant_id,
             _t_mcp_connections.c.device_id,
+            _t_mcp_connections.c.external_tenant_id,
+            _t_mcp_connections.c.external_warehouse_id,
             _t_warehouses.c.name.label('warehouse_name'),
             _t_tenants.c.name.label('tenant_name'),
         )
@@ -276,6 +280,8 @@ async def create_mcp_connection(
                     warehouse_id=wh_id,
                     tenant_id=conn_tenant_id,
                     device_id=device_id,
+                    external_tenant_id=(request.external_tenant_id or None),
+                    external_warehouse_id=(request.external_warehouse_id or None),
                     status='stopped',
                     created_at=now,
                     updated_at=now,
@@ -331,6 +337,11 @@ async def update_mcp_connection(
     row = dict(_r._mapping)
 
     old_endpoint = row['mcp_endpoint']
+    # 在 UPDATE 之前把外部作用域的旧值留下来 —— 下面的 row 是更新后重新查的，
+    # 拿它比较永远相等，判不出变化。
+    old_external_scope = {
+        k: row.get(k) for k in ('external_tenant_id', 'external_warehouse_id')
+    }
     key_hash = hash_api_key(row['api_key'])
     new_endpoint = None
     if request.mcp_endpoint is not None:
@@ -367,6 +378,11 @@ async def update_mcp_connection(
         mcp_values['tenant_id'] = new_tenant_id
         apikey_values['warehouse_id'] = new_wh_id
         apikey_values['tenant_id'] = new_tenant_id
+    # 外部作用域：空字符串视为解绑（存 NULL），与 device_id 的语义一致
+    if request.external_tenant_id is not None:
+        mcp_values['external_tenant_id'] = request.external_tenant_id.strip() or None
+    if request.external_warehouse_id is not None:
+        mcp_values['external_warehouse_id'] = request.external_warehouse_id.strip() or None
     if request.device_id is not None:
         # Legacy compatibility: strip 后空字符串视为解除绑定（传 NULL）
         raw = request.device_id.strip()
@@ -427,7 +443,15 @@ async def update_mcp_connection(
         ).first()
     row = dict(_r._mapping) if _r else None
 
-    if new_endpoint is not None and new_endpoint != old_endpoint:
+    # 外部作用域是在连接启动时读进 runtime state 的，改了不重启的话，运行中的
+    # Provider 会继续按**旧的**租户/仓库往对方系统写——界面上显示已改、实际写错仓库，
+    # 且没有任何报错。所以 endpoint 和 external_* 任一变化都要重启。
+    scope_changed = any(
+        k in mcp_values and mcp_values[k] != old_external_scope.get(k)
+        for k in ('external_tenant_id', 'external_warehouse_id')
+    )
+    endpoint_changed = new_endpoint is not None and new_endpoint != old_endpoint
+    if endpoint_changed or scope_changed:
         if mcp_manager.get_connection_status(conn_id).get('status') == 'running':
             await mcp_manager.restart_connection(conn_id, row['mcp_endpoint'], row['api_key'])
 
@@ -1060,6 +1084,47 @@ def quantize_embedding(f32_bytes: bytes, fmt: str) -> bytes:
     raise ValueError(f"未知 embedding_format: {fmt!r}")
 
 
+class DeviceBaseUrlUnreachable(ValueError):
+    """自动探测出的识别代理地址设备侧根本连不上，且没有显式覆盖。
+
+    这个异常存在的意义是**把静默失败提前**：以前探测到容器内网地址也照样下发，
+    push-faces 返回成功，等到设备真去识别时才失败，现场几乎无法定位。
+    """
+
+
+def _looks_unreachable_from_device(local_ip: str, device_ip: str) -> bool:
+    """判断探测到的本机 IP 对设备而言是不是明显不可达。
+
+    命中的两类：
+    1. 回环地址，而设备不在本机（测试环境设备就是 127.0.0.1，那种是合法的）
+    2. 容器内运行、且探测结果与设备不在同一 /24 —— 这几乎必然是 docker bridge
+       给的容器地址（如 172.18.0.3）。局域网上的设备永远路由不到它。
+
+    第 2 条对「设备在另一个网段」的路由型组网会误判，但代价可接受：误判的处理
+    方式恰好就是设置 WAREHOUSE_DEVICE_BASE_URL，而那本来就是这种组网该做的事。
+    """
+    import ipaddress
+
+    try:
+        local = ipaddress.ip_address(local_ip)
+        device = ipaddress.ip_address(device_ip)
+    except ValueError:
+        return False
+
+    if local.is_loopback:
+        return not device.is_loopback
+    if local.is_link_local:
+        return True
+
+    if os.path.exists("/.dockerenv"):
+        try:
+            same_subnet = local in ipaddress.ip_network(f"{device_ip}/24", strict=False)
+        except ValueError:
+            same_subnet = False
+        return not same_subnet
+    return False
+
+
 def _device_facing_base_url(device_ip: str) -> str:
     """lan 模式下发给设备的识别代理 base（设备会拼 /recognize）。
 
@@ -1083,6 +1148,13 @@ def _device_facing_base_url(device_ip: str) -> str:
         # 探测失败兜底（如设备 IP 不可路由）：回环。测试环境设备就是 127.0.0.1。
         local_ip = "127.0.0.1"
     port = int(os.environ.get("PORT", 2124))
+    if _looks_unreachable_from_device(local_ip, device_ip):
+        raise DeviceBaseUrlUnreachable(
+            f"自动探测到的本机地址是 {local_ip}，设备（{device_ip}）无法访问 —— "
+            "容器化部署时探测只能拿到容器在 docker 网络内的地址。"
+            f"请设置环境变量 WAREHOUSE_DEVICE_BASE_URL=http://<宿主机局域网IP>:{port}"
+            "/api/face/device 后重新下发。"
+        )
     return f"http://{local_ip}:{port}/api/face/device"
 
 
@@ -1226,7 +1298,12 @@ async def push_faces_to_device(
             # /api/face/device/recognize（伪装 face_rec_api /recognize 契约），
             # 不再直连租户端点——人脸库只在 warehouse 存一份，face_rec_api 保持
             # 无状态推理。identify_token 用租户级 auth_token（为空首发自动生成）。
-            payload["identify_endpoint"] = _device_facing_base_url(ip)
+            # 探测不出设备可达的地址时直接中止下发：宁可这里报一个能照着做的错，
+            # 也不要把不可达的 identify_endpoint 推给设备、让失败推迟到识别时才出现。
+            try:
+                payload["identify_endpoint"] = _device_facing_base_url(ip)
+            except DeviceBaseUrlUnreachable as e:
+                return {"success": False, "error": str(e)}
             payload["identify_token"] = _ensure_tenant_auth_token(tid, fc.auth_token)
         else:
             # local 模式行为不变：设备本地 NPU + 本地库，endpoint/token 原样透传。

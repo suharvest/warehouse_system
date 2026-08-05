@@ -12,6 +12,7 @@ Follow bare-module import style (no ``from backend.X``).
 """
 import os
 import sys as _sys
+import threading as _threading
 import json as _json
 from datetime import datetime
 from typing import Any, Optional
@@ -35,6 +36,8 @@ from deps import (
 from metadata import (
     erp_providers as _t_erp_providers,
     system_settings as _t_system_settings,
+    users as _t_users,
+    warehouses as _t_warehouses,
 )
 from resource_router import ResourceRouter
 
@@ -261,6 +264,451 @@ async def get_active_provider_for_mcp(
             "tenant_id": current_user.tenant_id,
             "config": cfg_obj,
         },
+    }
+
+
+# ============ 外部作用域探测（external_erp 模式下配置智能体用） ============
+# 接了外部 WMS 之后，库存数据全在对方，我们的租户/仓库跟对方的没有任何对应关系。
+# 与其在本地镜像一套对方的组织结构（双重维护、必然漂移），不如让 Provider 把
+# "对方有什么"报上来，用户在配置智能体时直接选，我们只存原始编码并原样透传。
+#
+# 探测哪个租户的？不需要推导——用调用方登录态的 tenant_id，与 active-for-mcp
+# 同一套解析；全局 admin（tenant_id 为 None）必须显式传 tenant_id，与上传接口
+# 的既有约定一致。
+
+
+def _resolve_probe_tenant(current_user: CurrentUser, tenant_id: Optional[int]) -> int:
+    """确定要探测哪个租户的外部系统。"""
+    if current_user.tenant_id is not None:
+        return current_user.tenant_id
+    if tenant_id is None:
+        raise HTTPException(
+            status_code=400, detail="全局管理员探测外部作用域时需指定 tenant_id"
+        )
+    return tenant_id
+
+
+def _load_active_provider_instance(tid: int):
+    """按租户加载其激活的 Provider 实例，用于只读探测。
+
+    与 mcp/warehouse_mcp.py 的加载逻辑保持一致：文件按
+    「租户子目录 → 扁平路径」顺序解析，配置取 erp_providers.config
+    （其中含对方 WMS 的地址与鉴权）。
+    """
+    with get_engine().connect() as sa_conn:
+        preds = [_t_erp_providers.c.is_active == 1]
+        preds.extend(build_scope_predicates(_t_erp_providers, tid, None))
+        row = sa_conn.execute(
+            select(
+                _t_erp_providers.c.provider_name,
+                _t_erp_providers.c.filename,
+                _t_erp_providers.c.config,
+            ).where(and_(*preds)).order_by(_t_erp_providers.c.id.asc()).limit(1)
+        ).first()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="当前租户没有激活的 ERP Provider，无法探测外部租户/仓库",
+        )
+
+    cfg = _erp_decode_config({"config": row.config}) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg = {**cfg, "provider": row.provider_name}
+
+    base = os.path.join(_mcp_dir, "providers", "custom")
+    candidates = [
+        os.path.join(base, str(tid), row.filename),
+        os.path.join(base, row.filename),
+    ]
+    filepath = next((p for p in candidates if os.path.exists(p)), None)
+    if filepath is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Provider 文件不存在（已尝试: {candidates}）",
+        )
+
+    try:
+        from providers.test_runner import load_provider_from_file
+        return load_provider_from_file(filepath, cfg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"加载 Provider 失败: {e}")
+
+
+# 第三方 Provider 里的网络调用最多 ~10s（BaseProvider 的 timeout），但裸死循环或
+# 自定义 http 客户端不受此约束。探测跑在 async 路由里，同步执行会直接堵住事件循环、
+# 拖垮整个 worker。故丢到独立线程并设硬超时。
+_PROBE_TIMEOUT_SECONDS = 20.0
+_PROBE_MAX_CONCURRENCY = 4
+
+# 用 **daemon 线程 + 信号量**，而不是 ThreadPoolExecutor：
+# 后者的线程是非 daemon 的，且注册了 atexit 钩子去 join 它们——只要有一次探测卡死在
+# 第三方代码里，解释器退出时就会被那个线程挂住，容器停不下来。daemon 线程不阻塞退出。
+# 并发上限仍由信号量把住，语义与线程池等价。
+_probe_slots = _threading.BoundedSemaphore(_PROBE_MAX_CONCURRENCY)
+
+
+class _ProbeProviderError(Exception):
+    """包装 Provider 自己抛出的异常。
+
+    存在的唯一理由：Python 3.11+ 里 `asyncio.TimeoutError` **就是**内建
+    `TimeoutError`，Provider 自抛 TimeoutError 会和我们 wait_for 的超时撞成同一个
+    异常类型，靠 `fut.done()` 区分在临界时序下会误判。统一换个类型，从根上消除歧义。
+    """
+
+    def __init__(self, original: BaseException):
+        super().__init__(str(original))
+        self.original = original
+
+
+def _spawn_probe(fn, args, loop):
+    """在 daemon 线程里跑 fn，返回一个 asyncio future。
+
+    名额由**线程自己**在 finally 里归还，保证恰好一次：即便超时、外层被取消，
+    也要等线程真正结束才释放——否则限流形同虚设（卡死的线程仍占着资源）。
+    """
+    fut = loop.create_future()
+
+    def _settle(setter, value):
+        # 事件循环可能已经关闭（进程退出中），此时无处投递，直接放弃
+        try:
+            loop.call_soon_threadsafe(
+                lambda: None if fut.done() else setter(value)
+            )
+        except RuntimeError:
+            pass
+
+    def _worker():
+        try:
+            _settle(fut.set_result, fn(*args))
+        except BaseException as exc:  # noqa: BLE001 — 第三方代码，什么都可能抛
+            _settle(fut.set_exception, _ProbeProviderError(exc))
+        finally:
+            _probe_slots.release()
+
+    # 超时/取消后没人再 await 这个 future，若线程随后抛异常，asyncio 会在 GC 时打一条
+    # "Future exception was never retrieved"。这里主动消费掉，避免日志噪音掩盖真问题。
+    def _drain(f):
+        if not f.cancelled() and f.exception() is not None:
+            pass
+
+    fut.add_done_callback(_drain)
+
+    _threading.Thread(target=_worker, name="erp-probe", daemon=True).start()
+    return fut
+
+
+async def _probe(fn, *args) -> dict:
+    """执行一次探测调用，把 Provider 抛出的异常收敛成结构化响应。
+
+    恒返回 200：前端据 success / error 决定是渲染下拉还是退化成手工填写，
+    未实现探测（not_implemented）属于预期路径，不该表现为 HTTP 错误。
+    """
+    import asyncio
+
+    if not _probe_slots.acquire(blocking=False):
+        logger.warning("外部作用域探测并发已满（%s），拒绝新请求", _PROBE_MAX_CONCURRENCY)
+        return {
+            "success": False,
+            "error": "probe_busy",
+            "items": [],
+            "message": "探测请求过多，或此前的探测仍卡在外部系统里，请稍后重试",
+        }
+
+    try:
+        fut = _spawn_probe(fn, args, asyncio.get_running_loop())
+    except BaseException:
+        # 线程都没起来，_worker 的 finally 不会执行，名额得自己还
+        _probe_slots.release()
+        raise
+
+    try:
+        # shield：wait_for 超时会取消外层等待，但内层必须继续跑到底——否则回调提前
+        # 触发、名额提前归还，而线程其实还占着资源。
+        resp = await asyncio.wait_for(
+            asyncio.shield(fut), timeout=_PROBE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        # 到这里一定是**我们**等超时：Provider 自抛的 TimeoutError 已被包成
+        # _ProbeProviderError，不会走这个分支。
+        logger.warning(
+            "外部作用域探测超时（>%ss）。线程仍在跑，名额待其结束后归还",
+            _PROBE_TIMEOUT_SECONDS,
+        )
+        return {
+            "success": False,
+            "error": "probe_timeout",
+            "items": [],
+            "message": f"探测超时（超过 {int(_PROBE_TIMEOUT_SECONDS)} 秒），请检查外部系统响应速度",
+        }
+    except _ProbeProviderError as e:
+        logger.warning(f"外部作用域探测失败: {e.original!r}")
+        return {
+            "success": False,
+            "error": "probe_failed",
+            "items": [],
+            "message": f"探测失败: {e}",
+        }
+
+    if not isinstance(resp, dict):
+        return {
+            "success": False,
+            "error": "bad_response",
+            "items": [],
+            "message": "Provider 返回了非预期的响应结构",
+        }
+    resp.setdefault("items", [])
+    return resp
+
+
+@router.get("/api/erp/external/tenants")
+async def probe_external_tenants(
+    tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
+):
+    """探测外部系统的租户/组织列表（供智能体配置的下拉使用）。"""
+    tid = _resolve_probe_tenant(current_user, tenant_id)
+    provider = _load_active_provider_instance(tid)
+    return await _probe(provider.list_tenants)
+
+
+@router.get("/api/erp/external/warehouses")
+async def probe_external_warehouses(
+    external_tenant_id: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
+):
+    """探测外部系统的仓库列表；external_tenant_id 为已选定的外部租户。"""
+    tid = _resolve_probe_tenant(current_user, tenant_id)
+    provider = _load_active_provider_instance(tid)
+    return await _probe(provider.list_warehouses, external_tenant_id)
+
+
+@router.get("/api/erp/external/users")
+async def probe_external_users(
+    external_tenant_id: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
+):
+    """探测外部系统的用户/账号列表（供导入使用）。
+
+    要 ADMIN：这是拿来建我方登录账号的，比只读的租户/仓库探测敏感。
+    """
+    tid = _resolve_probe_tenant(current_user, tenant_id)
+    provider = _load_active_provider_instance(tid)
+    return await _probe(provider.list_users, external_tenant_id)
+
+
+# ============ 外部身份导入 ============
+# 授权是我方的责任，推不出去：谁能登录、谁能配哪个智能体、谁能改人脸规则，
+# 走的是 users(role, tenant_id) + user_warehouses 这条链。所以即便库存数据
+# 全在对方，「用户 → 租户/角色」这份归属数据仍必须落在我方。导入只是免去
+# 管理员照着对方的用户表手工重敲一遍，不改变授权由我方判定这一事实。
+
+
+class _ImportUserItem(BaseModel):
+    external_user_id: str
+    username: str
+    display_name: Optional[str] = None
+    role: str = "operate"
+
+
+class _ImportUsersRequest(BaseModel):
+    users: list[_ImportUserItem]
+    # 导入只建身份，密码本地管：统一初始密码，导入后应要求用户自行修改。
+    default_password: str
+    tenant_id: Optional[int] = None
+
+
+class _ImportWarehouseItem(BaseModel):
+    external_warehouse_id: str
+    name: str
+
+
+class _ImportWarehousesRequest(BaseModel):
+    warehouses: list[_ImportWarehouseItem]
+    tenant_id: Optional[int] = None
+
+
+def _resolve_import_tenant(current_user: CurrentUser, tenant_id: Optional[int]) -> int:
+    return _resolve_probe_tenant(current_user, tenant_id)
+
+
+@router.post("/api/erp/external/import/users")
+async def import_external_users(
+    request: _ImportUsersRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.USERS, Action.ADMIN)),
+):
+    """把外部系统的账号导入为我方用户（幂等，按 external_user_id 增量同步）。
+
+    - 已存在同 external_user_id 的用户 → 更新 username/display_name/role，**不动密码**
+    - 不存在 → 新建，用 default_password 作为初始密码
+    - 同租户下 username 撞车但 external_user_id 不同 → 跳过并回报，不静默覆盖
+    """
+    from database import hash_password
+
+    tid = _resolve_import_tenant(current_user, request.tenant_id)
+    if not request.users:
+        return {"created": 0, "updated": 0, "skipped": [], "message": "没有要导入的用户"}
+    if len(request.default_password) < 4:
+        raise HTTPException(status_code=400, detail="初始密码长度至少 4 位")
+
+    valid_roles = {"admin", "operate", "view"}
+    now_dt = datetime.now()
+    # bcrypt 很慢，整批共用一个初始密码，只算一次
+    pw_hash = hash_password(request.default_password)
+
+    created = updated = 0
+    skipped: list[dict] = []
+
+    with get_engine().begin() as sa_conn:
+        for item in request.users:
+            ext_id = (item.external_user_id or "").strip()
+            username = (item.username or "").strip()
+            if not ext_id or not username:
+                skipped.append({"external_user_id": item.external_user_id,
+                                "reason": "external_user_id 或 username 为空"})
+                continue
+            role = item.role if item.role in valid_roles else "operate"
+
+            existing = sa_conn.execute(
+                select(_t_users.c.id).where(and_(
+                    _t_users.c.tenant_id == tid,
+                    _t_users.c.external_user_id == ext_id,
+                ))
+            ).first()
+
+            if existing:
+                sa_conn.execute(
+                    update(_t_users).where(_t_users.c.id == existing.id).values(
+                        username=username,
+                        display_name=item.display_name,
+                        role=role,
+                    )
+                )
+                updated += 1
+                continue
+
+            # 同租户重名但不是同一个外部账号：不覆盖，交给管理员决定
+            clash = sa_conn.execute(
+                select(_t_users.c.id, _t_users.c.external_user_id).where(and_(
+                    _t_users.c.tenant_id == tid,
+                    _t_users.c.username == username,
+                ))
+            ).first()
+            if clash:
+                skipped.append({
+                    "external_user_id": ext_id,
+                    "username": username,
+                    "reason": "该租户下已存在同名用户且并非同一外部账号，未覆盖",
+                })
+                continue
+
+            sa_conn.execute(
+                insert(_t_users).values(
+                    username=username,
+                    password_hash=pw_hash,
+                    role=role,
+                    display_name=item.display_name,
+                    tenant_id=tid,
+                    external_user_id=ext_id,
+                    created_by=current_user.id,
+                    created_at=now_dt,
+                )
+            )
+            created += 1
+
+    logger.info(
+        f"导入外部用户: tenant={tid} 新建={created} 更新={updated} 跳过={len(skipped)}"
+        f"，操作人: {current_user.display_name}"
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个",
+    }
+
+
+@router.post("/api/erp/external/import/warehouses")
+async def import_external_warehouses(
+    request: _ImportWarehousesRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.WAREHOUSES, Action.ADMIN)),
+):
+    """把外部仓库导入为本地仓库行，**仅作权限锚点**。
+
+    只在对方系统没有租户概念时才需要：那时仓库是唯一的作用域维度，
+    而 user_warehouses 必须绑本地 warehouse_id。导入的行不承载任何库存数据，
+    库存仍全部在对方。幂等：按 (tenant_id, external_warehouse_id) 增量同步。
+    """
+    tid = _resolve_import_tenant(current_user, request.tenant_id)
+    if not request.warehouses:
+        return {"created": 0, "updated": 0, "skipped": [], "message": "没有要导入的仓库"}
+
+    created = updated = 0
+    skipped: list[dict] = []
+
+    with get_engine().begin() as sa_conn:
+        for item in request.warehouses:
+            ext_id = (item.external_warehouse_id or "").strip()
+            name = (item.name or "").strip()
+            if not ext_id or not name:
+                skipped.append({"external_warehouse_id": item.external_warehouse_id,
+                                "reason": "external_warehouse_id 或 name 为空"})
+                continue
+
+            existing = sa_conn.execute(
+                select(_t_warehouses.c.id).where(and_(
+                    _t_warehouses.c.tenant_id == tid,
+                    _t_warehouses.c.external_warehouse_id == ext_id,
+                ))
+            ).first()
+            if existing:
+                sa_conn.execute(
+                    update(_t_warehouses).where(_t_warehouses.c.id == existing.id)
+                    .values(name=name)
+                )
+                updated += 1
+                continue
+
+            # slug 取外部编码（该租户内唯一），撞车说明本地已有同 slug 的仓库
+            slug = ext_id[:64]
+            clash = sa_conn.execute(
+                select(_t_warehouses.c.id).where(and_(
+                    _t_warehouses.c.tenant_id == tid,
+                    _t_warehouses.c.slug == slug,
+                ))
+            ).first()
+            if clash:
+                skipped.append({
+                    "external_warehouse_id": ext_id,
+                    "reason": "该租户下已存在同 slug 的本地仓库，未覆盖",
+                })
+                continue
+
+            sa_conn.execute(
+                insert(_t_warehouses).values(
+                    slug=slug,
+                    name=name,
+                    tenant_id=tid,
+                    external_warehouse_id=ext_id,
+                    is_default=0,
+                    is_disabled=0,
+                )
+            )
+            created += 1
+
+    logger.info(
+        f"导入外部仓库: tenant={tid} 新建={created} 更新={updated} 跳过={len(skipped)}"
+        f"，操作人: {current_user.display_name}"
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个",
     }
 
 
