@@ -571,7 +571,6 @@ npx @modelcontextprotocol/inspector uv run python warehouse_mcp.py   # GUI tool 
 | `actual_operator` is empty in stock records | Face recognition disabled or no rule requires it | Expected; configure a face rule if you need the audit trail |
 | 401 Unauthorized | Bad `auth` block or expired API key | Recreate the key under Web UI → User Management → API Keys |
 | `/face/verify-mcp` returns 403 | API key lacks `FACE:WRITE` | Use a key that has it |
-
 | Inventory / records / dashboard pages are empty in external mode | The data is in your system; these pages read our local DB | **Not a fault** — see §3.8. Check your own system for the real data |
 | Face rules configured but stock moves are never blocked | The agent's warehouse and the rule's warehouse don't match, so the rule silently doesn't apply | See the warning in §3.7. The UI links them automatically; if you create connections via the API, keep them consistent yourself |
 | External tenant/warehouse are text boxes instead of dropdowns | The Provider doesn't implement the matching discovery method | Expected — type the codes manually, or implement the methods in §3.5 |
