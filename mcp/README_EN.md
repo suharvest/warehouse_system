@@ -430,21 +430,26 @@ Endpoints: `GET /api/erp/external/tenants`, `GET /api/erp/external/warehouses`,
 `GET /api/erp/external/users` — all require **`ERP:ADMIN`** (they use stored credentials
 to reach your system and enumerate its org structure, so they are not open to read-only roles).
 
-**Always HTTP 200**; success and reason live in the body — a provider not implementing
-discovery is an expected path, not an HTTP error. Possible `error` values:
+**The discovery outcome always lives in the body** (HTTP 200) — a provider not implementing
+discovery is an expected path, not an HTTP error. **Unmet preconditions still return error
+status codes** though: 400 (global admin did not specify `tenant_id`), 403 (insufficient
+permission), 404 (no active provider for the tenant, or the provider file is missing),
+500 (provider file failed to load). Possible `error` values:
 
 | error | Meaning | UI behaviour |
 |---|---|---|
 | (none, `success: true`) | Discovery succeeded | Render dropdown |
 | `not_implemented` | Provider doesn't implement the method | Fall back to manual entry |
-| `probe_failed` | Provider raised, or returned a shape off-contract | Report failure, fall back to manual entry |
+| `probe_failed` | Provider raised an exception | Report failure, fall back to manual entry |
+| `bad_response` | Provider returned something that is not a dict | Same as above |
 | `probe_timeout` | No response within 20 seconds | Ask you to check your system's latency |
 | `probe_busy` | Concurrent probes exhausted (max 4), or earlier probes still stuck in your system | Ask the user to retry later |
 
-> Why `probe_busy` happens: discovery calls your code synchronously, so we run it in a
-> dedicated thread pool with a hard 20-second timeout. **A timeout only stops us waiting —
-> the stuck thread cannot be reclaimed.** If your endpoint hangs, those slots stay occupied
-> until the calls actually finish. Please make discovery return within seconds.
+> Why `probe_busy` happens: discovery calls your code synchronously, so we run it on a
+> separate daemon thread with a hard 20-second timeout and a concurrency cap of 4.
+> **A timeout only stops us waiting — the stuck thread cannot be reclaimed.** If your endpoint
+> hangs, those slots stay occupied until the calls actually finish. Please make discovery
+> return within seconds.
 
 **Where the tenant comes from for a global admin**: a normal user's tenant is decided by
 their login (the frontend neither sends nor should send it). A global admin (`tenant_id`
@@ -501,8 +506,11 @@ are constrained the same way on `(tenant_id, external_warehouse_id)`.
 > nothing** (these tables are referenced by stock records and others via foreign keys). It skips
 > index creation and prints the duplicates plus remediation steps to the deploy log. After
 > resolving them you must run the printed `CREATE UNIQUE INDEX` statement **manually** —
-> re-running `alembic upgrade head` is a no-op. Until then everything works; only the
-> concurrency guard is missing.
+> re-running `alembic upgrade head` is a no-op.
+>
+> **Until the duplicates are resolved it is not merely "one less concurrency guard"**: import
+> looks up an existing record by `external_user_id` and takes the first match, so which of the
+> duplicate rows gets updated is undefined. Resolve them first.
 
 Idempotency:
 
@@ -537,7 +545,8 @@ What the UI does: once an external warehouse is chosen, the local warehouse beco
 one is created on save (reusing the idempotent import endpoint). To switch warehouses, change
 the *external* warehouse dropdown and the local one follows. With no external warehouse
 selected (single-warehouse systems, or discovery not implemented and the field left blank),
-the local warehouse stays freely selectable and tenant-level rules apply.
+the local warehouse stays freely selectable — face rules then resolve against whichever local
+warehouse the agent is bound to (warehouse-specific rule first, tenant-level as fallback).
 
 **Creating connections directly via the API has none of this protection** — you must ensure
 the row referenced by `warehouse_id` carries the same `external_warehouse_id` you send.
