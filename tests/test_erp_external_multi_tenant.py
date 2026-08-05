@@ -142,7 +142,12 @@ def mt_env(admin_client, monkeypatch):
     created_files = []
     from database import get_db_connection
     conn = get_db_connection()
-    before = {r[0] for r in conn.cursor().execute("SELECT id FROM tenants")}
+    _c = conn.cursor()
+    before = {r[0] for r in _c.execute("SELECT id FROM tenants")}
+    # 用户/仓库也要快照：teardown 早先按 external_* IS NOT NULL 全局删，
+    # 会连带抹掉其它用例的数据。只删本次新增的行。
+    before_users = {r[0] for r in _c.execute("SELECT id FROM users")}
+    before_whs = {r[0] for r in _c.execute("SELECT id FROM warehouses")}
     conn.close()
     try:
         yield admin_client, created_files
@@ -167,12 +172,22 @@ def mt_env(admin_client, monkeypatch):
             if os.path.isdir(_full):
                 shutil.rmtree(_full, ignore_errors=True)
         cur.execute("DELETE FROM erp_providers WHERE provider_name LIKE 'mt_%'")
-        cur.execute("DELETE FROM user_warehouses WHERE user_id IN "
-                    "(SELECT id FROM users WHERE external_user_id IS NOT NULL)")
-        cur.execute("DELETE FROM users WHERE external_user_id IS NOT NULL")
-        cur.execute("DELETE FROM warehouses WHERE external_warehouse_id IS NOT NULL")
+        # 只删本次新增的用户/仓库，且**先删子表再删父行**——反过来在开启外键约束的
+        # 环境下会因悬挂引用直接 teardown 失败。
+        cur.execute("SELECT id FROM users")
+        for _uid in [r[0] for r in cur.fetchall() if r[0] not in before_users]:
+            cur.execute("DELETE FROM sessions WHERE user_id = ?", (_uid,))
+            cur.execute("DELETE FROM api_keys WHERE user_id = ?", (_uid,))
+            cur.execute("DELETE FROM user_warehouses WHERE user_id = ?", (_uid,))
+            cur.execute("DELETE FROM users WHERE id = ?", (_uid,))
+        cur.execute("SELECT id FROM warehouses")
+        for _wid in [r[0] for r in cur.fetchall() if r[0] not in before_whs]:
+            cur.execute("DELETE FROM user_warehouses WHERE warehouse_id = ?", (_wid,))
+            cur.execute("DELETE FROM mcp_connections WHERE warehouse_id = ?", (_wid,))
+            cur.execute("DELETE FROM api_keys WHERE warehouse_id = ?", (_wid,))
+            cur.execute("DELETE FROM warehouses WHERE id = ?", (_wid,))
         for tid in new_tenants:
-            # 顺序：会话 → api_key → 用户 → 仓库 → 租户，避免外键悬挂
+            # 顺序：会话 → api_key → 关联 → 用户 → 仓库 → 租户，避免外键悬挂
             cur.execute("DELETE FROM sessions WHERE user_id IN "
                         "(SELECT id FROM users WHERE tenant_id = ?)", (tid,))
             cur.execute("DELETE FROM api_keys WHERE tenant_id = ?", (tid,))

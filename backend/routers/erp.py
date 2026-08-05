@@ -340,33 +340,57 @@ def _load_active_provider_instance(tid: int):
 
 # 第三方 Provider 里的网络调用最多 ~10s（BaseProvider 的 timeout），但裸死循环或
 # 自定义 http 客户端不受此约束。探测跑在 async 路由里，同步执行会直接堵住事件循环、
-# 拖垮整个 worker。故放线程池并设硬超时。
+# 拖垮整个 worker。故丢到独立线程并设硬超时。
 _PROBE_TIMEOUT_SECONDS = 20.0
+_PROBE_MAX_CONCURRENCY = 4
 
-# **专用**线程池，不用 asyncio 的默认 executor。超时只能让调用方不再等待，
-# 卡死的第三方代码仍占着那个线程不放；若共用默认 executor，反复触发就会把
-# 整个进程的默认线程池占满，连累所有其它 run_in_executor 调用。
-# 隔离到一个小池子：最坏情况是探测功能自己不可用（返回 probe_timeout），
-# 不会外溢。
-_PROBE_MAX_WORKERS = 4
-_probe_executor = None
-_probe_executor_lock = _threading.Lock()
-# 池满时**不排队**：卡死的线程收不回来，无界排队只会让请求越积越多且都等不到结果。
-# 用信号量卡在入口直接返回"稍后重试"，比挂住强。
-_probe_slots = _threading.BoundedSemaphore(_PROBE_MAX_WORKERS)
+# 用 **daemon 线程 + 信号量**，而不是 ThreadPoolExecutor：
+# 后者的线程是非 daemon 的，且注册了 atexit 钩子去 join 它们——只要有一次探测卡死在
+# 第三方代码里，解释器退出时就会被那个线程挂住，容器停不下来。daemon 线程不阻塞退出。
+# 并发上限仍由信号量把住，语义与线程池等价。
+_probe_slots = _threading.BoundedSemaphore(_PROBE_MAX_CONCURRENCY)
 
 
-def _get_probe_executor():
-    global _probe_executor
-    if _probe_executor is None:
-        with _probe_executor_lock:
-            if _probe_executor is None:
-                from concurrent.futures import ThreadPoolExecutor
-                _probe_executor = ThreadPoolExecutor(
-                    max_workers=_PROBE_MAX_WORKERS,
-                    thread_name_prefix="erp-probe",
-                )
-    return _probe_executor
+class _ProbeProviderError(Exception):
+    """包装 Provider 自己抛出的异常。
+
+    存在的唯一理由：Python 3.11+ 里 `asyncio.TimeoutError` **就是**内建
+    `TimeoutError`，Provider 自抛 TimeoutError 会和我们 wait_for 的超时撞成同一个
+    异常类型，靠 `fut.done()` 区分在临界时序下会误判。统一换个类型，从根上消除歧义。
+    """
+
+    def __init__(self, original: BaseException):
+        super().__init__(str(original))
+        self.original = original
+
+
+def _spawn_probe(fn, args, loop):
+    """在 daemon 线程里跑 fn，返回一个 asyncio future。
+
+    名额由**线程自己**在 finally 里归还，保证恰好一次：即便超时、外层被取消，
+    也要等线程真正结束才释放——否则限流形同虚设（卡死的线程仍占着资源）。
+    """
+    fut = loop.create_future()
+
+    def _settle(setter, value):
+        # 事件循环可能已经关闭（进程退出中），此时无处投递，直接放弃
+        try:
+            loop.call_soon_threadsafe(
+                lambda: None if fut.done() else setter(value)
+            )
+        except RuntimeError:
+            pass
+
+    def _worker():
+        try:
+            _settle(fut.set_result, fn(*args))
+        except BaseException as exc:  # noqa: BLE001 — 第三方代码，什么都可能抛
+            _settle(fut.set_exception, _ProbeProviderError(exc))
+        finally:
+            _probe_slots.release()
+
+    _threading.Thread(target=_worker, name="erp-probe", daemon=True).start()
+    return fut
 
 
 async def _probe(fn, *args) -> dict:
@@ -376,10 +400,9 @@ async def _probe(fn, *args) -> dict:
     未实现探测（not_implemented）属于预期路径，不该表现为 HTTP 错误。
     """
     import asyncio
-    import functools
 
     if not _probe_slots.acquire(blocking=False):
-        logger.warning("外部作用域探测并发已满（%s），拒绝新请求", _PROBE_MAX_WORKERS)
+        logger.warning("外部作用域探测并发已满（%s），拒绝新请求", _PROBE_MAX_CONCURRENCY)
         return {
             "success": False,
             "error": "probe_busy",
@@ -387,28 +410,21 @@ async def _probe(fn, *args) -> dict:
             "message": "探测请求过多，或此前的探测仍卡在外部系统里，请稍后重试",
         }
 
-    # 名额在**线程真正跑完**时归还，而不是在超时分支直接放弃。早先那样写，
-    # 慢调用累计 4 次就会让探测接口永久卡在 probe_busy。
-    # shield 让 wait_for 的取消不传播到底层 future——否则一超时就取消、回调立刻触发，
-    # 而线程其实还占着 worker，限流形同虚设。
-    loop = asyncio.get_running_loop()
-    fut = loop.run_in_executor(_get_probe_executor(), functools.partial(fn, *args))
-    fut.add_done_callback(lambda _f: _probe_slots.release())
+    try:
+        fut = _spawn_probe(fn, args, asyncio.get_running_loop())
+    except BaseException:
+        # 线程都没起来，_worker 的 finally 不会执行，名额得自己还
+        _probe_slots.release()
+        raise
 
     try:
-        resp = await asyncio.wait_for(asyncio.shield(fut), timeout=_PROBE_TIMEOUT_SECONDS)
+        # shield：wait_for 超时会取消外层等待，但内层必须继续跑到底——否则回调提前
+        # 触发、名额提前归还，而线程其实还占着资源。
+        resp = await asyncio.wait_for(
+            asyncio.shield(fut), timeout=_PROBE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        # Python 3.11+ 里 asyncio.TimeoutError **就是**内建 TimeoutError，
-        # Provider 自己抛 TimeoutError 也会落到这里。用 fut.done() 区分：
-        # 已完成 → 是 Provider 抛的，属普通失败；未完成 → 才是我们等超时。
-        if fut.done():
-            logger.warning("外部作用域探测失败: Provider 抛出 TimeoutError")
-            return {
-                "success": False,
-                "error": "probe_failed",
-                "items": [],
-                "message": "探测失败: Provider 抛出 TimeoutError",
-            }
+        # 到这里一定是**我们**等超时：Provider 自抛的 TimeoutError 已被包成
+        # _ProbeProviderError，不会走这个分支。
         logger.warning(
             "外部作用域探测超时（>%ss）。线程仍在跑，名额待其结束后归还",
             _PROBE_TIMEOUT_SECONDS,
@@ -419,14 +435,15 @@ async def _probe(fn, *args) -> dict:
             "items": [],
             "message": f"探测超时（超过 {int(_PROBE_TIMEOUT_SECONDS)} 秒），请检查外部系统响应速度",
         }
-    except Exception as e:  # noqa: BLE001 — 第三方 Provider 代码，什么都可能抛
-        logger.warning(f"外部作用域探测失败: {e}")
+    except _ProbeProviderError as e:
+        logger.warning(f"外部作用域探测失败: {e.original!r}")
         return {
             "success": False,
             "error": "probe_failed",
             "items": [],
             "message": f"探测失败: {e}",
         }
+
     if not isinstance(resp, dict):
         return {
             "success": False,
