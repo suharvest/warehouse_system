@@ -2,6 +2,7 @@
   "json": {
     "address": "<masked>",
     "created_at": "<masked>",
+    "external_warehouse_id": null,
     "id": "<masked>",
     "is_default": false,
     "is_disabled": false,
@@ -13,6 +14,7 @@
   "json_keys": [
     "address",
     "created_at",
+    "external_warehouse_id",
     "id",
     "is_default",
     "is_disabled",

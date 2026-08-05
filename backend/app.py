@@ -593,6 +593,7 @@ async def list_warehouses(
         _t_warehouses.c.address, _t_warehouses.c.is_default,
         _t_warehouses.c.is_disabled, _t_warehouses.c.created_at,
         _t_warehouses.c.tenant_id,
+        _t_warehouses.c.external_warehouse_id,
         _t_tenants.c.name.label('tenant_name'),
     ).select_from(
         _t_warehouses.outerjoin(_t_tenants, _t_warehouses.c.tenant_id == _t_tenants.c.id)
@@ -610,6 +611,7 @@ async def list_warehouses(
                     if isinstance(r.created_at, datetime) else r.created_at),
         tenant_id=r.tenant_id,
         tenant_name=r.tenant_name,
+        external_warehouse_id=r.external_warehouse_id,
     ) for r in rows]
 
 

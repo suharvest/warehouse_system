@@ -3,6 +3,7 @@
     {
       "address": "<any>",
       "created_at": "<any>",
+      "external_warehouse_id": "<any>",
       "id": "<any>",
       "is_default": "<any>",
       "is_disabled": "<any>",

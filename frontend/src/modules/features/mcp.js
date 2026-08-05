@@ -6,6 +6,9 @@ import { showToast } from '../ui-components.js';
 
 // 状态
 let connections = [];
+// 本地仓库列表（含 external_warehouse_id）。外部模式下用来把"导入的权限锚点"
+// 与智能体绑定的外部仓库对应起来。
+let localWarehouses = [];
 let refreshInterval = null;
 // 设备子面板状态：connId -> { devices: [...] }；openDevicePanels 记录哪些智能体的设备区已展开。
 let deviceState = {};
@@ -182,6 +185,7 @@ export async function showAddMCPModal() {
     try {
         const data = await warehousesApi.getList();
         const warehouses = data.warehouses || data || [];
+        localWarehouses = warehouses;
         warehouses.forEach(w => {
             const opt = document.createElement('option');
             opt.value = w.id;
@@ -290,6 +294,11 @@ function _degradeField(sel, txt, value) {
     sel.style.display = 'none';
     txt.style.display = '';
     if (value != null) txt.value = value;
+    // 手填外部编码时同样要联动本地锚点，否则人脸规则一样对不上
+    if (txt.id === 'mcp-conn-ext-warehouse-text') {
+        txt.oninput = () => _syncLocalWarehouseFromExternal(txt.value.trim());
+        if (value) _syncLocalWarehouseFromExternal(String(value).trim());
+    }
 }
 
 function _showHint(hint, msg, field) {
@@ -324,6 +333,8 @@ async function _loadExternalWarehouses(extTenantId, selected) {
     wSel.style.display = '';
     wTxt.style.display = 'none';
     _fillSelect(wSel, resp.items, t('externalSelectWarehouse'), selected);
+    wSel.onchange = () => _syncLocalWarehouseFromExternal(wSel.value);
+    _syncLocalWarehouseFromExternal(wSel.value);
 }
 
 async function setupExternalScope(conn) {
@@ -381,6 +392,23 @@ async function setupExternalScope(conn) {
             ? t('externalProbeUnsupported') : t('externalProbeFailed'), t('externalTenant'));
     }
     await _loadExternalWarehouses(selTenant, selWarehouse);
+}
+
+
+function _syncLocalWarehouseFromExternal(extWarehouseId) {
+    // 人脸规则、审计、权限都挂在**本地** warehouse_id 上，而调用透传的是外部编码。
+    // 两者若各选各的，就会出现"规则配在北京仓、智能体其实绑了上海仓"——规则静默
+    // 不生效，且完全没有报错。所以选了外部仓库后，自动把本地仓库切到对应的
+    // 导入锚点（导入时写了 external_warehouse_id 的那一行）。
+    if (!extWarehouseId) return;
+    const anchor = (localWarehouses || []).find(
+        w => w.external_warehouse_id && String(w.external_warehouse_id) === String(extWarehouseId)
+    );
+    if (!anchor) return;   // 没导入锚点 → 说明走的是租户级规则，不需要联动
+    const whSelect = document.getElementById('mcp-conn-warehouse');
+    if (whSelect && String(whSelect.value) !== String(anchor.id)) {
+        whSelect.value = String(anchor.id);
+    }
 }
 
 function readExternalScope() {
