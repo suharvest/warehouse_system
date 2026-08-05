@@ -230,15 +230,21 @@ class TestBindingSurvivesRuntimeChain:
         os.makedirs(custom_dir, exist_ok=True)
         fname = f"bindchain_{os.getpid()}.py"
         dest = os.path.join(custom_dir, fname)
-        shutil.copyfile(os.path.join(_FIXTURE, "provider.py"), dest)
 
-        port = _free_port()
-        srv = self._fake_backend(
-            port, fname, tenant_id,
-            # Provider 自身存的静态配置，故意指向另一个仓库
-            {"api_base_url": mock_wms, "timeout": 10,
-             "external_warehouse_id": "WH-SH-01", "external_tenant_id": "ORG-SH"})
+        # 拷贝动作本身必须在 try 里：copyfile 之后、_fake_backend 之前若抛异常
+        # （端口占用等），文件就留在 providers/custom/ 下了。那个目录会被
+        # providers/__init__.py 的 _discover() 扫描注册，残留会污染后续用例；
+        # 这个目录残留的 .py 也正是被误提交进仓库两次的东西。
+        srv = None
         try:
+            shutil.copyfile(os.path.join(_FIXTURE, "provider.py"), dest)
+            port = _free_port()
+            srv = self._fake_backend(
+                port, fname, tenant_id,
+                # Provider 自身存的静态配置，故意指向另一个仓库
+                {"api_base_url": mock_wms, "timeout": 10,
+                 "external_warehouse_id": "WH-SH-01", "external_tenant_id": "ORG-SH"})
+
             state = warehouse_mcp.create_runtime_state(
                 f"http://127.0.0.1:{port}/api",
                 "test-key",
@@ -262,5 +268,12 @@ class TestBindingSurvivesRuntimeChain:
                     "查到的不是绑定仓库的库存"
                 assert r["product"]["current_stock"] != _stock(mock_wms, "WH-SH-01")
         finally:
-            srv.shutdown()
+            if srv is not None:
+                srv.shutdown()
             os.path.exists(dest) and os.unlink(dest)
+            # 动态 import 会在同目录留下 __pycache__/bindchain_*.pyc，
+            # 同样会被 _discover() 之外的导入路径捡到，一并收干净。
+            import glob
+            for pyc in glob.glob(os.path.join(
+                    custom_dir, "__pycache__", f"{fname[:-3]}*.pyc")):
+                os.path.exists(pyc) and os.unlink(pyc)
