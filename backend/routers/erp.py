@@ -389,6 +389,14 @@ def _spawn_probe(fn, args, loop):
         finally:
             _probe_slots.release()
 
+    # 超时/取消后没人再 await 这个 future，若线程随后抛异常，asyncio 会在 GC 时打一条
+    # "Future exception was never retrieved"。这里主动消费掉，避免日志噪音掩盖真问题。
+    def _drain(f):
+        if not f.cancelled() and f.exception() is not None:
+            pass
+
+    fut.add_done_callback(_drain)
+
     _threading.Thread(target=_worker, name="erp-probe", daemon=True).start()
     return fut
 
