@@ -337,14 +337,36 @@ def _load_active_provider_instance(tid: int):
         raise HTTPException(status_code=500, detail=f"加载 Provider 失败: {e}")
 
 
-def _probe(fn, *args) -> dict:
+# 第三方 Provider 里的网络调用最多 ~10s（BaseProvider 的 timeout），但裸死循环或
+# 自定义 http 客户端不受此约束。探测跑在 async 路由里，同步执行会直接堵住事件循环、
+# 拖垮整个 worker。故放线程池并设硬超时。
+_PROBE_TIMEOUT_SECONDS = 20.0
+
+
+async def _probe(fn, *args) -> dict:
     """执行一次探测调用，把 Provider 抛出的异常收敛成结构化响应。
 
     恒返回 200：前端据 success / error 决定是渲染下拉还是退化成手工填写，
     未实现探测（not_implemented）属于预期路径，不该表现为 HTTP 错误。
     """
+    import asyncio
+    import functools
+
     try:
-        resp = fn(*args)
+        resp = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(fn, *args)
+            ),
+            timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("外部作用域探测超时（>%ss）", _PROBE_TIMEOUT_SECONDS)
+        return {
+            "success": False,
+            "error": "probe_timeout",
+            "items": [],
+            "message": f"探测超时（超过 {int(_PROBE_TIMEOUT_SECONDS)} 秒），请检查外部系统响应速度",
+        }
     except Exception as e:  # noqa: BLE001 — 第三方 Provider 代码，什么都可能抛
         logger.warning(f"外部作用域探测失败: {e}")
         return {
@@ -372,7 +394,7 @@ async def probe_external_tenants(
     """探测外部系统的租户/组织列表（供智能体配置的下拉使用）。"""
     tid = _resolve_probe_tenant(current_user, tenant_id)
     provider = _load_active_provider_instance(tid)
-    return _probe(provider.list_tenants)
+    return await _probe(provider.list_tenants)
 
 
 @router.get("/api/erp/external/warehouses")
@@ -384,7 +406,7 @@ async def probe_external_warehouses(
     """探测外部系统的仓库列表；external_tenant_id 为已选定的外部租户。"""
     tid = _resolve_probe_tenant(current_user, tenant_id)
     provider = _load_active_provider_instance(tid)
-    return _probe(provider.list_warehouses, external_tenant_id)
+    return await _probe(provider.list_warehouses, external_tenant_id)
 
 
 @router.get("/api/erp/external/users")
@@ -399,7 +421,7 @@ async def probe_external_users(
     """
     tid = _resolve_probe_tenant(current_user, tenant_id)
     provider = _load_active_provider_instance(tid)
-    return _probe(provider.list_users, external_tenant_id)
+    return await _probe(provider.list_users, external_tenant_id)
 
 
 # ============ 外部身份导入 ============
