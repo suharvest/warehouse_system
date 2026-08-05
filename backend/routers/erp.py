@@ -163,14 +163,25 @@ async def upload_erp_provider(
     # 保存到 custom 目录（按 tenant_id 隔离）
     custom_dir = _get_providers_custom_dir(tenant_id=target_tid)
     dest_path = os.path.join(custom_dir, filename)
-    with open(dest_path, 'wb') as f:
-        f.write(content)
 
-    # 写入数据库
+    # 先落盘到同目录下的临时文件，DB 写成功后再原子改名就位。
+    #
+    # 旧版是「直接覆盖 dest_path → 写 DB → 冲突则 os.unlink(dest_path)」，有两个
+    # 后果：① 同名 Provider 已存在时返回 409，却顺手把用户原有的那份**正常文件
+    # 删掉了**——接口语义是"什么都没变"，实际是把线上 Provider 干掉了，而
+    # providers/__init__.py 的 _discover() 正靠这个文件注册；② 走到 IntegrityError
+    # 以外的任何异常（磁盘满、DB 断连）时，覆盖后的新文件留在原地不清理，下次
+    # 进程重启就会加载一个 DB 里根本没有对应记录的 Provider。
+    # 同目录 + os.replace 才能保证原子（跨文件系统的 rename 不原子）。
+    tmp_dest = None
     now_dt = datetime.now()
     # 使用文件名（去掉.py）作为默认显示名
     display_name = file.filename.replace('.py', '')
     try:
+        tmp_fd2, tmp_dest = tempfile.mkstemp(suffix='.py.tmp', dir=custom_dir)
+        with os.fdopen(tmp_fd2, 'wb') as f:
+            f.write(content)
+
         with get_engine().begin() as sa_conn:
             # 变量名不要复用 result——上面 result 是校验结果，被这里的 CursorResult
             # 覆盖后，函数末尾的 result['methods'] 会抛
@@ -187,10 +198,16 @@ async def upload_erp_provider(
                 )
             )
             provider_id = ins.inserted_primary_key[0] if ins.inserted_primary_key else None
+
+        os.replace(tmp_dest, dest_path)
+        tmp_dest = None
     except IntegrityError:
-        # provider_name 在当前租户内唯一约束冲突
-        os.unlink(dest_path)
+        # provider_name 在当前租户内唯一约束冲突。dest_path 原封不动。
         raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 在当前租户下已存在")
+    finally:
+        # 只清理自己的临时文件，永远不碰 dest_path
+        if tmp_dest and os.path.exists(tmp_dest):
+            os.unlink(tmp_dest)
 
     logger.info(f"上传 ERP Provider: {provider_name} ({class_name})，操作人: {current_user.display_name}")
     return {

@@ -154,8 +154,14 @@ def _cleanup_stray_provider_files():
     from routers import erp as erp_router
     import glob
     base = os.path.join(erp_router._mcp_dir, "providers", "custom")
-    for pat in ("probe_*.py", "bindtest_*.py"):
-        for f in glob.glob(os.path.join(base, pat)):
+    # 上传接口按 custom/<tenant_id>/ 存放，只扫扁平目录会漏掉真正的落点
+    # ——这个目录残留的 .py 被误提交进仓库过两次，兜底必须把子目录也扫上。
+    for pat in ("probe_*.py", "bindtest_*.py", "uploadtest_*.py"):
+        for f in glob.glob(os.path.join(base, pat)) + \
+                 glob.glob(os.path.join(base, "*", pat)):
+            os.path.exists(f) and os.unlink(f)
+        # 原子改名遗留的临时文件
+        for f in glob.glob(os.path.join(base, "*", "*.py.tmp")):
             os.path.exists(f) and os.unlink(f)
 
 
@@ -573,3 +579,65 @@ class TestScopeChangeTriggersRestart:
             assert calls == [], "值未变化不应触发重启"
         finally:
             external_mode.app.dependency_overrides.pop(mcp_admin.get_mcp_manager, None)
+
+
+class TestUploadDoesNotDestroyExistingProvider:
+    """重名上传返回 409 时，绝不能动用户已有的那份 Provider 文件。
+
+    旧版顺序是「覆盖写 dest_path → 写 DB → IntegrityError 则 os.unlink(dest_path)」，
+    于是一次注定失败的重名上传，会把线上正在用的 Provider 文件删掉——而
+    providers/__init__.py 的 _discover() 正是靠这个文件注册的，进程一重启
+    该 Provider 就消失了。接口语义是「什么都没变」，实际是把它干掉了。
+    """
+
+    @staticmethod
+    def _body(marker: str) -> bytes:
+        return f'''
+try:
+    from providers.base import BaseProvider
+except ImportError:
+    from ..base import BaseProvider
+
+
+class UploadTestProvider(BaseProvider):
+    PROVIDER_NAME = "{marker}"
+    MARKER = "{marker}"
+
+    def resolve_name(self, text, entity_type="all"): return {{}}
+    def query_stock(self, p, show_batches=False): return {{}}
+    def stock_in(self, *a, **k): return {{}}
+    def stock_out(self, *a, **k): return {{}}
+    def search(self, *a, **k): return {{}}
+    def get_today_statistics(self): return {{}}
+'''.encode("utf-8")
+
+    def test_conflicting_upload_leaves_original_file_intact(self, external_mode):
+        from io import BytesIO
+        from routers import erp as erp_router
+
+        marker = f"uploadtest_{uuid.uuid4().hex[:8]}"
+        first = self._body(marker)
+
+        r1 = external_mode.post(
+            "/api/erp/providers",
+            files={"file": (f"{marker}.py", BytesIO(first), "text/x-python")})
+        assert r1.status_code == 200, r1.text
+
+        custom_dir = erp_router._get_providers_custom_dir(tenant_id=1)
+        dest = os.path.join(custom_dir, f"{marker}.py")
+        assert os.path.exists(dest), "首次上传应当落盘"
+        assert open(dest, "rb").read() == first
+
+        # 同名再传一次：必须 409，且磁盘上那份原封不动
+        r2 = external_mode.post(
+            "/api/erp/providers",
+            files={"file": (f"{marker}.py", BytesIO(first + b"\n# v2\n"),
+                            "text/x-python")})
+        assert r2.status_code == 409, r2.text
+        assert os.path.exists(dest), "409 却把用户已有的 Provider 文件删了"
+        assert open(dest, "rb").read() == first, "409 不该改动已有文件内容"
+
+        # 不留临时文件
+        import glob
+        assert glob.glob(os.path.join(custom_dir, "*.py.tmp")) == [], \
+            "失败路径遗留了临时文件"
