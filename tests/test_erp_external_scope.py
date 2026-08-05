@@ -52,10 +52,17 @@ def _insert_provider(tenant_id=1, filename=None, config=None, is_active=1):
     return pname
 
 
+# 本文件造出来的 provider_name 都带这个前缀，清理时据此精确定位。
+# 早先用的是全表 DELETE FROM erp_providers——测试库是 session 级共享的，
+# 会把别的用例建的 provider 一起抹掉。
+_PROV_PREFIX = "prov_"
+
+
 def _clear_providers():
     from database import get_db_connection
     conn = get_db_connection()
-    conn.cursor().execute("DELETE FROM erp_providers")
+    conn.cursor().execute(
+        "DELETE FROM erp_providers WHERE provider_name LIKE ?", (_PROV_PREFIX + "%",))
     conn.commit()
     conn.close()
 
@@ -350,23 +357,74 @@ class TestRuntimeScopeInjection:
         assert "external_tenant_id" not in st["config"]
         assert "external_warehouse_id" not in st["config"]
 
-    def test_connection_binding_wins_over_stored_provider_config(self):
-        """merged_config = {**default, **stored} 之后必须重新覆盖，
-        否则 Provider 配置里写死的仓库会盖掉本连接的绑定 —— 多个智能体全打到同一个仓库。"""
+    def test_connection_binding_wins_over_stored_provider_config(self, monkeypatch, tmp_path):
+        """连接级绑定必须压过 Provider 存的静态配置。
+
+        这条**必须走生产实现**（_load_provider_from_db_or_default）：早先的版本在测试里
+        自己重写了一遍 merge，生产代码改坏了照样绿——等于没有保护。
+        """
         w = self._warehouse_mcp()
-        default_config = w.create_runtime_state(
-            "http://x/api", "key",
-            external_tenant_id="ORG-A", external_warehouse_id="WH-A",
-        )["config"]
-        stored_config = {"external_warehouse_id": "WH-STATIC", "api_base_url": "http://ext"}
 
-        merged = {**default_config, **stored_config}
-        for k in ("external_tenant_id", "external_warehouse_id"):
-            if default_config.get(k):
-                merged[k] = default_config[k]
+        # 造一个真的 Provider 文件，放在加载器会找的扁平路径下
+        import providers as _providers  # noqa: F401  (确保包可导入)
+        custom_dir = os.path.join(os.path.dirname(w.__file__), "providers", "custom")
+        os.makedirs(custom_dir, exist_ok=True)
+        fname = f"bindtest_{uuid.uuid4().hex[:8]}.py"
+        fpath = os.path.join(custom_dir, fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(
+                "try:\n"
+                "    from providers.base import BaseProvider\n"
+                "except ImportError:\n"
+                "    from ..base import BaseProvider\n"
+                "class BindProvider(BaseProvider):\n"
+                "    PROVIDER_NAME = 'bindtest'\n"
+                "    def resolve_name(self, t, entity_type='all'): return {}\n"
+                "    def query_stock(self, p, show_batches=False): return {}\n"
+                "    def stock_in(self, *a, **k): return {}\n"
+                "    def stock_out(self, *a, **k): return {}\n"
+                "    def search(self, *a, **k): return {}\n"
+                "    def get_today_statistics(self): return {}\n"
+            )
 
-        assert merged["external_warehouse_id"] == "WH-A"
-        assert merged["api_base_url"] == "http://ext", "其余键仍应由 Provider 配置决定"
+        # active-for-mcp 返回的 stored_config 里**也**写了 external_warehouse_id，
+        # 模拟「Provider 配置写死了一个仓库」的情况
+        class _FakeResp:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "mode": "external_erp",
+                    "provider": {
+                        "id": 1,
+                        "provider_name": "bindtest",
+                        "filename": fname,
+                        "tenant_id": None,
+                        "config": {
+                            "external_warehouse_id": "WH-STATIC",
+                            "api_base_url": "http://ext",
+                        },
+                    },
+                }
+
+        import requests
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp())
+
+        try:
+            state = w.create_runtime_state(
+                "http://x/api", "key",
+                external_tenant_id="ORG-A", external_warehouse_id="WH-A",
+            )
+            provider = w._load_provider_from_db_or_default(state["config"])
+            cfg = provider.config
+
+            assert cfg["external_warehouse_id"] == "WH-A", (
+                "Provider 静态配置盖掉了连接级绑定——多个智能体会全打到同一个外部仓库")
+            assert cfg["external_tenant_id"] == "ORG-A"
+            assert cfg["api_base_url"] == "http://ext", "其余键仍应由 Provider 配置决定"
+        finally:
+            os.path.exists(fpath) and os.unlink(fpath)
 
 
 # ---------------------------------------------------------------------------

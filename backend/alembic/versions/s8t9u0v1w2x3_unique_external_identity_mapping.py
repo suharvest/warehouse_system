@@ -42,16 +42,43 @@ def upgrade():
             inspector = inspect(bind)
             if _index_exists(inspector, table, index_name):
                 continue
-            # 先去重，否则唯一索引建不起来
-            bind.execute(sa.text(f"""
-                DELETE FROM {table}
-                 WHERE {column} IS NOT NULL
-                   AND id NOT IN (
-                       SELECT MIN(id) FROM {table}
-                        WHERE {column} IS NOT NULL
-                        GROUP BY tenant_id, {column}
-                   )
-            """))
+
+            # 存量重复必须由人来处理，迁移**绝不替运维删数据**。
+            # users 被 user_warehouses / inventory_records / sessions / api_keys 引用，
+            # warehouses 被 materials / batches / inventory_records 等 8 张表引用——
+            # 删一行会打断出入库历史，且 downgrade 恢复不了。
+            dupes = bind.execute(sa.text(f"""
+                SELECT tenant_id, {column}, COUNT(*) AS cnt
+                  FROM {table}
+                 WHERE {column} IS NOT NULL AND {column} <> ''
+                 GROUP BY tenant_id, {column}
+                HAVING COUNT(*) > 1
+            """)).fetchall()
+            if dupes:
+                # 只告警不中止：这个唯一索引是纵深防御（挡并发导入的先查后插），
+                # 不是正确性前提。alembic upgrade 跑在应用启动时，为了加固而让整个
+                # 仓库系统起不来，代价不成比例。
+                detail = "; ".join(
+                    f"tenant_id={r[0]} {column}={r[1]!r} x{r[2]}" for r in dupes[:10]
+                )
+                print(
+                    f"\n{'=' * 70}\n"
+                    f"[警告] 跳过唯一索引 {index_name}\n"
+                    f"{table}.{column} 存在重复的外部映射，无法建立唯一约束。\n"
+                    f"本迁移**不会自动删除任何数据** —— {table} 被出入库记录等多张表\n"
+                    f"外键引用，删行会打断历史且无法回滚，必须由人工确认保留哪一条。\n\n"
+                    f"重复项：{detail}\n\n"
+                    f"排查：\n"
+                    f"  SELECT id, tenant_id, {column} FROM {table}\n"
+                    f"   WHERE {column} IN (SELECT {column} FROM {table}\n"
+                    f"                       WHERE {column} IS NOT NULL\n"
+                    f"                       GROUP BY tenant_id, {column}\n"
+                    f"                      HAVING COUNT(*) > 1);\n\n"
+                    f"处理完后重跑 `alembic upgrade head` 即可补上该索引。\n"
+                    f"在此之前系统功能不受影响，仅缺少并发导入的数据库级保护。\n"
+                    f"{'=' * 70}\n"
+                )
+                continue
         op.create_index(index_name, table, ['tenant_id', column], unique=True)
 
 

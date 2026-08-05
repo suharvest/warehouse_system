@@ -130,10 +130,20 @@ def _activate_provider(tenant_id, filename):
 
 @pytest.fixture()
 def mt_env(admin_client, monkeypatch):
-    """多租户环境：切 DEPLOY_MODE、切 external_erp，退出时彻底复原。"""
+    """多租户环境：切 DEPLOY_MODE、切 external_erp，退出时彻底复原。
+
+    测试库是 session 级共享的，清理必须**精确**：早先这里用全表
+    DELETE FROM erp_providers，会连带抹掉别的用例建的数据；建出来的
+    tenant / 该 tenant 下的用户与会话也没回收，后续用例看到的租户数就不对了。
+    这里按本文件自己造的标记（slug 前缀 t- + external_* 非空）逐项收走。
+    """
     monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
     _set_system_mode("external_erp")
     created_files = []
+    from database import get_db_connection
+    conn = get_db_connection()
+    before = {r[0] for r in conn.cursor().execute("SELECT id FROM tenants")}
+    conn.close()
     try:
         yield admin_client, created_files
     finally:
@@ -141,14 +151,27 @@ def mt_env(admin_client, monkeypatch):
             os.path.exists(p) and os.unlink(p)
         _set_system_mode("self_owned")
         _restore_admin_tenant()
-        from database import get_db_connection
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("DELETE FROM erp_providers")
+        cur.execute("SELECT id FROM tenants")
+        new_tenants = [r[0] for r in cur.fetchall() if r[0] not in before]
+        cur.execute("DELETE FROM erp_providers WHERE provider_name LIKE 'mt_%'")
         cur.execute("DELETE FROM user_warehouses WHERE user_id IN "
                     "(SELECT id FROM users WHERE external_user_id IS NOT NULL)")
         cur.execute("DELETE FROM users WHERE external_user_id IS NOT NULL")
         cur.execute("DELETE FROM warehouses WHERE external_warehouse_id IS NOT NULL")
+        for tid in new_tenants:
+            # 顺序：会话 → api_key → 用户 → 仓库 → 租户，避免外键悬挂
+            cur.execute("DELETE FROM sessions WHERE user_id IN "
+                        "(SELECT id FROM users WHERE tenant_id = ?)", (tid,))
+            cur.execute("DELETE FROM api_keys WHERE tenant_id = ?", (tid,))
+            cur.execute("DELETE FROM user_warehouses WHERE user_id IN "
+                        "(SELECT id FROM users WHERE tenant_id = ?)", (tid,))
+            cur.execute("DELETE FROM mcp_connections WHERE tenant_id = ?", (tid,))
+            cur.execute("DELETE FROM users WHERE tenant_id = ?", (tid,))
+            cur.execute("DELETE FROM warehouses WHERE tenant_id = ?", (tid,))
+            cur.execute("DELETE FROM erp_providers WHERE tenant_id = ?", (tid,))
+            cur.execute("DELETE FROM tenants WHERE id = ?", (tid,))
         conn.commit()
         conn.close()
 
