@@ -386,21 +386,32 @@ async def _probe(fn, *args) -> dict:
             "items": [],
             "message": "探测请求过多，或此前的探测仍卡在外部系统里，请稍后重试",
         }
+
+    # 名额在**线程真正跑完**时归还，而不是在超时分支直接放弃。早先那样写，
+    # 慢调用累计 4 次就会让探测接口永久卡在 probe_busy。
+    # shield 让 wait_for 的取消不传播到底层 future——否则一超时就取消、回调立刻触发，
+    # 而线程其实还占着 worker，限流形同虚设。
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(_get_probe_executor(), functools.partial(fn, *args))
+    fut.add_done_callback(lambda _f: _probe_slots.release())
+
     try:
-        resp = await asyncio.wait_for(
-            asyncio.get_running_loop().run_in_executor(
-                _get_probe_executor(), functools.partial(fn, *args)
-            ),
-            timeout=_PROBE_TIMEOUT_SECONDS,
-        )
-        _probe_slots.release()
+        resp = await asyncio.wait_for(asyncio.shield(fut), timeout=_PROBE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        # 故意**不**释放名额：超时只是调用方不再等待，那个线程仍卡在第三方代码里
-        # 占着 worker。立刻归还会让并发限制形同虚设，名额随进程重启恢复。
+        # Python 3.11+ 里 asyncio.TimeoutError **就是**内建 TimeoutError，
+        # Provider 自己抛 TimeoutError 也会落到这里。用 fut.done() 区分：
+        # 已完成 → 是 Provider 抛的，属普通失败；未完成 → 才是我们等超时。
+        if fut.done():
+            logger.warning("外部作用域探测失败: Provider 抛出 TimeoutError")
+            return {
+                "success": False,
+                "error": "probe_failed",
+                "items": [],
+                "message": "探测失败: Provider 抛出 TimeoutError",
+            }
         logger.warning(
-            "外部作用域探测超时（>%ss）。注意：卡死的 Provider 线程无法强制终止，"
-            "反复超时会占满探测专用线程池（上限 %s）",
-            _PROBE_TIMEOUT_SECONDS, _PROBE_MAX_WORKERS,
+            "外部作用域探测超时（>%ss）。线程仍在跑，名额待其结束后归还",
+            _PROBE_TIMEOUT_SECONDS,
         )
         return {
             "success": False,
@@ -409,7 +420,6 @@ async def _probe(fn, *args) -> dict:
             "message": f"探测超时（超过 {int(_PROBE_TIMEOUT_SECONDS)} 秒），请检查外部系统响应速度",
         }
     except Exception as e:  # noqa: BLE001 — 第三方 Provider 代码，什么都可能抛
-        _probe_slots.release()
         logger.warning(f"外部作用域探测失败: {e}")
         return {
             "success": False,
