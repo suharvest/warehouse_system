@@ -581,6 +581,113 @@ class TestScopeChangeTriggersRestart:
             external_mode.app.dependency_overrides.pop(mcp_admin.get_mcp_manager, None)
 
 
+# ---------------------------------------------------------------------------
+# 审查回归（codex 第七轮）
+# ---------------------------------------------------------------------------
+
+def _grants_of(external_user_id):
+    """取某个导入用户当前的仓库授权（外部编码集合）。"""
+    from database import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT w.external_warehouse_id
+             FROM user_warehouses uw
+             JOIN users u ON u.id = uw.user_id
+             JOIN warehouses w ON w.id = uw.warehouse_id
+            WHERE u.external_user_id = ?""",
+        (external_user_id,))
+    out = {r[0] for r in cur.fetchall()}
+    conn.close()
+    return out
+
+
+class TestImportGrantsAreNotClobbered:
+    """`warehouses` 字段缺省 ≠ 授权为空。
+
+    授权是先清后建的。若把「没提交该字段」当成「空列表」，那么一次只想同步显示名
+    的增量导入，会把管理员在我方手工加的仓库授权全部清空，且响应里完全看不出来。
+    """
+
+    def _anchor(self, client, code):
+        r = client.post("/api/erp/external/import/warehouses",
+                        json={"warehouses": [{"external_warehouse_id": code,
+                                              "name": f"仓-{code}"}]})
+        assert r.status_code == 200, r.text
+
+    def test_omitted_warehouses_preserves_existing_grants(self, external_mode):
+        sfx = uuid.uuid4().hex[:6]
+        ext, code = f"ext-{sfx}", f"WH-{sfx}"
+        self._anchor(external_mode, code)
+
+        r = _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "warehouses": [code]}])
+        assert r.status_code == 200, r.text
+        assert _grants_of(ext) == {code}
+
+        # 第二次导入只改显示名，**不带** warehouses
+        r2 = _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "display_name": "改个名"}])
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["updated"] == 1
+        assert _grants_of(ext) == {code}, "缺省 warehouses 把已有授权清空了"
+
+    def test_explicit_empty_list_does_revoke(self, external_mode):
+        """显式传 [] 仍然是「收回全部授权」——两种语义必须能区分开。"""
+        sfx = uuid.uuid4().hex[:6]
+        ext, code = f"ext-{sfx}", f"WH-{sfx}"
+        self._anchor(external_mode, code)
+        _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "warehouses": [code]}])
+        assert _grants_of(ext) == {code}
+
+        r = _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "warehouses": []}])
+        assert r.status_code == 200, r.text
+        assert _grants_of(ext) == set()
+
+
+class TestImportUsernameClashOnUpdate:
+    """更新已有账号时撞上同租户别人的用户名 → 跳过并回报，不是 500。
+
+    users 上有 idx_users_username_tenant 唯一索引。旧版更新路径不查重名，直接
+    UPDATE 抛 IntegrityError；而整批共用一个事务，那一条会把**所有**已写入的
+    记录一起回滚，接口返回 500——与「撞名则跳过、其余继续」的约定完全相反。
+    """
+
+    def test_clash_is_skipped_and_batch_survives(self, external_mode):
+        sfx = uuid.uuid4().hex[:6]
+        a, b = f"ext-{sfx}-a", f"ext-{sfx}-b"
+        r = _import_users(external_mode, [
+            {"external_user_id": a, "username": f"ua{sfx}"},
+            {"external_user_id": b, "username": f"ub{sfx}"},
+        ])
+        assert r.status_code == 200 and r.json()["created"] == 2, r.text
+
+        # 把 b 改成 a 的用户名（撞车），同批再带一个全新账号
+        c = f"ext-{sfx}-c"
+        r2 = _import_users(external_mode, [
+            {"external_user_id": b, "username": f"ua{sfx}"},
+            {"external_user_id": c, "username": f"uc{sfx}"},
+        ])
+        assert r2.status_code == 200, r2.text
+        body = r2.json()
+        assert [s["external_user_id"] for s in body["skipped"]] == [b]
+        assert body["created"] == 1, "同批里无关的那条被一起回滚了"
+
+        from database import get_db_connection
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("SELECT username FROM users WHERE external_user_id = ?", (b,))
+        assert cur.fetchone()[0] == f"ub{sfx}", "撞车的那条不该被改动"
+        cur.execute("SELECT COUNT(*) FROM users WHERE external_user_id = ?", (c,))
+        assert cur.fetchone()[0] == 1, "同批的新账号应当照常写入"
+        conn.close()
+
+
 class TestUploadDoesNotDestroyExistingProvider:
     """重名上传返回 409 时，绝不能动用户已有的那份 Provider 文件。
 

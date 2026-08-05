@@ -542,7 +542,12 @@ class _ImportUserItem(BaseModel):
     # （get_authorized_warehouses 对非 admin 只认显式授权）。
     # 编码需先作为锚点导入过（POST /api/erp/external/import/warehouses），
     # 未匹配到本地锚点的编码会在结果里回报，不静默丢弃。
-    warehouses: list[str] = []
+    #
+    # 默认 None（"本次不涉及授权"）而**不是** []（"授权为空"）。这两者必须区分：
+    # 授权是先清后建的，如果缺省等同空列表，那么一次不带 warehouses 的增量导入
+    # （比如只想同步一下显示名）就会把管理员在我方手工加的仓库授权全部清空，
+    # 而调用方完全看不出发生了什么。只有显式给出该字段时才替换授权。
+    warehouses: Optional[list[str]] = None
 
 
 class _ImportUsersRequest(BaseModel):
@@ -581,6 +586,18 @@ async def import_external_users(
     - 同租户下 username 撞车但 external_user_id 不同 → 跳过并回报，不静默覆盖
     """
     from database import hash_password
+
+    # 批级 tenant_id 的越权检查必须在这里做一次，不能只靠 _tenant_of。
+    # _tenant_of 里 `want = item.tenant_id or request.tenant_id`——只要**每一条**都
+    # 自带 tenant_id，批级那个非法值就永远参与不到比较，403 静默失效：请求里明明
+    # 写着别人的租户号却返回 200。落点确实还在自己租户（没有越权写入），但接口
+    # 接受了一个它本该拒绝的字段，调用方会以为自己真的导进了那个租户。
+    if (
+        current_user.tenant_id is not None
+        and request.tenant_id is not None
+        and request.tenant_id != current_user.tenant_id
+    ):
+        raise HTTPException(status_code=403, detail="无权将用户导入其他租户")
 
     if not request.users:
         return {"created": 0, "updated": 0, "granted": 0,
@@ -623,7 +640,7 @@ async def import_external_users(
     valid_roles = {"admin", "operate", "view"}
     now_dt = datetime.now()
 
-    unmatched: set[str] = set()
+    unmatched: set[tuple] = set()      # {(tenant_id, external_user_id, code)}
     # bcrypt 很慢，整批共用一个初始密码，只算一次
     pw_hash = hash_password(request.default_password)
 
@@ -631,8 +648,15 @@ async def import_external_users(
     granted = 0
     skipped: list[dict] = []
 
-    def _grant(sa_conn, user_id: int, codes: list[str], role: str, tid: int) -> int:
-        """按外部仓库编码建仓库授权（幂等：先清后建）。"""
+    def _grant(sa_conn, user_id: int, codes: Optional[list[str]], role: str,
+               tid: int, ext_id: str) -> int:
+        """按外部仓库编码建仓库授权（幂等：先清后建）。
+
+        codes 为 None 表示本次请求没有提交该字段 → 完全不碰现有授权。
+        codes 为 [] 才是「显式收回全部授权」。
+        """
+        if codes is None:
+            return 0
         if role == "admin":
             return 0        # admin 可见本租户全部仓库，逐个授权没有意义
         anchor_by_code = anchor_by_tenant.get(tid) or {}
@@ -643,7 +667,9 @@ async def import_external_users(
                 continue
             wid = anchor_by_code.get(c)
             if wid is None:
-                unmatched.add(c)
+                # 带上租户和外部账号：多租户下同一个编码可能只在部分租户建过锚点，
+                # 只报一个裸编码的话无法判断是哪个用户的哪次授权没落上。
+                unmatched.add((tid, ext_id, c))
                 continue
             ids.append(wid)
         sa_conn.execute(
@@ -671,23 +697,16 @@ async def import_external_users(
                 ))
             ).first()
 
-            if existing:
-                sa_conn.execute(
-                    update(_t_users).where(_t_users.c.id == existing.id).values(
-                        username=username,
-                        display_name=item.display_name,
-                        role=role,
-                    )
-                )
-                granted += _grant(sa_conn, existing.id, item.warehouses, role, tid)
-                updated += 1
-                continue
-
-            # 同租户重名但不是同一个外部账号：不覆盖，交给管理员决定
+            # 同租户重名但不是同一个外部账号：不覆盖，交给管理员决定。
+            # 更新路径同样要查——users 上有 idx_users_username_tenant 唯一索引，
+            # 把已有账号改成同租户里别人的用户名会抛 IntegrityError；而整批共用
+            # 一个事务，那一条冲突会把**所有租户**已写入的记录一起回滚掉，接口
+            # 返回 500，与文档写的「撞名则跳过并回报、其余继续」完全相反。
             clash = sa_conn.execute(
-                select(_t_users.c.id, _t_users.c.external_user_id).where(and_(
+                select(_t_users.c.id).where(and_(
                     _t_users.c.tenant_id == tid,
                     _t_users.c.username == username,
+                    _t_users.c.id != (existing.id if existing else -1),
                 ))
             ).first()
             if clash:
@@ -698,22 +717,45 @@ async def import_external_users(
                 })
                 continue
 
-            _ins = sa_conn.execute(
-                insert(_t_users).values(
-                    username=username,
-                    password_hash=pw_hash,
-                    role=role,
-                    display_name=item.display_name,
-                    tenant_id=tid,
-                    external_user_id=ext_id,
-                    created_by=current_user.id,
-                    created_at=now_dt,
-                )
-            )
-            _uid = _ins.inserted_primary_key[0] if _ins.inserted_primary_key else None
-            if _uid is not None:
-                granted += _grant(sa_conn, _uid, item.warehouses, role, tid)
-            created += 1
+            # 每条一个 SAVEPOINT：并发导入等竞态下仍可能撞唯一索引（先查后插之间
+            # 有窗口），届时只回滚这一条并记入 skipped，不牵连整批。
+            try:
+                with sa_conn.begin_nested():
+                    if existing:
+                        sa_conn.execute(
+                            update(_t_users).where(_t_users.c.id == existing.id).values(
+                                username=username,
+                                display_name=item.display_name,
+                                role=role,
+                            )
+                        )
+                        granted += _grant(
+                            sa_conn, existing.id, item.warehouses, role, tid, ext_id)
+                        updated += 1
+                    else:
+                        _ins = sa_conn.execute(
+                            insert(_t_users).values(
+                                username=username,
+                                password_hash=pw_hash,
+                                role=role,
+                                display_name=item.display_name,
+                                tenant_id=tid,
+                                external_user_id=ext_id,
+                                created_by=current_user.id,
+                                created_at=now_dt,
+                            )
+                        )
+                        _uid = _ins.inserted_primary_key[0] if _ins.inserted_primary_key else None
+                        if _uid is not None:
+                            granted += _grant(
+                                sa_conn, _uid, item.warehouses, role, tid, ext_id)
+                        created += 1
+            except IntegrityError:
+                skipped.append({
+                    "external_user_id": ext_id,
+                    "username": username,
+                    "reason": "写入时与既有账号冲突（用户名或外部账号已被占用），已跳过",
+                })
 
     logger.info(
         f"导入外部用户: tenants={sorted(_tids)} 新建={created} 更新={updated} "
@@ -722,13 +764,20 @@ async def import_external_users(
     msg = f"导入完成：新建 {created} 个，更新 {updated} 个，跳过 {len(skipped)} 个"
     if granted:
         msg += f"，建立仓库授权 {granted} 条"
-    if unmatched:
-        msg += f"；以下外部仓库编码在本地没有对应锚点，未建授权：{'、'.join(sorted(unmatched))}"
+    _codes = sorted({c for _, _, c in unmatched})
+    if _codes:
+        msg += f"；以下外部仓库编码在本地没有对应锚点，未建授权：{'、'.join(_codes)}"
     return {
         "created": created,
         "updated": updated,
         "granted": granted,
-        "unmatched_warehouses": sorted(unmatched),
+        # 扁平编码列表，保持既有调用方（前端提示条）不变
+        "unmatched_warehouses": _codes,
+        # 逐条明细，多租户下用来定位是谁的哪个编码没落上
+        "unmatched_details": [
+            {"tenant_id": t, "external_user_id": u, "code": c}
+            for t, u, c in sorted(unmatched)
+        ],
         "skipped": skipped,
         "message": msg,
     }

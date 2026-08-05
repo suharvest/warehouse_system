@@ -423,3 +423,24 @@ class TestMultiTenantImportInOneCall:
             "users": [{"external_user_id": "e-y", "username": "uy"}],
         })
         assert r.status_code == 400, r.text
+
+    def test_batch_tenant_id_rejected_even_when_every_item_overrides(
+            self, mt_env, app_instance):
+        """批级 tenant_id 非法时必须 403，哪怕每一条都自带合法的 tenant_id。
+
+        _tenant_of 里 `want = item.tenant_id or request.tenant_id`——只要每条都写了
+        自己的 tenant_id，批级那个越权值就永远参与不到比较，请求里明明指着别人的
+        租户却返回 200。落点确实还在自己租户（没有越权写入），但接口默默接受了一个
+        本该拒绝的字段，调用方会以为自己真导进了那个租户。
+        """
+        admin_client, _files = mt_env
+        _as_global_admin()
+        other, _ = _make_tenant(admin_client)
+        _restore_admin_tenant()          # 变回租户 1 的管理员
+        r = admin_client.post("/api/erp/external/import/users", json={
+            "default_password": "Init@12345",
+            "tenant_id": other,                     # ← 越权：别人的租户
+            "users": [{"external_user_id": "e-z", "username": "uz",
+                       "tenant_id": 1}],            # ← 每条都自带合法值，掩盖了上面那个
+        })
+        assert r.status_code == 403, r.text

@@ -494,8 +494,21 @@ explicit warehouse grants (`user_warehouses`); without them an imported user log
 
 At import time these codes are mapped to local warehouse anchors (import them first via
 `POST /api/erp/external/import/warehouses`). Codes with no matching anchor are never dropped
-silently — they come back in `unmatched_warehouses`. The `admin` role gets no per-warehouse
+silently — they come back in `unmatched_warehouses` (plus `unmatched_details`, which names the
+tenant and account each unmatched code belongs to). The `admin` role gets no per-warehouse
 grants: it can already see every warehouse in its tenant.
+
+**Omitting the field is not the same as sending an empty array:**
+
+| Form | Behaviour |
+|---|---|
+| no `warehouses` key | leaves the user's existing grants untouched |
+| `"warehouses": []` | explicitly revokes all of the user's grants |
+| `"warehouses": ["WH-A"]` | replaces the set (delete-then-insert) |
+
+The distinction matters because grants are replaced wholesale. If "absent" meant "empty", an
+incremental import that only refreshes display names would silently wipe every grant an admin
+had added by hand on our side, with nothing in the response to indicate it.
 
 What you do **not** need to supply:
 
