@@ -494,11 +494,19 @@ def list_warehouses(self, tenant_id=None):
 
 ```python
 def list_users(self, tenant_id=None):
-    data = self.http_get("/api/users")
+    params = {"org": tenant_id} if tenant_id else None
+    data = self.http_get("/api/users", params=params)
     return {
         "success": True,
         "items": [
-            {"id": u["id"], "name": u["login"], "display_name": u["realName"]}
+            {
+                "id": u["id"],                 # 必需：稳定不变的账号 ID（去重键）
+                "name": u["login"],            # 必需：登录名
+                "display_name": u["realName"], # 可选
+                # 强烈建议：该账号能访问的仓库编码。我方对非管理员只认显式仓库授权，
+                # 不给的话导入的用户登录后仓库列表是空的、几乎什么都做不了。
+                "warehouses": u.get("warehouseCodes") or [],
+            }
             for u in data["list"]
         ],
         "message": "ok",
@@ -506,8 +514,12 @@ def list_users(self, tenant_id=None):
 ```
 
 导入后：`items[].id` 存进我方 `users.external_user_id`（用于增量同步与去重），
-`name` 作为登录名，`display_name` 作为显示名。**密码由我方本地管理**，
-贵方无需提供任何认证接口。
+`name` 作为登录名，`display_name` 作为显示名，`warehouses` 转成我方的仓库授权。
+**密码由我方本地管理**，贵方无需提供任何认证接口。
+
+`warehouses` 里的编码需要先通过仓库导入建成本地锚点；未匹配到的会在导入结果的
+`unmatched_warehouses` 里回报，不会静默丢弃。`admin` 角色不做逐仓授权——它天然可见
+本租户全部仓库。
 
 导入是幂等的：同 `external_user_id` 再导一次是更新而非重复创建；若我方已存在
 同名但非同一外部账号的用户，会跳过并回报，不会静默覆盖（尤其保护本地管理员账号）。
@@ -1126,9 +1138,16 @@ def list_users(self, tenant_id=None):
             "message": "ok"}
 ```
 
-`items[].id` is stored as `users.external_user_id` (used for incremental sync and
-dedup). **Passwords are managed locally on our side** — you do not need to expose
-any authentication endpoint.
+`items[].id` is stored as `users.external_user_id` (used for incremental sync and dedup),
+`name` becomes the login, `display_name` the display name, and `warehouses` is turned into
+warehouse grants on our side. **Passwords are managed locally on our side** — you do not need
+to expose any authentication endpoint.
+
+Supplying `warehouses` is strongly recommended: for non-admin roles we honour only explicit
+grants, so without it an imported user logs in to an empty warehouse list. The codes must
+already exist as local anchors (import warehouses first); unmatched ones are reported back in
+`unmatched_warehouses` rather than dropped silently. The `admin` role gets no per-warehouse
+grants — it can already see every warehouse in its tenant.
 
 Import is idempotent: re-importing the same `external_user_id` updates instead of
 duplicating; a local user with the same name but a different external id is

@@ -365,3 +365,82 @@ class TestTenantSubdirResolution:
         body = resp.json()
         assert body["success"] is True, "租户子目录下的 Provider 没被找到（早期 bug 回归）"
         assert [i["id"] for i in body["items"]] == ["u1"]
+
+
+# ---------------------------------------------------------------------------
+# 一次调用导入多个租户（全局管理员）
+# ---------------------------------------------------------------------------
+
+class TestMultiTenantImportInOneCall:
+    """全局管理员可在单次调用里把对方不同组织的账号分别导进我方不同租户。
+
+    此前顶层只有一个 tenant_id，跨租户必须分多次调用；租户管理员则一律按登录态，
+    显式指定别的租户要 403（与人脸接口同语义：显式拒绝比静默忽略更早暴露问题）。
+    """
+
+    @staticmethod
+    def _users_of(tid):
+        from database import get_db_connection
+        c = get_db_connection(); cur = c.cursor()
+        cur.execute("SELECT username FROM users WHERE tenant_id=? "
+                    "AND external_user_id IS NOT NULL", (tid,))
+        r = sorted(x[0] for x in cur.fetchall()); c.close()
+        return r
+
+    def test_global_admin_imports_into_multiple_tenants(self, mt_env, app_instance):
+        admin_client, _files = mt_env
+        _as_global_admin()
+        ta, sa = _make_tenant(admin_client)
+        tb, sb = _make_tenant(admin_client)
+        r = admin_client.post("/api/erp/external/import/users", json={
+            "default_password": "Init@12345",
+            "users": [
+                {"external_user_id": f"e-{sa}", "username": f"ua-{sa}", "tenant_id": ta},
+                {"external_user_id": f"e-{sb}", "username": f"ub-{sb}", "tenant_id": tb},
+            ],
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["created"] == 2
+        assert self._users_of(ta) == [f"ua-{sa}"]
+        assert self._users_of(tb) == [f"ub-{sb}"]
+
+    def test_tenant_admin_cannot_target_another_tenant(self, mt_env, app_instance):
+        admin_client, _files = mt_env
+        _as_global_admin()
+        other, _ = _make_tenant(admin_client)
+        _restore_admin_tenant()          # 变回租户 1 的管理员
+        r = admin_client.post("/api/erp/external/import/users", json={
+            "default_password": "Init@12345",
+            "users": [{"external_user_id": "e-x", "username": "ux", "tenant_id": other}],
+        })
+        assert r.status_code == 403, r.text
+
+    def test_global_admin_must_specify_tenant_somewhere(self, mt_env, app_instance):
+        admin_client, _files = mt_env
+        _as_global_admin()
+        r = admin_client.post("/api/erp/external/import/users", json={
+            "default_password": "Init@12345",
+            "users": [{"external_user_id": "e-y", "username": "uy"}],
+        })
+        assert r.status_code == 400, r.text
+
+    def test_batch_tenant_id_rejected_even_when_every_item_overrides(
+            self, mt_env, app_instance):
+        """批级 tenant_id 非法时必须 403，哪怕每一条都自带合法的 tenant_id。
+
+        _tenant_of 里 `want = item.tenant_id or request.tenant_id`——只要每条都写了
+        自己的 tenant_id，批级那个越权值就永远参与不到比较，请求里明明指着别人的
+        租户却返回 200。落点确实还在自己租户（没有越权写入），但接口默默接受了一个
+        本该拒绝的字段，调用方会以为自己真导进了那个租户。
+        """
+        admin_client, _files = mt_env
+        _as_global_admin()
+        other, _ = _make_tenant(admin_client)
+        _restore_admin_tenant()          # 变回租户 1 的管理员
+        r = admin_client.post("/api/erp/external/import/users", json={
+            "default_password": "Init@12345",
+            "tenant_id": other,                     # ← 越权：别人的租户
+            "users": [{"external_user_id": "e-z", "username": "uz",
+                       "tenant_id": 1}],            # ← 每条都自带合法值，掩盖了上面那个
+        })
+        assert r.status_code == 403, r.text

@@ -154,9 +154,22 @@ def _cleanup_stray_provider_files():
     from routers import erp as erp_router
     import glob
     base = os.path.join(erp_router._mcp_dir, "providers", "custom")
-    for pat in ("probe_*.py", "bindtest_*.py"):
-        for f in glob.glob(os.path.join(base, pat)):
+    # 上传接口按 custom/<tenant_id>/ 存放，只扫扁平目录会漏掉真正的落点
+    # ——这个目录残留的 .py 被误提交进仓库过两次，兜底必须把子目录也扫上。
+    for pat in ("probe_*.py", "bindtest_*.py", "uploadtest_*.py"):
+        for f in glob.glob(os.path.join(base, pat)) + \
+                 glob.glob(os.path.join(base, "*", pat)):
             os.path.exists(f) and os.unlink(f)
+        # 动态 import 留下的字节码。只删 .py 的话 __pycache__ 会一直涨——
+        # 实测这里积了 40+ 个历史用例的 .pyc，其中还有客户 Provider 的编译产物。
+        stem = pat[:-3]
+        for f in glob.glob(os.path.join(base, "__pycache__", stem + "*.pyc")) + \
+                 glob.glob(os.path.join(base, "*", "__pycache__", stem + "*.pyc")):
+            os.path.exists(f) and os.unlink(f)
+    # 原子改名遗留的临时文件
+    for f in glob.glob(os.path.join(base, "*.py.tmp")) + \
+             glob.glob(os.path.join(base, "*", "*.py.tmp")):
+        os.path.exists(f) and os.unlink(f)
 
 
 @pytest.fixture()
@@ -573,3 +586,234 @@ class TestScopeChangeTriggersRestart:
             assert calls == [], "值未变化不应触发重启"
         finally:
             external_mode.app.dependency_overrides.pop(mcp_admin.get_mcp_manager, None)
+
+
+# ---------------------------------------------------------------------------
+# 审查回归（codex 第七轮）
+# ---------------------------------------------------------------------------
+
+def _grants_of(external_user_id):
+    """取某个导入用户当前的仓库授权（外部编码集合）。"""
+    from database import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT w.external_warehouse_id
+             FROM user_warehouses uw
+             JOIN users u ON u.id = uw.user_id
+             JOIN warehouses w ON w.id = uw.warehouse_id
+            WHERE u.external_user_id = ?""",
+        (external_user_id,))
+    out = {r[0] for r in cur.fetchall()}
+    conn.close()
+    return out
+
+
+class TestImportGrantsAreNotClobbered:
+    """`warehouses` 字段缺省 ≠ 授权为空。
+
+    授权是先清后建的。若把「没提交该字段」当成「空列表」，那么一次只想同步显示名
+    的增量导入，会把管理员在我方手工加的仓库授权全部清空，且响应里完全看不出来。
+    """
+
+    def _anchor(self, client, code):
+        r = client.post("/api/erp/external/import/warehouses",
+                        json={"warehouses": [{"external_warehouse_id": code,
+                                              "name": f"仓-{code}"}]})
+        assert r.status_code == 200, r.text
+
+    def test_omitted_warehouses_preserves_existing_grants(self, external_mode):
+        sfx = uuid.uuid4().hex[:6]
+        ext, code = f"ext-{sfx}", f"WH-{sfx}"
+        self._anchor(external_mode, code)
+
+        r = _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "warehouses": [code]}])
+        assert r.status_code == 200, r.text
+        assert _grants_of(ext) == {code}
+
+        # 第二次导入只改显示名，**不带** warehouses
+        r2 = _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "display_name": "改个名"}])
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["updated"] == 1
+        assert _grants_of(ext) == {code}, "缺省 warehouses 把已有授权清空了"
+
+    def test_explicit_empty_list_does_revoke(self, external_mode):
+        """显式传 [] 仍然是「收回全部授权」——两种语义必须能区分开。"""
+        sfx = uuid.uuid4().hex[:6]
+        ext, code = f"ext-{sfx}", f"WH-{sfx}"
+        self._anchor(external_mode, code)
+        _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "warehouses": [code]}])
+        assert _grants_of(ext) == {code}
+
+        r = _import_users(external_mode, [
+            {"external_user_id": ext, "username": f"u{sfx}",
+             "role": "operate", "warehouses": []}])
+        assert r.status_code == 200, r.text
+        assert _grants_of(ext) == set()
+
+
+class TestImportUsernameClashOnUpdate:
+    """更新已有账号时撞上同租户别人的用户名 → 跳过并回报，不是 500。
+
+    users 上有 idx_users_username_tenant 唯一索引。旧版更新路径不查重名，直接
+    UPDATE 抛 IntegrityError；而整批共用一个事务，那一条会把**所有**已写入的
+    记录一起回滚，接口返回 500——与「撞名则跳过、其余继续」的约定完全相反。
+    """
+
+    def test_clash_is_skipped_and_batch_survives(self, external_mode):
+        sfx = uuid.uuid4().hex[:6]
+        a, b = f"ext-{sfx}-a", f"ext-{sfx}-b"
+        r = _import_users(external_mode, [
+            {"external_user_id": a, "username": f"ua{sfx}"},
+            {"external_user_id": b, "username": f"ub{sfx}"},
+        ])
+        assert r.status_code == 200 and r.json()["created"] == 2, r.text
+
+        # 把 b 改成 a 的用户名（撞车），同批再带一个全新账号
+        c = f"ext-{sfx}-c"
+        r2 = _import_users(external_mode, [
+            {"external_user_id": b, "username": f"ua{sfx}"},
+            {"external_user_id": c, "username": f"uc{sfx}"},
+        ])
+        assert r2.status_code == 200, r2.text
+        body = r2.json()
+        assert [s["external_user_id"] for s in body["skipped"]] == [b]
+        assert body["created"] == 1, "同批里无关的那条被一起回滚了"
+
+        from database import get_db_connection
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("SELECT username FROM users WHERE external_user_id = ?", (b,))
+        assert cur.fetchone()[0] == f"ub{sfx}", "撞车的那条不该被改动"
+        cur.execute("SELECT COUNT(*) FROM users WHERE external_user_id = ?", (c,))
+        assert cur.fetchone()[0] == 1, "同批的新账号应当照常写入"
+        conn.close()
+
+
+class TestUploadDoesNotDestroyExistingProvider:
+    """重名上传返回 409 时，绝不能动用户已有的那份 Provider 文件。
+
+    旧版顺序是「覆盖写 dest_path → 写 DB → IntegrityError 则 os.unlink(dest_path)」，
+    于是一次注定失败的重名上传，会把线上正在用的 Provider 文件删掉——而
+    providers/__init__.py 的 _discover() 正是靠这个文件注册的，进程一重启
+    该 Provider 就消失了。接口语义是「什么都没变」，实际是把它干掉了。
+    """
+
+    @staticmethod
+    def _body(marker: str) -> bytes:
+        return f'''
+try:
+    from providers.base import BaseProvider
+except ImportError:
+    from ..base import BaseProvider
+
+
+class UploadTestProvider(BaseProvider):
+    PROVIDER_NAME = "{marker}"
+    MARKER = "{marker}"
+
+    def resolve_name(self, text, entity_type="all"): return {{}}
+    def query_stock(self, p, show_batches=False): return {{}}
+    def stock_in(self, *a, **k): return {{}}
+    def stock_out(self, *a, **k): return {{}}
+    def search(self, *a, **k): return {{}}
+    def get_today_statistics(self): return {{}}
+'''.encode("utf-8")
+
+    def test_conflicting_upload_leaves_original_file_intact(self, external_mode):
+        from io import BytesIO
+        from routers import erp as erp_router
+
+        marker = f"uploadtest_{uuid.uuid4().hex[:8]}"
+        first = self._body(marker)
+
+        r1 = external_mode.post(
+            "/api/erp/providers",
+            files={"file": (f"{marker}.py", BytesIO(first), "text/x-python")})
+        assert r1.status_code == 200, r1.text
+
+        custom_dir = erp_router._get_providers_custom_dir(tenant_id=1)
+        dest = os.path.join(custom_dir, f"{marker}.py")
+        assert os.path.exists(dest), "首次上传应当落盘"
+        assert open(dest, "rb").read() == first
+
+        # 同名再传一次：必须 409，且磁盘上那份原封不动
+        r2 = external_mode.post(
+            "/api/erp/providers",
+            files={"file": (f"{marker}.py", BytesIO(first + b"\n# v2\n"),
+                            "text/x-python")})
+        assert r2.status_code == 409, r2.text
+        assert os.path.exists(dest), "409 却把用户已有的 Provider 文件删了"
+        assert open(dest, "rb").read() == first, "409 不该改动已有文件内容"
+
+        # 不留临时文件
+        import glob
+        assert glob.glob(os.path.join(custom_dir, "*.py.tmp")) == [], \
+            "失败路径遗留了临时文件"
+
+
+    def test_uploaded_file_is_world_readable(self, external_mode):
+        """上传落盘的 Provider 必须保持 0644。
+
+        改用 mkstemp 做原子替换后，权限从 open() 的 0644 变成了 0600。加载 Provider
+        的可能是另一个进程/用户（MCP 侧），0600 会让它读不到、静默回退到默认
+        Provider——症状是"配了没生效"，比直接报错难查得多。
+        """
+        from io import BytesIO
+        from routers import erp as erp_router
+        import stat
+
+        marker = f"uploadtest_{uuid.uuid4().hex[:8]}"
+        r = external_mode.post(
+            "/api/erp/providers",
+            files={"file": (f"{marker}.py",
+                            BytesIO(TestUploadDoesNotDestroyExistingProvider._body(marker)),
+                            "text/x-python")})
+        assert r.status_code == 200, r.text
+        dest = os.path.join(
+            erp_router._get_providers_custom_dir(tenant_id=1), f"{marker}.py")
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        assert mode & 0o044, f"落盘权限 {oct(mode)}，其他用户读不到"
+
+
+class TestSavepointSemantics:
+    """导入的逐条隔离依赖 SAVEPOINT，这里钉死它在部署栈上确实生效。
+
+    为什么单独测机制而不是走接口：撞名的常见情形被写入前的预检拦掉了，savepoint
+    是留给**先查后插之间那段竞态窗口**的兜底——在单进程测试里没法确定性地触发。
+    而 pysqlite 的事务处理有名地不老实（SQLAlchemy 默认不主动 BEGIN），
+    SAVEPOINT 能不能正确回滚不能想当然，所以直接对 get_engine() 验一遍。
+    """
+
+    def test_nested_rollback_keeps_outer_writes(self):
+        from sqlalchemy import text
+        from sqlalchemy.exc import IntegrityError
+        from db import get_engine
+
+        eng = get_engine()
+        with eng.begin() as c:
+            c.execute(text("DROP TABLE IF EXISTS _sp_probe"))
+            c.execute(text(
+                "CREATE TABLE _sp_probe (id INTEGER PRIMARY KEY, u TEXT UNIQUE)"))
+        try:
+            with eng.begin() as c:
+                c.execute(text("INSERT INTO _sp_probe (u) VALUES ('a')"))
+                with pytest.raises(IntegrityError):
+                    with c.begin_nested():
+                        c.execute(text("INSERT INTO _sp_probe (u) VALUES ('b')"))
+                        c.execute(text("INSERT INTO _sp_probe (u) VALUES ('a')"))
+                # 外层事务必须还能继续写
+                c.execute(text("INSERT INTO _sp_probe (u) VALUES ('c')"))
+
+            with eng.connect() as c:
+                rows = sorted(r[0] for r in c.execute(text("SELECT u FROM _sp_probe")))
+            assert rows == ["a", "c"], (
+                f"SAVEPOINT 没有正确回滚（'b' 应随失败的那条一起消失）：{rows}")
+        finally:
+            with eng.begin() as c:
+                c.execute(text("DROP TABLE IF EXISTS _sp_probe"))

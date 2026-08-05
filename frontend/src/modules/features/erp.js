@@ -92,6 +92,9 @@ function normalizeImportItems(raw) {
             username,
             display_name: String(it.display_name ?? it.displayName ?? '').trim() || null,
             role: ['admin', 'operate', 'view'].includes(it.role) ? it.role : 'operate',
+            // 对方系统里该账号能访问的仓库编码。后端据此建仓库授权——不带上的话，
+            // 导入的非 admin 用户登录后仓库列表是空的，几乎什么都做不了。
+            warehouses: Array.isArray(it.warehouses) ? it.warehouses.map(String) : [],
             checked: true,
         });
     }
@@ -113,6 +116,7 @@ function renderImportTable() {
             <td class="text-sm">${escapeHtml(u.external_user_id)}</td>
             <td class="text-sm">${escapeHtml(u.username)}</td>
             <td class="text-sm">${escapeHtml(u.display_name || '-')}</td>
+            <td class="text-sm">${u.warehouses && u.warehouses.length ? escapeHtml(u.warehouses.join(', ')) : '<span class="text-gray-400">-</span>'}</td>
             <td>
                 <select class="erp-import-role" data-idx="${i}">
                     <option value="view" ${u.role === 'view' ? 'selected' : ''}>view</option>
@@ -289,8 +293,8 @@ export async function erpDoImport() {
             method: 'POST',
             body: JSON.stringify({
                 default_password: password,
-                users: selected.map(({ external_user_id, username, display_name, role }) =>
-                    ({ external_user_id, username, display_name, role })),
+                users: selected.map(({ external_user_id, username, display_name, role, warehouses }) =>
+                    ({ external_user_id, username, display_name, role, warehouses })),
                 ...(importCandidatesTenantId ? { tenant_id: importCandidatesTenantId } : {}),
             }),
         });
