@@ -172,6 +172,30 @@ def run_level1_tests(filepath: str, config: dict) -> dict:
     r = _run_single_test(provider, "get_today_statistics", ())
     results["get_today_statistics"] = _check_keys(r, {"success", "statistics"}, "get_today_statistics")
 
+    # ── 外部作用域探测（可选方法）──
+    # 这三个是可选的，**未实现不算失败**，否则所有存量 Provider 一测就红。
+    # 但一旦实现了就必须测：否则客户写完 list_users 之后，直到在配置界面点开
+    # 下拉才知道对不对，返回结构错了也只能靠猜。
+    for name, args in (
+        ("list_tenants", ()),
+        ("list_warehouses", (None,)),
+        ("list_users", (None,)),
+    ):
+        r = _run_single_test(provider, name, args)
+        resp = r.get("_result")
+        if isinstance(resp, dict) and resp.get("error") == "not_implemented":
+            results[name] = {
+                "passed": True,
+                "latency_ms": r.get("latency_ms", 0.0),
+                "error": None,
+                "skipped": True,
+                "note": "未实现（可选方法，配置界面将退化为手工填写）",
+            }
+            continue
+        checked = _check_keys(r, {"success", "items"}, name)
+        checked["skipped"] = False
+        results[name] = checked
+
     all_passed = all(v["passed"] for v in results.values())
     return {"level": 1, "results": results, "all_passed": all_passed}
 
