@@ -66,7 +66,7 @@ function renderConnections() {
                     </div>
                 </td>
                 ${showTenantCol ? `<td class="mcp-tenant-col text-sm">${escapeHtml(conn.tenant_name || '-')}</td>` : ''}
-                <td class="text-sm">${escapeHtml(conn.warehouse_name || '-')}</td>
+                <td class="text-sm">${escapeHtml(conn.warehouse_name || '-')}${conn.external_warehouse_id ? `<div class="text-xs text-gray-400">${escapeHtml(conn.external_warehouse_id)}</div>` : ''}</td>
                 <td>
                     <span class="mcp-status-badge ${conn.status}">${statusText}</span>
                 </td>
