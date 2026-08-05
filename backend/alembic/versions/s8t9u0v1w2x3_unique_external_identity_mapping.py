@@ -53,7 +53,9 @@ def upgrade():
             dupes = bind.execute(sa.text(f"""
                 SELECT tenant_id, {column}, COUNT(*) AS cnt
                   FROM {table}
-                 WHERE {column} IS NOT NULL
+                 -- tenant_id 为 NULL 的行在唯一索引里彼此不冲突（NULL != NULL），
+                 -- 不加这个条件会把它们误判成重复、白白跳过整张表的索引
+                 WHERE {column} IS NOT NULL AND tenant_id IS NOT NULL
                  GROUP BY tenant_id, {column}
                 HAVING COUNT(*) > 1
             """)).fetchall()

@@ -506,8 +506,15 @@ function _syncLocalWarehouseFromExternal(extWarehouseId) {
     whSelect.disabled = true;
     whSelect.title = t('warehouseDerivedFromExternal');
 
+    // 与 _ensureLocalAnchor 保持同一判据：全局管理员选「全部仓库」时推不出租户，
+    // 此时按编码匹配会命中**别的租户**的锚点并显示上去——保存路径虽然会拒绝，
+    // 但用户在点保存之前看到的就已经是错的仓库了。该场景一律不匹配，
+    // 走下面的待创建预览，由保存时给出明确报错。
+    const _user = getCurrentUser();
+    const _isGlobalAdmin = !!_user && (_user.tenant_id === null || _user.tenant_id === undefined);
     const _tid = _mcpTenantId();
-    const anchor = (localWarehouses || []).find(
+    const _canMatch = !(_isGlobalAdmin && _tid == null);
+    const anchor = !_canMatch ? null : (localWarehouses || []).find(
         w => (_tid == null || String(w.tenant_id) === String(_tid))
              && w.external_warehouse_id
              && String(w.external_warehouse_id) === String(extWarehouseId)

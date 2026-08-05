@@ -86,7 +86,23 @@ def _import_users(client, users, password="Init@12345"):
     })
 
 
-def _cleanup_imported_rows():
+def _snapshot_ids():
+    """记下测试开始前已有的 users / warehouses id，清理时只删差集。
+
+    早先用 `external_* IS NOT NULL` 全库范围删，会波及其它用例造出来的数据。
+    """
+    from database import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users")
+    users = {r[0] for r in cur.fetchall()}
+    cur.execute("SELECT id FROM warehouses")
+    whs = {r[0] for r in cur.fetchall()}
+    conn.close()
+    return users, whs
+
+
+def _cleanup_imported_rows(snapshot=None):
     """删掉本文件导入出来的用户/仓库及其派生数据。
 
     测试库是 session 级共享的。导入用例会建出带 external_* 标记的行，其中还包括
@@ -98,17 +114,21 @@ def _cleanup_imported_rows():
     warehouses，避免外键悬挂。
     """
     from database import get_db_connection
+    old_users, old_whs = snapshot if snapshot else (set(), set())
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT id FROM users WHERE external_user_id IS NOT NULL")
-    uids = [r[0] for r in cur.fetchall()]
+    uids = [r[0] for r in cur.fetchall() if r[0] not in old_users]
     for uid in uids:
         cur.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
         cur.execute("DELETE FROM api_keys WHERE user_id = ?", (uid,))
         cur.execute("DELETE FROM user_warehouses WHERE user_id = ?", (uid,))
-    cur.execute("DELETE FROM users WHERE external_user_id IS NOT NULL")
-    cur.execute("DELETE FROM mcp_connections WHERE external_warehouse_id IS NOT NULL")
-    cur.execute("DELETE FROM warehouses WHERE external_warehouse_id IS NOT NULL")
+    for uid in uids:
+        cur.execute("DELETE FROM users WHERE id = ?", (uid,))
+    cur.execute("SELECT id FROM warehouses WHERE external_warehouse_id IS NOT NULL")
+    for wid in [r[0] for r in cur.fetchall() if r[0] not in old_whs]:
+        cur.execute("DELETE FROM mcp_connections WHERE warehouse_id = ?", (wid,))
+        cur.execute("DELETE FROM warehouses WHERE id = ?", (wid,))
     conn.commit()
     conn.close()
 
@@ -131,12 +151,13 @@ def _cleanup_stray_provider_files():
 def external_mode(admin_client):
     """把系统切到 external_erp，测试结束后恢复现场，避免污染其他用例。"""
     _set_system_mode("external_erp")
+    snapshot = _snapshot_ids()
     try:
         yield admin_client
     finally:
         _set_system_mode("self_owned")
         _clear_providers()
-        _cleanup_imported_rows()
+        _cleanup_imported_rows(snapshot)
         _cleanup_stray_provider_files()
 
 
