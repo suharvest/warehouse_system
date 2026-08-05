@@ -1,6 +1,7 @@
 // ============ ERP 系统模式管理模块 ============
 import { t } from '../../../i18n.js';
 import { API_BASE_URL } from '../state.js';
+import { showToast } from '../ui-components.js';
 
 // API 封装
 async function erpFetch(url, options = {}) {
@@ -49,6 +50,203 @@ export async function loadERPStatus() {
     renderModeCards();
     renderProvidersTable();
     renderStatusDashboard();
+
+    // 导入只在外部 ERP 模式下有意义
+    const importSection = document.getElementById('erp-import-section');
+    if (importSection) {
+        importSection.style.display = currentMode === 'external_erp' ? '' : 'none';
+        if (currentMode === 'external_erp') initImportFileInput();
+    }
+}
+
+
+// ============ 外部身份导入 ============
+// 两条来源共用同一张待导入表：
+//   1. 从 Provider 探测（对方实现了 list_users）
+//   2. 对方自己组织 JSON —— 粘贴或上传（Provider 完全不用改）
+// 导入接口本身不依赖 Provider，纯落库，所以第 2 条在没配 Provider 时也能用。
+// 角色一律由我方管理员在这里指定：对方不了解我们的权限模型，也不该由他们决定。
+
+let importCandidates = [];
+
+function normalizeImportItems(raw) {
+    // 兼容三种形态：探测响应 {items:[...]}、裸数组 [...]、{users:[...]}
+    const list = Array.isArray(raw) ? raw
+        : Array.isArray(raw?.items) ? raw.items
+        : Array.isArray(raw?.users) ? raw.users
+        : null;
+    if (!list) return null;
+
+    const out = [];
+    for (const it of list) {
+        if (!it || typeof it !== 'object') continue;
+        const extId = String(it.id ?? it.external_user_id ?? '').trim();
+        const username = String(it.name ?? it.username ?? '').trim();
+        if (!extId || !username) continue;   // 缺主键或登录名的行直接丢弃
+        out.push({
+            external_user_id: extId,
+            username,
+            display_name: String(it.display_name ?? it.displayName ?? '').trim() || null,
+            role: ['admin', 'operate', 'view'].includes(it.role) ? it.role : 'operate',
+            checked: true,
+        });
+    }
+    return out;
+}
+
+function renderImportTable() {
+    const wrap = document.getElementById('erp-import-table-wrap');
+    const tbody = document.getElementById('erp-import-tbody');
+    if (!wrap || !tbody) return;
+    if (!importCandidates.length) {
+        wrap.style.display = 'none';
+        return;
+    }
+    wrap.style.display = '';
+    tbody.innerHTML = importCandidates.map((u, i) => `
+        <tr>
+            <td><input type="checkbox" class="erp-import-row" data-idx="${i}" ${u.checked ? 'checked' : ''}></td>
+            <td class="text-sm">${escapeHtml(u.external_user_id)}</td>
+            <td class="text-sm">${escapeHtml(u.username)}</td>
+            <td class="text-sm">${escapeHtml(u.display_name || '-')}</td>
+            <td>
+                <select class="erp-import-role" data-idx="${i}">
+                    <option value="view" ${u.role === 'view' ? 'selected' : ''}>view</option>
+                    <option value="operate" ${u.role === 'operate' ? 'selected' : ''}>operate</option>
+                    <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
+                </select>
+            </td>
+        </tr>`).join('');
+
+    tbody.querySelectorAll('.erp-import-row').forEach(cb => {
+        cb.onchange = () => { importCandidates[Number(cb.dataset.idx)].checked = cb.checked; };
+    });
+    tbody.querySelectorAll('.erp-import-role').forEach(sel => {
+        sel.onchange = () => { importCandidates[Number(sel.dataset.idx)].role = sel.value; };
+    });
+    const all = document.getElementById('erp-import-check-all');
+    if (all) {
+        all.onchange = () => {
+            importCandidates.forEach(u => { u.checked = all.checked; });
+            renderImportTable();
+        };
+    }
+}
+
+function setImportSource(text) {
+    const el = document.getElementById('erp-import-source');
+    if (el) el.textContent = text || '';
+}
+
+function showParseError(msg) {
+    const el = document.getElementById('erp-import-parse-error');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.display = msg ? 'block' : 'none';
+}
+
+export async function erpProbeUsers() {
+    showParseError('');
+    document.getElementById('erp-import-json').style.display = 'none';
+    let resp;
+    try {
+        resp = await erpFetch('/erp/external/users');
+    } catch (e) {
+        if (e.status === 401) return;
+        showParseError(e.message || t('operationFailed'));
+        return;
+    }
+    if (!resp || !resp.success) {
+        showParseError(resp && resp.error === 'not_implemented'
+            ? t('erpImportProbeUnsupported') : (resp?.message || t('operationFailed')));
+        return;
+    }
+    importCandidates = normalizeImportItems(resp) || [];
+    setImportSource(`${t('erpImportProbe')} · ${importCandidates.length}`);
+    if (!importCandidates.length) showParseError(t('erpImportNoData'));
+    renderImportTable();
+}
+
+export function erpPasteJson() {
+    const ta = document.getElementById('erp-import-json');
+    if (!ta) return;
+    const showing = ta.style.display !== 'none';
+    ta.style.display = showing ? 'none' : '';
+    if (showing) return;
+    ta.oninput = () => {
+        const text = ta.value.trim();
+        if (!text) { showParseError(''); importCandidates = []; renderImportTable(); return; }
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            showParseError(t('erpImportBadJson'));
+            return;
+        }
+        const items = normalizeImportItems(parsed);
+        if (!items || !items.length) { showParseError(t('erpImportBadJson')); return; }
+        showParseError('');
+        importCandidates = items;
+        setImportSource(`${t('erpImportPaste')} · ${items.length}`);
+        renderImportTable();
+    };
+}
+
+export function initImportFileInput() {
+    const input = document.getElementById('erp-import-file');
+    if (!input || input.dataset.bound) return;
+    input.dataset.bound = '1';
+    input.onchange = async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        try {
+            const items = normalizeImportItems(JSON.parse(await file.text()));
+            if (!items || !items.length) { showParseError(t('erpImportBadJson')); return; }
+            showParseError('');
+            importCandidates = items;
+            setImportSource(`${file.name} · ${items.length}`);
+            renderImportTable();
+        } catch {
+            showParseError(t('erpImportBadJson'));
+        } finally {
+            input.value = '';   // 允许重复选同一个文件
+        }
+    };
+}
+
+export async function erpDoImport() {
+    const pwEl = document.getElementById('erp-import-password');
+    const resultEl = document.getElementById('erp-import-result');
+    const selected = importCandidates.filter(u => u.checked);
+    if (!selected.length) { showToast(t('erpImportSelectNone'), 'error'); return; }
+    const password = (pwEl?.value || '').trim();
+    if (password.length < 4) { showToast(t('erpImportNeedPassword'), 'error'); return; }
+
+    let resp;
+    try {
+        resp = await erpFetch('/erp/external/import/users', {
+            method: 'POST',
+            body: JSON.stringify({
+                default_password: password,
+                users: selected.map(({ external_user_id, username, display_name, role }) =>
+                    ({ external_user_id, username, display_name, role })),
+            }),
+        });
+    } catch (e) {
+        if (e.status === 401) return;
+        showToast(e.message || t('operationFailed'), 'error');
+        return;
+    }
+
+    showToast(resp.message, 'success');
+    if (pwEl) pwEl.value = '';
+    if (resultEl) {
+        // 跳过项必须显式列出来：静默跳过会让管理员以为全导进去了
+        const skipped = (resp.skipped || []).map(sk =>
+            `<li>${escapeHtml(sk.username || sk.external_user_id)} — ${escapeHtml(sk.reason)}</li>`).join('');
+        resultEl.innerHTML = `<div>${escapeHtml(resp.message)}</div>` +
+            (skipped ? `<ul style="margin:6px 0 0 18px;color:var(--text-muted,#6b7280);">${skipped}</ul>` : '');
+    }
 }
 
 // ============ 自动刷新 ============
