@@ -28,7 +28,7 @@ import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFi
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
 import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
-import { loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
+import { erpProbeUsers, erpPasteJson, erpDoImport, loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
 import { fetchDeployMode, renderTenantsPanel, showAddTenantModal, closeAddTenantModal, handleAddTenant, showEditTenantModal, closeEditTenantModal, handleEditTenant, handleDeleteTenant, tenantsPrevPage, tenantsNextPage, getTenantModalsHTML, setTenantsPage } from './features/tenants.js';
 import {
     renderFaceRecognitionPanel, switchFaceSubTab, refreshFacePanel,
@@ -529,6 +529,9 @@ const actionHandlers = {
     'wizardPrevStep': wizardPrevStep,
     'switchToSelfOwned': () => switchSystemMode('self_owned'),
     'switchToERP': () => switchSystemMode('external_erp'),
+    'erpProbeUsers': () => erpProbeUsers(),
+    'erpPasteJson': () => erpPasteJson(),
+    'erpDoImport': () => erpDoImport(),
     'erpActivate': (el) => activateProvider(el.dataset.providerId),
     'erpDeactivate': (el) => deactivateProvider(el.dataset.providerId),
     'erpDelete': (el) => deleteProvider(el.dataset.providerId),
