@@ -367,7 +367,7 @@ def _probe(fn, *args) -> dict:
 @router.get("/api/erp/external/tenants")
 async def probe_external_tenants(
     tenant_id: Optional[int] = None,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.READ)),
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
 ):
     """探测外部系统的租户/组织列表（供智能体配置的下拉使用）。"""
     tid = _resolve_probe_tenant(current_user, tenant_id)
@@ -379,7 +379,7 @@ async def probe_external_tenants(
 async def probe_external_warehouses(
     external_tenant_id: Optional[str] = None,
     tenant_id: Optional[int] = None,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.READ)),
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
 ):
     """探测外部系统的仓库列表；external_tenant_id 为已选定的外部租户。"""
     tid = _resolve_probe_tenant(current_user, tenant_id)

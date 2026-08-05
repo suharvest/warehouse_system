@@ -401,3 +401,61 @@ class TestDeviceBaseUrlGuard:
         monkeypatch.setenv("WAREHOUSE_DEVICE_BASE_URL",
                            "http://10.0.0.5:2125/api/face/device")
         assert _device_facing_base_url("192.168.1.9") == "http://10.0.0.5:2125/api/face/device"
+
+
+# ---------------------------------------------------------------------------
+# 改了绑定必须重启连接（codex review 发现）
+# ---------------------------------------------------------------------------
+
+class TestScopeChangeTriggersRestart:
+    """外部作用域是连接启动时读进 runtime state 的。
+
+    改了不重启的话，运行中的 Provider 会继续按**旧的**租户/仓库往对方系统写——
+    界面显示已改、实际写错仓库，且没有任何报错。
+    """
+
+    def test_changing_external_scope_restarts_running_connection(
+            self, external_mode, monkeypatch):
+        from routers import mcp_admin
+
+        calls = []
+
+        class _FakeManager:
+            def get_connection_status(self, conn_id):
+                return {"status": "running"}
+
+            async def start_connection(self, *a, **k):
+                return True
+
+            async def stop_connection(self, *a, **k):
+                return True
+
+            async def restart_connection(self, conn_id, endpoint, api_key):
+                calls.append(conn_id)
+                return True
+
+        fake = _FakeManager()
+        external_mode.app.dependency_overrides[mcp_admin.get_mcp_manager] = lambda: fake
+        try:
+            created = external_mode.post("/api/mcp/connections", json={
+                "name": f"agent-{uuid.uuid4().hex[:6]}",
+                "mcp_endpoint": f"wss://example.test/{uuid.uuid4().hex[:8]}/",
+                "external_warehouse_id": "WH-A",
+            })
+            assert created.status_code == 200, created.text
+            conn_id = created.json()["connection"]["id"]
+            calls.clear()
+
+            # 只改外部仓库，endpoint 不动
+            upd = external_mode.put(f"/api/mcp/connections/{conn_id}",
+                                    json={"external_warehouse_id": "WH-B"})
+            assert upd.status_code == 200, upd.text
+            assert calls == [conn_id], "改了外部作用域必须重启，否则旧作用域会一直生效"
+
+            # 值没变则不该重启
+            calls.clear()
+            external_mode.put(f"/api/mcp/connections/{conn_id}",
+                              json={"external_warehouse_id": "WH-B"})
+            assert calls == [], "值未变化不应触发重启"
+        finally:
+            external_mode.app.dependency_overrides.pop(mcp_admin.get_mcp_manager, None)
