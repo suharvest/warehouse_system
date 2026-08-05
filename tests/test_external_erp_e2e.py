@@ -31,25 +31,50 @@ def _free_port():
 
 @pytest.fixture(scope="module")
 def mock_wms():
-    """起一个模拟客户 WMS，返回其 base_url。"""
+    """起一个模拟客户 WMS，返回其 base_url。
+
+    启动失败**不 skip**：skip 在 CI 里是绿的，等于这一整个文件的断言可以无声消失。
+    真起不来就 fail，并把子进程的 stderr 一起打出来——否则只能看到一句
+    「未能启动」，连端口占用还是 import 报错都分不出来。
+    """
+    import tempfile as _tf
+
     port = _free_port()
     env = {**os.environ, "MOCK_WMS_PORT": str(port)}
+    err = _tf.TemporaryFile()
     proc = subprocess.Popen(
         [sys.executable, os.path.join(_FIXTURE, "server.py")],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env=env, stdout=subprocess.DEVNULL, stderr=err)
     base = f"http://127.0.0.1:{port}"
-    for _ in range(50):
+    try:
+        for _ in range(50):
+            if proc.poll() is not None:
+                break                       # 进程已经死了，不用再等
+            try:
+                urllib.request.urlopen(f"{base}/api/orgs", timeout=1).read()
+                break
+            except Exception:
+                time.sleep(0.2)
+        else:
+            proc.kill()
+            err.seek(0)
+            pytest.fail(f"模拟 WMS 未能在 10s 内就绪；stderr:\n"
+                        f"{err.read().decode('utf-8', 'replace')[:2000]}")
+        if proc.poll() is not None:
+            err.seek(0)
+            pytest.fail(f"模拟 WMS 启动即退出（returncode={proc.returncode}）；stderr:\n"
+                        f"{err.read().decode('utf-8', 'replace')[:2000]}")
+        yield base
+    finally:
+        # terminate 给它机会正常收尾，超时才 kill；两条路径都要 wait，
+        # 否则留下僵尸进程（同一 session 里跑多个模块时会累积）。
+        proc.terminate()
         try:
-            urllib.request.urlopen(f"{base}/api/orgs", timeout=1).read()
-            break
-        except Exception:
-            time.sleep(0.2)
-    else:
-        proc.kill()
-        pytest.skip("模拟 WMS 未能启动")
-    yield base
-    proc.kill()
-    proc.wait(timeout=5)
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        err.close()
 
 
 def _stock(base, warehouse, code="SP-001"):
@@ -137,3 +162,105 @@ class TestOutOfStockContract:
         assert r["success"] is False
         assert r["error"] == "insufficient_stock"
         assert "库存不足" in r["message"]
+
+
+# ---------------------------------------------------------------------------
+# 走完整运行时链路的绑定验证
+# ---------------------------------------------------------------------------
+# 上面那些用例是直接把 external_warehouse_id 塞进 Provider 的构造配置里，
+# 只证明了「Provider 自己会读这个键」。而真实链路是：
+#
+#   连接配置 → create_runtime_state(external_warehouse_id=...) → state['config']
+#          → _load_provider_from_db_or_default(default_config)
+#          → merged_config = {**default_config, **stored_config}   ← 危险的一步
+#          → load_provider_from_file(filepath, merged_config)
+#
+# 真正出过的 bug 就在 merge 那一步：Provider 自身存的静态 config 里若也写了
+# external_warehouse_id，会把连接级绑定盖掉，所有智能体一起打到同一个外部仓库。
+# 绕开这条链路的断言抓不到它，所以这里从 create_runtime_state 开始走。
+
+class TestBindingSurvivesRuntimeChain:
+
+    @staticmethod
+    def _fake_backend(port, provider_filename, tenant_id, stored_config):
+        """最小后端，只实现 MCP 引导要打的那个接口。"""
+        import http.server
+        import threading
+
+        payload = json.dumps({
+            "mode": "external_erp",
+            "provider": {
+                "provider_name": "mock_wms_e2e",
+                "filename": provider_filename,
+                "tenant_id": tenant_id,
+                "config": stored_config,
+            },
+        }).encode()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if "active-for-mcp" not in self.path:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", port), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_connection_binding_beats_provider_stored_config(self, mock_wms):
+        """连接绑 WH-BJ-01，而 Provider 存的静态 config 指向 WH-SH-01。
+
+        必须看到 BJ 的库存。看到 SH 的就说明 merge 把连接级绑定盖掉了。
+        """
+        import shutil
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp"))
+        import warehouse_mcp
+
+        tenant_id = 1
+        custom_dir = os.path.join(
+            os.path.dirname(warehouse_mcp.__file__), "providers", "custom", str(tenant_id))
+        os.makedirs(custom_dir, exist_ok=True)
+        fname = f"bindchain_{os.getpid()}.py"
+        dest = os.path.join(custom_dir, fname)
+        shutil.copyfile(os.path.join(_FIXTURE, "provider.py"), dest)
+
+        port = _free_port()
+        srv = self._fake_backend(
+            port, fname, tenant_id,
+            # Provider 自身存的静态配置，故意指向另一个仓库
+            {"api_base_url": mock_wms, "timeout": 10,
+             "external_warehouse_id": "WH-SH-01", "external_tenant_id": "ORG-SH"})
+        try:
+            state = warehouse_mcp.create_runtime_state(
+                f"http://127.0.0.1:{port}/api",
+                "test-key",
+                external_tenant_id="ORG-BJ",
+                external_warehouse_id="WH-BJ-01",
+            )
+            # 注意：state 的 api_base_url 必须留给**我方后端**（引导接口在那儿）。
+            # Provider 要访问的对方地址是从 stored_config 里 merge 进去的，
+            # 两者不是一回事——早先这里手抖改成了对方地址，引导请求打到模拟 WMS
+            # 上拿到 404，于是静默回退默认 Provider，断言直接崩在属性缺失上。
+            with warehouse_mcp.runtime_context(state):
+                provider = warehouse_mcp._get_provider()
+                assert provider.__class__.__name__ != "WarehouseAPIProvider", \
+                    "回退到默认 Provider 了，说明文件没找到或引导接口没打通"
+                assert provider.warehouse_id == "WH-BJ-01", (
+                    f"连接绑定被 Provider 静态配置盖掉了：{provider.warehouse_id}")
+
+                r = provider.query_stock("矿泉水")
+                assert r["success"], r
+                assert r["product"]["current_stock"] == _stock(mock_wms, "WH-BJ-01"), \
+                    "查到的不是绑定仓库的库存"
+                assert r["product"]["current_stock"] != _stock(mock_wms, "WH-SH-01")
+        finally:
+            srv.shutdown()
+            os.path.exists(dest) and os.unlink(dest)
