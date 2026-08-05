@@ -87,22 +87,44 @@ def _import_users(client, users, password="Init@12345"):
 
 
 def _cleanup_imported_rows():
-    """删掉本文件导入出来的用户/仓库。
+    """删掉本文件导入出来的用户/仓库及其派生数据。
 
     测试库是 session 级共享的。导入用例会建出带 external_* 标记的行，其中还包括
     role=admin 的用户——不清理会打破 TestLastAdminGuard 之类「当前有几个管理员」
     的前提，表现为一批看似无关的用例集体变红（已踩过）。
-    external_* 非空是本文件独有的标记，据此精确清理，不碰任何既有数据。
+
+    这些用户还会产生登录 session、api_key 等派生行，只删 users 会留下悬挂引用，
+    所以按 user_id 一并收走。顺序：session/api_key/user_warehouses → users →
+    warehouses，避免外键悬挂。
     """
     from database import get_db_connection
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM user_warehouses WHERE user_id IN "
-                "(SELECT id FROM users WHERE external_user_id IS NOT NULL)")
+    cur.execute("SELECT id FROM users WHERE external_user_id IS NOT NULL")
+    uids = [r[0] for r in cur.fetchall()]
+    for uid in uids:
+        cur.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        cur.execute("DELETE FROM api_keys WHERE user_id = ?", (uid,))
+        cur.execute("DELETE FROM user_warehouses WHERE user_id = ?", (uid,))
     cur.execute("DELETE FROM users WHERE external_user_id IS NOT NULL")
+    cur.execute("DELETE FROM mcp_connections WHERE external_warehouse_id IS NOT NULL")
     cur.execute("DELETE FROM warehouses WHERE external_warehouse_id IS NOT NULL")
     conn.commit()
     conn.close()
+
+
+def _cleanup_stray_provider_files():
+    """清掉用例写进 providers/custom/ 的临时 Provider 文件。
+
+    这个目录会被 providers/__init__ 的 _discover() 扫描，残留文件会污染后续
+    进程的 provider 注册表。用例内已有 finally，这里是兜底（断言失败时也能收干净）。
+    """
+    from routers import erp as erp_router
+    import glob
+    base = os.path.join(erp_router._mcp_dir, "providers", "custom")
+    for pat in ("probe_*.py", "bindtest_*.py"):
+        for f in glob.glob(os.path.join(base, pat)):
+            os.path.exists(f) and os.unlink(f)
 
 
 @pytest.fixture()
@@ -115,6 +137,7 @@ def external_mode(admin_client):
         _set_system_mode("self_owned")
         _clear_providers()
         _cleanup_imported_rows()
+        _cleanup_stray_provider_files()
 
 
 # ---------------------------------------------------------------------------

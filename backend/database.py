@@ -815,24 +815,6 @@ def init_database():
     # ============================================
     cursor.execute('UPDATE warehouses SET tenant_id = 1 WHERE tenant_id IS NULL')
 
-    # 外部映射唯一性：导入是先查后插，并发时应用层挡不住，靠 DB 锁死。
-    # NULL 不参与唯一性，手工建的本地用户/仓库不受影响。
-    #
-    # 必须放在上面 tenant_id 回填之后：索引键含 tenant_id，早于回填会拿到 NULL。
-    # 存量若已有重复外部映射，建索引会失败——这里只告警不抛，避免旧库直接起不来；
-    # 权威修复走 Alembic 迁移 s8t9u0v1w2x3，那里会明确报错要求人工处理
-    # （两张表都被出入库记录等多表外键引用，绝不能自动删行）。
-    for _idx, _tbl, _cols in (
-        ('idx_users_ext_uid_tenant', 'users', 'tenant_id, external_user_id'),
-        ('idx_warehouses_ext_wid_tenant', 'warehouses', 'tenant_id, external_warehouse_id'),
-    ):
-        try:
-            cursor.execute(
-                f'CREATE UNIQUE INDEX IF NOT EXISTS {_idx} ON {_tbl}({_cols})')
-        except sqlite3.IntegrityError as _e:
-            logger.warning(
-                "跳过唯一索引 %s：%s 存在重复的外部映射，请人工处理后重跑迁移（%s）",
-                _idx, _tbl, _e)
     if get_deploy_mode() == 'multi_tenant':
         cursor.execute('SELECT COUNT(*) as cnt FROM users WHERE role = "admin" AND tenant_id IS NULL')
         has_global_admin = cursor.fetchone()['cnt'] > 0
@@ -849,6 +831,27 @@ def init_database():
         cursor.execute('UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL AND role != "admin"')
     else:
         cursor.execute('UPDATE users SET tenant_id = 1 WHERE tenant_id IS NULL')
+
+    # 外部映射唯一性：导入是先查后插，并发时应用层挡不住，靠 DB 锁死。
+    # NULL 不参与唯一性，手工建的本地用户/仓库不受影响。
+    #
+    # 必须放在**所有** tenant_id 回填之后：索引键含 tenant_id。warehouses 与 users
+    # 的回填分处两段，早先只挪到 warehouses 之后，users 的回填仍在索引之后执行——
+    # 回填把多行的 tenant_id 从 NULL 改成 1 时可能撞上已建好的唯一索引并抛异常。
+    # 存量若已有重复外部映射，建索引会失败——这里只告警不抛，避免旧库直接起不来；
+    # 权威修复走 Alembic 迁移 s8t9u0v1w2x3，那里会明确报错要求人工处理
+    # （两张表都被出入库记录等多表外键引用，绝不能自动删行）。
+    for _idx, _tbl, _cols in (
+        ('idx_users_ext_uid_tenant', 'users', 'tenant_id, external_user_id'),
+        ('idx_warehouses_ext_wid_tenant', 'warehouses', 'tenant_id, external_warehouse_id'),
+    ):
+        try:
+            cursor.execute(
+                f'CREATE UNIQUE INDEX IF NOT EXISTS {_idx} ON {_tbl}({_cols})')
+        except sqlite3.IntegrityError as _e:
+            logger.warning(
+                "跳过唯一索引 %s：%s 存在重复的外部映射，请人工处理后重跑迁移（%s）",
+                _idx, _tbl, _e)
     cursor.execute('UPDATE api_keys SET tenant_id = 1 WHERE tenant_id IS NULL')
     cursor.execute('UPDATE mcp_connections SET tenant_id = 1 WHERE tenant_id IS NULL')
     cursor.execute('UPDATE contacts SET tenant_id = 1 WHERE tenant_id IS NULL')

@@ -149,6 +149,18 @@ def mt_env(admin_client, monkeypatch):
     finally:
         for p in created_files:
             os.path.exists(p) and os.unlink(p)
+        # 文件删了但 custom/<tenant_id>/ 目录会留下来，且里面还有动态导入生成的
+        # __pycache__——按"空目录"判定删不掉。这些目录会被 _discover() 扫描，
+        # 残留的 .pyc 可能让后续进程加载到已删除的 Provider。整棵删掉。
+        import shutil
+        from routers import erp as erp_router
+        _base = os.path.join(erp_router._mcp_dir, "providers", "custom")
+        if os.path.isdir(_base):
+            for _d in os.listdir(_base):
+                _full = os.path.join(_base, _d)
+                # 只删本文件建的租户子目录（纯数字命名），不碰 .gitkeep 与真实 Provider
+                if _d.isdigit() and os.path.isdir(_full):
+                    shutil.rmtree(_full, ignore_errors=True)
         _set_system_mode("self_owned")
         _restore_admin_tenant()
         conn = get_db_connection()

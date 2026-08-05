@@ -137,8 +137,11 @@ function renderImportTable() {
     }
 }
 
-function _captureCandidateTenant() {
-    importCandidatesTenantId = _selectedTenantId();
+function _captureCandidateTenant(tenantAtRequestTime) {
+    // 必须传入**发起请求那一刻**的租户，不能在 await 之后再读当前值：
+    // 探测/读文件是异步的，期间用户可以切仓，事后再读会把 A 仓的候选标记成 B 仓。
+    importCandidatesTenantId = tenantAtRequestTime !== undefined
+        ? tenantAtRequestTime : _selectedTenantId();
 }
 
 function setImportSource(text) {
@@ -190,9 +193,12 @@ export async function erpProbeUsers() {
         return;
     }
     document.getElementById('erp-import-json').style.display = 'none';
+    // 在 await 之前定格租户，后续请求与钉住都用它
+    const tenantAtRequest = _selectedTenantId();
     let resp;
     try {
-        resp = await erpFetch(`/erp/external/users${_tenantQuery()}`);
+        resp = await erpFetch(
+            `/erp/external/users${tenantAtRequest ? `?tenant_id=${encodeURIComponent(tenantAtRequest)}` : ''}`);
     } catch (e) {
         if (e.status === 401) return;
         showParseError(e.message || t('operationFailed'));
@@ -204,7 +210,7 @@ export async function erpProbeUsers() {
         return;
     }
     importCandidates = normalizeImportItems(resp) || [];
-    _captureCandidateTenant();
+    _captureCandidateTenant(tenantAtRequest);
     setImportSource(`${t('erpImportProbe')} · ${importCandidates.length}`);
     if (!importCandidates.length) showParseError(t('erpImportNoData'));
     renderImportTable();
@@ -243,12 +249,13 @@ export function initImportFileInput() {
     input.onchange = async () => {
         const file = input.files && input.files[0];
         if (!file) return;
+        const tenantAtRequest = _selectedTenantId();   // file.text() 之前定格
         try {
             const items = normalizeImportItems(JSON.parse(await file.text()));
             if (!items || !items.length) { showParseError(t('erpImportBadJson')); return; }
             showParseError('');
             importCandidates = items;
-            _captureCandidateTenant();
+            _captureCandidateTenant(tenantAtRequest);
             setImportSource(`${file.name} · ${items.length}`);
             renderImportTable();
         } catch {

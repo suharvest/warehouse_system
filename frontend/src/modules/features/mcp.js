@@ -219,7 +219,14 @@ async function _ensureLocalAnchor(extWarehouseId, displayName) {
 
     // 必须同时匹配租户：全局管理员的仓库列表跨租户，只按外部编码找会撞上
     // 别的租户那条同编码的锚点，导致跨租户错绑。
+    const user = getCurrentUser();
+    const isGlobalAdmin = !!user && (user.tenant_id === null || user.tenant_id === undefined);
     const tid = _mcpTenantId();
+    if (isGlobalAdmin && tid == null) {
+        // 全局管理员选的是「全部仓库」——推不出租户，此时按编码匹配会对所有租户
+        // 放行，可能绑到别人的锚点上。宁可报错也不能猜。
+        throw Object.assign(new Error(t('warehouseNeedTenantForAnchor')), { status: 400 });
+    }
     const sameTenant = w => tid == null || String(w.tenant_id) === String(tid);
     const hit = (localWarehouses || []).find(
         w => sameTenant(w) && w.external_warehouse_id
