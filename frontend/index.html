@@ -190,7 +190,10 @@
                 <div class="tab-content">
                     <!-- 看板 Tab -->
                     <div id="tab-dashboard" class="tab-pane active">
-                        <div class="page-header">
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <div class="page-header">
                             <h2 class="page-title" data-i18n="subtitle">访问统计概览</h2>
                         </div>
 
@@ -296,7 +299,10 @@
 
                     <!-- 进出库记录 Tab -->
                     <div id="tab-records" class="tab-pane">
-                        <!-- 筛选区域 -->
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <!-- 筛选区域 -->
                         <div class="filter-bar">
                             <div class="filter-group">
                                 <label data-i18n="filterStartDate">开始日期</label>
@@ -461,7 +467,10 @@
 
                     <!-- 库存列表 Tab -->
                     <div id="tab-inventory" class="tab-pane">
-                        <!-- 筛选区域 -->
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <!-- 筛选区域 -->
                         <div class="filter-bar">
                             <div class="filter-group">
                                 <label data-i18n="filterProduct">名称/编码</label>
@@ -593,7 +602,10 @@
 
                     <!-- 产品详情 Tab -->
                     <div id="tab-detail" class="tab-pane">
-                        <!-- 产品选择 -->
+                        <div class="external-mode-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border-radius:6px;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;font-size:13px;">
+                            <span data-i18n="externalModeBanner">当前为外部 ERP 模式：库存与出入库数据都在外部系统中，本页读取的是本地数据库，通常为空。请到外部系统查看真实数据。</span>
+                        </div>
+                                                <!-- 产品选择 -->
                         <div class="product-selector-bar">
                             <button class="action-btn back-btn" data-action="goBackToInventory">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
