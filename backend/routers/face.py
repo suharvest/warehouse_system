@@ -470,13 +470,17 @@ async def face_library(
     """Export the face library for on-device sync.
 
     Returns ``[{name, subject_id, embedding_b64, model_tag}]`` — active subjects
-    joined with their active enrollments, embedding bytes base64-encoded. xiaozhi
-    pulls this and pushes each entry to the device-local DB via ``self.face.add``
-    so passive greeting recognizes the same people the face check authorizes. The
-    device persists ``subject_id`` alongside ``name`` and returns it via
-    ``self.conversation.speaker`` so session-mode verify can locate the subject
-    without name ambiguity. Same auth (FACE/WRITE) as verify-mcp, so the MCP
-    api_key can call it.
+    joined with their active enrollments, embedding bytes base64-encoded. The
+    push path is ``push_faces`` (``backend/routers/mcp_admin.py``), which fp16-
+    quantizes this payload and POSTs it whole to the device's
+    ``/api/face/batch-update`` → ``FaceDatabase::ReplaceAll`` (full replace, so
+    entries absent from the payload are deleted device-side). That keeps passive
+    greeting recognizing the same people the face check authorizes.
+
+    The device persists ``subject_id`` alongside ``name`` and returns it from
+    ``GET /api/face/current-speaker`` (see ``backend/face/device_pull.py``), so
+    session-mode verify can locate the subject without name ambiguity. Same auth
+    (FACE/WRITE) as verify-mcp, so the MCP api_key can call it.
 
     Optional ``model_tag`` filters to enrollments from a single embedding model;
     omit it to keep the legacy (unfiltered) behaviour.
