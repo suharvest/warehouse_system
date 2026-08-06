@@ -147,7 +147,8 @@ error / message / product / batch / candidates / batches / ...`
 | 任意失败的 `candidates` | `≤3` 条，每条仅 `name` | 删 id/score（小模型用不上） |
 | `get_today_statistics` | `in, out, net, total, low` | 5 个数字打平 |
 
-效果：所有响应稳定在 80-250 token 之间。
+效果：所有响应稳定在 80-250 token 之间（SKU 是无长度约束的 TEXT，按编码查时
+`say` 和 `data.sku` 各带一份，编码特别长会超出这个区间）。
 
 ---
 

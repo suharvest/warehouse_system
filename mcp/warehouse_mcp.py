@@ -504,10 +504,18 @@ def _norm_code(s: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "", str(s or "")).upper()
 
 
-def _asked_by_code(query: str, sku: str) -> bool:
-    """用户这次是按编码查的吗？只有是才在播报里回读编码，避免按名字查时啰嗦。"""
+def _asked_by_code(query: str, sku: str, name: str = "") -> bool:
+    """用户这次是按编码查的吗？只有是才在播报里回读编码，避免按名字查时啰嗦。
+
+    归一化会抹掉中文，所以名字里带数字时可能和 SKU 撞车：物料名"螺丝001"、
+    SKU "001"，用户报名字"螺丝001"归一化后同样是 "001"，会被误判成报编码，
+    播出"编码001是螺丝001"这种废话。名字归一化后同样能对上 SKU 时，说明这两者
+    根本分不开，一律不回读。
+    """
     nq, ns = _norm_code(query), _norm_code(sku)
-    return bool(nq and ns and nq == ns)
+    if not (nq and ns and nq == ns):
+        return False
+    return _norm_code(name) != ns
 
 
 def _wrap_response(operation: str, resp: dict) -> dict:
@@ -694,7 +702,7 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                 # 用户报编码来查时，播报里把编码回读一遍，方便他确认认对了料；
                 # 按名字查则不念编码，避免每次播报多出一串字母数字。
                 sku = p.get("sku") or ""
-                if _asked_by_code(resp.get("query") or "", sku):
+                if _asked_by_code(resp.get("query") or "", sku, p.get("name") or ""):
                     say = (
                         f"编码{sku}是{disp_name}，"
                         f"当前库存{qty}{unit}{extra}{loc_say}。"

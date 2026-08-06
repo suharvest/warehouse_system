@@ -282,6 +282,16 @@ class TestQueryStockByCode:
         assert resp["say"] == "watcher主控板当前库存12个，位于A区-01。"
         assert resp["data"]["sku"] == "MB-WZ-001"
 
+    def test_chinese_name_with_digits_not_mistaken_for_code(self):
+        """归一化抹掉中文，"螺丝001" 和 SKU "001" 会撞车——不能因此误播编码。"""
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = warehouse_mcp._wrap_response("query_stock", {
+            "success": True, "query": "螺丝001",
+            "product": {"name": "螺丝001", "sku": "001",
+                        "current_stock": 5, "unit": "个", "location": "B区"},
+        })
+        assert resp["say"] == "螺丝001当前库存5个，位于B区。"
+
     def test_missing_query_field_keeps_legacy_say(self):
         """provider 未回传 query（老响应）时退回原文案，不炸。"""
         warehouse_mcp = _import_warehouse_mcp()
@@ -337,6 +347,21 @@ class TestQueryStockByCodeE2E:
 
         return P()
 
+    def _call_tool(self, monkeypatch, admin_client, query):
+        """走真正的 MCP 工具入口，而不是自己拼 provider + _wrap_response。
+
+        这样 query_stock 里 resp.setdefault("query", ...) 那行才在覆盖范围内——
+        否则把它删掉测试照样绿。只把 provider 和人脸门禁替换掉。
+        """
+        warehouse_mcp = _import_warehouse_mcp()
+        provider = self._provider(admin_client)
+        monkeypatch.setattr(warehouse_mcp, "_get_provider", lambda: provider)
+        monkeypatch.setattr(warehouse_mcp, "_enforce_face", lambda *a, **k: (None, None))
+        # @mcp.tool() 把函数包成 FunctionTool，取 .fn 拿回被装饰的原函数
+        # （_antihallucination / log_mcp_call 仍在链上）。
+        fn = getattr(warehouse_mcp.query_stock, "fn", warehouse_mcp.query_stock)
+        return asyncio.run(fn(query))
+
     def test_product_stats_hits_by_sku(self, admin_client, material_with_code):
         """后端 product-stats 的 ident_pred 本就是 name OR sku。"""
         r = admin_client.get(
@@ -347,29 +372,24 @@ class TestQueryStockByCodeE2E:
         assert r.json()["sku"] == material_with_code["sku"]
         assert r.json()["current_stock"] == 12
 
-    def test_say_reads_back_code_and_location(self, admin_client, material_with_code):
-        warehouse_mcp = _import_warehouse_mcp()
+    def test_say_reads_back_code_and_location(self, monkeypatch, admin_client,
+                                              material_with_code):
         sku = material_with_code["sku"]
-        resp = self._provider(admin_client).query_stock(sku, show_batches=True)
-        assert resp["success"] is True
-        resp.setdefault("query", sku)
-        wrapped = warehouse_mcp._wrap_response("query_stock", resp)
+        wrapped = self._call_tool(monkeypatch, admin_client, sku)
         assert wrapped["say"] == (
             f"编码{sku}是编码回读主控板，当前库存12个，共1个批次，位于A区-01。"
         )
         assert wrapped["data"]["sku"] == sku
         assert wrapped["data"]["locations"] == [{"location": "A区-01", "qty": 12}]
 
-    def test_spoken_code_without_hyphens_resolves(self, admin_client, material_with_code):
+    def test_spoken_code_without_hyphens_resolves(self, monkeypatch, admin_client,
+                                                  material_with_code):
         """连字符念丢：精确查询 miss → fuzzy 回落 → 仍认成编码并回读。"""
-        warehouse_mcp = _import_warehouse_mcp()
         sku = material_with_code["sku"]
         spoken = sku.replace("-", "").lower()
-        resp = self._provider(admin_client).query_stock(spoken, show_batches=True)
-        assert resp["success"] is True, resp
-        resp.setdefault("query", spoken)
-        wrapped = warehouse_mcp._wrap_response("query_stock", resp)
+        wrapped = self._call_tool(monkeypatch, admin_client, spoken)
         assert wrapped["say"].startswith(f"编码{sku}是编码回读主控板，")
+
 
 
 class TestMCPSlimResponse:
