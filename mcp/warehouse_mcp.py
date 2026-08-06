@@ -23,6 +23,7 @@ import logging
 import yaml
 import functools
 import json
+import re
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -495,6 +496,28 @@ def _fmt_candidate_say(c: dict) -> str:
     return n
 
 
+def _norm_code(s: str) -> str:
+    """物料编码归一化：去掉分隔符/空白后大写，用于判断用户是不是在报编码。
+
+    语音把 "MB-WZ-001" 念成 "MB WZ 001" 或 "mbwz001" 都要能对上。
+    """
+    return re.sub(r"[^0-9A-Za-z]", "", str(s or "")).upper()
+
+
+def _asked_by_code(query: str, sku: str, name: str = "") -> bool:
+    """用户这次是按编码查的吗？只有是才在播报里回读编码，避免按名字查时啰嗦。
+
+    归一化会抹掉中文，所以名字里带数字时可能和 SKU 撞车：物料名"螺丝001"、
+    SKU "001"，用户报名字"螺丝001"归一化后同样是 "001"，会被误判成报编码，
+    播出"编码001是螺丝001"这种废话。名字归一化后同样能对上 SKU 时，说明这两者
+    根本分不开，一律不回读。
+    """
+    nq, ns = _norm_code(query), _norm_code(sku)
+    if not (nq and ns and nq == ns):
+        return False
+    return _norm_code(name) != ns
+
+
 def _wrap_response(operation: str, resp: dict) -> dict:
     """把 provider 响应压缩为 MCP 对外稳定 schema。"""
     if not isinstance(resp, dict):
@@ -676,13 +699,24 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                     loc_say = f"，分布在{parts}{more}"
                 else:
                     loc_say = ""
-                say = f"{disp_name}当前库存{qty}{unit}{extra}{loc_say}。"
+                # 用户报编码来查时，播报里把编码回读一遍，方便他确认认对了料；
+                # 按名字查则不念编码，避免每次播报多出一串字母数字。
+                sku = p.get("sku") or ""
+                if _asked_by_code(resp.get("query") or "", sku, p.get("name") or ""):
+                    say = (
+                        f"编码{sku}是{disp_name}，"
+                        f"当前库存{qty}{unit}{extra}{loc_say}。"
+                    )
+                else:
+                    say = f"{disp_name}当前库存{qty}{unit}{extra}{loc_say}。"
                 data = {
                     "name": p.get("name"),
                     "qty": qty,
                     "unit": unit,
                     "batch_count": batch_count,
                 }
+                if sku:
+                    data["sku"] = sku
                 if locations:
                     data["locations"] = locations[:5]
                 if variant:
@@ -927,7 +961,11 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 @log_mcp_call
 @_antihallucination("query_stock")
 def query_stock(product_name: str) -> dict:
-    """按产品名查库存，也用于查询物料的存放位置（"X放在哪/在哪个库位"）。"""
+    """按产品名或物料编码/SKU 查库存数量和存放位置（"X还有多少/放在哪/在哪个库位"）。
+
+    用户只报一串编码（如 MB-WZ-001、"MB WZ 001"、mbwz001）时也直接调本工具，
+    把编码原样填进 product_name，不要先调 resolve_name。
+    """
     # 查询类共用 operation='query' 规则（按名称/SKU/批次/今日统计一体配置）。
     # 未配置规则时后端返回 skipped，零开销放行。
     blocked, _ = _enforce_face("query")
@@ -937,6 +975,10 @@ def query_stock(product_name: str) -> dict:
         resp = _get_provider().query_stock(product_name, show_batches=True)
     except Exception as e:
         resp = _tool_error("查询库存", e)
+    # 原始查询词带给 _wrap_response，用来判断要不要在播报里回读编码。
+    # setdefault：provider 若已自带 query 字段则不覆盖。
+    if isinstance(resp, dict):
+        resp.setdefault("query", product_name)
     return resp
 
 

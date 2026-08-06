@@ -252,6 +252,146 @@ def _import_warehouse_mcp():
     return importlib.import_module("warehouse_mcp")
 
 
+class TestQueryStockByCode:
+    """按物料编码查库存：播报要回读编码，按名字查则不回读。"""
+
+    PRODUCT = {
+        "name": "watcher主控板", "sku": "MB-WZ-001",
+        "current_stock": 12, "unit": "个", "location": "A区-01",
+    }
+
+    def _wrap(self, query):
+        warehouse_mcp = _import_warehouse_mcp()
+        return warehouse_mcp._wrap_response("query_stock", {
+            "success": True, "product": dict(self.PRODUCT), "query": query,
+        })
+
+    def test_code_query_reads_back_code(self):
+        resp = self._wrap("MB-WZ-001")
+        assert resp["say"] == "编码MB-WZ-001是watcher主控板，当前库存12个，位于A区-01。"
+        assert resp["data"]["sku"] == "MB-WZ-001"
+        assert resp["data"]["locations"] == [{"location": "A区-01", "qty": None}]
+
+    @pytest.mark.parametrize("spoken", ["MB WZ 001", "mbwz001", "mb-wz-001"])
+    def test_spoken_code_variants_still_read_back(self, spoken):
+        """语音把连字符念成空格或整个丢掉，仍应认成编码查询。"""
+        assert self._wrap(spoken)["say"].startswith("编码MB-WZ-001是")
+
+    def test_name_query_does_not_read_back_code(self):
+        resp = self._wrap("watcher主控板")
+        assert resp["say"] == "watcher主控板当前库存12个，位于A区-01。"
+        assert resp["data"]["sku"] == "MB-WZ-001"
+
+    def test_chinese_name_with_digits_not_mistaken_for_code(self):
+        """归一化抹掉中文，"螺丝001" 和 SKU "001" 会撞车——不能因此误播编码。"""
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = warehouse_mcp._wrap_response("query_stock", {
+            "success": True, "query": "螺丝001",
+            "product": {"name": "螺丝001", "sku": "001",
+                        "current_stock": 5, "unit": "个", "location": "B区"},
+        })
+        assert resp["say"] == "螺丝001当前库存5个，位于B区。"
+
+    def test_missing_query_field_keeps_legacy_say(self):
+        """provider 未回传 query（老响应）时退回原文案，不炸。"""
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = warehouse_mcp._wrap_response("query_stock", {
+            "success": True, "product": dict(self.PRODUCT),
+        })
+        assert resp["say"] == "watcher主控板当前库存12个，位于A区-01。"
+
+
+class TestQueryStockByCodeE2E:
+    """真链路：真 DB + 真后端路由 + 真 FuzzyMatcher，只把 HTTP 换成 TestClient。"""
+
+    @pytest.fixture()
+    def material_with_code(self, admin_client, default_warehouse_id):
+        from database import get_db_connection
+        sku = f"MB-WZ-{uuid.uuid4().hex[:4].upper()}"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO materials (name, sku, category, quantity, unit, "
+            "safe_stock, location, warehouse_id) "
+            "VALUES (?, ?, 'Test', 0, '个', 0, '', ?)",
+            ("编码回读主控板", sku, default_warehouse_id),
+        )
+        mid = cur.lastrowid
+        cur.execute(
+            "INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, "
+            "is_exhausted, warehouse_id, created_at, location, tenant_id) "
+            "VALUES (?, ?, 12, 12, 0, ?, datetime('now'), 'A区-01', 1)",
+            (f"TB-{uuid.uuid4().hex[:8].upper()}", mid, default_warehouse_id),
+        )
+        conn.commit()
+        conn.close()
+        # 直插 SQL 绕过了 API，fuzzy 索引缓存不会自动失效；真实链路走 API 会自动失效。
+        # 不手动失效的话，同一会话里前一个用例已 warm 过缓存，本条物料搜不到。
+        from app import get_fuzzy_matcher
+        get_fuzzy_matcher().invalidate_cache(entity_type="material")
+        return {"id": mid, "sku": sku}
+
+    def _provider(self, admin_client):
+        _import_warehouse_mcp()
+        from providers.default import DefaultProvider
+
+        class P(DefaultProvider):
+            def __init__(self):
+                self.max_results = 10
+
+            def http_get(self, path, params=None):
+                r = admin_client.get(f"/api{path}", params=params or {})
+                if r.status_code != 200:
+                    return {"error": r.text}
+                return r.json()
+
+        return P()
+
+    def _call_tool(self, monkeypatch, admin_client, query):
+        """走真正的 MCP 工具入口，而不是自己拼 provider + _wrap_response。
+
+        这样 query_stock 里 resp.setdefault("query", ...) 那行才在覆盖范围内——
+        否则把它删掉测试照样绿。只把 provider 和人脸门禁替换掉。
+        """
+        warehouse_mcp = _import_warehouse_mcp()
+        provider = self._provider(admin_client)
+        monkeypatch.setattr(warehouse_mcp, "_get_provider", lambda: provider)
+        monkeypatch.setattr(warehouse_mcp, "_enforce_face", lambda *a, **k: (None, None))
+        # @mcp.tool() 把函数包成 FunctionTool，取 .fn 拿回被装饰的原函数
+        # （_antihallucination / log_mcp_call 仍在链上）。
+        fn = getattr(warehouse_mcp.query_stock, "fn", warehouse_mcp.query_stock)
+        return asyncio.run(fn(query))
+
+    def test_product_stats_hits_by_sku(self, admin_client, material_with_code):
+        """后端 product-stats 的 ident_pred 本就是 name OR sku。"""
+        r = admin_client.get(
+            "/api/materials/product-stats",
+            params={"name": material_with_code["sku"]},
+        )
+        assert r.status_code == 200
+        assert r.json()["sku"] == material_with_code["sku"]
+        assert r.json()["current_stock"] == 12
+
+    def test_say_reads_back_code_and_location(self, monkeypatch, admin_client,
+                                              material_with_code):
+        sku = material_with_code["sku"]
+        wrapped = self._call_tool(monkeypatch, admin_client, sku)
+        assert wrapped["say"] == (
+            f"编码{sku}是编码回读主控板，当前库存12个，共1个批次，位于A区-01。"
+        )
+        assert wrapped["data"]["sku"] == sku
+        assert wrapped["data"]["locations"] == [{"location": "A区-01", "qty": 12}]
+
+    def test_spoken_code_without_hyphens_resolves(self, monkeypatch, admin_client,
+                                                  material_with_code):
+        """连字符念丢：精确查询 miss → fuzzy 回落 → 仍认成编码并回读。"""
+        sku = material_with_code["sku"]
+        spoken = sku.replace("-", "").lower()
+        wrapped = self._call_tool(monkeypatch, admin_client, spoken)
+        assert wrapped["say"].startswith(f"编码{sku}是编码回读主控板，")
+
+
+
 class TestMCPSlimResponse:
     def test_executed_false_on_query(self):
         warehouse_mcp = _import_warehouse_mcp()

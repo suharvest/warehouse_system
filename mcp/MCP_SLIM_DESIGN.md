@@ -139,7 +139,7 @@ error / message / product / batch / candidates / batches / ...`
 
 | 工具 | 成功时 data 字段 | 截断/省略规则 |
 |---|---|---|
-| `query_stock` | `name, qty, unit, batch_count` | 不返回 batches 列表；要明细另调 `query_batch` |
+| `query_stock` | `name, sku, qty, unit, batch_count, locations[≤5], variant` | 不返回 batches 列表；要明细另调 `query_batch`。`locations` 是按库位聚合的 `{location, qty}`；`sku`/`variant` 有才带。用户报编码查时 `say` 会回读编码 |
 | `query_batch` | `batch_no, name, qty, unit, location` | 单批次只返回当前余量 |
 | `search` | `total, items[≤5]`（每条 `name, qty, unit`） | `max_results` 默认从 10 降到 5；不嵌套 batches |
 | `stock_in` 成功 | `name, in_qty, after, unit, batch_no` | 删除多余字段 |
@@ -147,7 +147,8 @@ error / message / product / batch / candidates / batches / ...`
 | 任意失败的 `candidates` | `≤3` 条，每条仅 `name` | 删 id/score（小模型用不上） |
 | `get_today_statistics` | `in, out, net, total, low` | 5 个数字打平 |
 
-效果：所有响应稳定在 80-250 token 之间。
+效果：所有响应稳定在 80-250 token 之间（SKU 是无长度约束的 TEXT，按编码查时
+`say` 和 `data.sku` 各带一份，编码特别长会超出这个区间）。
 
 ---
 
