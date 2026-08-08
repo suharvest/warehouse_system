@@ -997,6 +997,11 @@ def generate_batch_no(material_id: int, warehouse_id: int, cursor=None) -> str:
     传入 cursor 可在同一事务内看到未提交的批次（避免批量创建时序号冲突）。
     无 cursor 时：dialect-portable 路径走 SA Core。
 
+    序号取当天最大值 + 1，且**必须在 Python 侧按整数比较**：序号只补零到 3 位，
+    单日超过 999 之后就出现 4 位号（-1000），此时 SQL 的字符串排序会把
+    '20260807-999' 判为大于 '20260807-1000'，导致每次都重新生成已存在的
+    -1000，撞 (batch_no, warehouse_id) 唯一约束。
+
     warehouse_id 是**必填**：批次号在迁移 a1b2c3d4e5f6 后改为
     (batch_no, warehouse_id) 复合唯一，而 NULL 不参与复合唯一约束。
     若调用者拿不到 warehouse_id（例如全局 admin 写入路径），上游应当先用
@@ -1013,36 +1018,32 @@ def generate_batch_no(material_id: int, warehouse_id: int, cursor=None) -> str:
 
     if cursor is not None:
         cursor.execute(
-            "SELECT batch_no FROM batches WHERE batch_no LIKE ? AND warehouse_id = ? ORDER BY batch_no DESC LIMIT 1",
+            "SELECT batch_no FROM batches WHERE batch_no LIKE ? AND warehouse_id = ?",
             (like_pat, warehouse_id),
         )
-        row = cursor.fetchone()
-        last_no = row['batch_no'] if row else None
+        existing = [row['batch_no'] for row in cursor.fetchall()]
     else:
         from sqlalchemy import select, and_
         from db import get_engine
         from metadata import batches as _t_batches
         with get_engine().connect() as conn:
-            row = conn.execute(
-                select(_t_batches.c.batch_no)
-                .where(and_(
-                    _t_batches.c.batch_no.like(like_pat),
-                    _t_batches.c.warehouse_id == warehouse_id,
-                ))
-                .order_by(_t_batches.c.batch_no.desc())
-                .limit(1)
-            ).first()
-        last_no = row[0] if row else None
+            existing = [
+                row[0] for row in conn.execute(
+                    select(_t_batches.c.batch_no)
+                    .where(and_(
+                        _t_batches.c.batch_no.like(like_pat),
+                        _t_batches.c.warehouse_id == warehouse_id,
+                    ))
+                ).fetchall()
+            ]
 
-    if last_no:
+    last_seq = 0
+    for batch_no in existing:
         try:
-            last_seq = int(last_no.split('-')[-1])
+            last_seq = max(last_seq, int(batch_no.split('-')[-1]))
         except (ValueError, IndexError):
-            last_seq = 0
-        seq = last_seq + 1
-    else:
-        seq = 1
-    return f'{today}-{seq:03d}'
+            continue
+    return f'{today}-{last_seq + 1:03d}'
 
 
 def has_admin_user():

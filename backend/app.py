@@ -6146,24 +6146,25 @@ async def confirm_import_excel(
         # until unique.
         today_prefix = datetime.now().strftime('%Y%m%d')
         allocated_batch_nos = set()
+        _next_batch_seq = None  # lazily seeded from the committed max on first use
 
         def _alloc_batch_no(material_id):
-            candidate = generate_batch_no(material_id, warehouse_id=wh_id)
-            if candidate not in allocated_batch_nos:
-                allocated_batch_nos.add(candidate)
-                return candidate
-            # Bump suffix until unique within this session.
-            try:
-                last_seq = int(candidate.split('-')[-1])
-            except (ValueError, IndexError):
-                last_seq = 0
-            seq = last_seq + 1
+            # Seed once: generate_batch_no opens its own connection, so calling it
+            # per row would re-scan today's batches N times and always return the
+            # same committed-max + 1 anyway.
+            nonlocal _next_batch_seq
+            if _next_batch_seq is None:
+                base = generate_batch_no(material_id, warehouse_id=wh_id)
+                try:
+                    _next_batch_seq = int(base.split('-')[-1])
+                except (ValueError, IndexError):
+                    _next_batch_seq = 1
             while True:
-                candidate = f'{today_prefix}-{seq:03d}'
+                candidate = f'{today_prefix}-{_next_batch_seq:03d}'
+                _next_batch_seq += 1
                 if candidate not in allocated_batch_nos:
                     allocated_batch_nos.add(candidate)
                     return candidate
-                seq += 1
 
         def _create_batch(material_id, quantity, location, contact_id, variant=None, batch_no=None):
             """创建新批次并返回 batch_id"""
