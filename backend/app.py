@@ -5707,7 +5707,9 @@ async def preview_import_excel(
     try:
         from openpyxl import load_workbook
 
-        wb = load_workbook(filename=BytesIO(contents))
+        # data_only=True 取公式的缓存结果值；否则 openpyxl 返回公式字符串本身
+        # （现场见过 '=+IFERROR(VLOOKUP(...),"临时库位")' 被当作库位写进 batches）。
+        wb = load_workbook(filename=BytesIO(contents), data_only=True)
         ws = wb.active
     except Exception as e:
         return _error_resp(f"文件解析失败: {str(e)}")
@@ -5825,9 +5827,10 @@ async def preview_import_excel(
             sku = _read_cell(row, 'sku')
             category = _read_cell(row, 'category') or "未分类"
             unit = _sanitize_import_text(_read_cell(row, 'unit')) or "个"
-            location = _read_cell(row, 'location') or ""
+            # 库位/联系方是自由文本，未求值的公式残渣不是有效数据，统一清成空
+            location = _sanitize_import_text(_read_cell(row, 'location')) or ""
             batch_no_val = _read_cell(row, 'batch_no') or ""
-            contact_name_val = _read_cell(row, 'contact_name') or ""
+            contact_name_val = _sanitize_import_text(_read_cell(row, 'contact_name')) or ""
 
             try:
                 import_qty = _read_int(row, 'quantity', 0)
