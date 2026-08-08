@@ -499,7 +499,7 @@ async function executeImport(confirmNewSkusFlag) {
 
         const data = await response.json().catch(() => null);
 
-        if (data.success) {
+        if (data && data.success) {
             alert(data.message);
             closeImportModal();
             if (loadAllProductsFn) loadAllProductsFn();
@@ -507,7 +507,12 @@ async function executeImport(confirmNewSkusFlag) {
             if (getCurrentTab() === 'inventory' && loadInventoryFn) loadInventoryFn();
             if (getCurrentTab() === 'dashboard' && loadDashboardDataFn) loadDashboardDataFn();
         } else {
-            alert(_formatApiError(data, t('importFailed')));
+            // 500 之类的响应体不是 JSON（data === null），只弹「导入失败」会让现场
+            // 无从排查，补上 HTTP 状态码。
+            const fallback = response.ok
+                ? t('importFailed')
+                : `${t('importFailed')} (HTTP ${response.status})`;
+            alert(_formatApiError(data, fallback));
         }
     } catch (error) {
         console.error('导入失败:', error);

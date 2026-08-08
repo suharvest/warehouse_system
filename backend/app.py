@@ -5707,7 +5707,9 @@ async def preview_import_excel(
     try:
         from openpyxl import load_workbook
 
-        wb = load_workbook(filename=BytesIO(contents))
+        # data_only=True 取公式的缓存结果值；否则 openpyxl 返回公式字符串本身
+        # （现场见过 '=+IFERROR(VLOOKUP(...),"临时库位")' 被当作库位写进 batches）。
+        wb = load_workbook(filename=BytesIO(contents), data_only=True)
         ws = wb.active
     except Exception as e:
         return _error_resp(f"文件解析失败: {str(e)}")
@@ -5825,9 +5827,10 @@ async def preview_import_excel(
             sku = _read_cell(row, 'sku')
             category = _read_cell(row, 'category') or "未分类"
             unit = _sanitize_import_text(_read_cell(row, 'unit')) or "个"
-            location = _read_cell(row, 'location') or ""
+            # 库位/联系方是自由文本，未求值的公式残渣不是有效数据，统一清成空
+            location = _sanitize_import_text(_read_cell(row, 'location')) or ""
             batch_no_val = _read_cell(row, 'batch_no') or ""
-            contact_name_val = _read_cell(row, 'contact_name') or ""
+            contact_name_val = _sanitize_import_text(_read_cell(row, 'contact_name')) or ""
 
             try:
                 import_qty = _read_int(row, 'quantity', 0)
@@ -6146,24 +6149,25 @@ async def confirm_import_excel(
         # until unique.
         today_prefix = datetime.now().strftime('%Y%m%d')
         allocated_batch_nos = set()
+        _next_batch_seq = None  # lazily seeded from the committed max on first use
 
         def _alloc_batch_no(material_id):
-            candidate = generate_batch_no(material_id, warehouse_id=wh_id)
-            if candidate not in allocated_batch_nos:
-                allocated_batch_nos.add(candidate)
-                return candidate
-            # Bump suffix until unique within this session.
-            try:
-                last_seq = int(candidate.split('-')[-1])
-            except (ValueError, IndexError):
-                last_seq = 0
-            seq = last_seq + 1
+            # Seed once: generate_batch_no opens its own connection, so calling it
+            # per row would re-scan today's batches N times and always return the
+            # same committed-max + 1 anyway.
+            nonlocal _next_batch_seq
+            if _next_batch_seq is None:
+                base = generate_batch_no(material_id, warehouse_id=wh_id)
+                try:
+                    _next_batch_seq = int(base.split('-')[-1])
+                except (ValueError, IndexError):
+                    _next_batch_seq = 1
             while True:
-                candidate = f'{today_prefix}-{seq:03d}'
+                candidate = f'{today_prefix}-{_next_batch_seq:03d}'
+                _next_batch_seq += 1
                 if candidate not in allocated_batch_nos:
                     allocated_batch_nos.add(candidate)
                     return candidate
-                seq += 1
 
         def _create_batch(material_id, quantity, location, contact_id, variant=None, batch_no=None):
             """创建新批次并返回 batch_id"""
