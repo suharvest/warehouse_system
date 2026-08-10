@@ -6828,17 +6828,41 @@ async def add_inventory_record(
 _INITIAL_SCHEMA_REVISION = "1826e23835b6"
 
 
+_AUTO_MIGRATE_ON_VALUES = ("1", "true", "yes", "on", "enable", "enabled")
+_AUTO_MIGRATE_OFF_VALUES = ("0", "false", "no", "off", "disable", "disabled")
+
+
 def _auto_migrate_legacy_enabled() -> bool:
     """Opt-out switch for the startup legacy-DB auto-migration.
 
-    Defaults to ON. Ops can set ``AUTO_MIGRATE_LEGACY_DB`` to a falsy value
-    (``0``/``false``/``no``/``off``) to restore the previous refuse-to-start
-    behaviour when they'd rather inspect the DB by hand first.
+    Defaults to ON (unset or empty). Ops can set ``AUTO_MIGRATE_LEGACY_DB`` to
+    any of ``_AUTO_MIGRATE_OFF_VALUES`` to restore the previous
+    refuse-to-start behaviour when they'd rather inspect the DB by hand first.
+
+    Parsing is a strict whitelist in both directions. The previous
+    "anything not falsy means on" rule was fail-open: a typo (``flase``),
+    a guess (``disabled``) or a stray ``00`` silently left the auto-migration
+    running when the operator meant to switch it off. An unrecognised value is
+    now a hard error — the operator's intent is unknown, and guessing it in
+    the direction that rewrites their database is the wrong default.
     """
     raw = os.environ.get("AUTO_MIGRATE_LEGACY_DB")
     if raw is None or raw.strip() == "":
         return True
-    return raw.strip().lower() not in ("0", "false", "no", "off")
+    value = raw.strip().lower()
+    if value in _AUTO_MIGRATE_ON_VALUES:
+        return True
+    if value in _AUTO_MIGRATE_OFF_VALUES:
+        return False
+    raise RuntimeError(
+        f"AUTO_MIGRATE_LEGACY_DB has an unrecognised value {raw!r}. "
+        "Refusing to start rather than guess whether the legacy-DB "
+        "auto-migration should run.\n"
+        f"  enable:  {', '.join(_AUTO_MIGRATE_ON_VALUES)}\n"
+        f"  disable: {', '.join(_AUTO_MIGRATE_OFF_VALUES)}\n"
+        "  unset or empty: enabled (default)\n"
+        "Values are case-insensitive and surrounding whitespace is ignored."
+    )
 
 
 def _legacy_auto_migrate_blockers(eng) -> list[str]:
@@ -6991,6 +7015,13 @@ def _recover_legacy_alembic_state(cfg) -> None:
         value which is a deployment-level decision we must not guess.
     """
     from sqlalchemy import inspect as sa_inspect
+
+    # Validate the opt-out switch on every startup, not only when a legacy DB
+    # happens to be detected. A malformed value means the operator's intent is
+    # unknown; they should learn that immediately, not on the one boot where
+    # it would have mattered.
+    _auto_migrate_legacy_enabled()
+
     eng = get_engine()
     insp = sa_inspect(eng)
     tables = set(insp.get_table_names())
