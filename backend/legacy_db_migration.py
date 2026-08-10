@@ -217,14 +217,42 @@ def _anonymous_unique_on(conn: sqlite3.Connection, table: str, col: str) -> bool
     return named_pattern.search(sql) is None
 
 
+def _has_table_options(sql: str) -> bool:
+    """True when ``CREATE TABLE`` carries ``WITHOUT ROWID`` / ``STRICT``.
+
+    Those keywords sit *after* the body's closing paren, so the "append the
+    named constraint just before the final ``)``" rewrite below would splice
+    the constraint into the wrong place (or fail to match at all). Everything
+    after the last ``)`` is the table-options tail, so this is an exact test
+    rather than a heuristic."""
+    tail_start = sql.rfind(")")
+    if tail_start < 0:
+        return True  # unparseable — treat as unsafe
+    tail = sql[tail_start + 1:].upper()
+    return "WITHOUT" in tail or "STRICT" in tail
+
+
 def _rebuild_with_named_unique(
-    conn: sqlite3.Connection, table: str, col: str, constraint: str
+    conn: sqlite3.Connection,
+    table: str,
+    col: str,
+    constraint: str,
+    *,
+    log: Callable[[str], None] = print,
 ) -> bool:
     """Rebuild ``table`` so its UNIQUE on ``col`` is named ``constraint``.
 
     Reads the original ``CREATE TABLE`` SQL from ``sqlite_master``, strips the
     inline ``UNIQUE`` from ``col``'s column definition, and appends a named
     constraint. Data preserved via ``INSERT … SELECT *``.
+
+    The rewrite is regex-based, not SQL-aware, so it is bracketed by checks
+    rather than trusted: both substitutions must fire, tables with
+    ``WITHOUT ROWID`` / ``STRICT`` options are skipped outright, and the
+    rebuilt table is verified to have the same column set, the same row count
+    and the requested constraint name. A failed post-check raises so the
+    caller's transaction rolls the whole migration back — silently continuing
+    with a mangled table is the one outcome worse than not starting.
 
     Returns True when the table was actually rebuilt."""
     row = conn.execute(
@@ -233,6 +261,19 @@ def _rebuild_with_named_unique(
     if not row:
         return False
     original_sql = row[0]
+
+    if _has_table_options(original_sql):
+        log(
+            f"[warn] {table}: CREATE TABLE carries WITHOUT ROWID / STRICT "
+            "options — skipping the named-UNIQUE rebuild (the rewrite is not "
+            "SQL-aware enough to place a constraint safely). If a later "
+            "migration drops this constraint by name it will need doing by "
+            "hand."
+        )
+        return False
+
+    cols_before = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    (rows_before,) = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
 
     # Strip the trailing UNIQUE keyword from `<col> ... UNIQUE` column def.
     # The optional quote char covers quoted identifiers (``"sku" VARCHAR(64)``,
@@ -251,12 +292,20 @@ def _rebuild_with_named_unique(
         return False
 
     # Append the named constraint just before the closing `)`.
-    new_sql = re.sub(
+    new_sql, n_append = re.subn(
         r"\)\s*$",
         f", CONSTRAINT {constraint} UNIQUE ({col}))",
         new_sql.strip(),
         count=1,
     )
+    if n_append == 0:
+        # No recognisable trailing `)` to splice into. Bail out rather than
+        # execute SQL we didn't actually transform.
+        log(
+            f"[warn] {table}: could not locate the closing paren of "
+            "CREATE TABLE — skipping the named-UNIQUE rebuild."
+        )
+        return False
 
     tmp_table = f"{table}__legacy_rebuild"
     new_sql = new_sql.replace(
@@ -295,6 +344,34 @@ def _rebuild_with_named_unique(
     conn.execute(f'ALTER TABLE "{tmp_table}" RENAME TO "{table}"')
     for stmt in attached:
         conn.execute(stmt)
+
+    # Post-checks. The regex above is not SQL-aware; a string DEFAULT
+    # containing the word UNIQUE, an `ON CONFLICT` clause or a table-level
+    # `UNIQUE(col)` can make it cut in the wrong place, and the damage would
+    # otherwise only surface as missing columns or lost rows much later.
+    cols_after = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    if cols_after != cols_before:
+        raise RuntimeError(
+            f"{table}: rebuild for CONSTRAINT {constraint} changed the column "
+            f"set ({cols_before} -> {cols_after}). The CREATE TABLE rewrite "
+            "was wrong; aborting so the transaction rolls back."
+        )
+    (rows_after,) = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+    if rows_after != rows_before:
+        raise RuntimeError(
+            f"{table}: rebuild for CONSTRAINT {constraint} changed the row "
+            f"count ({rows_before} -> {rows_after}). Aborting so the "
+            "transaction rolls back."
+        )
+    check = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not check or constraint.lower() not in (check[0] or "").lower():
+        raise RuntimeError(
+            f"{table}: rebuild completed but CONSTRAINT {constraint} is "
+            "absent from the resulting CREATE TABLE. Aborting so the "
+            "transaction rolls back."
+        )
     return True
 
 
@@ -573,7 +650,9 @@ def migrate(
                 continue
             if not _anonymous_unique_on(conn, table, col):
                 continue
-            if not _rebuild_with_named_unique(conn, table, col, constraint):
+            if not _rebuild_with_named_unique(
+                conn, table, col, constraint, log=log
+            ):
                 continue
             changes.append(
                 f"{table}: anonymous UNIQUE({col}) -> CONSTRAINT {constraint}"
