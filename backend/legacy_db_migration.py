@@ -312,6 +312,28 @@ def _resolve_target_warehouse_id(
     )
 
 
+def _column_info(
+    conn: sqlite3.Connection, table: str
+) -> list[tuple[str, str, int, str | None, int]]:
+    """Full per-column definition: ``(name, type, notnull, dflt_value, pk)``.
+
+    Everything ``PRAGMA table_info`` knows except the ordinal. Used as the
+    before/after fingerprint of a table rebuild — comparing only names lets a
+    mangled DEFAULT through unnoticed.
+    """
+    return [
+        (row[1], row[2] or "", int(row[3]), row[4], int(row[5]))
+        for row in conn.execute(f'PRAGMA table_info("{table}")')
+    ]
+
+
+def _foreign_keys(conn: sqlite3.Connection, table: str) -> list[tuple]:
+    """``PRAGMA foreign_key_list`` minus the id/seq columns, order-stable."""
+    return sorted(
+        tuple(row[2:]) for row in conn.execute(f'PRAGMA foreign_key_list("{table}")')
+    )
+
+
 def _tables_with_null_warehouse_id(
     conn: sqlite3.Connection, tables: list[str]
 ) -> list[tuple[str, int]]:
@@ -429,7 +451,9 @@ def _rebuild_with_named_unique(
         )
         return False
 
-    cols_before = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    info_before = _column_info(conn, table)
+    fks_before = _foreign_keys(conn, table)
+    cols_before = [c[0] for c in info_before]
     (rows_before,) = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
 
     # Strip the trailing UNIQUE keyword from `<col> ... UNIQUE` column def.
@@ -506,12 +530,39 @@ def _rebuild_with_named_unique(
     # containing the word UNIQUE, an `ON CONFLICT` clause or a table-level
     # `UNIQUE(col)` can make it cut in the wrong place, and the damage would
     # otherwise only surface as missing columns or lost rows much later.
-    cols_after = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    #
+    # Comparing column *names* is not enough. `note TEXT DEFAULT 'NOT UNIQUE
+    # YET'` gets its literal cut down to 'NOT YET' while the name set, the row
+    # count and the constraint name all still check out. So the comparison is
+    # over the full PRAGMA table_info tuple — name / type / notnull /
+    # dflt_value / pk — plus PRAGMA foreign_key_list.
+    info_after = _column_info(conn, table)
+    cols_after = [c[0] for c in info_after]
     if cols_after != cols_before:
         raise RuntimeError(
             f"{table}: rebuild for CONSTRAINT {constraint} changed the column "
             f"set ({cols_before} -> {cols_after}). The CREATE TABLE rewrite "
             "was wrong; aborting so the transaction rolls back."
+        )
+    if info_after != info_before:
+        diffs = [
+            f"{b[0]}: (type, notnull, default, pk) {b[1:]} -> {a[1:]}"
+            for b, a in zip(info_before, info_after)
+            if b != a
+        ]
+        raise RuntimeError(
+            f"{table}: rebuild for CONSTRAINT {constraint} changed a column "
+            "definition:\n"
+            + "".join(f"    - {d}\n" for d in diffs)
+            + "The CREATE TABLE rewrite mangled something it should not have "
+            "touched; aborting so the transaction rolls back."
+        )
+    fks_after = _foreign_keys(conn, table)
+    if fks_after != fks_before:
+        raise RuntimeError(
+            f"{table}: rebuild for CONSTRAINT {constraint} changed the "
+            f"foreign keys ({fks_before} -> {fks_after}). Aborting so the "
+            "transaction rolls back."
         )
     (rows_after,) = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
     if rows_after != rows_before:

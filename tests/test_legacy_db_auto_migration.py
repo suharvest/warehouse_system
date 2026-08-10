@@ -14,6 +14,7 @@ hand-written approximation.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1336,3 +1337,138 @@ def test_single_warehouse_without_default_flag_is_used(legacy_db):
     mod.migrate(path, log=lambda _m: None)
 
     assert _distinct_warehouse_ids(path, "materials") == [5]
+
+
+# --------------------------------------------------------------------------
+# 13. the rebuild self-check compares full column definitions, not just names
+# --------------------------------------------------------------------------
+def _md5(path: Path) -> str:
+    import hashlib
+
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _table_info(path: Path, table: str) -> list[tuple]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [tuple(r[1:]) for r in conn.execute(f"PRAGMA table_info({table})")]
+    finally:
+        conn.close()
+
+
+def test_default_literal_containing_unique_is_caught_by_the_self_check(legacy_db):
+    """The reviewer's counterexample: name set + row count + constraint all pass.
+
+    ``DEFAULT 'NOT UNIQUE YET'`` sits before the inline ``UNIQUE`` on the same
+    column, so the (deliberately not SQL-aware) rewrite cuts inside the string
+    literal and turns the default into ``'NOT YET'``. Column names, row count
+    and the new CONSTRAINT name are all unaffected — only a full ``table_info``
+    comparison notices.
+    """
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE erp_providers")
+        conn.execute(
+            "CREATE TABLE erp_providers ("
+            "id INTEGER PRIMARY KEY, "
+            "provider_name TEXT DEFAULT 'NOT UNIQUE YET' UNIQUE, "
+            "note TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO erp_providers (id, provider_name, note) "
+            "VALUES (1, 'sap', 'keep me')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before_md5 = _md5(path)
+    before_info = _table_info(path, "erp_providers")
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(RuntimeError, match="changed a column definition"):
+        mod.migrate(path, log=lambda _m: None)
+
+    assert _md5(path) == before_md5, "the whole migration must roll back"
+    assert _table_info(path, "erp_providers") == before_info
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_self_check_reports_the_mangled_default_value(legacy_db):
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE erp_providers")
+        conn.execute(
+            "CREATE TABLE erp_providers ("
+            "id INTEGER PRIMARY KEY, "
+            "provider_name TEXT DEFAULT 'NOT UNIQUE YET' UNIQUE)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(RuntimeError) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    msg = str(exc.value)
+    assert "provider_name:" in msg
+    assert "'NOT UNIQUE YET'" in msg and "'NOT YET'" in msg
+
+
+def test_rebuild_rejects_a_dropped_not_null(legacy_db):
+    """A rewrite that loses NOT NULL must raise even though names match."""
+    path, _ = legacy_db
+    import legacy_db_migration as mod
+
+    def mangle(sql: str) -> str:
+        if sql.startswith("CREATE TABLE") and "erp_providers__legacy_rebuild" in sql:
+            return sql.replace("NOT NULL", "")
+        return sql
+
+    conn = sqlite3.connect(str(path))
+    try:
+        with pytest.raises(RuntimeError, match="changed a column definition"):
+            _rebuild_erp(_MangledConn(conn, mangle), mod)
+    finally:
+        conn.close()
+
+
+def test_rebuild_rejects_a_dropped_foreign_key(legacy_db):
+    """Losing an FK during the rebuild must abort the migration."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE erp_providers")
+        conn.execute(
+            "CREATE TABLE erp_providers ("
+            "id INTEGER PRIMARY KEY, provider_name TEXT UNIQUE, "
+            "tenant_id INTEGER, "
+            "CONSTRAINT fk_erp_tenant FOREIGN KEY(tenant_id) "
+            "REFERENCES tenants (id))"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    def mangle(sql: str) -> str:
+        if sql.startswith("CREATE TABLE") and "erp_providers__legacy_rebuild" in sql:
+            return re.sub(
+                r",\s*CONSTRAINT fk_erp_tenant FOREIGN KEY\(tenant_id\)\s*"
+                r"REFERENCES tenants \(id\)",
+                "",
+                sql,
+            )
+        return sql
+
+    conn = sqlite3.connect(str(path))
+    try:
+        with pytest.raises(RuntimeError, match="changed the foreign keys"):
+            _rebuild_erp(_MangledConn(conn, mangle), mod)
+    finally:
+        conn.close()
