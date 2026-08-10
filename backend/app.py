@@ -7188,6 +7188,28 @@ def _recover_legacy_alembic_state(cfg) -> None:
         "post-initial_schema tables. Auto-stamping to %s.",
         _INITIAL_SCHEMA_REVISION,
     )
+
+    # Stamping is an assertion that the schema *is* this revision. Two tables
+    # existing is not evidence of that — a same-named column of the wrong type,
+    # a missing column, or orphan FK rows all sail through the marker check and
+    # get handed to the next (destructive) migration.
+    #
+    # legacy_db_migration.migrate() already gates its own stamp on
+    # assert_schema_matches_revision(). This path is the *other* stamp site and
+    # was left bare: it fires for DBs that already have users.tenant_id but an
+    # empty alembic_version, which is the more common shape of the two. Same
+    # gate, same revision — refuse rather than stamp a claim we cannot back up.
+    if eng.url.get_backend_name() == "sqlite":
+        import sqlite3 as _sqlite3
+        _mod = _legacy_migration_module()
+        _raw = _sqlite3.connect(eng.url.database)
+        try:
+            _mod.assert_schema_matches_revision(
+                _raw, _INITIAL_SCHEMA_REVISION, log=logger.warning
+            )
+        finally:
+            _raw.close()
+
     from alembic import command as alembic_command
     alembic_command.stamp(cfg, _INITIAL_SCHEMA_REVISION)
 

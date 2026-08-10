@@ -628,6 +628,9 @@ def _rebuild_with_named_unique(
 # file. Cached because the only caller is the stamp path, but a container that
 # restart-loops would otherwise pay for it on every boot.
 _REFERENCE_SCHEMA_CACHE: dict[str, dict[str, dict[str, str]]] = {}
+# 与上面同一次参考库构建产出，单独存 NOT NULL 集合。不并进 reference_schema
+# 的返回值，是为了不改它已被多处依赖的 {table: {col: type}} 形状。
+_REFERENCE_NOTNULL_CACHE: dict[str, dict[str, set[str]]] = {}
 
 
 def _alembic_config():
@@ -671,21 +674,32 @@ def reference_schema(revision: str = INITIAL_SCHEMA_REVISION) -> dict[str, dict[
 
         conn = sqlite3.connect(str(ref))
         try:
-            schema = {
-                row[0]: {
-                    c[1]: (c[2] or "")
-                    for c in conn.execute(f'PRAGMA table_info("{row[0]}")')
-                }
-                for row in conn.execute(
+            tables = [
+                row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name NOT LIKE 'sqlite_%'"
                 )
-            }
+            ]
+            schema = {}
+            notnull = {}
+            for t in tables:
+                info = list(conn.execute(f'PRAGMA table_info("{t}")'))
+                # PRAGMA table_info: (cid, name, type, notnull, dflt, pk)
+                schema[t] = {c[1]: (c[2] or "") for c in info}
+                notnull[t] = {c[1] for c in info if c[3]}
         finally:
             conn.close()
+    _REFERENCE_NOTNULL_CACHE[revision] = notnull
 
     _REFERENCE_SCHEMA_CACHE[revision] = schema
     return schema
+
+
+def _reference_notnull(revision: str = INITIAL_SCHEMA_REVISION) -> dict[str, set[str]]:
+    """``{table: {NOT NULL 的列名}}``，与 :func:`reference_schema` 同源同缓存。"""
+    if revision not in _REFERENCE_NOTNULL_CACHE:
+        reference_schema(revision)          # 顺带把 notnull 缓存填上
+    return _REFERENCE_NOTNULL_CACHE.get(revision, {})
 
 
 def _type_family(declared: str) -> str:
@@ -738,6 +752,7 @@ def assert_schema_matches_revision(
     missing_cols: list[str] = []
     type_mismatch: list[str] = []
     extra_cols: list[str] = []
+    nullable_only: list[str] = []
 
     for table in EQUIVALENCE_TABLES:
         expected = ref.get(table)
@@ -758,6 +773,37 @@ def assert_schema_matches_revision(
                     f"({_type_family(got)})"
                 )
         extra_cols.extend(f"{table}.{c}" for c in actual if c not in expected)
+
+        # NOT NULL 差异：只有「参考结构要求非空、本地允许空、且**真的存在
+        # NULL 值**」才拒绝。
+        #
+        # 不能一见到可空就拒：老 bootstrap 普遍不写 NOT NULL，一刀切会让大量
+        # 本可正常升级的客户库直接开不了机——把静默风险换成停机，是更坏的结果。
+        # 而列里真有 NULL 时，后面那条把它改成 NOT NULL 的迁移必然失败，
+        # 那才是必须当场拦下的。
+        # _column_info 返回 (name, type, notnull, dflt, pk)
+        want_notnull = _reference_notnull(revision).get(table, set())
+        actual_notnull = {c[0] for c in _column_info(conn, table) if c[2]}
+        for col in sorted(want_notnull - actual_notnull):
+            if col not in actual:
+                continue                      # 缺列已在上面报了
+            n = conn.execute(
+                f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" IS NULL'
+            ).fetchone()[0]
+            nullable_only.append(
+                f"{table}.{col}" + (f" ({n} NULL row(s))" if n else "")
+            )
+
+    if nullable_only:
+        # 只提示，绝不拒绝。查过全链：没有任何迁移做 alter_column(nullable=False)，
+        # 而 SQLite 上 batch_alter_table 重建时照搬反射出来的现有结构，所以
+        # 可空列（哪怕真的存着 NULL）不会让后续迁移失败。为此拒绝启动，等于
+        # 把一个不存在的风险换成客户设备开不了机。
+        log(
+            "[warn] columns nullable locally where revision "
+            f"{revision} declares NOT NULL (allowed, chain never tightens them): "
+            f"{', '.join(sorted(nullable_only))}"
+        )
 
     if extra_cols:
         # Not a blocker: a legacy deployment carrying its own columns is

@@ -1634,3 +1634,227 @@ def test_equivalence_check_passes_on_the_plain_fixture(legacy_db):
 
     assert _counts(path) == before
     assert _null_warehouse_counts(path) == {t: 0 for t in _WAREHOUSE_SCOPED}
+
+
+# --------------------------------------------------------------------------
+# 裸 stamp 路径的等价性闸门
+# --------------------------------------------------------------------------
+# _recover_legacy_alembic_state 有**两个** stamp 入口：
+#   1. users 缺 tenant_id → legacy_db_migration.migrate()，它自己会调
+#      assert_schema_matches_revision() 再 stamp；
+#   2. users 已有 tenant_id、alembic_version 为空 → 直接 alembic stamp。
+# 第二条长期是裸的：只看 face_auth_logs 和 tenant_id 两个标记存在就 stamp。
+# 而 stamp 是在断言"这个库就是 1826e23835b6"——同名不同类型的列、缺列、
+# 孤儿外键行全都能蒙混过去，然后被交给下一个（破坏性的）迁移。
+# 这批用例守的就是第二条路径。
+
+def _post_tenant_db(path: Path, *, drop_col: str | None = None):
+    """造一个 users 已有 tenant_id、alembic_version 为空的库（走第 2 条路径）。"""
+    import legacy_db_migration as m
+    ref = m.reference_schema(m.INITIAL_SCHEMA_REVISION)
+    conn = sqlite3.connect(path)
+    for table, cols in ref.items():
+        defs = [f"{c} {t}" for c, t in cols.items() if c != drop_col or table != "users"]
+        conn.execute(f"CREATE TABLE {table} ({', '.join(defs)})")
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture()
+def post_tenant_env(tmp_path, monkeypatch):
+    def _mk(**kw):
+        path = tmp_path / "warehouse.db"
+        _post_tenant_db(path, **kw)
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
+        monkeypatch.setenv("DATABASE_PATH", str(path))
+        monkeypatch.setenv("DEPLOY_MODE", "single_tenant")
+        monkeypatch.delenv("AUTO_MIGRATE_LEGACY_DB", raising=False)
+        import db as db_module
+        db_module.reset_engine()
+        return path
+    yield _mk
+    import db as db_module
+    db_module.reset_engine()
+
+
+def test_bare_stamp_path_accepts_an_equivalent_schema(post_tenant_env):
+    """结构确实等价时照常 stamp——闸门不能把正常升级也挡住。"""
+    path = post_tenant_env()
+    _recover(path)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        v = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    finally:
+        conn.close()
+    assert v and v[0] == "1826e23835b6", "等价的库应当被 stamp"
+
+
+def test_bare_stamp_path_refuses_when_a_column_is_missing(post_tenant_env):
+    """users 少一列却带着两个标记——旧实现会照 stamp 不误，必须拒绝。"""
+    import legacy_db_migration as m
+    ref = m.reference_schema(m.INITIAL_SCHEMA_REVISION)
+    victim = next(c for c in ref["users"] if c not in ("id", "username", "tenant_id"))
+
+    path = post_tenant_env(drop_col=victim)
+    with pytest.raises(Exception) as ei:
+        _recover(path)
+    assert victim in str(ei.value) or "missing" in str(ei.value).lower(), (
+        f"拒绝理由里要指出缺的是哪一列，实际: {ei.value}")
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='alembic_version'").fetchone()
+        if row[0]:
+            v = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            assert not v, f"拒绝之后不该留下 stamp，实际留了 {v}"
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# 安全承诺的证据（commit message 里声称的，这里逐条兑现）
+# --------------------------------------------------------------------------
+# 1a502c2 声称"表重建保留索引触发器"、"迁移前备份走 WAL"。
+# 原有用例对备份只断言"文件存在且非空"——这种弱断言连一个 0 字节以外的
+# 损坏文件都拦不住，等于没验。备份的意义是**能还原**，索引触发器的意义是
+# **重建后还在**，就按这两条验。
+
+def _objects(path: Path, kind: str, table: str) -> set[str]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type=? AND tbl_name=? "
+            "AND name NOT LIKE 'sqlite_%'", (kind, table))}
+    finally:
+        conn.close()
+
+
+def test_rebuild_preserves_indexes_and_triggers(legacy_db):
+    """表重建走的是 CREATE-new / copy / DROP-old / RENAME，索引和触发器挂在
+    旧表上，不显式重建就会随 DROP 一起消失——而且是静默消失。"""
+    path, _ = legacy_db
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE INDEX ix_probe_material ON inventory_records(material_id)")
+    conn.execute(
+        "CREATE TRIGGER trg_probe AFTER INSERT ON inventory_records "
+        "BEGIN SELECT 1; END")
+    conn.commit()
+    conn.close()
+
+    before_idx = _objects(path, "index", "inventory_records")
+    before_trg = _objects(path, "trigger", "inventory_records")
+    assert "ix_probe_material" in before_idx and "trg_probe" in before_trg
+
+    _recover(path)
+
+    assert "ix_probe_material" in _objects(path, "index", "inventory_records"), \
+        "重建后索引没了——查询会突然全表扫描，且没有任何报错提示"
+    assert "trg_probe" in _objects(path, "trigger", "inventory_records"), \
+        "重建后触发器没了"
+
+
+def test_backup_is_actually_restorable(legacy_db):
+    """备份必须能打开、能读到迁移前的行数。
+
+    只断言"文件非空"是无效的：备份的唯一用途是出事时还原，
+    没验证过可读性的备份等于没有备份。
+    """
+    path, before = legacy_db
+    _recover(path)
+
+    backups = _backups(path)
+    assert len(backups) == 1
+    bak = backups[0]
+
+    conn = sqlite3.connect(f"file:{bak}?mode=ro", uri=True)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok", \
+            "备份文件本身损坏"
+        # 迁移前的形态：users 还没有 tenant_id
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        assert "tenant_id" not in cols, "备份存的不是迁移前的状态"
+        for table, n in before.items():
+            got = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            assert got == n, f"备份里 {table} 行数对不上：{got} != {n}"
+    finally:
+        conn.close()
+
+
+def test_second_run_is_a_noop(legacy_db):
+    """迁移必须幂等。容器会重启（崩溃、OOM、运维手动重启），
+    第二次启动绝不能再迁一遍、也不能再堆一份备份。"""
+    path, _ = legacy_db
+    _recover(path)
+    first_backups = _backups(path)
+    snapshot = path.read_bytes()
+
+    _recover(path)          # 第二次启动
+
+    assert _backups(path) == first_backups, "重启又多备份了一份"
+    assert path.read_bytes() == snapshot, "第二次启动又改了数据库"
+
+
+# --------------------------------------------------------------------------
+# NOT NULL 差异的处理策略
+# --------------------------------------------------------------------------
+# 等价性校验原本只比列名和粗类型，NOT NULL 完全不看。但这里不能一见到可空就拒：
+# 老 bootstrap 普遍不写 NOT NULL，一刀切会让大量本可正常升级的客户库开不了机
+# ——把静默风险换成停机是更坏的结果。只有列里**真的有 NULL** 时，后面那条收紧
+# 约束的迁移必然失败，那才必须当场拦下。
+
+def _ref_notnull_col(table: str) -> str:
+    import legacy_db_migration as m
+    cols = m._reference_notnull()[table]
+    return next(c for c in sorted(cols) if c not in ("id",))
+
+
+def _db_with_nullable(path: Path, table: str, col: str, *, insert_null: bool):
+    import legacy_db_migration as m
+    ref = m.reference_schema()
+    conn = sqlite3.connect(path)
+    for t, cols in ref.items():
+        defs = []
+        for c, ty in cols.items():
+            nn = " NOT NULL" if c in m._reference_notnull().get(t, ()) else ""
+            if t == table and c == col:
+                nn = ""                      # 故意放宽成可空
+            defs.append(f"{c} {ty}{nn}")
+        conn.execute(f"CREATE TABLE {t} ({', '.join(defs)})")
+    if insert_null:
+        # 除目标列外，其余 NOT NULL 列都要给值，否则插不进去
+        import legacy_db_migration as _m
+        need = [c for c in _m._reference_notnull().get(table, ()) if c != col]
+        cols = ", ".join(need + [col])
+        vals = ", ".join(["1"] * len(need) + ["NULL"])
+        conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({vals})")
+    conn.commit()
+    conn.close()
+
+
+def test_nullable_columns_never_refuse_startup(tmp_path):
+    """参考结构要求 NOT NULL、本地可空——**即使列里真有 NULL 也不能拒绝启动**。
+
+    一开始我按"有 NULL 就拒"实现，跑全量时打挂了既有用例，回头查才发现闸门
+    是误报：全链没有任何迁移做 alter_column(nullable=False)，而 SQLite 上
+    batch_alter_table 重建时照搬反射出来的现有结构，所以可空列不会让任何
+    迁移失败。为一个不存在的风险拒绝启动，等于把客户设备变成开不了机。
+
+    这条用例把"不拒绝"钉死，防止以后又有人把它改回去。
+    """
+    import legacy_db_migration as m
+    table = "users"
+    col = _ref_notnull_col(table)
+
+    for insert_null in (False, True):
+        path = tmp_path / f"wh_{insert_null}.db"
+        _db_with_nullable(path, table, col, insert_null=insert_null)
+        logs: list[str] = []
+        conn = sqlite3.connect(path)
+        try:
+            m.assert_schema_matches_revision(conn, log=logs.append)   # 不抛
+        finally:
+            conn.close()
+        assert any(col in x and "nullable" in x for x in logs), (
+            f"可空差异至少要提示出来（insert_null={insert_null}）：{logs}")
