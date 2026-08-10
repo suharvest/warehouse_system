@@ -74,12 +74,17 @@ ENV PORT=2125
 ENV STATIC_DIR=/app/static
 ENV DATABASE_PATH=/data/warehouse.db
 ENV DEPLOY_MODE=single_tenant
-# 挂进来的是 pre-multi-tenant 老库时，启动阶段自动备份 + 补 tenant_id/warehouse_id
-# 列 + stamp 到 initial schema，再跑 alembic upgrade head。只在 DEPLOY_MODE=
-# single_tenant + SQLite 下生效。设成 0/false/no/off 可关掉，届时老库仍按原来的
-# 方式拒绝启动，需手动执行：
+# 挂进来的是 pre-multi-tenant 老库时，可在启动阶段自动备份 + 补
+# tenant_id/warehouse_id 列 + stamp 到 initial schema，再跑 alembic upgrade head。
+#
+# 默认**关闭**：这条路径会在一次普通的 docker compose pull 之后，无人值守地重写
+# 运维唯一那份生产库，而运维并没有在这次启动时要求它这么做。拒绝启动是可恢复的
+# （报错里直接给出该跑什么命令），意外迁移不是。要用就显式打开。
+#
+# 打开：AUTO_MIGRATE_LEGACY_DB=1（仅在 DEPLOY_MODE=single_tenant + SQLite 下生效）
+# 不打开时老库照旧拒绝启动，手动迁移：
 #   /app/.venv/bin/python -m backend.legacy_db_migration /data/warehouse.db
-ENV AUTO_MIGRATE_LEGACY_DB=1
+ENV AUTO_MIGRATE_LEGACY_DB=0
 ENV PYTHONUNBUFFERED=1
 ENV SQLITE_PRODUCTION_MODE=true
 ENV INIT_MOCK_DATA=false

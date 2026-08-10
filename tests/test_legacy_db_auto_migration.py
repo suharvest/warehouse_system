@@ -191,7 +191,10 @@ def legacy_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
     monkeypatch.setenv("DATABASE_PATH", str(path))
     monkeypatch.setenv("DEPLOY_MODE", "single_tenant")
-    monkeypatch.delenv("AUTO_MIGRATE_LEGACY_DB", raising=False)
+    # 自动迁移是 opt-in 的（默认关）。本文件绝大多数用例验的是"迁移真的跑起来
+    # 之后"的行为，所以这里显式打开。默认值本身由
+    # test_unset_flag_refuses_and_touches_nothing 单独守着。
+    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", "1")
     import db as db_module
 
     db_module.reset_engine()
@@ -252,6 +255,8 @@ def test_legacy_db_single_tenant_app_starts_and_health_is_200(tmp_path):
         os.environ["DATABASE_PATH"] = {str(path)!r}
         os.environ["DATABASE_URL"] = "sqlite:///" + {str(path)!r}
         os.environ["DEPLOY_MODE"] = "single_tenant"
+        # 自动迁移是 opt-in 的；这条用例验的正是"打开之后老库能起来"
+        os.environ["AUTO_MIGRATE_LEGACY_DB"] = "1"
         os.environ["INIT_MOCK_DATA"] = "false"
         sys.path.insert(0, {str(BACKEND_DIR)!r})
         os.chdir({str(BACKEND_DIR)!r})
@@ -302,20 +307,27 @@ def test_legacy_db_opt_out_refuses_to_start(legacy_db, monkeypatch, value):
     with pytest.raises(RuntimeError) as exc:
         _recover(path)
 
-    assert "AUTO_MIGRATE_LEGACY_DB is disabled" in str(exc.value)
+    assert "AUTO_MIGRATE_LEGACY_DB is not enabled" in str(exc.value)
     assert "tenant_id" not in _cols(path, "users")
     assert _backups(path) == []
 
 
-def test_opt_out_default_is_on(monkeypatch):
+def test_default_is_opt_in(monkeypatch):
+    """未设置 / 空值 = 关闭。自动迁移必须显式打开才生效。
+
+    这条路径会在一次普通的 docker compose pull 之后，无人值守地重写运维唯一
+    那份生产库。默认开启意味着运维事后才知道（如果还能知道的话）；默认关闭
+    最坏是容器起不来，而报错里直接写了该跑什么命令。
+    """
     import app as app_module
 
     monkeypatch.delenv("AUTO_MIGRATE_LEGACY_DB", raising=False)
-    assert app_module._auto_migrate_legacy_enabled() is True
+    assert app_module._auto_migrate_legacy_enabled() is False
     monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", "")
-    assert app_module._auto_migrate_legacy_enabled() is True
-    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", "1")
-    assert app_module._auto_migrate_legacy_enabled() is True
+    assert app_module._auto_migrate_legacy_enabled() is False
+    for on in ("1", "true", "yes", "on", "ENABLED"):
+        monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", on)
+        assert app_module._auto_migrate_legacy_enabled() is True, on
 
 
 # --------------------------------------------------------------------------
@@ -1858,3 +1870,35 @@ def test_nullable_columns_never_refuse_startup(tmp_path):
             conn.close()
         assert any(col in x and "nullable" in x for x in logs), (
             f"可空差异至少要提示出来（insert_null={insert_null}）：{logs}")
+
+
+def test_unset_flag_refuses_and_touches_nothing(tmp_path, monkeypatch):
+    """未设置 AUTO_MIGRATE_LEGACY_DB 时：拒绝启动，且数据库**字节不变**。
+
+    这是把默认值从 ON 改成 opt-in 的全部意义所在。只断言"抛异常"不够——
+    真正要守的是"什么都没写"：没有备份文件、没有补列、没有 stamp。
+    报错里还必须给出可执行的下一步，否则运维只知道起不来、不知道该干什么。
+    """
+    path = tmp_path / "warehouse.db"
+    _make_legacy_db(path)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
+    monkeypatch.setenv("DATABASE_PATH", str(path))
+    monkeypatch.setenv("DEPLOY_MODE", "single_tenant")
+    monkeypatch.delenv("AUTO_MIGRATE_LEGACY_DB", raising=False)   # ← 未设置
+    import db as db_module
+    db_module.reset_engine()
+
+    before = path.read_bytes()
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            _recover(path)
+    finally:
+        db_module.reset_engine()
+
+    msg = str(exc.value)
+    assert "AUTO_MIGRATE_LEGACY_DB is not enabled" in msg
+    assert "legacy_db_migration" in msg, f"报错里要给出手动迁移命令：{msg}"
+
+    assert path.read_bytes() == before, "拒绝启动却动了数据库"
+    assert _backups(path) == [], "拒绝启动却留下了备份文件"
+    assert "tenant_id" not in _cols(path, "users"), "拒绝启动却补了列"

@@ -6883,22 +6883,29 @@ _AUTO_MIGRATE_OFF_VALUES = ("0", "false", "no", "off", "disable", "disabled")
 
 
 def _auto_migrate_legacy_enabled() -> bool:
-    """Opt-out switch for the startup legacy-DB auto-migration.
+    """Opt-**in** switch for the startup legacy-DB auto-migration.
 
-    Defaults to ON (unset or empty). Ops can set ``AUTO_MIGRATE_LEGACY_DB`` to
-    any of ``_AUTO_MIGRATE_OFF_VALUES`` to restore the previous
-    refuse-to-start behaviour when they'd rather inspect the DB by hand first.
+    Defaults to OFF (unset or empty). Ops must set ``AUTO_MIGRATE_LEGACY_DB``
+    to one of ``_AUTO_MIGRATE_ON_VALUES`` to let the container rewrite the
+    schema of a legacy DB on boot.
 
-    Parsing is a strict whitelist in both directions. The previous
-    "anything not falsy means on" rule was fail-open: a typo (``flase``),
-    a guess (``disabled``) or a stray ``00`` silently left the auto-migration
-    running when the operator meant to switch it off. An unrecognised value is
-    now a hard error — the operator's intent is unknown, and guessing it in
-    the direction that rewrites their database is the wrong default.
+    Why opt-in rather than opt-out: this path rewrites the operator's only
+    production database, unattended, on a boot they did not ask for it on.
+    Defaulting to ON means a routine ``docker compose pull`` can restructure
+    a customer's data — and the operator finds out afterwards, if at all.
+    Refusing to start is recoverable (the error says exactly what to run);
+    a surprise migration is not. Whoever wants it can say so explicitly.
+
+    Parsing is a strict whitelist in both directions. "Anything not falsy
+    means on" would be fail-open: a typo (``flase``), a guess (``disabled``)
+    or a stray ``00`` would silently leave the auto-migration running when the
+    operator meant to switch it off. An unrecognised value is a hard error —
+    the operator's intent is unknown, and guessing it in the direction that
+    rewrites their database is the wrong default.
     """
     raw = os.environ.get("AUTO_MIGRATE_LEGACY_DB")
     if raw is None or raw.strip() == "":
-        return True
+        return False
     value = raw.strip().lower()
     if value in _AUTO_MIGRATE_ON_VALUES:
         return True
@@ -6910,7 +6917,7 @@ def _auto_migrate_legacy_enabled() -> bool:
         "auto-migration should run.\n"
         f"  enable:  {', '.join(_AUTO_MIGRATE_ON_VALUES)}\n"
         f"  disable: {', '.join(_AUTO_MIGRATE_OFF_VALUES)}\n"
-        "  unset or empty: enabled (default)\n"
+        "  unset or empty: disabled (default — auto-migration is opt-in)\n"
         "Values are case-insensitive and surrounding whitespace is ignored."
     )
 
@@ -6940,7 +6947,9 @@ def _legacy_auto_migrate_blockers(eng) -> list[str]:
         )
     if not _auto_migrate_legacy_enabled():
         blockers.append(
-            "AUTO_MIGRATE_LEGACY_DB is disabled via environment variable"
+            "AUTO_MIGRATE_LEGACY_DB is not enabled (auto-migration is opt-in; "
+            "set AUTO_MIGRATE_LEGACY_DB=1 to allow the container to rewrite "
+            "this DB's schema on boot)"
         )
     return blockers
 
