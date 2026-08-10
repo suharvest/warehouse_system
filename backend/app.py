@@ -6919,6 +6919,15 @@ def _migrate_legacy_db_or_refuse(eng) -> None:
         )
 
     mod = _legacy_migration_module()
+
+    # Ambiguity gate. Deliberately BEFORE the backup, not just before the
+    # first write: the check is read-only, so there is nothing for a backup to
+    # protect, and a container that keeps restarting into this refusal would
+    # otherwise drop a fresh full-size copy of the DB on every attempt and
+    # eventually fill the volume. Raised as-is (not wrapped in the
+    # "auto-migration FAILED" handler below) because nothing was attempted.
+    mod.assert_auto_migration_unambiguous(db_path)
+
     # Drop any pooled/open handles before the migration rewrites tables.
     eng.dispose()
 

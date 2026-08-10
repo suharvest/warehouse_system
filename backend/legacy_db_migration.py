@@ -121,6 +121,14 @@ LEGACY_TABLE_PATCHES: dict[str, list[tuple[str, str]]] = {
 }
 
 
+class LegacyMigrationAmbiguity(RuntimeError):
+    """The legacy DB's stock data is ambiguous — a human must decide.
+
+    Raised *before* anything is written. Callers should surface the message and
+    refuse to start rather than guessing.
+    """
+
+
 @dataclass
 class MigrationResult:
     """Outcome of one :func:`migrate` run."""
@@ -305,6 +313,92 @@ def needs_legacy_migration(db_path: Path) -> bool:
         return "tenant_id" not in _table_cols(conn, "users")
     finally:
         conn.close()
+
+
+def find_batch_quantity_divergence(
+    db_path: Path | str,
+) -> list[tuple[int, str, float, float]]:
+    """Materials whose cached ``quantity`` disagrees with their active batches.
+
+    Read-only. Returns ``(material_id, name, cached_quantity, active_batch_sum)``
+    tuples, empty when the DB has no batch history at all (``batches`` empty)
+    or everything reconciles.
+
+    An empty ``batches`` table is *not* a divergence: the deployment simply
+    never used batches, and revision ``d6e7f8a9b0c1`` synthesising
+    ``LEGACY-MIG-d6e7-*`` batches from ``materials.quantity`` is exactly that
+    migration's intended semantics. Divergence on a DB that *does* have batch
+    history is a different animal — revision ``6fec76bb57d9`` already notes it
+    "needs manual investigation" — and letting d6e7f8a9b0c1 top it up would
+    invent stock that never existed.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        if not _table_exists(conn, "materials") or not _table_exists(conn, "batches"):
+            return []
+        m_cols = _table_cols(conn, "materials")
+        b_cols = _table_cols(conn, "batches")
+        if "quantity" not in m_cols or not {
+            "material_id", "quantity", "is_exhausted"
+        } <= b_cols:
+            return []
+        (n_batches,) = conn.execute("SELECT COUNT(*) FROM batches").fetchone()
+        if not n_batches:
+            return []
+        name_col = "name" if "name" in m_cols else "id"
+        rows = conn.execute(
+            f"""
+            SELECT m.id, m.{name_col}, m.quantity, COALESCE(b.active_sum, 0)
+            FROM materials m
+            LEFT JOIN (
+                SELECT material_id, SUM(quantity) AS active_sum
+                FROM batches WHERE is_exhausted = 0 GROUP BY material_id
+            ) b ON b.material_id = m.id
+            WHERE COALESCE(m.quantity, 0) != COALESCE(b.active_sum, 0)
+            ORDER BY m.id
+            """
+        ).fetchall()
+        return [(r[0], str(r[1]), r[2], r[3]) for r in rows]
+    finally:
+        conn.close()
+
+
+def assert_auto_migration_unambiguous(db_path: Path | str) -> None:
+    """Raise :class:`LegacyMigrationAmbiguity` if this DB must not auto-migrate.
+
+    Read-only and side-effect free — safe to call before taking a backup.
+    """
+    diverged = find_batch_quantity_divergence(db_path)
+    if not diverged:
+        return
+    examples = "".join(
+        f"    - material id={mid} {name!r}: materials.quantity={qty}, "
+        f"active batch sum={bsum}\n"
+        for mid, name, qty, bsum in diverged[:5]
+    )
+    more = (
+        f"    ... and {len(diverged) - 5} more\n" if len(diverged) > 5 else ""
+    )
+    raise LegacyMigrationAmbiguity(
+        f"Refusing to auto-migrate {db_path}: this DB has batch history, but "
+        f"{len(diverged)} material(s) have a cached quantity that disagrees "
+        "with the sum of their active batches:\n"
+        f"{examples}{more}"
+        "Migration d6e7f8a9b0c1 would 'fix' each of these by synthesising a "
+        "LEGACY-MIG-d6e7-* batch for the positive difference — inventing "
+        "stock and corrupting the existing ledger. Which number is right is a "
+        "business question this tool must not guess (revision 6fec76bb57d9 "
+        "flags the same divergence as needing manual investigation).\n"
+        "Nothing was written; the DB is untouched. Reconcile the quantities "
+        "by hand, then migrate explicitly:\n"
+        "  uv run python scripts/migrate_legacy_db.py /path/to/warehouse.db\n"
+        "or, inside the container (WORKDIR /app):\n"
+        "  /app/.venv/bin/python -m backend.legacy_db_migration "
+        "/data/warehouse.db"
+    )
 
 
 def migrate(
