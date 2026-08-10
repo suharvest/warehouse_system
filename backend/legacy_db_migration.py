@@ -29,7 +29,9 @@ What it does
    rows predate the warehouse split, so they all belong to that one
    warehouse; leaving them NULL would hide them from every warehouse-scoped
    query in ``backend/deps.py``.
-5. Stamps ``alembic_version`` to ``1826e23835b6`` (initial schema) so the
+5. Copies any ``inventory_records.reason`` text into ``reason_note`` before
+   revision ``c5d6e7f8a9b0`` drops the column without a data migration.
+6. Stamps ``alembic_version`` to ``1826e23835b6`` (initial schema) so the
    normal alembic chain can apply the incremental migrations that follow.
 
 After running this, start the container normally — the startup hook will run
@@ -92,6 +94,12 @@ LEGACY_TABLE_PATCHES: dict[str, list[tuple[str, str]]] = {
         # replaying the chain. Re-add it so the DB really matches the
         # revision we are about to stamp.
         ("reason", "VARCHAR(255)"),
+        # Present at 1826e23835b6, but a sufficiently old bootstrap may not
+        # have them. They are also the destination of the ``reason``
+        # preservation step below, which must not be skipped just because the
+        # legacy DB never grew the replacement columns.
+        ("reason_category", "VARCHAR(32)"),
+        ("reason_note", "TEXT"),
     ],
     "contacts": [
         ("tenant_id", "INTEGER DEFAULT 1"),
@@ -436,6 +444,34 @@ def migrate(
                     log(
                         f"[ok] {table}: backfilled warehouse_id={default_wh} "
                         f"for {cur.rowcount} row(s)"
+                    )
+
+        # Preserve ``inventory_records.reason`` before the alembic chain
+        # deletes it. Revision c5d6e7f8a9b0 does an unconditional
+        # ``drop_column('reason')`` with no data migration -- correct for a DB
+        # that is already on a recent version (nothing has read the column for
+        # a while), destructive for a genuinely old one where ``reason`` was
+        # the only place the in/out reason was ever recorded. Copy the text
+        # into ``reason_note`` while it still exists.
+        #
+        # ``reason_note`` wins when it already holds something: it is the newer
+        # field and the user's most recent intent.
+        if _table_exists(conn, "inventory_records"):
+            ir_cols = _table_cols(conn, "inventory_records")
+            if "reason" in ir_cols and "reason_note" in ir_cols:
+                cur = conn.execute(
+                    "UPDATE inventory_records SET reason_note = reason "
+                    "WHERE reason IS NOT NULL AND TRIM(reason) != '' "
+                    "AND (reason_note IS NULL OR TRIM(reason_note) = '')"
+                )
+                if cur.rowcount > 0:
+                    changes.append(
+                        f"inventory_records: preserved reason -> reason_note "
+                        f"for {cur.rowcount} row(s)"
+                    )
+                    log(
+                        f"[ok] inventory_records: preserved reason -> "
+                        f"reason_note for {cur.rowcount} row(s)"
                     )
 
         for table, col, constraint in NAMED_UNIQUE_TARGETS:
