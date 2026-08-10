@@ -24,7 +24,11 @@ What it does
 2. Creates a default tenant row (id=1) if ``tenants`` is empty.
 3. Creates a default warehouse row (id=1) if ``warehouses`` is empty or missing.
 4. For each legacy business table, ALTERs in any missing ``tenant_id`` /
-   ``warehouse_id`` columns and backfills them to 1.
+   ``warehouse_id`` columns, backfills ``tenant_id`` to 1 and ``warehouse_id``
+   to the default warehouse's actual id (looked up, not hardcoded). Legacy
+   rows predate the warehouse split, so they all belong to that one
+   warehouse; leaving them NULL would hide them from every warehouse-scoped
+   query in ``backend/deps.py``.
 5. Stamps ``alembic_version`` to ``1826e23835b6`` (initial schema) so the
    normal alembic chain can apply the incremental migrations that follow.
 
@@ -126,6 +130,31 @@ class MigrationResult:
 
 def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _default_warehouse_id(conn: sqlite3.Connection) -> int | None:
+    """Id of the warehouse legacy rows semantically belong to.
+
+    The legacy schema has no warehouse concept at all: every row predates the
+    split, so it belongs to the single warehouse the deployment actually has.
+    Prefer the one flagged ``is_default``, else the lowest id. Returns None
+    when there is no ``warehouses`` table or it is empty (nothing to point
+    at — the caller then skips the backfill rather than inventing an id).
+
+    Deliberately queried instead of hardcoded to 1: the bridge only seeds
+    id=1 when the table is empty, and a legacy DB may already carry a default
+    warehouse row with a different id.
+    """
+    if not _table_exists(conn, "warehouses"):
+        return None
+    cols = _table_cols(conn, "warehouses")
+    if "is_default" in cols:
+        row = conn.execute(
+            "SELECT id FROM warehouses ORDER BY is_default DESC, id ASC LIMIT 1"
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT id FROM warehouses ORDER BY id ASC LIMIT 1").fetchone()
+    return int(row[0]) if row else None
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -369,6 +398,44 @@ def migrate(
                     conn.execute(
                         f"UPDATE {table} SET {col} = ? WHERE {col} IS NULL",
                         (fill,),
+                    )
+
+        # Backfill ``warehouse_id``. Adding the column alone leaves every
+        # legacy row NULL, and NULL matches neither ``warehouse_id = <id>``
+        # nor ``warehouse_id IN (...)`` -- the scope predicates in
+        # ``backend/deps.py`` that every list endpoint applies. The data would
+        # still be in the DB but invisible in the UI. Legacy rows predate the
+        # warehouse split, so they belong to the single default warehouse.
+        # Only NULL rows are touched, so re-runs are no-ops.
+        default_wh = _default_warehouse_id(conn)
+        wh_tables = [
+            t for t, patches in LEGACY_TABLE_PATCHES.items()
+            if any(c == "warehouse_id" for c, _ in patches)
+        ]
+        if default_wh is None:
+            log(
+                "[warn] no warehouses row found -- skipping warehouse_id "
+                "backfill; rows may be invisible to warehouse-scoped queries"
+            )
+        else:
+            for table in wh_tables:
+                if not _table_exists(conn, table):
+                    continue
+                if "warehouse_id" not in _table_cols(conn, table):
+                    continue
+                cur = conn.execute(
+                    f"UPDATE {table} SET warehouse_id = ? "
+                    f"WHERE warehouse_id IS NULL",
+                    (default_wh,),
+                )
+                if cur.rowcount > 0:
+                    changes.append(
+                        f"{table}: backfilled warehouse_id={default_wh} "
+                        f"for {cur.rowcount} row(s)"
+                    )
+                    log(
+                        f"[ok] {table}: backfilled warehouse_id={default_wh} "
+                        f"for {cur.rowcount} row(s)"
                     )
 
         for table, col, constraint in NAMED_UNIQUE_TARGETS:
