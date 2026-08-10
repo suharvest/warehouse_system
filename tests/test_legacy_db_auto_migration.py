@@ -380,3 +380,572 @@ def test_fresh_empty_db_is_unaffected(tmp_path, monkeypatch):
         assert _counts(path)["users"] == 0
     finally:
         db_module.reset_engine()
+
+
+# --------------------------------------------------------------------------
+# 6. warehouse_id is backfilled -- migrated rows stay visible to scoped queries
+# --------------------------------------------------------------------------
+_WAREHOUSE_SCOPED = ("materials", "batches", "inventory_records", "contacts")
+
+
+def _default_wh_id(path: Path) -> int:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return conn.execute(
+            "SELECT id FROM warehouses ORDER BY is_default DESC, id ASC LIMIT 1"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _null_warehouse_counts(path: Path) -> dict[str, int]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {
+            t: conn.execute(
+                f"SELECT COUNT(*) FROM {t} WHERE warehouse_id IS NULL"
+            ).fetchone()[0]
+            for t in _WAREHOUSE_SCOPED
+        }
+    finally:
+        conn.close()
+
+
+def _distinct_warehouse_ids(path: Path, table: str) -> list:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return sorted(
+            r[0] for r in conn.execute(f"SELECT DISTINCT warehouse_id FROM {table}")
+        )
+    finally:
+        conn.close()
+
+
+def test_warehouse_id_is_backfilled_not_left_null(legacy_db):
+    """The bug: rows arrive with warehouse_id NULL and vanish from the UI."""
+    path, _ = legacy_db
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+
+    wh = _default_wh_id(path)
+    assert _null_warehouse_counts(path) == {t: 0 for t in _WAREHOUSE_SCOPED}
+    for table in _WAREHOUSE_SCOPED:
+        ids = _distinct_warehouse_ids(path, table)
+        assert ids in ([], [wh]), f"{table} has unexpected warehouse ids {ids}"
+
+
+def test_backfilled_rows_survive_the_scope_predicate(legacy_db):
+    """Rows must match ``warehouse_id IN (authorized)`` -- the deps.py filter.
+
+    Reproduces the shape of ``build_authorized_scope_predicates``: a NULL
+    column silently drops every row, so the count under the filter is the
+    thing that actually proves the fix.
+    """
+    path, _ = legacy_db
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+    wh = _default_wh_id(path)
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        for table in ("materials", "inventory_records"):
+            (total,) = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            (scoped,) = conn.execute(
+                f"SELECT COUNT(*) FROM {table} "
+                f"WHERE tenant_id = 1 AND warehouse_id IN (?)",
+                (wh,),
+            ).fetchone()
+            assert total > 0, f"{table} fixture is empty, test proves nothing"
+            assert scoped == total, (
+                f"{table}: {total - scoped} of {total} rows are invisible "
+                "under the warehouse scope filter"
+            )
+    finally:
+        conn.close()
+
+
+def test_warehouse_backfill_uses_existing_default_not_hardcoded_one(legacy_db):
+    """A pre-existing default warehouse with id != 1 must win."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "INSERT INTO warehouses (id, slug, name, is_default, tenant_id) "
+            "VALUES (7, 'main', '主仓', 1, 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    mod.migrate(path, log=lambda _m: None)
+
+    assert _distinct_warehouse_ids(path, "materials") == [7]
+    assert _distinct_warehouse_ids(path, "inventory_records") == [7]
+
+
+def test_warehouse_backfill_is_idempotent_and_keeps_explicit_values(legacy_db):
+    """Only NULL rows are touched; a second run reports no change."""
+    path, _ = legacy_db
+    import legacy_db_migration as mod
+
+    mod.migrate(path, log=lambda _m: None)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("UPDATE materials SET warehouse_id = 99 WHERE id = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    second = mod.migrate(path, log=lambda _m: None)
+
+    assert [c for c in second.changes if "warehouse_id" in c] == []
+    assert _distinct_warehouse_ids(path, "materials") == [1, 99]
+
+
+def test_warehouse_backfill_counts_are_reported(legacy_db):
+    path, _ = legacy_db
+    import legacy_db_migration as mod
+
+    result = mod.migrate(path, log=lambda _m: None)
+
+    backfills = [c for c in result.changes if "backfilled warehouse_id" in c]
+    assert any(c.startswith("materials:") for c in backfills), backfills
+    assert any(c.startswith("inventory_records:") for c in backfills), backfills
+
+
+# --------------------------------------------------------------------------
+# 7. inventory_records.reason is preserved before c5d6e7f8a9b0 drops it
+# --------------------------------------------------------------------------
+def _set_reason(path: Path, rows: dict[int, tuple[str | None, str | None]]) -> None:
+    """Write ``{record_id: (reason, reason_note)}`` into the legacy DB."""
+    conn = sqlite3.connect(str(path))
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(inventory_records)")}
+        if "reason" not in cols:
+            conn.execute("ALTER TABLE inventory_records ADD COLUMN reason VARCHAR(255)")
+        for rec_id, (reason, note) in rows.items():
+            conn.execute(
+                "UPDATE inventory_records SET reason = ? WHERE id = ?",
+                (reason, rec_id),
+            )
+            if "reason_note" in cols:
+                conn.execute(
+                    "UPDATE inventory_records SET reason_note = ? WHERE id = ?",
+                    (note, rec_id),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _reason_notes(path: Path) -> dict[int, str | None]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return dict(
+            conn.execute("SELECT id, reason_note FROM inventory_records")
+        )
+    finally:
+        conn.close()
+
+
+def test_reason_text_survives_the_full_chain(legacy_db):
+    """``reason`` text must be readable in ``reason_note`` after head."""
+    path, _ = legacy_db
+    _set_reason(path, {1: ("客户退货补入库", None), 2: ("生产领料", None)})
+
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+
+    assert "reason" not in _cols(path, "inventory_records"), (
+        "c5d6e7f8a9b0 should still drop the column -- the migration is unchanged"
+    )
+    notes = _reason_notes(path)
+    assert notes[1] == "客户退货补入库"
+    assert notes[2] == "生产领料"
+
+
+def test_reason_does_not_overwrite_existing_reason_note(legacy_db):
+    path, _ = legacy_db
+    _set_reason(
+        path,
+        {
+            1: ("旧字段文本", "新字段已有内容"),
+            2: ("旧字段文本", ""),
+            3: (None, None),
+        },
+    )
+
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+
+    notes = _reason_notes(path)
+    assert notes[1] == "新字段已有内容", "existing reason_note was clobbered"
+    assert notes[2] == "旧字段文本", "empty reason_note should be filled"
+    assert notes[3] is None
+
+
+def test_reason_preserved_when_replacement_columns_are_missing(legacy_db):
+    """An old bootstrap may lack reason_note / reason_category entirely."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        _rebuild_legacy_shape(
+            conn, "inventory_records", ["reason_note", "reason_category"], None
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert "reason_note" not in _cols(path, "inventory_records")
+    _set_reason(path, {1: ("补货", None)})
+
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+
+    assert _reason_notes(path)[1] == "补货"
+
+
+def test_reason_preservation_is_reported_and_idempotent(legacy_db):
+    path, _ = legacy_db
+    _set_reason(path, {1: ("客户退货", None)})
+    import legacy_db_migration as mod
+
+    first = mod.migrate(path, log=lambda _m: None)
+    assert any("preserved reason -> reason_note" in c for c in first.changes)
+
+    second = mod.migrate(path, log=lambda _m: None)
+    assert [c for c in second.changes if "reason" in c] == []
+
+
+# --------------------------------------------------------------------------
+# 8. ambiguous batch stock -> refuse to auto-migrate, write nothing
+# --------------------------------------------------------------------------
+def _add_batches(path: Path, rows: list[tuple[str, int, int]]) -> None:
+    """Insert ``(batch_no, material_id, quantity)`` active batches."""
+    conn = sqlite3.connect(str(path))
+    try:
+        for batch_no, material_id, qty in rows:
+            conn.execute(
+                "INSERT INTO batches "
+                "(batch_no, material_id, quantity, initial_quantity, is_exhausted) "
+                "VALUES (?, ?, ?, ?, 0)",
+                (batch_no, material_id, qty, qty),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _digest(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_diverging_batches_refuse_auto_migration(legacy_db):
+    path, _ = legacy_db
+    # materials 1..3 have quantity 10/20/30; give material 1 a short batch.
+    _add_batches(path, [("B-1", 1, 4)])
+    before = _digest(path)
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        _recover(path)
+
+    msg = str(exc.value)
+    assert "materials.quantity=10" in msg and "active batch sum=4" in msg
+    assert "-m backend.legacy_db_migration" in msg
+    # Nothing written at all -- not even a backup.
+    assert _backups(path) == []
+    assert _digest(path) == before
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_empty_batches_is_not_ambiguous(legacy_db):
+    """No batch history -> d6e7f8a9b0c1's synthesis is the intended semantics."""
+    path, before = legacy_db
+    import legacy_db_migration as mod
+
+    assert mod.find_batch_quantity_divergence(path) == []
+
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        (mat_sum,) = conn.execute("SELECT SUM(quantity) FROM materials").fetchone()
+        (batch_sum,) = conn.execute(
+            "SELECT SUM(quantity) FROM batches WHERE is_exhausted = 0"
+        ).fetchone()
+        (synth,) = conn.execute(
+            "SELECT COUNT(*) FROM batches WHERE batch_no LIKE 'LEGACY-MIG-d6e7-%'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert batch_sum == mat_sum
+    assert synth > 0
+    assert _counts(path) == before
+
+
+def test_reconciled_batches_are_not_ambiguous(legacy_db):
+    """Batch history that agrees with materials.quantity migrates normally."""
+    path, _ = legacy_db
+    _add_batches(path, [("B-1", 1, 10), ("B-2", 2, 20), ("B-3", 3, 30)])
+
+    import legacy_db_migration as mod
+
+    assert mod.find_batch_quantity_divergence(path) == []
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+    assert "tenant_id" in _cols(path, "users")
+
+
+def test_divergence_report_lists_material_details(legacy_db):
+    path, _ = legacy_db
+    _add_batches(path, [("B-1", 1, 4), ("B-2", 2, 7)])
+    import legacy_db_migration as mod
+
+    diverged = mod.find_batch_quantity_divergence(path)
+
+    assert [(m[0], m[2], m[3]) for m in diverged] == [
+        (1, 10, 4),
+        (2, 20, 7),
+        (3, 30, 0),
+    ]
+
+
+# --------------------------------------------------------------------------
+# 9. AUTO_MIGRATE_LEGACY_DB is parsed against a strict whitelist
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " enabled "])
+def test_auto_migrate_flag_accepts_on_values(monkeypatch, value):
+    import app as app_module
+
+    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", value)
+    assert app_module._auto_migrate_legacy_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "NO", "off", " disabled "])
+def test_auto_migrate_flag_accepts_off_values(monkeypatch, value):
+    import app as app_module
+
+    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", value)
+    assert app_module._auto_migrate_legacy_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["flase", "disabled!", "00", "maybe", "2", "-1"])
+def test_auto_migrate_flag_rejects_unknown_values(monkeypatch, value):
+    """Fail-closed: an unrecognised value must not silently mean 'on'."""
+    import app as app_module
+
+    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", value)
+    with pytest.raises(RuntimeError) as exc:
+        app_module._auto_migrate_legacy_enabled()
+
+    msg = str(exc.value)
+    assert repr(value) in msg
+    assert "enable:" in msg and "disable:" in msg
+
+
+def test_malformed_flag_refuses_startup_on_legacy_db(legacy_db, monkeypatch):
+    path, _ = legacy_db
+    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", "flase")
+
+    with pytest.raises(RuntimeError) as exc:
+        _recover(path)
+
+    assert "unrecognised value" in str(exc.value)
+    assert _backups(path) == []
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_malformed_flag_refuses_startup_on_fresh_db(tmp_path, monkeypatch):
+    """The value is validated on every boot, not only when a legacy DB shows up."""
+    path = tmp_path / "fresh.db"
+    sqlite3.connect(str(path)).close()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
+    monkeypatch.setenv("DATABASE_PATH", str(path))
+    monkeypatch.setenv("DEPLOY_MODE", "single_tenant")
+    monkeypatch.setenv("AUTO_MIGRATE_LEGACY_DB", "flase")
+    import db as db_module
+
+    db_module.reset_engine()
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            _recover(path)
+        assert "unrecognised value" in str(exc.value)
+    finally:
+        db_module.reset_engine()
+
+
+# --------------------------------------------------------------------------
+# 10. table rebuild is self-checked
+# --------------------------------------------------------------------------
+def test_without_rowid_table_is_skipped_not_corrupted(legacy_db):
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE erp_providers")
+        conn.execute(
+            "CREATE TABLE erp_providers ("
+            "id INTEGER PRIMARY KEY, provider_name TEXT UNIQUE NOT NULL, "
+            "note TEXT DEFAULT 'must be UNIQUE') WITHOUT ROWID"
+        )
+        conn.execute(
+            "INSERT INTO erp_providers (id, provider_name) VALUES (1, 'sap')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    logs: list[str] = []
+    result = mod.migrate(path, log=logs.append)
+
+    assert any(
+        "erp_providers" in m and "WITHOUT ROWID" in m
+        for m in logs
+        if m.startswith("[warn]")
+    ), logs
+    assert not any("uq_erp_providers_provider_name" in c for c in result.changes)
+    # Table untouched apart from the tenant_id patch; row still there.
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        assert conn.execute(
+            "SELECT provider_name, note FROM erp_providers"
+        ).fetchall() == [("sap", "must be UNIQUE")]
+        (sql,) = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'erp_providers'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "WITHOUT ROWID" in sql
+    # The other rebuilds still happened.
+    assert any("uq_users_username" in c for c in result.changes)
+
+
+def test_unrewritable_unique_clause_rolls_everything_back(legacy_db):
+    """``UNIQUE ON CONFLICT ...`` must fail loudly, leaving the DB untouched."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE erp_providers")
+        conn.execute(
+            "CREATE TABLE erp_providers (id INTEGER PRIMARY KEY, "
+            "provider_name TEXT UNIQUE ON CONFLICT IGNORE, note TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO erp_providers (id, provider_name, note) "
+            "VALUES (1, 'sap', 'keep me')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _digest(path)
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(sqlite3.Error):
+        mod.migrate(path, log=lambda _m: None)
+
+    assert _digest(path) == before, "migration must roll back completely"
+    assert "tenant_id" not in _cols(path, "users")
+
+
+class _MangledConn:
+    """sqlite3 connection proxy that rewrites SQL on the way through.
+
+    ``sqlite3.Connection.execute`` is read-only, so simulating a mis-cut
+    ``CREATE TABLE`` (the thing the post-checks exist to catch) has to happen
+    one level up.
+    """
+
+    def __init__(self, conn, mangle):
+        self._conn = conn
+        self._mangle = mangle
+
+    def execute(self, sql, *args):
+        if isinstance(sql, str):
+            sql = self._mangle(sql)
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def _rebuild_erp(conn, mod):
+    return mod._rebuild_with_named_unique(
+        conn,
+        "erp_providers",
+        "provider_name",
+        "uq_erp_providers_provider_name",
+        log=lambda _m: None,
+    )
+
+
+def test_rebuild_rejects_a_changed_column_set(legacy_db):
+    """A CREATE TABLE rewrite that grows/loses a column must raise."""
+    path, _ = legacy_db
+    import legacy_db_migration as mod
+
+    def mangle(sql: str) -> str:
+        if sql.startswith("CREATE TABLE") and "erp_providers__legacy_rebuild" in sql:
+            return sql.replace("(", "(smuggled_col TEXT, ", 1)
+        return sql
+
+    conn = sqlite3.connect(str(path))
+    try:
+        with pytest.raises(RuntimeError, match="changed the column set"):
+            _rebuild_erp(_MangledConn(conn, mangle), mod)
+    finally:
+        conn.close()
+
+
+def test_rebuild_rejects_a_changed_row_count(legacy_db):
+    """A rewrite that silently drops rows must raise.
+
+    Uses ``materials`` because the fixture already seeds rows there -- a
+    rebuild that loses them is exactly the failure the check exists for.
+    """
+    path, _ = legacy_db
+    import legacy_db_migration as mod
+
+    def mangle(sql: str) -> str:
+        if sql.startswith("INSERT INTO") and "materials__legacy_rebuild" in sql:
+            return sql + " WHERE 1 = 0"
+        return sql
+
+    conn = sqlite3.connect(str(path))
+    try:
+        with pytest.raises(RuntimeError, match="changed the row count"):
+            mod._rebuild_with_named_unique(
+                _MangledConn(conn, mangle),
+                "materials",
+                "sku",
+                "uq_materials_sku",
+                log=lambda _m: None,
+            )
+    finally:
+        conn.close()
+
+
+def test_rebuild_rejects_a_missing_constraint(legacy_db):
+    """If the named CONSTRAINT did not land, the rebuild must not be reported."""
+    path, _ = legacy_db
+    import legacy_db_migration as mod
+
+    def mangle(sql: str) -> str:
+        if sql.startswith("CREATE TABLE") and "erp_providers__legacy_rebuild" in sql:
+            return sql.replace("CONSTRAINT uq_erp_providers_provider_name ", "")
+        return sql
+
+    conn = sqlite3.connect(str(path))
+    try:
+        with pytest.raises(RuntimeError, match="absent from"):
+            _rebuild_erp(_MangledConn(conn, mangle), mod)
+    finally:
+        conn.close()
