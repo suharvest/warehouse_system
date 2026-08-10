@@ -6827,6 +6827,11 @@ async def add_inventory_record(
 
 _INITIAL_SCHEMA_REVISION = "1826e23835b6"
 
+# Revision d6e7f8a9b0c1 synthesises ``LEGACY-MIG-d6e7-*`` batches from
+# ``materials.quantity``. Any DB that has not passed it yet must clear the
+# batch-ambiguity gate first, whether or not it went through the legacy bridge.
+_BATCH_SYNTHESIS_REVISION = "d6e7f8a9b0c1"
+
 
 _AUTO_MIGRATE_ON_VALUES = ("1", "true", "yes", "on", "enable", "enabled")
 _AUTO_MIGRATE_OFF_VALUES = ("0", "false", "no", "off", "disable", "disabled")
@@ -6910,6 +6915,78 @@ def _legacy_migration_module():
         return legacy_db_migration
 
 
+def _revision_precedes(cfg, current: str | None, target: str) -> bool:
+    """True when ``current`` sits strictly *before* ``target`` in the chain.
+
+    Answered from alembic's own revision graph
+    (``ScriptDirectory.iterate_revisions(target, "base")`` walks every ancestor
+    of ``target``), never from string ordering or a hardcoded list — inserting
+    or reordering migrations therefore cannot silently invalidate this test.
+
+    ``current is None`` (no ``alembic_version`` row at all) counts as "before":
+    such a DB is about to have the whole chain applied to it.
+    """
+    if not current:
+        return True
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(cfg)
+    try:
+        ancestors = {rev.revision for rev in script.iterate_revisions(target, "base")}
+    except Exception:
+        # ``target`` is no longer part of the graph. The migration whose
+        # behaviour this gate guards against does not exist any more, so there
+        # is nothing to gate — say so loudly rather than blocking startup.
+        logger.warning(
+            "Revision %s is not in the alembic graph; skipping the "
+            "pre-%s ambiguity gate.",
+            target,
+            target,
+        )
+        return False
+    ancestors.discard(target)
+    return current in ancestors
+
+
+def _current_alembic_revision(eng) -> str | None:
+    from sqlalchemy import inspect as sa_inspect
+
+    if "alembic_version" not in set(sa_inspect(eng).get_table_names()):
+        return None
+    with eng.begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT version_num FROM alembic_version LIMIT 1"
+        ).first()
+    return row[0] if row and row[0] else None
+
+
+def _assert_batch_synthesis_unambiguous(cfg) -> None:
+    """Gate ``alembic upgrade head`` on the batch-quantity ambiguity check.
+
+    ``_migrate_legacy_db_or_refuse`` only covers DBs that need the
+    pre-multi-tenant bridge. A DB whose ``alembic_version`` merely stopped at
+    some revision before ``d6e7f8a9b0c1`` needs no bridge at all, went straight
+    to ``upgrade head`` and had ``LEGACY-MIG-d6e7-*`` batches synthesised for
+    it — inventing stock. The gate therefore has to sit here too, in front of
+    the upgrade itself, independent of which path got us here.
+    """
+    eng = get_engine()
+    if eng.url.get_backend_name() != "sqlite":
+        return  # the divergence probe is a sqlite3 implementation
+    db_path = eng.url.database
+    if not db_path:
+        return  # in-memory SQLite — nothing on disk to inspect
+
+    current = _current_alembic_revision(eng)
+    if not _revision_precedes(cfg, current, _BATCH_SYNTHESIS_REVISION):
+        return
+
+    mod = _legacy_migration_module()
+    mod.assert_auto_migration_unambiguous(
+        db_path, log=lambda m: logger.warning("  %s", m)
+    )
+
+
 def _migrate_legacy_db_or_refuse(eng) -> None:
     """Auto-migrate a pre-multi-tenant SQLite DB, or refuse to start.
 
@@ -6950,7 +7027,13 @@ def _migrate_legacy_db_or_refuse(eng) -> None:
     # otherwise drop a fresh full-size copy of the DB on every attempt and
     # eventually fill the volume. Raised as-is (not wrapped in the
     # "auto-migration FAILED" handler below) because nothing was attempted.
-    mod.assert_auto_migration_unambiguous(db_path)
+    #
+    # ``migrate()`` now runs the same gate internally (so the CLI entry points
+    # are covered too); this call stays because it is the only way to keep the
+    # refusal unwrapped and to skip the backup entirely.
+    mod.assert_auto_migration_unambiguous(
+        db_path, log=lambda m: logger.warning("  %s", m)
+    )
 
     # Drop any pooled/open handles before the migration rewrites tables.
     eng.dispose()
@@ -6965,6 +7048,10 @@ def _migrate_legacy_db_or_refuse(eng) -> None:
     try:
         result = mod.migrate(db_path, log=lambda m: logger.warning("  %s", m))
         backup_path = result.backup_path
+    except mod.LegacyMigrationAmbiguity:
+        # A refusal, not a failure: surface it verbatim rather than dressing it
+        # up as "auto-migration FAILED" (the DB was rolled back / untouched).
+        raise
     except Exception as exc:
         hint = (
             f" A pre-migration backup was written to {backup_path}."
@@ -7076,6 +7163,9 @@ async def _run_migrations():
         "script_location", os.path.join(os.path.dirname(__file__), "alembic")
     )
     _recover_legacy_alembic_state(cfg)
+    # Second, path-independent gate: covers DBs that never needed the legacy
+    # bridge but still sit before d6e7f8a9b0c1.
+    _assert_batch_synthesis_unambiguous(cfg)
     alembic_command.upgrade(cfg, "head")
 
     # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。

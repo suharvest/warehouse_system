@@ -949,3 +949,250 @@ def test_rebuild_rejects_a_missing_constraint(legacy_db):
             _rebuild_erp(_MangledConn(conn, mangle), mod)
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# 11. the batch-ambiguity gate covers every path into `alembic upgrade head`
+# --------------------------------------------------------------------------
+# The bridge branch is not the only way a DB reaches d6e7f8a9b0c1: one whose
+# ``alembic_version`` merely stopped at an earlier revision needs no bridge at
+# all and used to walk straight past the gate.
+_PRE_D6E7_REVISION = "c5d6e7f8a9b0"
+_BATCH_SYNTHESIS_REVISION = "d6e7f8a9b0c1"
+
+
+def _upgrade_to(path: Path, revision: str) -> None:
+    """Run ``alembic upgrade <revision>`` against ``path`` explicitly."""
+    prev_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = f"sqlite:///{path}"
+    try:
+        alembic_command.upgrade(_alembic_cfg(), revision)
+    finally:
+        if prev_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = prev_url
+
+
+def _bridged_db_at(path: Path, revision: str) -> None:
+    """Take the legacy fixture through the bridge and up to ``revision``.
+
+    The result needs no legacy bridge (``users.tenant_id`` exists) but sits
+    before ``d6e7f8a9b0c1`` — the path the ambiguity gate used to miss.
+    """
+    import legacy_db_migration as mod
+
+    mod.migrate(path, log=lambda _m: None)
+    _upgrade_to(path, revision)
+    for stale in _backups(path):
+        stale.unlink()
+
+
+def _run_app_startup(path: Path, env: dict[str, str] | None = None):
+    """Boot the real app against ``path`` out of process; return the result."""
+    script = textwrap.dedent(
+        f"""
+        import os, sys
+        os.environ["DATABASE_PATH"] = {str(path)!r}
+        os.environ["DATABASE_URL"] = "sqlite:///" + {str(path)!r}
+        os.environ["DEPLOY_MODE"] = "single_tenant"
+        os.environ["INIT_MOCK_DATA"] = "false"
+        sys.path.insert(0, {str(BACKEND_DIR)!r})
+        os.chdir({str(BACKEND_DIR)!r})
+        from fastapi.testclient import TestClient
+        from app import app
+        with TestClient(app) as c:
+            r = c.get("/health")
+            print("HEALTH", r.status_code, r.text)
+        """
+    )
+    proc_env = dict(os.environ)
+    proc_env.pop("ALLOW_AMBIGUOUS_BATCH_MIGRATION", None)
+    proc_env.update(env or {})
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=proc_env,
+    )
+
+
+def _synthesised_batches(path: Path) -> list[str]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT batch_no FROM batches WHERE batch_no LIKE 'LEGACY-MIG-d6e7-%'"
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def _stamped_revision(path: Path) -> str | None:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def test_revision_precedes_uses_the_alembic_graph(legacy_db):
+    """Ordering comes from alembic's revision map, not string comparison."""
+    import app as app_module
+
+    cfg = _alembic_cfg()
+    assert app_module._revision_precedes(cfg, None, _BATCH_SYNTHESIS_REVISION)
+    assert app_module._revision_precedes(
+        cfg, INITIAL_SCHEMA_REVISION, _BATCH_SYNTHESIS_REVISION
+    )
+    assert app_module._revision_precedes(
+        cfg, _PRE_D6E7_REVISION, _BATCH_SYNTHESIS_REVISION
+    )
+    # The target itself and its descendants are not "before" it.
+    assert not app_module._revision_precedes(
+        cfg, _BATCH_SYNTHESIS_REVISION, _BATCH_SYNTHESIS_REVISION
+    )
+    assert not app_module._revision_precedes(
+        cfg, "e7f8a9b0c1d2", _BATCH_SYNTHESIS_REVISION
+    )
+
+
+def test_gate_blocks_non_bridge_path_stopped_before_d6e7(legacy_db):
+    """No bridge needed, stopped before d6e7 -> still refused, no synthesis."""
+    path, _ = legacy_db
+    _bridged_db_at(path, _PRE_D6E7_REVISION)
+    _add_batches(path, [("B-1", 1, 4)])  # material 1 has quantity 10
+    assert _stamped_revision(path) == _PRE_D6E7_REVISION
+    before = _digest(path)
+
+    import app as app_module
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        app_module._assert_batch_synthesis_unambiguous(_alembic_cfg())
+
+    assert "materials.quantity=10" in str(exc.value)
+    assert _synthesised_batches(path) == []
+    assert _stamped_revision(path) == _PRE_D6E7_REVISION
+    assert _digest(path) == before
+    assert _backups(path) == []
+
+
+def test_gate_blocks_non_bridge_path_via_full_startup(tmp_path):
+    """End-to-end: the real startup hook refuses and synthesises nothing."""
+    path = tmp_path / "warehouse.db"
+    _make_legacy_db(path)
+    _bridged_db_at(path, _PRE_D6E7_REVISION)
+    _add_batches(path, [("B-1", 1, 4)])
+
+    proc = _run_app_startup(path)
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "LegacyMigrationAmbiguity" in proc.stderr, proc.stdout + proc.stderr
+    assert _synthesised_batches(path) == []
+    assert _stamped_revision(path) == _PRE_D6E7_REVISION
+
+
+def test_gate_waived_by_override_env(legacy_db, monkeypatch):
+    """The explicit override lets a reviewed divergence through."""
+    path, _ = legacy_db
+    _bridged_db_at(path, _PRE_D6E7_REVISION)
+    _add_batches(path, [("B-1", 1, 4)])
+    monkeypatch.setenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", "1")
+
+    import app as app_module
+
+    app_module._assert_batch_synthesis_unambiguous(_alembic_cfg())
+    _upgrade_to(path, "head")
+
+    assert _synthesised_batches(path), "d6e7 should have run once waived"
+    assert _stamped_revision(path) is not None
+
+
+def test_gate_does_not_fire_after_d6e7(legacy_db):
+    """A DB already past d6e7 is never re-gated (the synthesis is behind it)."""
+    path, _ = legacy_db
+    _bridged_db_at(path, "head")
+    _add_batches(path, [("B-9", 1, 4)])
+
+    import app as app_module
+
+    app_module._assert_batch_synthesis_unambiguous(_alembic_cfg())
+
+
+# ---- the manual CLI entry points are gated too ---------------------------
+def test_cli_module_refuses_ambiguous_db(legacy_db):
+    """``python -m backend.legacy_db_migration`` must not bypass the gate."""
+    path, _ = legacy_db
+    _add_batches(path, [("B-1", 1, 4)])
+    before = _digest(path)
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "backend.legacy_db_migration", str(path)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        timeout=300,
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "REFUSED" in proc.stderr, proc.stdout + proc.stderr
+    assert "materials.quantity=10" in proc.stderr
+    assert _digest(path) == before
+    assert _backups(path) == []
+
+
+def test_cli_script_refuses_ambiguous_db(legacy_db):
+    """``scripts/migrate_legacy_db.py`` shares the same gate."""
+    path, _ = legacy_db
+    _add_batches(path, [("B-1", 1, 4)])
+    before = _digest(path)
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "migrate_legacy_db.py"), str(path)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        timeout=300,
+    )
+
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "REFUSED" in proc.stderr, proc.stdout + proc.stderr
+    assert _digest(path) == before
+    assert _backups(path) == []
+
+
+def test_cli_honours_the_override_env(legacy_db, monkeypatch):
+    path, _ = legacy_db
+    _add_batches(path, [("B-1", 1, 4)])
+    monkeypatch.setenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", "1")
+    import legacy_db_migration as mod
+
+    result = mod.migrate(path, log=lambda _m: None)
+
+    assert result.changed
+    assert "tenant_id" in _cols(path, "users")
+
+
+@pytest.mark.parametrize("value", ["flase", "maybe", "2"])
+def test_override_env_rejects_unknown_values(monkeypatch, value):
+    monkeypatch.setenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", value)
+    import legacy_db_migration as mod
+
+    with pytest.raises(RuntimeError, match="unrecognised value"):
+        mod.allow_ambiguous_batch_migration()
+
+
+def test_override_env_default_is_off(monkeypatch):
+    import legacy_db_migration as mod
+
+    monkeypatch.delenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", raising=False)
+    assert mod.allow_ambiguous_batch_migration() is False
+    monkeypatch.setenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", "")
+    assert mod.allow_ambiguous_batch_migration() is False
+    monkeypatch.setenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", "off")
+    assert mod.allow_ambiguous_batch_migration() is False

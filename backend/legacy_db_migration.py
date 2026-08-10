@@ -52,6 +52,7 @@ This module is the single implementation. Two entry points wrap it:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sqlite3
 import sys
@@ -61,6 +62,21 @@ from pathlib import Path
 from typing import Callable
 
 INITIAL_SCHEMA_REVISION = "1826e23835b6"
+
+# The revision that synthesises ``LEGACY-MIG-d6e7-*`` batches from
+# ``materials.quantity``. Any DB sitting *before* it must pass the ambiguity
+# gate, otherwise that migration invents stock. Named here so both entry points
+# (this module and ``backend/app.py``) refer to the same thing.
+BATCH_SYNTHESIS_REVISION = "d6e7f8a9b0c1"
+
+# Operator override for the ambiguity gate: set once the books have been
+# reconciled by hand and the divergence is known to be acceptable.
+ALLOW_AMBIGUOUS_ENV = "ALLOW_AMBIGUOUS_BATCH_MIGRATION"
+
+# Same strict-whitelist parsing as ``AUTO_MIGRATE_LEGACY_DB`` in app.py: an
+# unrecognised value is a hard error, never a silent "off" (or "on").
+_ENV_ON_VALUES = ("1", "true", "yes", "on", "enable", "enabled")
+_ENV_OFF_VALUES = ("0", "false", "no", "off", "disable", "disabled")
 
 # Tables whose UNIQUE constraints later migrations need to drop *by name*.
 # Old DBs created the column inline (`username TEXT UNIQUE`), which produces
@@ -127,6 +143,42 @@ class LegacyMigrationAmbiguity(RuntimeError):
     Raised *before* anything is written. Callers should surface the message and
     refuse to start rather than guessing.
     """
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    """Parse ``name`` as a boolean against a strict whitelist.
+
+    Unset / empty -> ``default``. Anything outside the whitelist raises: the
+    operator's intent is unknown, and guessing it in the direction that
+    rewrites their database is the wrong default.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in _ENV_ON_VALUES:
+        return True
+    if value in _ENV_OFF_VALUES:
+        return False
+    raise RuntimeError(
+        f"{name} has an unrecognised value {raw!r}. Refusing to proceed "
+        "rather than guess what was meant.\n"
+        f"  enable:  {', '.join(_ENV_ON_VALUES)}\n"
+        f"  disable: {', '.join(_ENV_OFF_VALUES)}\n"
+        f"  unset or empty: {'enabled' if default else 'disabled'} (default)\n"
+        "Values are case-insensitive and surrounding whitespace is ignored."
+    )
+
+
+def allow_ambiguous_batch_migration() -> bool:
+    """True when the operator explicitly waived the batch-ambiguity gate.
+
+    Defaults to False. Ops set ``ALLOW_AMBIGUOUS_BATCH_MIGRATION=1`` after they
+    have reconciled ``materials.quantity`` against the batch ledger by hand and
+    accept that ``d6e7f8a9b0c1`` will synthesise batches for the remaining
+    positive differences.
+    """
+    return _env_flag(ALLOW_AMBIGUOUS_ENV, default=False)
 
 
 @dataclass
@@ -443,13 +495,30 @@ def find_batch_quantity_divergence(
         conn.close()
 
 
-def assert_auto_migration_unambiguous(db_path: Path | str) -> None:
+def assert_auto_migration_unambiguous(
+    db_path: Path | str,
+    *,
+    log: Callable[[str], None] = print,
+) -> None:
     """Raise :class:`LegacyMigrationAmbiguity` if this DB must not auto-migrate.
 
     Read-only and side-effect free — safe to call before taking a backup.
+
+    Bypassed only by an explicit ``ALLOW_AMBIGUOUS_BATCH_MIGRATION`` opt-in;
+    the waiver is logged loudly because it is the operator asserting the books
+    were reconciled by hand.
     """
     diverged = find_batch_quantity_divergence(db_path)
     if not diverged:
+        return
+    if allow_ambiguous_batch_migration():
+        log(
+            f"[warn] {ALLOW_AMBIGUOUS_ENV} is set: proceeding despite "
+            f"{len(diverged)} material(s) whose cached quantity disagrees with "
+            f"their active batches. Revision {BATCH_SYNTHESIS_REVISION} will "
+            "synthesise LEGACY-MIG-d6e7-* batches for the positive "
+            "differences."
+        )
         return
     examples = "".join(
         f"    - material id={mid} {name!r}: materials.quantity={qty}, "
@@ -474,7 +543,9 @@ def assert_auto_migration_unambiguous(db_path: Path | str) -> None:
         "  uv run python scripts/migrate_legacy_db.py /path/to/warehouse.db\n"
         "or, inside the container (WORKDIR /app):\n"
         "  /app/.venv/bin/python -m backend.legacy_db_migration "
-        "/data/warehouse.db"
+        "/data/warehouse.db\n"
+        f"If the divergence has already been reviewed and is acceptable, set "
+        f"{ALLOW_AMBIGUOUS_ENV}=1 to waive this gate."
     )
 
 
@@ -497,6 +568,13 @@ def migrate(
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"DB not found: {db_path}")
+
+    # Ambiguity gate lives *inside* migrate(), before the backup and before any
+    # write, so every entry point is covered by construction: the startup hook,
+    # ``scripts/migrate_legacy_db.py`` and ``python -m
+    # backend.legacy_db_migration`` all funnel through here. Putting it only in
+    # the caller left the two CLI paths able to walk straight past it.
+    assert_auto_migration_unambiguous(db_path, log=log)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup = db_path.with_suffix(db_path.suffix + f".bak.legacy_migrate_{ts}")
@@ -713,6 +791,10 @@ def main(argv: list[str] | None = None) -> None:
         migrate(args.db_path)
     except FileNotFoundError as exc:
         sys.exit(str(exc))
+    except LegacyMigrationAmbiguity as exc:
+        # Same refusal the startup hook gives, minus the traceback: this is an
+        # expected outcome that needs a human decision, not a crash.
+        sys.exit(f"REFUSED: {exc}")
 
 
 if __name__ == "__main__":
