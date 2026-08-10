@@ -270,6 +270,38 @@ function renderNewContactsBanner(newContacts) {
     banner.innerHTML = `\u2139\uFE0F ${t('newContacts')}: ${newContacts.length} - ${names}`;
 }
 
+function renderFormulaWarnings(warnings) {
+    let banner = document.getElementById('formula-warning-banner');
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'formula-warning-banner';
+        banner.className = 'warning-banner';
+        const previewArea = document.getElementById('preview-area');
+        previewArea.insertBefore(banner, previewArea.firstChild);
+    }
+
+    if (!warnings || warnings.length === 0) {
+        banner.style.display = 'none';
+        banner.innerHTML = '';
+        return;
+    }
+
+    // 后端已经把行号和处理方式写进文案了，这里只负责显示。
+    // 用 textContent 逐条写入，不拼 innerHTML——文案里带客户的列名，
+    // 而列名来自 Excel 表头，属于外部输入。
+    banner.style.display = 'block';
+    banner.innerHTML = '';
+    const title = document.createElement('div');
+    title.style.fontWeight = '600';
+    title.textContent = '⚠️ ' + t('formulaWarningTitle');
+    banner.appendChild(title);
+    warnings.forEach(w => {
+        const line = document.createElement('div');
+        line.textContent = w;
+        banner.appendChild(line);
+    });
+}
+
 function renderImportPreview(data) {
     document.getElementById('preview-area').style.display = 'block';
     document.getElementById('preview-in').textContent = data.total_in;
@@ -308,6 +340,7 @@ function renderImportPreview(data) {
 
     // 渲染新联系方提示
     renderNewContactsBanner(data.new_contacts || []);
+    renderFormulaWarnings(data.formula_warnings || []);
 
     const tbody = document.getElementById('preview-tbody');
     const thead = document.getElementById('preview-thead');

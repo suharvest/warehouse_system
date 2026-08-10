@@ -240,3 +240,56 @@ class TestImportUnitSanitization:
         item = next(p for p in data['preview'] if p['sku'] == sku)
         assert '=' not in (item['unit'] or ''), f"formula leaked into unit: {item['unit']!r}"
         assert item['unit'] == '个'  # sanitized -> default unit
+
+
+class TestFormulaWarnings:
+    """公式没被求值时，预览必须**明说**，不能静默把该列变成空值。
+
+    背景：openpyxl 取的是公式的缓存结果。文件若没被 Excel/WPS 计算保存过，
+    缓存为空 → 读成 None → 库位悄无声息变空。现场已经因为这条链踩过一次
+    （当时是反向：没传 data_only，公式串原样写进了 1306 条物料的库位）。
+    修完源头之后，剩下的风险就是"静默变空"，所以要在预览里拦一道。
+    """
+
+    @staticmethod
+    def _book(location_value, formula=True):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(['物料名称', '物料编码(SKU)', '分类', '单位', '库存', '存放位置'])
+        ws.append(['螺母A', 'T-F001', '未分类', 'Pcs', 3, location_value])
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def _preview(self, client, buf):
+        r = client.post(
+            "/api/materials/import-excel/preview",
+            files={"file": ("f.xlsx", buf,
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_uncalculated_formula_is_reported(self, admin_client):
+        """openpyxl 写出的公式没有缓存值——正是"打开就变空"的那种文件。"""
+        buf = self._book('=+IFERROR(VLOOKUP(B2,[1]Sheet1!$A:$B,2,FALSE),"临时库位")')
+        data = self._preview(admin_client, buf)
+        assert data['success'] is True
+        warns = data.get('formula_warnings') or []
+        assert warns, "公式取不到结果值却没有任何告警——客户只会看到库位莫名消失"
+        joined = ' '.join(warns)
+        assert '存放位置' in joined
+        assert '第 2 行' in joined, f"要指出具体行号才能让客户去改：{joined}"
+
+    def test_plain_value_produces_no_warning(self, admin_client):
+        """正常字面量不能误报，否则告警会被当成噪音忽略。"""
+        data = self._preview(admin_client, self._book('12-2'))
+        assert data['success'] is True
+        assert not (data.get('formula_warnings') or [])
+
+    def test_empty_cell_is_not_a_formula_warning(self, admin_client):
+        """空格子本来就是空，不该报成公式问题。"""
+        data = self._preview(admin_client, self._book(None))
+        assert data['success'] is True
+        assert not (data.get('formula_warnings') or [])

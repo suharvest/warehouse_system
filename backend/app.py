@@ -5711,6 +5711,13 @@ async def preview_import_excel(
         # （现场见过 '=+IFERROR(VLOOKUP(...),"临时库位")' 被当作库位写进 batches）。
         wb = load_workbook(filename=BytesIO(contents), data_only=True)
         ws = wb.active
+        # 再读一份公式视图，用来区分「这格本来就空」和「这格是公式但没算过」。
+        # 后者取不到缓存值会静默变空，必须在预览里说清楚，否则客户只会看到
+        # 库位莫名消失。失败不影响导入，只是拿不到告警。
+        try:
+            ws_formula = load_workbook(filename=BytesIO(contents), data_only=False).active
+        except Exception:
+            ws_formula = None
     except Exception as e:
         return _error_resp(f"文件解析失败: {str(e)}")
 
@@ -5779,6 +5786,43 @@ async def preview_import_excel(
         if ci is None or ci >= len(row) or row[ci] is None:
             return default
         return int(row[ci])
+
+    def _collect_formula_warnings():
+        """找出「是公式、但取不到结果值」的单元格，按列汇总成人话。
+
+        两种都要报：
+        - 缓存值为空 → 该列导入后会变空（文件没被 Excel/WPS 计算保存过）
+        - 缓存值本身就是 '=' 开头 → 会被 _sanitize_import_text 丢掉
+        只看真正会落库的几列，行号按 Excel 的 1-based 给，方便客户直接跳过去看。
+        """
+        if ws_formula is None:
+            return []
+        watched = [('location', '存放位置'), ('contact_name', '联系方'), ('unit', '单位')]
+        out = []
+        for key, label in watched:
+            ci = col_mapping.get(key)
+            if ci is None:
+                continue
+            rows = []
+            for i, row in enumerate(data_rows):
+                excel_row = i + 2                      # 表头占第 1 行
+                cached = row[ci] if ci < len(row) else None
+                if cached is not None and not str(cached).strip().startswith('='):
+                    continue                            # 有正常值，不用管
+                raw = ws_formula.cell(excel_row, ci + 1).value
+                if isinstance(raw, str) and raw.startswith('='):
+                    rows.append(excel_row)
+            if rows:
+                shown = '、'.join(str(r) for r in rows[:5])
+                more = f" 等 {len(rows)} 行" if len(rows) > 5 else ""
+                out.append(
+                    f"「{label}」列有 {len(rows)} 个单元格是公式且没有可用的计算结果"
+                    f"（第 {shown} 行{more}），导入后这些格会是空值。"
+                    f"请在 Excel/WPS 里打开该文件、确认这列显示的是计算结果后另存，再重新导入。"
+                )
+        return out
+
+    formula_warnings = _collect_formula_warnings()
 
     preview_items = []
     new_skus = []
@@ -6055,6 +6099,7 @@ async def preview_import_excel(
         total_missing=total_missing,
         is_batch_mode=is_batch_mode,
         new_contacts=sorted(new_contacts_set),
+        formula_warnings=formula_warnings,
         message=f'[{mode_label}] 共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条'
                 + duplicate_msg
                 + (f'，有 {total_missing} 个SKU不在导入文件中' if total_missing > 0 else '')

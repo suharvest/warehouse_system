@@ -271,6 +271,10 @@ class ExcelImportPreviewResponse(BaseModel):
     message: str
     is_batch_mode: bool = False            # Excel 是否包含批次列
     new_contacts: List[str] = []           # 将自动创建的联系方名称
+    # 公式未求值告警。openpyxl 取的是公式的**缓存结果**，文件若没被 Excel/WPS
+    # 计算保存过，缓存为空 → 该格读成 None → 静默变空值。不提示的话，客户只会
+    # 看到"库位莫名其妙全没了"，无从判断是自己文件的问题。
+    formula_warnings: List[str] = []
 
 
 class ExcelImportConfirm(BaseModel):

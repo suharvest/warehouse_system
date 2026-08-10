@@ -114,3 +114,21 @@
 .agg-toggle__label {
     font-weight: 500;
 }
+
+/* 导入预览：公式未求值告警。
+ * 必须比 .info-banner 显眼——它提示的后果是"该列导入后会变成空值"，
+ * 客户如果略过它，会在导入完成后才发现库位没了，那时已经要走数据修复。 */
+.warning-banner {
+    margin-bottom: 12px;
+    padding: 10px 14px;
+    border: 1px solid #f59e0b;
+    border-left-width: 4px;
+    border-radius: 6px;
+    background: #fffbeb;
+    color: #92400e;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.warning-banner > div + div {
+    margin-top: 4px;
+}
