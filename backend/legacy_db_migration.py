@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -226,12 +225,31 @@ def _rebuild_with_named_unique(
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
     col_list = ", ".join(f'"{c}"' for c in cols)
 
+    # ``DROP TABLE`` takes the table's indexes and triggers with it, and the
+    # rebuilt table only carries what the CREATE statement declares. Capture
+    # everything sqlite_master holds for this table so we can put it back.
+    # ``sql IS NOT NULL`` filters out the implicit ``sqlite_autoindex_*``
+    # entries, which cannot (and must not) be re-issued by hand.
+    attached = [
+        row[0]
+        for row in conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",
+            (table,),
+        )
+    ]
+
+    # A previous run may have died between CREATE and RENAME, leaving the
+    # scratch table behind; without this the retry fails on "already exists".
+    conn.execute(f'DROP TABLE IF EXISTS "{tmp_table}"')
     conn.execute(new_sql)
     conn.execute(
         f'INSERT INTO "{tmp_table}" ({col_list}) SELECT {col_list} FROM "{table}"'
     )
     conn.execute(f'DROP TABLE "{table}"')
     conn.execute(f'ALTER TABLE "{tmp_table}" RENAME TO "{table}"')
+    for stmt in attached:
+        conn.execute(stmt)
     return True
 
 
@@ -274,12 +292,33 @@ def migrate(
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup = db_path.with_suffix(db_path.suffix + f".bak.legacy_migrate_{ts}")
-    shutil.copy2(db_path, backup)
+    # The app opens SQLite in WAL mode (backend/database.py), so committed
+    # transactions can still live in ``<db>-wal`` instead of the .db file --
+    # a container that died before a checkpoint leaves them there. Copying
+    # only the .db would then produce a backup that silently lacks recent
+    # data, and on a young WAL it can lack whole tables. The sqlite3 backup
+    # API reads through the WAL and writes one consistent snapshot.
+    src = sqlite3.connect(str(db_path))
+    try:
+        dst = sqlite3.connect(str(backup))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
     log(f"[ok] backup -> {backup}")
 
     changes: list[str] = []
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = OFF")
+    # One explicit transaction around the whole migration. Python's sqlite3
+    # only opens an implicit transaction for DML, so bare DDL (CREATE/DROP/
+    # ALTER during a table rebuild) would otherwise autocommit one statement at
+    # a time and a crash mid-run could leave the DB in a shape no later run
+    # knows how to finish. ``PRAGMA foreign_keys`` is deliberately set before
+    # BEGIN -- it is a no-op inside a transaction.
+    conn.execute("BEGIN")
     try:
         # Seed defaults column-by-column: ``tenants``/``warehouses`` declare
         # ``slug NOT NULL``, so a fixed 3-column INSERT blows up on a legacy DB
@@ -368,6 +407,11 @@ def migrate(
             changes.append(f"stamped alembic_version -> {INITIAL_SCHEMA_REVISION}")
             log(f"[ok] stamped alembic_version -> {INITIAL_SCHEMA_REVISION}")
         conn.commit()
+    except BaseException:
+        # Roll the whole thing back rather than leaving a half-migrated schema
+        # behind. The caller turns this into a refusal to start.
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
