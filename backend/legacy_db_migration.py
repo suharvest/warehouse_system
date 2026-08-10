@@ -73,6 +73,10 @@ BATCH_SYNTHESIS_REVISION = "d6e7f8a9b0c1"
 # reconciled by hand and the divergence is known to be acceptable.
 ALLOW_AMBIGUOUS_ENV = "ALLOW_AMBIGUOUS_BATCH_MIGRATION"
 
+# Operator override for the warehouse the legacy rows get backfilled into,
+# for DBs where the bridge cannot decide on its own.
+TARGET_WAREHOUSE_ENV = "LEGACY_MIGRATE_WAREHOUSE_ID"
+
 # Same strict-whitelist parsing as ``AUTO_MIGRATE_LEGACY_DB`` in app.py: an
 # unrecognised value is a hard error, never a silent "off" (or "on").
 _ENV_ON_VALUES = ("1", "true", "yes", "on", "enable", "enabled")
@@ -200,29 +204,130 @@ def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def _default_warehouse_id(conn: sqlite3.Connection) -> int | None:
+def _warehouse_rows(conn: sqlite3.Connection) -> list[tuple[int, str, int]]:
+    """``(id, name, is_default)`` for every warehouse, lowest id first."""
+    cols = _table_cols(conn, "warehouses")
+    name_col = "name" if "name" in cols else "id"
+    if "is_default" in cols:
+        sql = (
+            f"SELECT id, {name_col}, COALESCE(is_default, 0) FROM warehouses "
+            "ORDER BY id ASC"
+        )
+    else:
+        sql = f"SELECT id, {name_col}, 0 FROM warehouses ORDER BY id ASC"
+    return [(int(r[0]), str(r[1]), int(r[2])) for r in conn.execute(sql)]
+
+
+def _format_warehouse_candidates(rows: list[tuple[int, str, int]]) -> str:
+    return "".join(
+        f"    - id={wid} name={name!r}"
+        + (" (is_default=1)" if is_default else "")
+        + "\n"
+        for wid, name, is_default in rows
+    )
+
+
+def _explicit_target_warehouse_id(conn: sqlite3.Connection) -> int | None:
+    """``LEGACY_MIGRATE_WAREHOUSE_ID`` if set — validated against the DB."""
+    raw = os.environ.get(TARGET_WAREHOUSE_ENV)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        wanted = int(raw.strip())
+    except ValueError:
+        raise LegacyMigrationAmbiguity(
+            f"{TARGET_WAREHOUSE_ENV}={raw!r} is not an integer warehouse id. "
+            "Nothing was migrated."
+        ) from None
+    if not _table_exists(conn, "warehouses"):
+        raise LegacyMigrationAmbiguity(
+            f"{TARGET_WAREHOUSE_ENV}={wanted} was requested, but this DB has "
+            "no 'warehouses' table at all. Restore it (or drop the variable) "
+            "before migrating."
+        )
+    rows = _warehouse_rows(conn)
+    if wanted not in {wid for wid, _n, _d in rows}:
+        raise LegacyMigrationAmbiguity(
+            f"{TARGET_WAREHOUSE_ENV}={wanted} does not exist in 'warehouses'. "
+            "Known warehouses:\n" + (_format_warehouse_candidates(rows) or
+                                     "    (table is empty)\n")
+        )
+    return wanted
+
+
+def _resolve_target_warehouse_id(
+    conn: sqlite3.Connection, *, log: Callable[[str], None] = print
+) -> int | None:
     """Id of the warehouse legacy rows semantically belong to.
 
     The legacy schema has no warehouse concept at all: every row predates the
     split, so it belongs to the single warehouse the deployment actually has.
-    Prefer the one flagged ``is_default``, else the lowest id. Returns None
-    when there is no ``warehouses`` table or it is empty (nothing to point
-    at — the caller then skips the backfill rather than inventing an id).
 
-    Deliberately queried instead of hardcoded to 1: the bridge only seeds
-    id=1 when the table is empty, and a legacy DB may already carry a default
-    warehouse row with a different id.
+    Resolution order:
+
+    1. ``LEGACY_MIGRATE_WAREHOUSE_ID`` when set — validated to exist first.
+    2. the single row flagged ``is_default``.
+    3. the single row, when the table has exactly one.
+
+    Anything else is ambiguous and raises rather than picking arbitrarily.
+    The old ``ORDER BY is_default DESC, id ASC LIMIT 1`` silently took *a* row
+    when several carried ``is_default = 1``; which warehouse the entire legacy
+    stock lands in is not a tie-break we get to make.
+
+    Returns None only when there is no ``warehouses`` table or it is empty —
+    the caller turns that into a refusal if any row still needs backfilling.
     """
+    explicit = _explicit_target_warehouse_id(conn)
+    if explicit is not None:
+        log(f"[ok] {TARGET_WAREHOUSE_ENV}={explicit} — backfilling to it")
+        return explicit
+
     if not _table_exists(conn, "warehouses"):
         return None
-    cols = _table_cols(conn, "warehouses")
-    if "is_default" in cols:
-        row = conn.execute(
-            "SELECT id FROM warehouses ORDER BY is_default DESC, id ASC LIMIT 1"
+    rows = _warehouse_rows(conn)
+    if not rows:
+        return None
+
+    defaults = [r for r in rows if r[2]]
+    if len(defaults) == 1:
+        return defaults[0][0]
+    if len(defaults) > 1:
+        raise LegacyMigrationAmbiguity(
+            f"Refusing to migrate: {len(defaults)} warehouses are flagged "
+            "is_default=1, so which one the legacy stock belongs to is "
+            "undecidable:\n"
+            + _format_warehouse_candidates(defaults)
+            + f"Pick one explicitly with {TARGET_WAREHOUSE_ENV}=<id> (or fix "
+            "the is_default flags), then re-run. Nothing was written."
+        )
+    if len(rows) == 1:
+        return rows[0][0]
+    raise LegacyMigrationAmbiguity(
+        f"Refusing to migrate: 'warehouses' holds {len(rows)} rows and none "
+        "is flagged is_default, so which one the legacy stock belongs to is "
+        "undecidable:\n"
+        + _format_warehouse_candidates(rows)
+        + f"Pick one explicitly with {TARGET_WAREHOUSE_ENV}=<id> (or set "
+        "is_default on the right row), then re-run. Nothing was written."
+    )
+
+
+def _tables_with_null_warehouse_id(
+    conn: sqlite3.Connection, tables: list[str]
+) -> list[tuple[str, int]]:
+    """``(table, row_count)`` for tables still carrying NULL ``warehouse_id``."""
+    pending: list[tuple[str, int]] = []
+    for table in tables:
+        if not _table_exists(conn, table):
+            continue
+        if "warehouse_id" not in _table_cols(conn, table):
+            continue
+        (n,) = conn.execute(
+            f'SELECT COUNT(*) FROM "{table}" WHERE warehouse_id IS NULL'
         ).fetchone()
-    else:
-        row = conn.execute("SELECT id FROM warehouses ORDER BY id ASC LIMIT 1").fetchone()
-    return int(row[0]) if row else None
+        if n:
+            pending.append((table, int(n)))
+    return pending
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -664,16 +769,33 @@ def migrate(
         # still be in the DB but invisible in the UI. Legacy rows predate the
         # warehouse split, so they belong to the single default warehouse.
         # Only NULL rows are touched, so re-runs are no-ops.
-        default_wh = _default_warehouse_id(conn)
+        default_wh = _resolve_target_warehouse_id(conn, log=log)
         wh_tables = [
             t for t, patches in LEGACY_TABLE_PATCHES.items()
             if any(c == "warehouse_id" for c, _ in patches)
         ]
         if default_wh is None:
-            log(
-                "[warn] no warehouses row found -- skipping warehouse_id "
-                "backfill; rows may be invisible to warehouse-scoped queries"
-            )
+            # The seed step above already tried to create a default warehouse.
+            # Still nothing to point at means the table is missing or could not
+            # be seeded. Carrying on would leave warehouse_id NULL on every
+            # row, and NULL matches neither ``warehouse_id = <id>`` nor
+            # ``warehouse_id IN (...)`` in backend/deps.py -- the data would be
+            # in the DB but invisible in the UI. That is exactly the bug this
+            # backfill exists to prevent, so refuse instead of degrading.
+            pending = _tables_with_null_warehouse_id(conn, wh_tables)
+            if pending:
+                raise LegacyMigrationAmbiguity(
+                    "Refusing to migrate: no default warehouse could be "
+                    "determined ('warehouses' is missing or empty and seeding "
+                    "it did not work), but "
+                    + ", ".join(f"{t} ({n} row(s))" for t, n in pending)
+                    + " still need warehouse_id filled in. Leaving them NULL "
+                    "would hide the data from every warehouse-scoped query in "
+                    "backend/deps.py.\nCreate the warehouse row (or point at "
+                    f"an existing one with {TARGET_WAREHOUSE_ENV}=<id>), then "
+                    "re-run. Nothing was written."
+                )
+            log("[ok] no warehouse_id backfill needed")
         else:
             for table in wh_tables:
                 if not _table_exists(conn, table):

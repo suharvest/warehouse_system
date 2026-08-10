@@ -1196,3 +1196,143 @@ def test_override_env_default_is_off(monkeypatch):
     assert mod.allow_ambiguous_batch_migration() is False
     monkeypatch.setenv("ALLOW_AMBIGUOUS_BATCH_MIGRATION", "off")
     assert mod.allow_ambiguous_batch_migration() is False
+
+
+# --------------------------------------------------------------------------
+# 12. missing / ambiguous default warehouse -> refuse, never stamp NULLs
+# --------------------------------------------------------------------------
+def test_missing_warehouses_table_refuses_instead_of_leaving_nulls(legacy_db):
+    """Dropping ``warehouses`` used to downgrade to a warning + NULL columns."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("DROP TABLE warehouses")
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    msg = str(exc.value)
+    assert "no default warehouse could be determined" in msg
+    assert "materials" in msg
+    assert "LEGACY_MIGRATE_WAREHOUSE_ID" in msg
+    # Whole migration rolled back: the schema patch is not half-applied.
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_missing_warehouses_table_refuses_at_startup(legacy_db):
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("DROP TABLE warehouses")
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity):
+        _recover(path)
+
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def _insert_warehouse(path: Path, wid: int, slug: str, is_default: int) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "INSERT INTO warehouses (id, slug, name, is_default, tenant_id) "
+            "VALUES (?, ?, ?, ?, 1)",
+            (wid, slug, slug, is_default),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_two_default_warehouses_refuse_and_list_candidates(legacy_db):
+    """``ORDER BY is_default DESC`` used to pick an arbitrary one of them."""
+    path, _ = legacy_db
+    _insert_warehouse(path, 3, "north", 1)
+    _insert_warehouse(path, 4, "south", 1)
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    msg = str(exc.value)
+    assert "2 warehouses are flagged is_default=1" in msg
+    assert "id=3" in msg and "'north'" in msg
+    assert "id=4" in msg and "'south'" in msg
+    assert "LEGACY_MIGRATE_WAREHOUSE_ID" in msg
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_explicit_warehouse_id_resolves_the_ambiguity(legacy_db, monkeypatch):
+    path, _ = legacy_db
+    _insert_warehouse(path, 3, "north", 1)
+    _insert_warehouse(path, 4, "south", 1)
+    monkeypatch.setenv("LEGACY_MIGRATE_WAREHOUSE_ID", "4")
+
+    import legacy_db_migration as mod
+
+    result = mod.migrate(path, log=lambda _m: None)
+
+    assert result.changed
+    assert _null_warehouse_counts(path) == {t: 0 for t in _WAREHOUSE_SCOPED}
+    assert _distinct_warehouse_ids(path, "materials") == [4]
+    assert _distinct_warehouse_ids(path, "inventory_records") == [4]
+
+
+def test_explicit_warehouse_id_must_exist(legacy_db, monkeypatch):
+    path, _ = legacy_db
+    monkeypatch.setenv("LEGACY_MIGRATE_WAREHOUSE_ID", "99")
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    assert "does not exist in 'warehouses'" in str(exc.value)
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_explicit_warehouse_id_must_be_an_integer(legacy_db, monkeypatch):
+    path, _ = legacy_db
+    monkeypatch.setenv("LEGACY_MIGRATE_WAREHOUSE_ID", "main")
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity, match="not an integer"):
+        mod.migrate(path, log=lambda _m: None)
+
+
+def test_several_warehouses_without_a_default_are_ambiguous(legacy_db):
+    path, _ = legacy_db
+    _insert_warehouse(path, 3, "north", 0)
+    _insert_warehouse(path, 4, "south", 0)
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    assert "holds 2 rows and none is flagged is_default" in str(exc.value)
+
+
+def test_single_warehouse_without_default_flag_is_used(legacy_db):
+    path, _ = legacy_db
+    _insert_warehouse(path, 5, "only", 0)
+
+    import legacy_db_migration as mod
+
+    mod.migrate(path, log=lambda _m: None)
+
+    assert _distinct_warehouse_ids(path, "materials") == [5]
