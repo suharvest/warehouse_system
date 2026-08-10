@@ -7048,7 +7048,7 @@ def _migrate_legacy_db_or_refuse(eng) -> None:
     try:
         result = mod.migrate(db_path, log=lambda m: logger.warning("  %s", m))
         backup_path = result.backup_path
-    except mod.LegacyMigrationAmbiguity:
+    except (mod.LegacyMigrationAmbiguity, mod.LegacySchemaMismatch):
         # A refusal, not a failure: surface it verbatim rather than dressing it
         # up as "auto-migration FAILED" (the DB was rolled back / untouched).
         raise

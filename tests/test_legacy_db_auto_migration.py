@@ -790,9 +790,16 @@ def test_without_rowid_table_is_skipped_not_corrupted(legacy_db):
     conn = sqlite3.connect(str(path))
     try:
         conn.execute("DROP TABLE erp_providers")
+        # Full 1826e23835b6 column set (plus a local extra) so the table stays
+        # equivalent to the revision being stamped -- the point of this test is
+        # the WITHOUT ROWID skip, not a schema mismatch.
         conn.execute(
             "CREATE TABLE erp_providers ("
-            "id INTEGER PRIMARY KEY, provider_name TEXT UNIQUE NOT NULL, "
+            "id INTEGER NOT NULL PRIMARY KEY, name TEXT, "
+            "provider_name TEXT UNIQUE NOT NULL, class_name TEXT, "
+            "filename TEXT, config TEXT, test_results TEXT, "
+            "test_passed_at TIMESTAMP, is_active INTEGER, "
+            "created_at TIMESTAMP, updated_at TIMESTAMP, "
             "note TEXT DEFAULT 'must be UNIQUE') WITHOUT ROWID"
         )
         conn.execute(
@@ -1035,7 +1042,10 @@ def _synthesised_batches(path: Path) -> list[str]:
 def _stamped_revision(path: Path) -> str | None:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
-        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        try:
+            row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        except sqlite3.OperationalError:
+            return None  # table absent -> nothing was ever stamped
         return row[0] if row else None
     finally:
         conn.close()
@@ -1472,3 +1482,155 @@ def test_rebuild_rejects_a_dropped_foreign_key(legacy_db):
             _rebuild_erp(_MangledConn(conn, mangle), mod)
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# 14. stamping asserts equivalence with the target revision
+# --------------------------------------------------------------------------
+def _retype_column(path: Path, table: str, column: str, new_type: str) -> None:
+    """Rebuild ``table`` with ``column`` re-declared as ``new_type``."""
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        info = list(conn.execute(f"PRAGMA table_info({table})"))
+        defs = []
+        for _cid, name, ctype, notnull, dflt, pk in info:
+            piece = f'"{name}" {new_type if name == column else (ctype or "TEXT")}'
+            if pk:
+                piece += " PRIMARY KEY"
+            elif notnull:
+                piece += " NOT NULL"
+            if dflt is not None:
+                piece += f" DEFAULT {dflt}"
+            defs.append(piece)
+        cols = ", ".join(f'"{r[1]}"' for r in info)
+        conn.execute(f'CREATE TABLE "{table}__t" ({", ".join(defs)})')
+        conn.execute(f'INSERT INTO "{table}__t" ({cols}) SELECT {cols} FROM "{table}"')
+        conn.execute(f'DROP TABLE "{table}"')
+        conn.execute(f'ALTER TABLE "{table}__t" RENAME TO "{table}"')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_reference_schema_is_built_from_the_real_migrations(legacy_db):
+    import legacy_db_migration as mod
+
+    ref = mod.reference_schema(INITIAL_SCHEMA_REVISION)
+
+    assert ref["users"]["tenant_id"].upper().startswith("INTEGER")
+    assert "warehouse_id" in ref["materials"]
+    assert "reason" in ref["inventory_records"]
+    # Cached: a second call must not rebuild anything.
+    assert mod.reference_schema(INITIAL_SCHEMA_REVISION) is ref
+
+
+def test_declared_type_families_tolerate_legacy_affinities():
+    """Old bootstraps wrote bare affinities; those are not a mismatch."""
+    import legacy_db_migration as mod
+
+    same = [
+        ("VARCHAR(64)", "TEXT"),
+        ("JSON", "TEXT"),
+        ("BOOLEAN", "INTEGER"),
+        ("DATETIME", "TIMESTAMP"),
+    ]
+    for a, b in same:
+        assert mod._type_family(a) == mod._type_family(b), (a, b)
+    assert mod._type_family("INTEGER") != mod._type_family("TEXT")
+
+
+def test_incompatible_column_type_refuses_the_stamp(legacy_db):
+    """Same column name, wrong type -> the stamp would be a lie."""
+    path, _ = legacy_db
+    _retype_column(path, "materials", "quantity", "TEXT")
+    before = _md5(path)
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacySchemaMismatch) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    msg = str(exc.value)
+    assert "incompatible column types" in msg
+    assert "materials.quantity" in msg
+    assert "expected INTEGER" in msg and "actual TEXT" in msg
+    assert _md5(path) == before, "the migration must roll back entirely"
+    assert "tenant_id" not in _cols(path, "users")
+    assert _stamped_revision(path) is None
+
+
+def test_missing_column_refuses_the_stamp(legacy_db):
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        _rebuild_legacy_shape(conn, "materials", ["location"], "sku")
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacySchemaMismatch) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    assert "columns missing locally" in str(exc.value)
+    assert "materials.location" in str(exc.value)
+
+
+def test_orphan_foreign_key_rows_refuse_the_stamp(legacy_db):
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute(
+            "INSERT INTO batch_consumptions (id, record_id, batch_id, quantity) "
+            "VALUES (1, 4242, 4243, 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _md5(path)
+
+    import legacy_db_migration as mod
+
+    with pytest.raises(mod.LegacySchemaMismatch) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    msg = str(exc.value)
+    assert "orphan foreign-key rows" in msg
+    assert "batch_consumptions" in msg
+    assert _md5(path) == before
+    assert "tenant_id" not in _cols(path, "users")
+
+
+def test_extra_local_columns_only_warn(legacy_db):
+    """A legacy deployment's own extra column must not block the migration."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("ALTER TABLE materials ADD COLUMN local_note TEXT")
+        conn.commit()
+    finally:
+        conn.close()
+
+    import legacy_db_migration as mod
+
+    logs: list[str] = []
+    result = mod.migrate(path, log=logs.append)
+
+    assert result.changed
+    assert any("materials.local_note" in m for m in logs if m.startswith("[warn]")), logs
+    assert "tenant_id" in _cols(path, "users")
+
+
+def test_equivalence_check_passes_on_the_plain_fixture(legacy_db):
+    """The happy path must not trip the new gate."""
+    path, before = legacy_db
+
+    _recover(path)
+    alembic_command.upgrade(_alembic_cfg(), "head")
+
+    assert _counts(path) == before
+    assert _null_warehouse_counts(path) == {t: 0 for t in _WAREHOUSE_SCOPED}
