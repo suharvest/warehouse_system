@@ -52,6 +52,7 @@ This module is the single implementation. Two entry points wrap it:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sqlite3
@@ -220,6 +221,21 @@ class MigrationResult:
     def changed(self) -> bool:
         """True when the run actually altered the schema/data (not a no-op)."""
         return bool(self.changes)
+
+
+def _file_digest(path: Path, chunk: int = 1 << 20) -> str:
+    """SHA-256 of a file, used to prove a rollback left the DB untouched.
+
+    Deliberately not compared against the backup: ``sqlite3.Connection.backup``
+    writes a logically equivalent but not byte-identical file (page layout and
+    freelist differ), so only the DB against its own earlier self is a valid
+    test.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -936,7 +952,7 @@ def migrate(
     # the caller left the two CLI paths able to walk straight past it.
     assert_auto_migration_unambiguous(db_path, log=log)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup = db_path.with_suffix(db_path.suffix + f".bak.legacy_migrate_{ts}")
     # The app opens SQLite in WAL mode (backend/database.py), so committed
     # transactions can still live in ``<db>-wal`` instead of the .db file --
@@ -954,6 +970,7 @@ def migrate(
     finally:
         src.close()
     log(f"[ok] backup -> {backup}")
+    digest_before = _file_digest(db_path)
 
     changes: list[str] = []
     conn = sqlite3.connect(str(db_path))
@@ -1149,9 +1166,24 @@ def migrate(
         # Roll the whole thing back rather than leaving a half-migrated schema
         # behind. The caller turns this into a refusal to start.
         conn.rollback()
+        conn.close()
+        # A refusal that rolled back cleanly leaves the DB byte-identical to
+        # the backup, so the backup carries no information -- and a container
+        # restart-looping into this refusal would drop a fresh full-size copy
+        # into the volume every few seconds until the disk fills. Only drop it
+        # once the rollback is proven complete; if the two differ, something
+        # did land on disk and the backup is the only way back.
+        try:
+            if backup.exists() and _file_digest(db_path) == digest_before:
+                backup.unlink()
+        except OSError as exc:  # pragma: no cover - best effort cleanup
+            log(f"[warn] could not remove the unused backup {backup}: {exc}")
         raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # pragma: no cover - already closed on the error path
+            pass
 
     log(
         "[done] run `alembic upgrade head` (or restart the container) to "
