@@ -6828,6 +6828,135 @@ async def add_inventory_record(
 _INITIAL_SCHEMA_REVISION = "1826e23835b6"
 
 
+def _auto_migrate_legacy_enabled() -> bool:
+    """Opt-out switch for the startup legacy-DB auto-migration.
+
+    Defaults to ON. Ops can set ``AUTO_MIGRATE_LEGACY_DB`` to a falsy value
+    (``0``/``false``/``no``/``off``) to restore the previous refuse-to-start
+    behaviour when they'd rather inspect the DB by hand first.
+    """
+    raw = os.environ.get("AUTO_MIGRATE_LEGACY_DB")
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _legacy_auto_migrate_blockers(eng) -> list[str]:
+    """Reasons the legacy DB must NOT be auto-migrated (empty list = go ahead).
+
+    All three conditions must hold:
+
+    * ``DEPLOY_MODE == single_tenant`` — under multi-tenant, what tenant_id to
+      backfill is a business decision we cannot guess.
+    * the DB is SQLite — the migration is a sqlite3 implementation.
+    * ``AUTO_MIGRATE_LEGACY_DB`` not explicitly disabled.
+    """
+    blockers: list[str] = []
+    mode = get_deploy_mode()
+    if mode != "single_tenant":
+        blockers.append(
+            f"DEPLOY_MODE={mode!r} (auto-migration only runs in "
+            "'single_tenant'; the tenant_id backfill value is a business "
+            "decision under multi-tenant)"
+        )
+    if eng.url.get_backend_name() != "sqlite":
+        blockers.append(
+            f"database backend is {eng.url.get_backend_name()!r} "
+            "(auto-migration is SQLite-only)"
+        )
+    if not _auto_migrate_legacy_enabled():
+        blockers.append(
+            "AUTO_MIGRATE_LEGACY_DB is disabled via environment variable"
+        )
+    return blockers
+
+
+def _legacy_migration_module():
+    """Import the shared migration module under either import layout.
+
+    ``run_backend.py`` puts ``backend/`` on ``sys.path`` (bare import works);
+    tests and the ``python -m backend.legacy_db_migration`` CLI import it as a
+    package member.
+    """
+    try:
+        import legacy_db_migration  # type: ignore
+        return legacy_db_migration
+    except ImportError:  # pragma: no cover - packaged import path
+        from backend import legacy_db_migration  # type: ignore
+        return legacy_db_migration
+
+
+def _migrate_legacy_db_or_refuse(eng) -> None:
+    """Auto-migrate a pre-multi-tenant SQLite DB, or refuse to start.
+
+    Refusal (and any failure of the migration itself) is fatal on purpose: a
+    half-migrated DB is far more dangerous than a container that won't boot.
+    """
+    blockers = _legacy_auto_migrate_blockers(eng)
+    if blockers:
+        raise RuntimeError(
+            "Legacy DB detected: users.tenant_id is missing. This DB "
+            "pre-dates the multi-tenant schema. Automatic migration was NOT "
+            "attempted because:\n"
+            + "".join(f"  - {b}\n" for b in blockers)
+            + "Migrate manually (the script backs up the DB first), from the "
+            "host repo root:\n"
+            "  uv run python scripts/migrate_legacy_db.py "
+            "/path/to/warehouse.db\n"
+            "or from inside the container (WORKDIR /app):\n"
+            "  /app/.venv/bin/python -m backend.legacy_db_migration "
+            "/data/warehouse.db\n"
+            "then restart. Under multi_tenant, decide and set the tenant "
+            "mapping yourself before running it.\n"
+            f"DB url: {eng.url}"
+        )
+
+    db_path = eng.url.database
+    if not db_path:
+        raise RuntimeError(
+            "Legacy DB detected: users.tenant_id is missing, but the SQLite "
+            f"URL carries no file path (url={eng.url}). Cannot auto-migrate."
+        )
+
+    mod = _legacy_migration_module()
+    # Drop any pooled/open handles before the migration rewrites tables.
+    eng.dispose()
+
+    logger.warning(
+        "Legacy DB detected (users.tenant_id missing) at %s. "
+        "AUTO_MIGRATE_LEGACY_DB is enabled and DEPLOY_MODE=single_tenant — "
+        "running the legacy migration now.",
+        db_path,
+    )
+    backup_path = None
+    try:
+        result = mod.migrate(db_path, log=lambda m: logger.warning("  %s", m))
+        backup_path = result.backup_path
+    except Exception as exc:
+        hint = (
+            f" A pre-migration backup was written to {backup_path}."
+            if backup_path
+            else " The pre-migration backup (if any) sits next to "
+            f"{db_path} as *.bak.legacy_migrate_*."
+        )
+        raise RuntimeError(
+            f"Legacy DB auto-migration FAILED for {db_path}: {exc}."
+            f"{hint} Refusing to start with a possibly half-migrated DB. "
+            "Restore the backup and migrate manually with "
+            "`python -m backend.legacy_db_migration <db>`."
+        ) from exc
+
+    logger.warning(
+        "Legacy DB auto-migration complete. Detected pre-multi-tenant schema "
+        "(users.tenant_id missing); backup written to %s; schema stamped to "
+        "alembic revision %s. Changes applied: %s. "
+        "`alembic upgrade head` will now apply the remaining migrations.",
+        result.backup_path,
+        result.revision,
+        "; ".join(result.changes) or "(none — already migrated)",
+    )
+
+
 def _recover_legacy_alembic_state(cfg) -> None:
     """Auto-recover when ``alembic_version`` is empty but business tables exist.
 
@@ -6846,10 +6975,11 @@ def _recover_legacy_alembic_state(cfg) -> None:
         ``1826e23835b6`` (face_auth_logs present, users has tenant_id) → stamp
         to ``1826e23835b6`` so subsequent incremental migrations apply.
       * If business tables exist but pre-multi-tenant (users missing
-        ``tenant_id``) → refuse to start with an actionable error pointing at
-        the manual migration script. We do NOT silently ALTER tables here; the
-        backfill needs a default tenant_id value which is a deployment-level
-        decision.
+        ``tenant_id``) → auto-run ``legacy_db_migration.migrate`` when it is
+        provably safe (single-tenant deployment + SQLite + not opted out),
+        after taking a backup. Otherwise refuse to start with an actionable
+        error: outside single-tenant the backfill needs a default tenant_id
+        value which is a deployment-level decision we must not guess.
     """
     from sqlalchemy import inspect as sa_inspect
     eng = get_engine()
@@ -6871,17 +7001,8 @@ def _recover_legacy_alembic_state(cfg) -> None:
     if "users" in tables:
         user_cols = {c["name"] for c in insp.get_columns("users")}
         if "tenant_id" not in user_cols:
-            raise RuntimeError(
-                "Legacy DB detected: users.tenant_id is missing. This DB "
-                "pre-dates the multi-tenant schema and cannot be auto-"
-                "migrated. From the host run:\n"
-                "  uv run python scripts/migrate_legacy_db.py "
-                "/path/to/warehouse.db\n"
-                "or from inside the container:\n"
-                "  /app/.venv/bin/python /app/scripts/migrate_legacy_db.py "
-                "/data/warehouse.db\n"
-                f"DB url: {eng.url}"
-            )
+            _migrate_legacy_db_or_refuse(eng)
+            return
 
     if "face_auth_logs" not in tables:
         raise RuntimeError(
