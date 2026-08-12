@@ -1227,6 +1227,8 @@
                     <div id="erp-step-dot-4" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">4</div>
                     <div style="height: 2px; width: 40px; background: var(--border-color, #e5e7eb);"></div>
                     <div id="erp-step-dot-5" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">5</div>
+                    <div style="height: 2px; width: 40px; background: var(--border-color, #e5e7eb);"></div>
+                    <div id="erp-step-dot-6" style="width: 28px; height: 28px; border-radius: 50%; background: var(--border-color, #d1d5db); color: var(--text-muted, #6b7280); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0;">6</div>
                 </div>
 
                 <!-- Step 1: 上传文件 -->
@@ -1280,12 +1282,36 @@
                     <div class="form-error" id="erp-config-error" style="display:none;"></div>
                     <div style="display: flex; justify-content: space-between; margin-top: 16px;">
                         <button class="btn cancel-btn" data-action="wizardPrevStep" data-i18n="back">返回</button>
-                        <button class="btn confirm-btn" data-action="saveProviderConfig" data-i18n="erpUploadStep3">保存并测试</button>
+                        <button class="btn confirm-btn" data-action="saveProviderConfig" data-i18n="erpSaveAndProbe">保存并体检</button>
                     </div>
                 </div>
 
-                <!-- Step 3: Level 1 测试 -->
+                <!-- Step 3: 对端数据体检 -->
                 <div id="erp-wizard-step-3" style="display: none;">
+                    <h4 style="margin-bottom: 8px;" data-i18n="erpUploadStepProbe">对端数据体检</h4>
+                    <p style="margin: 0 0 16px; font-size: 13px; color: var(--text-muted, #6b7280);" data-i18n="erpProbeIntro">
+                        只读检查，不会写入任何数据。下一步的 Level 1 只检查返回值结构，不看内容——一个每次都查不到数据的 Provider 同样能通过 Level 1，所以先在这里确认对端真的查得出东西。
+                    </p>
+                    <div class="form-group">
+                        <label data-i18n="erpProbeSample">样本物料（对端系统里真实存在的名称或编码）</label>
+                        <input type="text" id="erp-probe-sample" placeholder="例如：撬具 或 P001">
+                        <div style="font-size: 12px; color: var(--text-muted, #9ca3af); margin-top: 4px;" data-i18n="erpProbeSampleHint">留空则只做目录探测，检查深度有限</div>
+                    </div>
+                    <div id="erp-probe-results" style="border: 1px solid var(--border-color, #e5e7eb); border-radius: 8px; padding: 16px; min-height: 60px;">
+                        <div style="color: var(--text-muted, #6b7280);" data-i18n="erpProbeIdle">点击「开始体检」运行检查</div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 16px;">
+                        <button class="btn cancel-btn" data-action="wizardPrevStep" data-i18n="back">返回</button>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn cancel-btn" id="erp-probe-skip-btn" data-action="erpProbeContinue" style="display:none;" data-i18n="erpProbeIgnore">忽略问题并继续</button>
+                            <button class="btn confirm-btn" id="erp-probe-run-btn" data-action="erpRunProbe" data-i18n="erpProbeRun">开始体检</button>
+                            <button class="btn confirm-btn" id="erp-probe-next-btn" data-action="erpProbeContinue" style="display:none;" data-i18n="erpProbeNext">下一步（Level 1 测试）</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 4: Level 1 测试 -->
+                <div id="erp-wizard-step-4" style="display: none;">
                     <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep3">Level 1 只读测试</h4>
                     <div id="erp-test1-results" style="border: 1px solid var(--border-color, #e5e7eb); border-radius: 8px; padding: 16px; min-height: 80px;">
                         <div style="color: var(--text-muted, #6b7280);" data-i18n="erpTestRunning">测试中...</div>
@@ -1296,8 +1322,8 @@
                     </div>
                 </div>
 
-                <!-- Step 4: Level 2 测试（可选） -->
-                <div id="erp-wizard-step-4" style="display: none;">
+                <!-- Step 5: Level 2 测试（可选） -->
+                <div id="erp-wizard-step-5" style="display: none;">
                     <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep4">Level 2 写操作测试（可选）</h4>
                     <div style="background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
                         <div style="font-weight: 600; color: #92400e; margin-bottom: 4px;" data-i18n="erpLevel2Warning">写操作测试会在目标 ERP 中产生真实数据</div>
@@ -1314,8 +1340,8 @@
                     </div>
                 </div>
 
-                <!-- Step 5: 结果 & 激活 -->
-                <div id="erp-wizard-step-5" style="display: none;">
+                <!-- Step 6: 结果 & 激活 -->
+                <div id="erp-wizard-step-6" style="display: none;">
                     <h4 style="margin-bottom: 16px;" data-i18n="erpUploadStep5">结果 & 激活</h4>
                     <div id="erp-wizard-summary"></div>
                     <div style="display: flex; justify-content: space-between; margin-top: 16px; align-items: center;">

@@ -28,7 +28,7 @@ import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFi
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
 import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
-import { erpProbeUsers, erpPasteJson, erpDoImport, loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults } from './features/erp.js';
+import { erpProbeUsers, erpPasteJson, erpDoImport, loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults, runProviderProbe, probeContinue } from './features/erp.js';
 import { fetchDeployMode, renderTenantsPanel, showAddTenantModal, closeAddTenantModal, handleAddTenant, showEditTenantModal, closeEditTenantModal, handleEditTenant, handleDeleteTenant, tenantsPrevPage, tenantsNextPage, getTenantModalsHTML, setTenantsPage } from './features/tenants.js';
 import {
     renderFaceRecognitionPanel, switchFaceSubTab, refreshFacePanel,
@@ -553,6 +553,8 @@ const actionHandlers = {
     'erpEdit': (el) => editProviderConfig(el.dataset.providerId),
     'erpRunTest1': (el) => runProviderTest(el.dataset.providerId, 1),
     'erpRunTest2': (el) => runProviderTest(el.dataset.providerId, 2),
+    'erpRunProbe': () => runProviderProbe(),
+    'erpProbeContinue': () => probeContinue(),
     'erpWizardRunLevel2': () => wizardRunLevel2(),
     'erpWizardGoToResults': () => wizardGoToResults(),
     'erpFileChanged': (el) => {

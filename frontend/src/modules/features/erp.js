@@ -648,14 +648,17 @@ export function closeUploadWizard() {
     if (modal) modal.classList.remove('show');
 }
 
+// 向导步骤：1 上传 → 2 配置 → 3 对端数据体检 → 4 Level 1 → 5 Level 2 → 6 结果
+const WIZARD_LAST_STEP = 6;
+
 function showWizardStep(step) {
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= WIZARD_LAST_STEP; i++) {
         const el = document.getElementById(`erp-wizard-step-${i}`);
         if (el) el.style.display = i === step ? '' : 'none';
     }
 
     // Update step indicator
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= WIZARD_LAST_STEP; i++) {
         const dot = document.getElementById(`erp-step-dot-${i}`);
         if (dot) {
             dot.style.background = i === step ? 'var(--primary-color, #3b82f6)' : (i < step ? '#22c55e' : 'var(--border-color, #d1d5db)');
@@ -665,7 +668,7 @@ function showWizardStep(step) {
 }
 
 export function wizardNextStep() {
-    if (currentWizardStep < 5) {
+    if (currentWizardStep < WIZARD_LAST_STEP) {
         currentWizardStep++;
         showWizardStep(currentWizardStep);
     }
@@ -774,17 +777,117 @@ export async function saveProviderConfig() {
         wizardProviderName = name;
         if (configErr) configErr.style.display = 'none';
 
-        // Auto-run Level 1 test
+        // 进入对端数据体检（不自动跑，等用户填样本物料）
         currentWizardStep = 3;
         showWizardStep(3);
-        await runProviderTest(uploadedProviderId, 1);
+        resetProbeStep();
     } catch (error) {
         console.error('保存配置失败:', error);
         if (configErr) { configErr.textContent = error.data?.error || t('operationFailed'); configErr.style.display = 'block'; }
     }
 }
 
-// Steps 3-4: Run tests
+// ============ Step 3: 对端数据体检 ============
+
+const PROBE_STATUS_STYLE = {
+    pass: { color: '#16a34a', icon: '✓' },
+    fail: { color: '#dc2626', icon: '✗' },
+    warn: { color: '#d97706', icon: '!' },
+    skip: { color: '#9ca3af', icon: '–' },
+};
+
+function resetProbeStep() {
+    const results = document.getElementById('erp-probe-results');
+    if (results) {
+        results.innerHTML = `<div style="color: var(--text-muted, #6b7280);">${t('erpProbeIdle')}</div>`;
+    }
+    setBtnVisible('erp-probe-run-btn', true);
+    setBtnVisible('erp-probe-next-btn', false);
+    setBtnVisible('erp-probe-skip-btn', false);
+}
+
+function setBtnVisible(id, visible) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = visible ? '' : 'none';
+}
+
+export async function runProviderProbe() {
+    if (!uploadedProviderId) return;
+
+    const sample = document.getElementById('erp-probe-sample')?.value?.trim() || '';
+    const results = document.getElementById('erp-probe-results');
+    if (results) {
+        results.innerHTML = `<div style="color: var(--text-muted, #6b7280);">${t('erpProbeRunning')}</div>`;
+    }
+    setBtnVisible('erp-probe-run-btn', false);
+    setBtnVisible('erp-probe-next-btn', false);
+    setBtnVisible('erp-probe-skip-btn', false);
+
+    try {
+        const data = await erpFetch(`/erp/providers/${uploadedProviderId}/probe`, {
+            method: 'POST',
+            body: JSON.stringify({ sample })
+        });
+        renderProbeResults(data);
+
+        // 通过 → 主按钮走下一步；不通过 → 只留一个次要按钮，需要显式忽略
+        setBtnVisible('erp-probe-run-btn', true);
+        setBtnVisible('erp-probe-next-btn', data.all_passed === true);
+        setBtnVisible('erp-probe-skip-btn', data.all_passed !== true);
+
+        const idx = providers.findIndex(p => p.id === uploadedProviderId);
+        if (idx >= 0) {
+            if (!providers[idx].test_results) providers[idx].test_results = {};
+            providers[idx].test_results.probe = data;
+        }
+        return data.all_passed === true;
+    } catch (error) {
+        console.error('对端体检失败:', error);
+        if (results) {
+            results.innerHTML = `<div style="color: #dc2626;">${escapeHtml(error.data?.error || t('operationFailed'))}</div>`;
+        }
+        setBtnVisible('erp-probe-run-btn', true);
+        setBtnVisible('erp-probe-skip-btn', true);
+        return false;
+    }
+}
+
+function renderProbeResults(data) {
+    const results = document.getElementById('erp-probe-results');
+    if (!results) return;
+
+    const checks = data.checks || [];
+    const failed = checks.filter(c => c.status === 'fail').length;
+    const banner = data.all_passed
+        ? { color: '#16a34a', text: data.has_warning ? t('erpProbePassedWithWarning') : t('erpProbePassed') }
+        : { color: '#dc2626', text: t('erpProbeFailed').replace('{n}', failed) };
+
+    results.innerHTML = `
+        <div style="font-weight: 600; color: ${banner.color}; margin-bottom: 10px;">${banner.text}</div>
+        ${checks.map(c => {
+            const s = PROBE_STATUS_STYLE[c.status] || PROBE_STATUS_STYLE.skip;
+            return `
+            <div style="display: flex; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border-color, #e5e7eb);">
+                <span style="color: ${s.color}; font-weight: 700; flex-shrink: 0;">${s.icon}</span>
+                <div style="flex: 1; min-width: 0;">
+                    <div style="font-size: 13px; font-weight: 600;">
+                        ${escapeHtml(c.id)} ${escapeHtml(c.title)}
+                        ${c.latency_ms != null ? `<span style="font-weight: 400; font-size: 11px; color: var(--text-muted, #9ca3af); margin-left: 6px;">${c.latency_ms}ms</span>` : ''}
+                    </div>
+                    ${c.detail ? `<div style="font-size: 12px; color: var(--text-muted, #6b7280); margin-top: 2px; white-space: pre-wrap; word-break: break-word;">${escapeHtml(c.detail)}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('')}
+    `;
+}
+
+export async function probeContinue() {
+    currentWizardStep = 4;
+    showWizardStep(4);
+    if (uploadedProviderId) await runProviderTest(uploadedProviderId, 1);
+}
+
+// Steps 4-5: Run tests
 export async function runProviderTest(providerId, level) {
     const resultContainerId = level === 1 ? 'erp-test1-results' : 'erp-test2-results';
     const resultContainer = document.getElementById(resultContainerId);
@@ -854,8 +957,8 @@ export async function runProviderTest(providerId, level) {
 
 export async function wizardRunLevel2() {
     if (!uploadedProviderId) return;
-    currentWizardStep = 4;
-    showWizardStep(4);
+    currentWizardStep = 5;
+    showWizardStep(5);
     await runProviderTest(uploadedProviderId, 2);
     // Show "proceed to results" button after test completes
     const nextBtn = document.getElementById('erp-level2-next-btn');
@@ -863,8 +966,8 @@ export async function wizardRunLevel2() {
 }
 
 export async function wizardGoToResults() {
-    currentWizardStep = 5;
-    showWizardStep(5);
+    currentWizardStep = WIZARD_LAST_STEP;
+    showWizardStep(WIZARD_LAST_STEP);
     renderWizardResults();
 }
 
@@ -880,9 +983,30 @@ function renderWizardResults() {
             </div>
             <div style="font-size: 13px; color: var(--text-muted, #6b7280);">${t('erpUploadProvider')}: ${escapeHtml(wizardProviderName)}</div>
         </div>
+        ${renderProbeSummary(provider)}
     `;
     const activateBtn = document.getElementById('erp-wizard-activate-btn');
     if (activateBtn) activateBtn.disabled = !testPassed;
+}
+
+// Level 1 全绿不代表对端查得出数据，所以结果页要把体检结论一并摆出来，
+// 避免用户只看到「测试全部通过」就激活一个实际上查不到任何物料的 Provider。
+function renderProbeSummary(provider) {
+    const probe = provider?.test_results?.probe;
+    if (!probe) {
+        return `<div style="padding: 12px; border-radius: 8px; background: #fffbeb; border: 1px solid #fcd34d; font-size: 13px; color: #92400e;">
+            ${t('erpProbeNotRun')}
+        </div>`;
+    }
+    const failed = (probe.checks || []).filter(c => c.status === 'fail').length;
+    if (probe.all_passed) {
+        return `<div style="padding: 12px; border-radius: 8px; background: #f0fdf4; border: 1px solid #bbf7d0; font-size: 13px; color: #166534;">
+            ${probe.has_warning ? t('erpProbePassedWithWarning') : t('erpProbePassed')}
+        </div>`;
+    }
+    return `<div style="padding: 12px; border-radius: 8px; background: #fef2f2; border: 1px solid #fecaca; font-size: 13px; color: #991b1b;">
+        ${t('erpProbeFailed').replace('{n}', failed)}　${t('erpProbeFailedHint')}
+    </div>`;
 }
 
 export async function wizardActivate() {
