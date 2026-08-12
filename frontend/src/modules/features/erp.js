@@ -410,7 +410,7 @@ function renderProvidersTable() {
 }
 
 function getProviderTestStatus(p) {
-    if (!p.test_results) return 'not_run';
+    if (!p || !p.test_results) return 'not_run';
     const l1 = p.test_results.level1;
     if (!l1) return 'not_run';
     return l1.all_passed ? 'passed' : 'failed';
@@ -566,8 +566,14 @@ export async function deactivateProvider(providerId) {
     }
 }
 
+// data-action 的 dataset 值永远是字符串，而 providers[].id 是数字，
+// 直接用 === 比会永远找不到（「编辑」按钮曾因此完全失灵）。
+function findProvider(providerId) {
+    return providers.find(p => String(p.id) === String(providerId));
+}
+
 export async function deleteProvider(providerId) {
-    const provider = providers.find(p => p.id === providerId);
+    const provider = findProvider(providerId);
     const name = provider ? provider.name : providerId;
     if (!confirm(t('erpConfirmDelete').replace('{name}', name))) return;
 
@@ -581,7 +587,7 @@ export async function deleteProvider(providerId) {
 }
 
 export function editProviderConfig(providerId) {
-    const provider = providers.find(p => p.id === providerId);
+    const provider = findProvider(providerId);
     if (!provider) return;
 
     uploadedProviderId = providerId;
@@ -814,7 +820,7 @@ export async function runProviderTest(providerId, level) {
         }
 
         // Update provider test_results in local list (nested by level)
-        const idx = providers.findIndex(p => p.id === providerId);
+        const idx = providers.findIndex(p => String(p.id) === String(providerId));
         if (idx >= 0) {
             if (!providers[idx].test_results) providers[idx].test_results = {};
             providers[idx].test_results[`level${level}`] = data;
@@ -865,7 +871,7 @@ export async function wizardGoToResults() {
 function renderWizardResults() {
     const summary = document.getElementById('erp-wizard-summary');
     if (!summary) return;
-    const provider = providers.find(p => p.id === uploadedProviderId);
+    const provider = findProvider(uploadedProviderId);
     const testPassed = getProviderTestStatus(provider) === 'passed';
     summary.innerHTML = `
         <div style="padding: 16px; border-radius: 8px; background: ${testPassed ? '#f0fdf4' : '#fef2f2'}; border: 1px solid ${testPassed ? '#bbf7d0' : '#fecaca'}; margin-bottom: 16px;">
