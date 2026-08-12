@@ -344,6 +344,14 @@
     "tags": []
   },
   {
+    "method": "POST",
+    "name": "probe_erp_provider",
+    "path": "/api/erp/providers/{provider_id}/probe",
+    "response_model": null,
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "GET",
     "name": "get_erp_provider_status",
     "path": "/api/erp/providers/{provider_id}/status",

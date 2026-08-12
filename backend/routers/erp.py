@@ -1023,13 +1023,8 @@ _erp_router = ResourceRouter(
 _erp_router.register()
 
 
-@router.post("/api/erp/providers/{provider_id}/test")
-async def test_erp_provider(
-    provider_id: int,
-    level: int = Query(1, ge=1, le=2),
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
-):
-    """运行 Provider 连通性测试（level=1 只读，level=2 写操作）"""
+def _load_provider_row_for_run(provider_id: int, current_user: CurrentUser):
+    """取出 Provider 行 + 解析后的 config + 落盘路径，供 test / probe 共用。"""
     with get_engine().connect() as sa_conn:
         _r = sa_conn.execute(
             select(_t_erp_providers).where(_t_erp_providers.c.id == provider_id)
@@ -1044,24 +1039,22 @@ async def test_erp_provider(
     if isinstance(_cfg, (bytes, bytearray)):
         _cfg = _cfg.decode('utf-8')
     config = (_json.loads(_cfg) if _cfg else {}) if isinstance(_cfg, str) else (_cfg or {})
+
     custom_dir = _get_providers_custom_dir(tenant_id=row.get('tenant_id'))
     filepath = os.path.join(custom_dir, row['filename'])
-
     if not os.path.exists(filepath):
         raise HTTPException(status_code=400, detail=f"Provider 文件不存在: {row['filename']}")
 
-    from providers.test_runner import run_level1_tests, run_level2_tests
-    if level == 1:
-        test_result = run_level1_tests(filepath, config)
-    else:
-        test_result = run_level2_tests(filepath, config)
+    return row, config, filepath
 
-    # 存储测试结果（分级保存，L1 和 L2 独立存储）
+
+def _store_test_results(provider_id: int, key: str, payload: dict):
+    """把某一轮结果并进 test_results JSON，并按 level1 的通过情况刷新 test_passed_at。"""
     now_dt = datetime.now()
     with get_engine().begin() as sa_conn:
-        # 读取现有测试结果
         existing = sa_conn.execute(
-            select(_t_erp_providers.c.test_results).where(_t_erp_providers.c.id == provider_id)
+            select(_t_erp_providers.c.test_results)
+            .where(_t_erp_providers.c.id == provider_id)
         ).first()
         existing_tr = existing.test_results if existing else None
         if isinstance(existing_tr, (bytes, bytearray)):
@@ -1070,17 +1063,70 @@ async def test_erp_provider(
             all_results = _json.loads(existing_tr) if existing_tr else {}
         else:
             all_results = existing_tr if existing_tr else {}
-        all_results[f'level{level}'] = test_result
+        all_results[key] = payload
 
-        # L1 通过才更新 test_passed_at
         l1 = all_results.get('level1', {})
         test_passed_at = now_dt if l1.get('all_passed') else None
 
         sa_conn.execute(
             update(_t_erp_providers)
             .where(_t_erp_providers.c.id == provider_id)
-            .values(test_results=all_results, test_passed_at=test_passed_at, updated_at=now_dt)
+            .values(test_results=all_results, test_passed_at=test_passed_at,
+                    updated_at=now_dt)
         )
+
+
+class ProviderProbeRequest(BaseModel):
+    """对端数据体检请求。sample 为空时只做目录探测。"""
+    sample: str = Field(default="", max_length=200)
+
+
+@router.post("/api/erp/providers/{provider_id}/probe")
+async def probe_erp_provider(
+    provider_id: int,
+    payload: ProviderProbeRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
+):
+    """对端数据体检（只读）。
+
+    Level 1 测的是 Provider 返回值的**结构**——有没有约定的那几个 key，不看内容。
+    因此一个「每次查询都返回 not_found」的 Provider 照样能 Level 1 全绿：
+    失败响应里同样带 ``success``。本接口拿一个真实存在的样本物料走一遍只读链路，
+    确认对端真的能查出数据、且字段可用（名称非空、库存是数字）。
+
+    不写任何数据，可以在生产 ERP 上放心跑。
+    """
+    row, config, filepath = _load_provider_row_for_run(provider_id, current_user)
+
+    from providers.probe import run_probe
+    result = run_probe(filepath, config, payload.sample)
+
+    _store_test_results(provider_id, 'probe', result)
+
+    logger.info(
+        f"体检 ERP Provider: {row['provider_name']}，"
+        f"sample={payload.sample!r} all_passed={result['all_passed']}"
+    )
+    return result
+
+
+@router.post("/api/erp/providers/{provider_id}/test")
+async def test_erp_provider(
+    provider_id: int,
+    level: int = Query(1, ge=1, le=2),
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
+):
+    """运行 Provider 连通性测试（level=1 只读，level=2 写操作）"""
+    row, config, filepath = _load_provider_row_for_run(provider_id, current_user)
+
+    from providers.test_runner import run_level1_tests, run_level2_tests
+    if level == 1:
+        test_result = run_level1_tests(filepath, config)
+    else:
+        test_result = run_level2_tests(filepath, config)
+
+    # 存储测试结果（分级保存，L1 / L2 / probe 各占一个 key）
+    _store_test_results(provider_id, f'level{level}', test_result)
 
     logger.info(f"测试 ERP Provider: {row['provider_name']} L{level}，all_passed={test_result['all_passed']}")
     return test_result

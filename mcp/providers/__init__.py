@@ -37,7 +37,7 @@ def _discover():
     pkg_dir = os.path.dirname(__file__)
 
     # ── 扫描包内置模块（validator / test_runner 等辅助模块跳过）──
-    _skip_modules = {"base", "validator", "test_runner"}
+    _skip_modules = {"base", "validator", "test_runner", "probe"}
     for _, module_name, _ in pkgutil.iter_modules([pkg_dir]):
         if module_name in _skip_modules:
             continue
