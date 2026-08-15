@@ -464,6 +464,25 @@ def build_authorized_scope_predicates(table, current_user: CurrentUser, warehous
     return preds
 
 
+def resolve_authorized_warehouse_ids(current_user: CurrentUser, warehouse_id=None):
+    """``build_authorized_scope_predicates`` 的集合形式，给非 SQL 的过滤用。
+
+    模糊匹配走的是进程内索引而不是 SQL，没法复用上面的谓词。以前它只按
+    tenant 过滤，于是同一个调用者在 /api/fuzzy-match 能匹配出物料、拿着
+    entity_id 回查 /api/materials/product-stats 却 404 —— 两个端点对同一个
+    物料给出相反答案（现场表现为"编码查不到"，见 2026-08-14 排查）。
+    附带地，无任何仓库授权的调用者仍可借模糊匹配枚举物料名与 SKU。
+
+    返回 ``None`` 表示不限仓库（全局/租户 admin）；返回集合表示只允许这些
+    仓库；返回空集表示一个都不允许（对应谓词里的 ``false()``）。
+    """
+    if warehouse_id is not None:
+        return {warehouse_id}
+    if current_user.role == RoleName.ADMIN:
+        return None
+    return set(current_user.get_authorized_warehouses(None))
+
+
 def audit_log(action: str, user_id: int = None, username: str = None, details: dict = None):
     """记录审计日志"""
     if not ENABLE_AUDIT_LOG:

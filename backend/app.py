@@ -118,6 +118,7 @@ from deps import (
     _ACTION_TO_ROLE,
     audit_log,
     resolve_warehouse_id,
+    resolve_authorized_warehouse_ids,
     check_warehouse_access,
     build_scope_predicates,
     build_authorized_scope_predicates,
@@ -3139,11 +3140,14 @@ def fuzzy_match_endpoint(
 ):
     """模糊匹配搜索（按当前租户/仓库范围过滤候选）"""
     wh_id = resolve_warehouse_id(current_user, warehouse_id)
+    # 仓库授权必须与 SQL 侧一致：否则本端点匹配得到的 entity_id，拿去
+    # /api/materials/product-stats 回查会 404（两个端点结论相反）。
+    wh_ids = resolve_authorized_warehouse_ids(current_user, wh_id)
     matcher = get_fuzzy_matcher()
     result = matcher.resolve(q, entity_type=entity_type,
-                             tenant_id=current_user.tenant_id, warehouse_id=wh_id)
+                             tenant_id=current_user.tenant_id, warehouse_ids=wh_ids)
     candidates_raw = matcher.search(q, entity_type=entity_type, top_k=top_k, threshold=threshold,
-                                    tenant_id=current_user.tenant_id, warehouse_id=wh_id)
+                                    tenant_id=current_user.tenant_id, warehouse_ids=wh_ids)
 
     candidates = [FuzzyMatchCandidate(**c) for c in candidates_raw]
     best_match = FuzzyMatchCandidate(**result['best_match']) if result['best_match'] else None
@@ -3188,7 +3192,8 @@ def unified_search(
     if entity_type == "material":
         return _search_materials(None, q, category, status, fuzzy, format, include_batches,
                                  page, page_size, '', (),
-                                 tenant_id=tenant_id, warehouse_id=wh_id)
+                                 tenant_id=tenant_id, warehouse_id=wh_id,
+                                 current_user=current_user)
     elif entity_type == "contact":
         # 联系方为租户级（无 wh 过滤）
         return _search_contacts(None, q, contact_type, fuzzy, format, page, page_size,
@@ -3201,20 +3206,33 @@ def unified_search(
         raise HTTPException(status_code=400, detail=f"不支持的实体类型: {entity_type}")
 
 
-def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=(), tenant_id=None, warehouse_id=None):
-    """搜索物料 — Phase 2d: SA Core read. ``cursor``/``wh_filter``/``wh_params`` retained for signature compatibility but unused."""
+def _search_materials(cursor, q, category, status, fuzzy, fmt, include_batches, page, page_size, wh_filter='', wh_params=(), tenant_id=None, warehouse_id=None, current_user=None):
+    """搜索物料 — Phase 2d: SA Core read. ``cursor``/``wh_filter``/``wh_params`` retained for signature compatibility but unused.
+
+    ``current_user`` 用于把仓库授权对齐到 ``build_authorized_scope_predicates``
+    （与 /api/fuzzy-match、/api/materials/product-stats 同一套语义）。缺省为
+    None 时退回旧的 tenant-only 范围，保持既有调用方不变。
+    """
+    wh_ids = (resolve_authorized_warehouse_ids(current_user, warehouse_id)
+              if current_user is not None else None)
+
     # 获取匹配的 material IDs (fuzzy mode)
     matched_ids = None
     if q and fuzzy:
         matcher = get_fuzzy_matcher()
         results = matcher.search(q, entity_type="material", top_k=100, threshold=50.0,
-                                 tenant_id=tenant_id, warehouse_id=warehouse_id)
+                                 tenant_id=tenant_id, warehouse_id=warehouse_id,
+                                 warehouse_ids=wh_ids)
         matched_ids = [r['entity_id'] for r in results]
         if not matched_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 1}
 
     preds = [_t_materials.c.is_disabled == 0]
-    preds.extend(build_scope_predicates(_t_materials, tenant_id, warehouse_id))
+    if current_user is not None:
+        preds.extend(build_authorized_scope_predicates(
+            _t_materials, current_user, warehouse_id))
+    else:
+        preds.extend(build_scope_predicates(_t_materials, tenant_id, warehouse_id))
     if matched_ids is not None:
         preds.append(_t_materials.c.id.in_(matched_ids))
     elif q and not fuzzy:

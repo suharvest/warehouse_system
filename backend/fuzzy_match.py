@@ -378,7 +378,13 @@ class FuzzyMatcher:
     def search(self, query: str, entity_type: str = "all",
                top_k: int = 5, threshold: float = 50.0,
                tenant_id: int | None = None,
-               warehouse_id: int | None = None) -> list[dict]:
+               warehouse_id: int | None = None,
+               warehouse_ids: set[int] | None = None) -> list[dict]:
+        """``warehouse_ids``：允许的仓库集合，对齐 SQL 侧的
+        ``build_authorized_scope_predicates``。``None`` = 不限；空集 = 全部
+        排除（等价于谓词里的 ``false()``）。语义跟随 SQL ``IN``：仓库为 NULL
+        的条目也不在集合内，故一并排除。
+        """
         self._ensure_index()
 
         norm_query = self._normalize(query)
@@ -408,6 +414,11 @@ class FuzzyMatcher:
             if warehouse_id is not None:
                 entry_whid = entry.get("warehouse_id")
                 if entry_whid is not None and entry_whid != warehouse_id:
+                    continue
+            # 只对 material 生效：contact/operator 是租户级，表上根本没有
+            # warehouse_id 列（SQL 侧同样不加仓库过滤），一并过滤会全部误杀。
+            if warehouse_ids is not None and entry["entity_type"] == "material":
+                if entry.get("warehouse_id") not in warehouse_ids:
                     continue
 
             norm_name = self._normalize(entry["name"])
@@ -446,10 +457,12 @@ class FuzzyMatcher:
 
     def resolve(self, query: str, entity_type: str = "all",
                 tenant_id: int | None = None,
-                warehouse_id: int | None = None) -> dict:
+                warehouse_id: int | None = None,
+                warehouse_ids: set[int] | None = None) -> dict:
         candidates = self.search(
             query, entity_type=entity_type, top_k=5, threshold=50.0,
             tenant_id=tenant_id, warehouse_id=warehouse_id,
+            warehouse_ids=warehouse_ids,
         )
 
         if not candidates:

@@ -195,3 +195,61 @@ def test_product_stats_by_material_id_matches_fuzzy_match_result(
     assert stats.status_code == 200, stats.text
     assert stats.json()["sku"] == sku
 
+
+# ---------------------------------------------------------------------------
+# fuzzy-match 与 SQL 侧的仓库授权对齐
+# ---------------------------------------------------------------------------
+
+def test_fuzzy_match_respects_warehouse_authorization(engine, admin_client, client):
+    """无仓库授权时，fuzzy-match 必须和 product-stats 一样查不到。
+
+    对齐前：fuzzy-match 只按 tenant 过滤索引，照常返回候选，于是
+    "匹配得到 entity_id → 回查 product-stats 404" 这条自相矛盾的链路成立；
+    同时无授权调用者可借模糊匹配枚举物料名与 SKU。
+    """
+    from app import get_fuzzy_matcher
+
+    sku = _sku()
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO materials (name, sku, category, unit, quantity, "
+                 "safe_stock, location, is_disabled, tenant_id, warehouse_id) "
+                 "VALUES (:n, :s, '未分类', 'Pcs', 0, 0, 'A-01', 0, 1, 1)"),
+            {"n": f"测试物料C-{sku}", "s": sku},
+        )
+    get_fuzzy_matcher().invalidate_cache(entity_type='material')
+
+    # 未回填 → 无授权仓库
+    key = _make_agent_key(engine, warehouse_id=None,
+                          user_id=_make_ungranted_user(engine))
+    headers = {"X-API-Key": key}
+
+    fm = client.get(f"/api/fuzzy-match?q={sku}&entity_type=material",
+                    headers=headers)
+    assert fm.status_code == 200, fm.text
+    assert fm.json()["best_match"] is None, fm.text
+    assert fm.json()["candidates"] == [], fm.text
+
+    stats = client.get(f"/api/materials/product-stats?name={sku}",
+                       headers=headers)
+    assert stats.status_code == 404, stats.text
+
+
+def test_fuzzy_match_still_finds_contacts_without_warehouse_grant(
+    engine, admin_client, client
+):
+    """contact/operator 是租户级，不能被仓库授权过滤误杀。"""
+    from app import get_fuzzy_matcher
+
+    name = f"供应商-{uuid.uuid4().hex[:8]}"
+    resp = admin_client.post("/api/contacts",
+                             json={"name": name, "is_supplier": True})
+    assert resp.status_code in (200, 201), resp.text
+    get_fuzzy_matcher().invalidate_cache(entity_type='contact')
+
+    key = _make_agent_key(engine, warehouse_id=None,
+                          user_id=_make_ungranted_user(engine))
+    fm = client.get(f"/api/fuzzy-match?q={name}&entity_type=contact",
+                    headers={"X-API-Key": key})
+    assert fm.status_code == 200, fm.text
+    assert fm.json()["best_match"] is not None, fm.text
