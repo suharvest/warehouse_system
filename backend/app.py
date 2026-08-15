@@ -397,6 +397,44 @@ def _seed_base_data() -> None:
         logger.warning(f"_seed_base_data() skipped: {e}")
 
 
+def _backfill_agent_key_warehouse() -> None:
+    """把 agent api_keys / mcp_connections 的 NULL warehouse_id 回填到默认仓库。
+
+    与迁移 j9k0l1m2n3o4 同样的 UPDATE，但必须在这里再跑一次：迁移是一次性的，
+    且它的 ``EXISTS (SELECT 1 FROM warehouses ...)`` 前置条件在纯 Alembic 部署
+    路径上执行时**必然为假**——``alembic upgrade head`` 跑在 ``_seed_base_data()``
+    之前，此时 warehouses 表还是空的。迁移因此匹配 0 行、被记为已应用、永不重跑，
+    默认仓库随后才被种进去，NULL 就永久留在了库里。
+
+    留下 NULL 的后果：agent key 是 operate 角色，``build_authorized_scope_predicates``
+    在"无授权仓库"时追加 ``false()``，于是 /api/materials/product-stats 对任何物料
+    都 404，智能体表现为"系统中没有与 X 相似的产品"——即使 /api/fuzzy-match 明明
+    已经把该物料匹配出来了（模糊层不走这个仓库过滤，两边结论相反）。
+
+    幂等：只碰 warehouse_id IS NULL 的行；无默认仓库时 EXISTS 跳过，不会写成 NULL。
+    不动 role='admin' 的 key —— 其 NULL 语义是"全仓可见"，绑单仓反而缩小权限。
+    """
+    try:
+        with get_engine().begin() as conn:
+            for table, extra in (
+                ("api_keys", "AND is_system = 1 AND role <> 'admin'"),
+                ("mcp_connections", ""),
+            ):
+                conn.execute(text(
+                    f"UPDATE {table} SET warehouse_id = ("
+                    "  SELECT w.id FROM warehouses w"
+                    f"  WHERE w.tenant_id = {table}.tenant_id AND w.is_default = 1"
+                    "  ORDER BY w.id LIMIT 1"
+                    ") "
+                    f"WHERE warehouse_id IS NULL {extra} AND EXISTS ("
+                    "  SELECT 1 FROM warehouses w2"
+                    f"  WHERE w2.tenant_id = {table}.tenant_id AND w2.is_default = 1"
+                    ")"
+                ))
+    except Exception as e:
+        logger.warning(f"_backfill_agent_key_warehouse() skipped: {e}")
+
+
 def _seed_face_endpoint() -> None:
     """把 FACE_REC_API_URL 种进 tenant_face_config.endpoint（仅当该行 endpoint 为空）。
 
@@ -7247,6 +7285,10 @@ async def _run_migrations():
     # 幂等补种：确保 tenant 1 和默认仓库存在，不依赖 init_database()。
     # Docker 部署走纯 Alembic 路径，Alembic 只建表不插数据，需在此补齐。
     _seed_base_data()
+
+    # agent key 仓库回填：必须在 _seed_base_data() 之后（迁移 j9k0l1m2n3o4 跑在
+    # 建仓之前，前置条件为假而空转，见函数 docstring）。
+    _backfill_agent_key_warehouse()
 
     # 人脸端点补种：必须在 _seed_base_data() 之后（依赖 tenant 1 存在的外键）。
     _seed_face_endpoint()
