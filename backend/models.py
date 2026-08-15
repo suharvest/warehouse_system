@@ -123,40 +123,52 @@ class TopStock(BaseModel):
 
 
 class LowStockItem(BaseModel):
-    """库存预警项"""
+    """库存预警项。``location`` 可空，理由同 MaterialItem。"""
     name: str
     sku: str
     category: str
     quantity: int
     safe_stock: Optional[int] = None
-    location: str
+    location: Optional[str] = ""
     shortage: int
 
 
 # ============ Material Models ============
 
 class MaterialItem(BaseModel):
-    """物料项"""
+    """物料项
+
+    ``location`` 可空：materials.location 在 metadata.py:174 没有
+    nullable=False，一行库位为空就让 /api/materials/list 整页 500
+    （响应序列化阶段的 ValidationError，不是业务错误）。
+    """
     name: str
     sku: str
     category: str
     quantity: int
     unit: str
     safe_stock: Optional[int] = None
-    location: str
+    location: Optional[str] = ""
     status: str
     status_text: str
 
 
 
 class ProductStats(BaseModel):
-    """产品统计数据"""
+    """产品统计数据
+
+    ``location`` 在 materials 表里可为 NULL（metadata.py:174 未声明
+    nullable=False），而这里曾声明为必填 ``str`` —— 库位为空的物料一查
+    product-stats 就在响应序列化阶段 500（ValidationError，不是业务错误，
+    日志里也不好认）。放宽为可空；构造侧仍 coalesce 成 ""，线上字段类型不变。
+    ``sku`` 是 NOT NULL 列，保持必填。
+    """
     name: str
     sku: str
     current_stock: int
     unit: str
     safe_stock: Optional[int] = None
-    location: str
+    location: Optional[str] = ""
     today_in: int
     today_out: int
     in_change: float

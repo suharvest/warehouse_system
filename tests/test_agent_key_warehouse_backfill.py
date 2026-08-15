@@ -253,3 +253,24 @@ def test_fuzzy_match_still_finds_contacts_without_warehouse_grant(
                     headers={"X-API-Key": key})
     assert fm.status_code == 200, fm.text
     assert fm.json()["best_match"] is not None, fm.text
+
+
+def test_product_stats_tolerates_null_location(engine, admin_client, client):
+    """库位为 NULL 的物料不能把响应序列化打成 500。
+
+    materials.location 可空（metadata.py:174），而 ProductStats.location 曾是
+    必填 str。sku 是 NOT NULL 列，不在此列。
+    """
+    sku = _sku()
+    name = f"无库位物料-{uuid.uuid4().hex[:8]}"
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO materials (name, sku, category, unit, quantity, "
+                 "safe_stock, location, is_disabled, tenant_id, warehouse_id) "
+                 "VALUES (:n, :s, '未分类', 'Pcs', 0, 0, NULL, 0, 1, 1)"),
+            {"n": name, "s": sku},
+        )
+
+    resp = admin_client.get(f"/api/materials/product-stats?name={name}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["location"] == ""

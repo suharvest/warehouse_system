@@ -3855,11 +3855,11 @@ def get_product_stats(
 
         return ProductStats(
             name=product.name,
-            sku=product.sku,
+            sku=product.sku or "",
             current_stock=current_stock,
             unit=unit,
             safe_stock=safe_stock,
-            location=product.location,
+            location=product.location or "",
             today_in=today_in,
             today_out=today_out,
             in_change=round(in_change, 1),
