@@ -22,6 +22,7 @@ import os
 import logging
 import yaml
 import functools
+import inspect
 import json
 import re
 import threading
@@ -122,6 +123,7 @@ _config = load_config()
 # 确保能找到 providers 包（直接运行 warehouse_mcp.py 时需要）
 sys.path.insert(0, os.path.dirname(__file__))
 from providers import load_provider  # noqa: E402
+from providers.normalize import normalize_query  # noqa: E402
 
 
 def _load_provider_from_db_or_default(default_config: dict):
@@ -910,6 +912,55 @@ def _wrap_response(operation: str, resp: dict) -> dict:
     return out
 
 
+def _normalize_query_args(*param_names: str):
+    """装饰器：把指定参数做查询词归一化后再交给 Provider。
+
+    语音链路的两类固定噪声（ASR 的中文数字、LLM 塞进来的「型号」前缀）与
+    后端是谁无关，所以在工具入口统一处理一次，而不是让每个 Provider 各修
+    一遍 —— 本地 FuzzyMatcher 有拼音容错、parts_wms 只有 difflib，各修必然
+    行为不一致。放在这里，**客户自己写的 Provider 一行不用改**就能受益。
+
+    位置必须在 ``_antihallucination`` 之上、``log_mcp_call`` 之下：前者要拿到
+    已归一化的参数，后者是 async wrapper（FastMCP 2.13 用 to_thread 跑同步
+    工具），归一化是纯计算，放同步层即可。
+
+    用 ``signature.bind_partial`` 而不是直接翻 kwargs：MCP 过来的都是 kwargs，
+    但内部/测试可能用位置参数，绑定后两种都覆盖到。绑定失败（LLM 传了
+    schema 外的参数）不在这里报错，原样透传给 ``_antihallucination``，由它
+    的 TypeError 分支给出结构化提示。
+    """
+    def deco(fn):
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                bound = sig.bind_partial(*args, **kwargs)
+            except TypeError:
+                return fn(*args, **kwargs)
+
+            changed = []
+            for name in param_names:
+                if name not in bound.arguments:
+                    continue
+                old = bound.arguments[name]
+                new = normalize_query(old)
+                if new != old:
+                    bound.arguments[name] = new
+                    changed.append(f"{name}: {old!r} -> {new!r}")
+
+            if not changed:
+                return fn(*args, **kwargs)
+
+            # 归一化改写了用户意图的字面值，出问题时必须能从日志还原，
+            # 所以这条按 info 打，不跟随 MCP_DEBUG 开关。
+            logger.info(f"查询词归一化 [{fn.__name__}] " + "; ".join(changed))
+            return fn(*bound.args, **bound.kwargs)
+
+        return wrapper
+    return deco
+
+
 def _antihallucination(operation: str):
     """装饰器：包装返回值，注入 facts.executed / speak* / next_action / retry_hint。
 
@@ -980,6 +1031,7 @@ mcp = FastMCP("Warehouse System", instructions=_RULES_FOOTER.strip())
 
 @mcp.tool()
 @log_mcp_call
+@_normalize_query_args("text")
 @_antihallucination("resolve_name")
 def resolve_name(text: str, entity_type: str = "all") -> dict:
     """仅"先确认实体再下一步"时用；查库存/批次/出入库已内建模糊匹配，请直接调对应工具。"""
@@ -991,6 +1043,7 @@ def resolve_name(text: str, entity_type: str = "all") -> dict:
 
 @mcp.tool()
 @log_mcp_call
+@_normalize_query_args("product_name")
 @_antihallucination("query_stock")
 def query_stock(product_name: str) -> dict:
     """按产品名或物料编码/SKU 查库存数量和存放位置（"X还有多少/放在哪/在哪个库位"）。
@@ -1016,6 +1069,7 @@ def query_stock(product_name: str) -> dict:
 
 @mcp.tool()
 @log_mcp_call
+@_normalize_query_args("batch_no")
 @_antihallucination("query_batch")
 def query_batch(batch_no: str) -> dict:
     """按批次号查批次。"""
@@ -1036,6 +1090,7 @@ def query_batch(batch_no: str) -> dict:
     # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
+@_normalize_query_args("product_name")
 @_antihallucination("stock_in")
 def stock_in(product_name: str, quantity: int,
              reason_category: str = "purchase", reason_note: str = "",
@@ -1072,6 +1127,7 @@ def stock_in(product_name: str, quantity: int,
     # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
+@_normalize_query_args("product_name")
 @_antihallucination("stock_out")
 def stock_out(product_name: str, quantity: int,
               reason_category: str, reason_note: str = "",
@@ -1104,6 +1160,7 @@ def stock_out(product_name: str, quantity: int,
 
 @mcp.tool(exclude_args=["category", "status", "contact_type", "include_batches", "max_results"])
 @log_mcp_call
+@_normalize_query_args("query")
 @_antihallucination("search")
 def search(query: str = None, entity_type: str = "material",
            category: str = None, status: str = None,
@@ -1126,6 +1183,7 @@ def search(query: str = None, entity_type: str = "material",
     # 后端直连设备拉图/拉身份），不再靠 xiaozhi 运行时看静态 meta 预抓拍。
 )
 @log_mcp_call
+@_normalize_query_args("batch_no", "new_location")
 @_antihallucination("move_batch_location")
 def move_batch_location(batch_no: str, new_location: str,
                          quantity: int = None,
