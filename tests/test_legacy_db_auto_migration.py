@@ -1224,13 +1224,66 @@ def test_override_env_default_is_off(monkeypatch):
 # --------------------------------------------------------------------------
 # 12. missing / ambiguous default warehouse -> refuse, never stamp NULLs
 # --------------------------------------------------------------------------
-def test_missing_warehouses_table_refuses_instead_of_leaving_nulls(legacy_db):
-    """Dropping ``warehouses`` used to downgrade to a warning + NULL columns."""
+def _drop_tables(path: Path, *tables: str) -> None:
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        for t in tables:
+            conn.execute(f"DROP TABLE {t}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_missing_warehouses_table_is_recreated_and_seeded(legacy_db):
+    """A DB predating the warehouse split has no ``warehouses`` table at all.
+
+    Refusing there strands every such deployment on a container that will not
+    boot. The rows carry no warehouse_id of their own, so attaching them to a
+    freshly seeded default warehouse is the only reading available — and it is
+    the same one the migration applies to any single-warehouse deployment.
+    The dangerous shape (rows already pointing at warehouses that are gone) is
+    a different case, guarded by the orphan-FK check — see the test below.
+    """
+    path, before = legacy_db
+    _drop_tables(path, "warehouses")
+
+    import legacy_db_migration as mod
+
+    result = mod.migrate(path, log=lambda _m: None)
+
+    assert result.changed
+    assert any("created missing table warehouses" in c for c in result.changes)
+    assert _default_wh_id(path) == 1
+    assert _null_warehouse_counts(path) == dict.fromkeys(_WAREHOUSE_SCOPED, 0)
+    assert _counts(path) == before, "no business rows may be lost"
+
+
+def test_missing_warehouses_table_recovers_at_startup(legacy_db):
+    path, _ = legacy_db
+    _drop_tables(path, "warehouses")
+
+    _recover(path)
+
+    assert "tenant_id" in _cols(path, "users")
+    assert _default_wh_id(path) == 1
+
+
+def test_orphan_warehouse_ids_still_refuse(legacy_db):
+    """Recreating the table must not paper over rows pointing at lost warehouses.
+
+    This is the shape the old blanket refusal was really protecting: the DB
+    *did* live through the warehouse split, so its rows carry warehouse_id
+    values — and seeding a default id=1 would silently leave them pointing at
+    a warehouse that no longer exists.
+    """
     path, _ = legacy_db
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
         conn.execute("DROP TABLE warehouses")
+        conn.execute("ALTER TABLE materials ADD COLUMN warehouse_id INTEGER")
+        conn.execute("UPDATE materials SET warehouse_id = 7")
         conn.commit()
     finally:
         conn.close()
@@ -1241,28 +1294,10 @@ def test_missing_warehouses_table_refuses_instead_of_leaving_nulls(legacy_db):
         mod.migrate(path, log=lambda _m: None)
 
     msg = str(exc.value)
-    assert "no default warehouse could be determined" in msg
-    assert "materials" in msg
+    assert "already carry a warehouse_id" in msg
     assert "LEGACY_MIGRATE_WAREHOUSE_ID" in msg
+    assert "Nothing was written" in msg
     # Whole migration rolled back: the schema patch is not half-applied.
-    assert "tenant_id" not in _cols(path, "users")
-
-
-def test_missing_warehouses_table_refuses_at_startup(legacy_db):
-    path, _ = legacy_db
-    conn = sqlite3.connect(str(path))
-    conn.execute("PRAGMA foreign_keys=OFF")
-    try:
-        conn.execute("DROP TABLE warehouses")
-        conn.commit()
-    finally:
-        conn.close()
-
-    import legacy_db_migration as mod
-
-    with pytest.raises(mod.LegacyMigrationAmbiguity):
-        _recover(path)
-
     assert "tenant_id" not in _cols(path, "users")
 
 

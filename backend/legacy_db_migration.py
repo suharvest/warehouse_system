@@ -637,6 +637,8 @@ _REFERENCE_SCHEMA_CACHE: dict[str, dict[str, dict[str, str]]] = {}
 # 与上面同一次参考库构建产出，单独存 NOT NULL 集合。不并进 reference_schema
 # 的返回值，是为了不改它已被多处依赖的 {table: {col: type}} 形状。
 _REFERENCE_NOTNULL_CACHE: dict[str, dict[str, set[str]]] = {}
+# 同源第三份缓存：建表用的原始 DDL，供 migrate() 补建缺表。
+_REFERENCE_DDL_CACHE: dict[str, dict[str, list[str]]] = {}
 
 
 def _alembic_config():
@@ -699,6 +701,59 @@ def reference_schema(revision: str = INITIAL_SCHEMA_REVISION) -> dict[str, dict[
 
     _REFERENCE_SCHEMA_CACHE[revision] = schema
     return schema
+
+
+def reference_table_ddl(
+    revision: str = INITIAL_SCHEMA_REVISION,
+) -> dict[str, list[str]]:
+    """``{table: [CREATE TABLE …, CREATE INDEX …]}`` for a freshly built ``revision``.
+
+    Same throwaway-DB mechanism as :func:`reference_schema`, but keeps the raw
+    DDL so missing tables can be recreated verbatim instead of being
+    reconstructed from column metadata. ``alembic_version`` is excluded — the
+    stamp at the end of :func:`migrate` owns that table.
+    """
+    cached = _REFERENCE_DDL_CACHE.get(revision)
+    if cached is not None:
+        return cached
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="legacy_ref_ddl_") as tmp:
+        ref = Path(tmp) / "reference.db"
+        sqlite3.connect(str(ref)).close()
+        prev = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = f"sqlite:///{ref}"
+        try:
+            from alembic import command as alembic_command
+
+            alembic_command.upgrade(_alembic_config(), revision)
+        finally:
+            if prev is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = prev
+
+        conn = sqlite3.connect(str(ref))
+        try:
+            ddl: dict[str, list[str]] = {}
+            # Tables first, then their indexes — an index cannot be created
+            # before the table it sits on.
+            rows = conn.execute(
+                "SELECT tbl_name, type, sql FROM sqlite_master "
+                "WHERE sql IS NOT NULL AND type IN ('table', 'index') "
+                "AND tbl_name NOT LIKE 'sqlite_%' "
+                "ORDER BY tbl_name, (type = 'index')"
+            ).fetchall()
+            for tbl, _type, sql in rows:
+                if tbl == "alembic_version":
+                    continue
+                ddl.setdefault(tbl, []).append(sql)
+        finally:
+            conn.close()
+
+    _REFERENCE_DDL_CACHE[revision] = ddl
+    return ddl
 
 
 def _reference_notnull(revision: str = INITIAL_SCHEMA_REVISION) -> dict[str, set[str]]:
@@ -1035,6 +1090,59 @@ def migrate(
     # BEGIN -- it is a no-op inside a transaction.
     conn.execute("BEGIN")
     try:
+        # Create tables the revision has but this DB never grew. The bridge's
+        # column patches assume ``tenants``/``warehouses``/… already exist —
+        # a bootstrap old enough to predate them leaves the warehouse_id
+        # backfill with nothing to point at, and the run dies at the
+        # "no default warehouse" refusal with the DB untouched.
+        #
+        # DDL is copied verbatim from a freshly built reference DB rather than
+        # reconstructed, so the result is what the migrations really produce.
+        # Only missing tables are created; existing ones are never redefined.
+        existing_tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "warehouses" not in existing_tables:
+            # Recreating the table means seeding a default warehouse id=1 and
+            # backfilling every NULL row onto it. Rows that already carry a
+            # warehouse_id lived through the warehouse split, so their values
+            # point at warehouses this DB can no longer describe — inventing a
+            # replacement would silently re-home them. The backfill only
+            # touches NULLs, so those rows would survive as dangling
+            # references (the column is a bare INTEGER, so no FK check catches
+            # them later either). Refuse, exactly as before.
+            populated = []
+            for table in sorted(LEGACY_TABLE_PATCHES):
+                if not _table_exists(conn, table):
+                    continue
+                if "warehouse_id" not in _table_cols(conn, table):
+                    continue
+                (n,) = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE warehouse_id IS NOT NULL"
+                ).fetchone()
+                if n:
+                    populated.append((table, n))
+            if populated:
+                raise LegacyMigrationAmbiguity(
+                    "Refusing to migrate: 'warehouses' is missing, but "
+                    + ", ".join(f"{t} ({n} row(s))" for t, n in populated)
+                    + " already carry a warehouse_id. Seeding a fresh default "
+                    "warehouse would leave those rows pointing at a warehouse "
+                    "that no longer exists.\nRestore the 'warehouses' table "
+                    f"(or point at an existing one with {TARGET_WAREHOUSE_ENV}"
+                    "=<id>), then re-run. Nothing was written."
+                )
+
+        for table, statements in sorted(reference_table_ddl().items()):
+            if table in existing_tables:
+                continue
+            for stmt in statements:
+                conn.execute(stmt)
+            changes.append(f"created missing table {table}")
+            log(f"[ok] created missing table {table}")
+
         # Seed defaults column-by-column: ``tenants``/``warehouses`` declare
         # ``slug NOT NULL``, so a fixed 3-column INSERT blows up on a legacy DB
         # whose tenants table is empty.
