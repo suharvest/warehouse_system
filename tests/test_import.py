@@ -119,6 +119,84 @@ class TestImportPreview:
         assert '重复行' in data['message']
 
 
+class TestSafeStockColumnMapping:
+    """「安全库存」列必须真的进库 —— 它含 '库存' 二字，极易被通用数量列吃掉。"""
+
+    # 当前导出/下载模板的表头，以及客户手上那份旧模板（'变体' 尚未改名 '规格'）。
+    CANONICAL = ['物料名称', '规格', '物料编码(SKU)', '分类', '单位',
+                 '安全库存', '批次号', '库存', '存放位置', '联系方']
+    LEGACY = ['物料名称', '物料编码(SKU)', '分类', '单位', '安全库存',
+              '批次号', '变体', '库存', '存放位置', '联系方']
+
+    def _upload(self, admin_client, headers, row):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "库存数据"
+        ws.append(headers)
+        ws.append(row)
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return admin_client.post(
+            "/api/materials/import-excel/preview",
+            files={"file": ("t.xlsx", buf,
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet")},
+        )
+
+    @pytest.mark.parametrize("layout", ["canonical", "legacy"])
+    def test_safe_stock_reaches_the_database(self, admin_client, layout,
+                                             default_warehouse_id):
+        import uuid
+        sku = f"SS-{uuid.uuid4().hex[:8].upper()}"
+        if layout == "canonical":
+            headers = self.CANONICAL
+            row = ['安全库存物料', '', sku, '测试', '个', 42, '', 5, 'A-01', '']
+        else:
+            headers = self.LEGACY
+            row = ['安全库存物料', sku, '测试', '个', 42, '', '', 5, 'A-01', '']
+
+        resp = self._upload(admin_client, headers, row)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['success'] is True, data
+
+        confirm = admin_client.post("/api/materials/import-excel/confirm", json={
+            "changes": data['preview'],
+            "reason_category": "purchase",
+            "confirm_new_skus": True,
+        })
+        assert confirm.status_code == 200, confirm.text
+
+        from database import get_db_connection
+        conn = get_db_connection()
+        try:
+            row_db = conn.execute(
+                "SELECT safe_stock, quantity FROM materials WHERE sku = ?", (sku,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row_db is not None, "物料未创建"
+        # 回归点：安全库存曾被通用「库存」分支吃掉，整列静默丢失。
+        assert row_db['safe_stock'] == 42
+
+    @pytest.mark.parametrize("layout", ["canonical", "legacy"])
+    def test_quantity_is_not_taken_from_safe_stock_column(self, admin_client,
+                                                          layout):
+        """调整分支顺序不能反过来让安全库存冒充数量列。"""
+        headers = self.CANONICAL if layout == "canonical" else self.LEGACY
+        if layout == "canonical":
+            row = ['数量归属物料', '', 'SS-QTY-1', '测试', '个', 42, '', 5, 'A-01', '']
+        else:
+            row = ['数量归属物料', 'SS-QTY-1', '测试', '个', 42, '', '', 5, 'A-01', '']
+        data = self._upload(admin_client, headers, row).json()
+        assert data['success'] is True, data
+        item = data['preview'][0]
+        assert item['import_quantity'] == 5
+        assert item['safe_stock'] == 42
+
+
 class TestImportConfirm:
     """Excel import confirmation tests."""
 

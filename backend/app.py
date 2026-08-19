@@ -5797,13 +5797,17 @@ async def preview_import_excel(
             col_mapping['sku'] = idx
         elif '分类' in header or 'category' in header_lower:
             col_mapping['category'] = idx
+        # 必须排在通用「库存」之前：'安全库存' 里含 '库存'，放在后面会先命中
+        # 下面那条 elif，其内部守卫正确地拒绝把它当数量列，但 elif 链命中即
+        # 终止，本条永远走不到 —— 整列被静默丢弃（模板自身的表头就是这个顺序，
+        # 导出再导入同样丢）。
+        elif '安全库存' in header or 'safe' in header_lower:
+            col_mapping['safe_stock'] = idx
         elif '库存' in header or 'quantity' in header_lower or '数量' in header:
-            if '安全' not in header and '批次' not in header:
+            if '批次' not in header:
                 col_mapping['quantity'] = idx
         elif '单位' in header or 'unit' in header_lower:
             col_mapping['unit'] = idx
-        elif '安全库存' in header or 'safe' in header_lower:
-            col_mapping['safe_stock'] = idx
         elif '位置' in header or 'location' in header_lower:
             col_mapping['location'] = idx
         elif '批次' in header or 'batch' in header_lower:
