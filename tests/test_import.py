@@ -197,6 +197,63 @@ class TestSafeStockColumnMapping:
         assert item['safe_stock'] == 42
 
 
+class TestDuplicateSkuWarning:
+    """简化模式下同 SKU 多行会造虚假流水，预览必须在确认前说清楚。"""
+
+    HEADERS = ['物料名称', '规格', '物料编码(SKU)', '分类', '单位',
+               '安全库存', '批次号', '库存', '存放位置', '联系方']
+
+    def _preview(self, admin_client, rows):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "库存数据"
+        ws.append(self.HEADERS)
+        for r in rows:
+            ws.append(r)
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return admin_client.post(
+            "/api/materials/import-excel/preview",
+            files={"file": ("t.xlsx", buf,
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet")},
+        ).json()
+
+    def test_duplicate_sku_in_simple_mode_warns(self, admin_client):
+        """同一编码两行（用户拿多行表达多库位）→ 必须告警并指出批次模式。"""
+        rows = [
+            ['多库位物料', '', 'DUP-001', '测试', '个', None, '', 112, 'A1-2-03', ''],
+            ['多库位物料', '', 'DUP-001', '测试', '个', None, '', 56, 'A1-2-04', ''],
+        ]
+        data = self._preview(admin_client, rows)
+        assert data['success'] is True
+        assert data['is_batch_mode'] is False
+        warns = data['duplicate_sku_warnings']
+        assert warns, "同 SKU 多行必须告警"
+        joined = "".join(warns)
+        assert 'DUP-001' in joined
+        assert '批次号' in joined, "必须指出正解是走批次模式"
+
+    def test_unique_skus_produce_no_warning(self, admin_client):
+        rows = [
+            ['物料甲', '', 'UNI-001', '测试', '个', None, '', 10, 'A-01', ''],
+            ['物料乙', '', 'UNI-002', '测试', '个', None, '', 20, 'A-02', ''],
+        ]
+        assert self._preview(admin_client, rows)['duplicate_sku_warnings'] == []
+
+    def test_batch_mode_does_not_warn(self, admin_client):
+        """批次模式下每行是独立批次，同 SKU 多行完全正常，不该报警。"""
+        rows = [
+            ['多批次物料', '', 'BAT-001', '测试', '个', None, 'B-A-1', 112, 'A1-2-03', ''],
+            ['多批次物料', '', 'BAT-001', '测试', '个', None, 'B-A-2', 56, 'A1-2-04', ''],
+        ]
+        data = self._preview(admin_client, rows)
+        assert data['is_batch_mode'] is True
+        assert data['duplicate_sku_warnings'] == []
+
+
 class TestImportConfirm:
     """Excel import confirmation tests."""
 

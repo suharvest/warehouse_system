@@ -5888,6 +5888,8 @@ async def preview_import_excel(
     new_skus = []
     new_contacts_set = set()
     seen_skus_simple = set()  # 简化模式下追踪已见SKU，检测同SKU多行
+    # {sku: 出现行数}，仅简化模式收集，用于预览告警
+    simple_sku_row_counts: dict = {}
     sku_excel_names = {}  # SKU → [(preview_item_index, excel_name), ...] 用于后处理提取 variant
     has_variant_col = col_mapping['variant'] is not None
     total_in = 0
@@ -6047,6 +6049,7 @@ async def preview_import_excel(
                 # 同一 SKU 出现多次 → 每行作为新批次（不同位置/联系方）
                 sku_is_duplicate = sku in seen_skus_simple
                 seen_skus_simple.add(sku)
+                simple_sku_row_counts[sku] = simple_sku_row_counts.get(sku, 0) + 1
 
                 # 显式 variant 列优先
                 explicit_variant = variant_val if has_variant_col and variant_val else None
@@ -6146,6 +6149,32 @@ async def preview_import_excel(
 
         total_missing = len(missing_skus)
 
+    # 简化模式 + 同 SKU 多行：第 2 行起被当作新批次入库，会凭空产生出入库流水。
+    # 库存最终数字往往仍是对的，只有流水被污染 —— 用户几乎不可能自己发现，
+    # 所以必须在确认之前把话说清楚，并指出正解是填批次号走批次模式。
+    duplicate_sku_warnings: list[str] = []
+    if not is_batch_mode:
+        repeated = {k: v for k, v in simple_sku_row_counts.items() if v > 1}
+        if repeated:
+            examples = "、".join(
+                f"{k}({v}行)" for k, v in list(sorted(repeated.items()))[:3]
+            )
+            more = " 等" if len(repeated) > 3 else ""
+            duplicate_sku_warnings.append(
+                f"有 {len(repeated)} 个物料编码在文件里出现多行："
+                f"{examples}{more}。"
+            )
+            duplicate_sku_warnings.append(
+                "当前文件没有【批次号】列，按简化模式解析 —— 每行的【库存】"
+                "表示该编码的库存总量，不是该库位的数量。同一编码的第 2 行起会被"
+                "当作新批次入库，从而产生实际并未发生的出入库记录。"
+            )
+            duplicate_sku_warnings.append(
+                "若这些行代表同一物料放在不同库位，请在【批次号】列填入各批次的"
+                "批次号后重新导入（批次模式下每行独立比对，不会产生多余流水）；"
+                "若确实是要按总量调整，请先把同一编码合并成一行。"
+            )
+
     mode_label = "批次模式" if is_batch_mode else "简化模式"
     duplicate_msg = f"，已跳过 {duplicate_rows} 条重复行" if duplicate_rows else ""
     return ExcelImportPreviewResponse(
@@ -6160,6 +6189,7 @@ async def preview_import_excel(
         is_batch_mode=is_batch_mode,
         new_contacts=sorted(new_contacts_set),
         formula_warnings=formula_warnings,
+        duplicate_sku_warnings=duplicate_sku_warnings,
         message=f'[{mode_label}] 共解析 {len(preview_items)} 条记录，其中新增 {total_new} 条'
                 + duplicate_msg
                 + (f'，有 {total_missing} 个SKU不在导入文件中' if total_missing > 0 else '')

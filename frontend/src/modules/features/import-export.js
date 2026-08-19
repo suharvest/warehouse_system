@@ -270,11 +270,11 @@ function renderNewContactsBanner(newContacts) {
     banner.innerHTML = `\u2139\uFE0F ${t('newContacts')}: ${newContacts.length} - ${names}`;
 }
 
-function renderFormulaWarnings(warnings) {
-    let banner = document.getElementById('formula-warning-banner');
+function renderWarningBanner(bannerId, titleKey, warnings) {
+    let banner = document.getElementById(bannerId);
     if (!banner) {
         banner = document.createElement('div');
-        banner.id = 'formula-warning-banner';
+        banner.id = bannerId;
         banner.className = 'warning-banner';
         const previewArea = document.getElementById('preview-area');
         previewArea.insertBefore(banner, previewArea.firstChild);
@@ -287,19 +287,30 @@ function renderFormulaWarnings(warnings) {
     }
 
     // 后端已经把行号和处理方式写进文案了，这里只负责显示。
-    // 用 textContent 逐条写入，不拼 innerHTML——文案里带客户的列名，
-    // 而列名来自 Excel 表头，属于外部输入。
+    // 用 textContent 逐条写入，不拼 innerHTML——文案里带客户的列名/物料编码，
+    // 都来自 Excel，属于外部输入。
     banner.style.display = 'block';
     banner.innerHTML = '';
     const title = document.createElement('div');
     title.style.fontWeight = '600';
-    title.textContent = '⚠️ ' + t('formulaWarningTitle');
+    title.textContent = '⚠️ ' + t(titleKey);
     banner.appendChild(title);
     warnings.forEach(w => {
         const line = document.createElement('div');
         line.textContent = w;
         banner.appendChild(line);
     });
+}
+
+function renderFormulaWarnings(warnings) {
+    renderWarningBanner('formula-warning-banner', 'formulaWarningTitle', warnings);
+}
+
+// 简化模式下同 SKU 多行会凭空产生出入库流水，而库存最终数字往往仍是对的，
+// 用户几乎不可能自己发现。这条必须在点确认之前就摆在眼前。
+function renderDuplicateSkuWarnings(warnings) {
+    renderWarningBanner('duplicate-sku-warning-banner',
+                        'duplicateSkuWarningTitle', warnings);
 }
 
 function renderImportPreview(data) {
@@ -341,6 +352,7 @@ function renderImportPreview(data) {
     // 渲染新联系方提示
     renderNewContactsBanner(data.new_contacts || []);
     renderFormulaWarnings(data.formula_warnings || []);
+    renderDuplicateSkuWarnings(data.duplicate_sku_warnings || []);
 
     const tbody = document.getElementById('preview-tbody');
     const thead = document.getElementById('preview-thead');

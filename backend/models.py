@@ -287,6 +287,10 @@ class ExcelImportPreviewResponse(BaseModel):
     # 计算保存过，缓存为空 → 该格读成 None → 静默变空值。不提示的话，客户只会
     # 看到"库位莫名其妙全没了"，无从判断是自己文件的问题。
     formula_warnings: List[str] = []
+    # 简化模式下同一 SKU 出现多行的告警。用户习惯用"一个 SKU 多行、每行一个库位"
+    # 表达库存分布，但简化模式下每行的语义是"该 SKU 的总量应为 X"，第二行起会被
+    # 当成新批次入库 —— 库存最终数字往往仍对，只有流水被污染，极难自查。
+    duplicate_sku_warnings: List[str] = []
 
 
 class ExcelImportConfirm(BaseModel):
