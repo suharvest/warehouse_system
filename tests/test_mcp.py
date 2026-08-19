@@ -301,6 +301,67 @@ class TestQueryStockByCode:
         assert resp["say"] == "watcher主控板当前库存12个，位于A区-01。"
 
 
+class TestLowStockNotice:
+    """库存低于安全线时，查询和出库的播报都要带一句提醒。"""
+
+    def _q(self, **product):
+        warehouse_mcp = _import_warehouse_mcp()
+        base = {"name": "螺丝", "current_stock": 8, "unit": "个", "safe_stock": 20}
+        base.update(product)
+        return warehouse_mcp._wrap_response(
+            "query_stock", {"success": True, "product": base}
+        )
+
+    def _out(self, **product):
+        warehouse_mcp = _import_warehouse_mcp()
+        base = {"name": "螺丝", "out_quantity": 15, "new_quantity": 5,
+                "unit": "个", "safe_stock": 20}
+        base.update(product)
+        return warehouse_mcp._wrap_response(
+            "stock_out", {"success": True, "product": base, "batch_consumptions": []}
+        )
+
+    def test_query_below_half_says_urgent(self):
+        resp = self._q(current_stock=8)
+        assert resp["say"].endswith("注意，库存告急，低于安全库存20个，缺12个。")
+        assert resp["data"]["low_stock"] is True
+        assert resp["data"]["safe_stock"] == 20
+
+    def test_query_below_safe_says_low(self):
+        assert "注意，库存偏低，低于安全库存20个，缺5个。" in self._q(current_stock=15)["say"]
+
+    def test_query_at_or_above_safe_stays_silent(self):
+        resp = self._q(current_stock=20)
+        assert "安全库存" not in resp["say"]
+        assert "low_stock" not in resp["data"]
+
+    def test_query_without_safe_stock_stays_silent(self):
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = warehouse_mcp._wrap_response("query_stock", {
+            "success": True,
+            "product": {"name": "螺丝", "current_stock": 1, "unit": "个"},
+        })
+        assert "安全库存" not in resp["say"]
+        assert "safe_stock" not in resp["data"]
+
+    def test_variant_query_does_not_compare(self):
+        """safe_stock 是整料阈值，拿它比单规格库存会误报。"""
+        resp = self._q(current_stock=3, variant="M3")
+        assert "安全库存" not in resp["say"]
+
+    def test_stock_out_below_safe_appends_notice(self):
+        resp = self._out(new_quantity=5)
+        assert resp["say"].endswith("注意，库存告急，低于安全库存20个，缺15个。")
+        assert resp["say"].startswith("已出库螺丝共15个")
+        assert resp["data"]["low_stock"] is True
+
+    def test_stock_out_still_above_safe_stays_silent(self):
+        resp = self._out(out_quantity=1, new_quantity=50)
+        assert "安全库存" not in resp["say"]
+        assert "low_stock" not in resp["data"]
+        assert resp["data"]["safe_stock"] == 20
+
+
 class TestQueryStockByCodeE2E:
     """真链路：真 DB + 真后端路由 + 真 FuzzyMatcher，只把 HTTP 换成 TestClient。"""
 

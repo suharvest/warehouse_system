@@ -518,6 +518,20 @@ def _asked_by_code(query: str, sku: str, name: str = "") -> bool:
     return _norm_code(name) != ns
 
 
+def _low_stock_note(qty, safe_stock, unit: str) -> str:
+    """库存跌破安全线时追加的播报文案；库存正常或没配安全库存返回空串。
+
+    分档口径与后端 stock-out 的 warning 一致（低于 50% 算告急，否则偏低），
+    但不带 emoji —— 这段文字会被 TTS 直接念出来。
+    """
+    if not isinstance(qty, int) or not isinstance(safe_stock, int):
+        return ""
+    if qty >= safe_stock:
+        return ""
+    level = "库存告急" if qty < safe_stock * 0.5 else "库存偏低"
+    return f"注意，{level}，低于安全库存{safe_stock}{unit}，缺{safe_stock - qty}{unit}。"
+
+
 def _wrap_response(operation: str, resp: dict) -> dict:
     """把 provider 响应压缩为 MCP 对外稳定 schema。"""
     if not isinstance(resp, dict):
@@ -574,6 +588,15 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                     for b in bcs[:3]
                 ],
             }
+            # 出库后跌破安全库存要当场提醒，否则用户只听到"当前库存 N"，
+            # 不会意识到已经低于阈值。
+            safe = p.get("safe_stock")
+            low_note = _low_stock_note(p.get("new_quantity"), safe, unit)
+            if safe is not None:
+                data["safe_stock"] = safe
+            if low_note:
+                say += low_note
+                data["low_stock"] = True
         else:
             err = resp.get("error") or ""
             msg = resp.get("message") or "出库失败"
@@ -715,6 +738,15 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                     "unit": unit,
                     "batch_count": batch_count,
                 }
+                # 安全库存只在整料维度比：按规格过滤时 current_stock 是该规格的
+                # 量、safe_stock 仍是整料阈值，直接比会把正常库存播成告急。
+                safe = p.get("safe_stock")
+                low_note = "" if variant else _low_stock_note(qty, safe, unit)
+                if safe is not None:
+                    data["safe_stock"] = safe
+                if low_note:
+                    say += low_note
+                    data["low_stock"] = True
                 if sku:
                     data["sku"] = sku
                 if locations:
