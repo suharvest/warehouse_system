@@ -272,3 +272,72 @@ class TestPerformanceSmoke:
             cur.executemany("DELETE FROM materials WHERE id = ?", [(i,) for i in seeded_ids])
             conn.commit()
             conn.close()
+
+
+class TestChineseNumeralNormalization:
+    """ASR 逐字念出的编号（"一零零二零一"）必须能匹配到阿拉伯数字索引项。
+
+    背景：_get_pinyin 用 lazy_pinyin，对阿拉伯数字原样透传。索引侧 SKU
+    "100201" 的拼音仍是 "100201"，而 query "一零零二零一" 的拼音是
+    "yi ling ling er ling yi"，两者相似度≈0，拼音层这一路彻底失效；
+    _sku_tokens 的 r'[a-z]+\d+|\d+' 也抓不到中文数字，SKU boost 同样不触发。
+    修复方式是在 _normalize / _tokenize 里做中文数字还原。
+    """
+
+    @pytest.mark.parametrize("src,want", [
+        ("一零零二零一", "100201"),
+        ("查询型号一零零二零一的库存", "查询型号100201的库存"),
+        ("幺九五零", "1950"),          # "幺" 是口语常见的 1
+        ("一二三四五六七八九零", "1234567890"),
+    ])
+    def test_converts_digit_runs(self, src, want):
+        from fuzzy_match import _cn_digits_to_arabic
+        assert _cn_digits_to_arabic(src) == want
+
+    @pytest.mark.parametrize("src", [
+        "三通",          # 单个数字字，不足 3 个
+        "一字螺丝刀",
+        "四氟垫片",
+        "六角螺栓",
+        "第一批次",
+        "三十五",        # 含位词，是计量不是编号
+        "一二三十五",    # 数字串后紧邻「十」，整段不转
+        "两百三十五个",
+        "二三",          # 不足 3 个
+        "100201",        # 已是阿拉伯数字
+    ])
+    def test_leaves_non_serial_text_intact(self, src):
+        from fuzzy_match import _cn_digits_to_arabic
+        assert _cn_digits_to_arabic(src) == src
+
+    def test_normalize_and_tokenize_are_idempotent(self):
+        from fuzzy_match import FuzzyMatcher
+        q = "查询型号一零零二零一的库存"
+        assert FuzzyMatcher._normalize(q) == FuzzyMatcher._normalize(
+            FuzzyMatcher._normalize(q))
+        assert FuzzyMatcher._tokenize(q) == FuzzyMatcher._tokenize(
+            FuzzyMatcher._tokenize(q))
+
+    def test_normalize_merges_punctuation_split_serial(self):
+        """标点打断的编号先合并再转换。"""
+        from fuzzy_match import FuzzyMatcher
+        assert FuzzyMatcher._normalize("一零零-二零一") == "100201"
+
+    def test_tokenize_splits_cjk_digit_boundary(self):
+        """转成阿拉伯数字后才产生中↔ASCII 边界，供 token_set_ratio 切词。"""
+        from fuzzy_match import FuzzyMatcher
+        assert FuzzyMatcher._tokenize("型号一零零二零一") == "型号 100201"
+
+    def test_spoken_serial_resolves_to_material(self):
+        """端到端：口语念出的编号能命中 SKU 索引项。"""
+        matcher = _fresh_matcher()
+        sku = "100201"
+        _seed_material("上钳口", sku=sku)
+        matcher.invalidate_cache()
+
+        spoken = matcher.search("一零零二零一", entity_type="material", top_k=5)
+        typed = matcher.search(sku, entity_type="material", top_k=5)
+
+        assert spoken, "口语编号应能召回候选"
+        assert [c["entity_id"] for c in spoken] == [c["entity_id"] for c in typed], \
+            "口语编号与直接输入阿拉伯数字应召回同一批候选"

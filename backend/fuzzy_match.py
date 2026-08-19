@@ -27,6 +27,25 @@ _ENTITY_TYPES = ("material", "contact", "operator")
 # 拼音缓存上限。超过后用 LRU 顺序淘汰。
 _PINYIN_CACHE_MAX = 10000
 
+# 中文数字 → 阿拉伯数字。用于把 ASR 逐字念出的编号（"一零零二零一"）还原成
+# 索引里的形式（"100201"）。
+#
+# 只转连续 >=3 个的纯数字单字，且前后不紧邻「十百千万亿」——避免打坏物料名里的
+# "三通" "一字螺丝刀"（单字，不足 3 个）和计量表达 "三十五"（含位词）。
+# _normalize / _tokenize 两侧共用，query 与索引走同一条规则，幂等且对称。
+_CN_DIGIT_MAP = str.maketrans({
+    '零': '0', '〇': '0', '一': '1', '幺': '1', '二': '2', '三': '3',
+    '四': '4', '五': '5', '六': '6', '七': '7', '八': '8', '九': '9',
+})
+_CN_DIGIT_RUN = re.compile(
+    r'(?<![十百千万亿])[零〇一幺二三四五六七八九]{3,}(?![十百千万亿])'
+)
+
+
+def _cn_digits_to_arabic(text: str) -> str:
+    """把连续的中文数字单字串转成阿拉伯数字，其余原样保留。"""
+    return _CN_DIGIT_RUN.sub(lambda m: m.group().translate(_CN_DIGIT_MAP), text)
+
 
 class FuzzyMatcher:
     """模糊匹配器，支持文本编辑距离和中文拼音相似度两层匹配"""
@@ -55,8 +74,13 @@ class FuzzyMatcher:
 
     @staticmethod
     def _normalize(text: str) -> str:
-        """去除空格、横杠、斜杠、括号、逗号等干扰字符，统一比较基准"""
-        return re.sub(r'[\s\-－/／\(\)（）\[\]【】,，、]+', '', text).lower()
+        """去除空格、横杠、斜杠、括号、逗号等干扰字符，统一比较基准
+
+        先去干扰字符再做中文数字还原，这样被标点打断的编号（"一零零-二零一"）
+        也能合并成一段连续数字串再整体转换。
+        """
+        t = re.sub(r'[\s\-－/／\(\)（）\[\]【】,，、]+', '', text)
+        return _cn_digits_to_arabic(t).lower()
 
     @staticmethod
     def _tokenize(text: str) -> str:
@@ -67,8 +91,11 @@ class FuzzyMatcher:
         "M3 螺丝 银色 8mm" → "m3 螺丝 银色 8mm" 的 token_set_ratio = 100，
         匹配上 "name + variant" 组合索引项。
         """
+        # 中文数字还原必须在边界补空格之前：转成阿拉伯数字后才有中↔ASCII 边界，
+        # "型号一零零二零一" → "型号100201" → "型号 100201"。顺序反了则不切词。
+        t = _cn_digits_to_arabic(text)
         # 中文↔ASCII 边界插空格（中→ASCII，ASCII→中）
-        t = re.sub(r'([一-鿿])([A-Za-z0-9])', r'\1 \2', text)
+        t = re.sub(r'([一-鿿])([A-Za-z0-9])', r'\1 \2', t)
         t = re.sub(r'([A-Za-z0-9])([一-鿿])', r'\1 \2', t)
         # 标点统一替换为空格（保留单词边界，与 _normalize 不同）
         t = re.sub(r'[\-－/／\(\)（）\[\]【】,，、]+', ' ', t)
