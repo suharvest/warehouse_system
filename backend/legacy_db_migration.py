@@ -126,6 +126,12 @@ LEGACY_TABLE_PATCHES: dict[str, list[tuple[str, str]]] = {
         ("tenant_id", "INTEGER DEFAULT 1"),
         ("warehouse_id", "INTEGER"),
     ],
+    # ``revoked_at`` only ever appears in 1826e23835b6 itself — no incremental
+    # migration adds it. A legacy ``sessions`` table therefore never grows the
+    # column, and the boot-time metadata gate refuses to start on it. Same
+    # rationale as ``inventory_records.reason``: re-add so the DB really
+    # matches the revision we stamp.
+    "sessions": [("revoked_at", "DATETIME")],
     "mcp_connections": [
         ("tenant_id", "INTEGER DEFAULT 1"),
         ("warehouse_id", "INTEGER"),
