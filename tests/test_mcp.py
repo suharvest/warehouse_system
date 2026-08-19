@@ -362,6 +362,108 @@ class TestLowStockNotice:
         assert resp["data"]["safe_stock"] == 20
 
 
+class TestLowStockNoticeE2E:
+    """真链路验证 safe_stock 能从后端流到播报：真 DB + 真路由，只换 HTTP 层。
+
+    前面 TestLowStockNotice 是手搓 dict 喂 _wrap_response，字段名对不上也测不出来。
+    """
+
+    @pytest.fixture()
+    def low_material(self, admin_client, default_warehouse_id):
+        """安全库存 20，实际 8 —— 落在告急档（低于 50%）。"""
+        from database import get_db_connection
+        sku = f"LS-{uuid.uuid4().hex[:6].upper()}"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO materials (name, sku, category, quantity, unit, "
+            "safe_stock, location, warehouse_id) "
+            "VALUES (?, ?, 'Test', 0, '个', 20, '', ?)",
+            ("安全库存告急件", sku, default_warehouse_id),
+        )
+        mid = cur.lastrowid
+        cur.execute(
+            "INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, "
+            "is_exhausted, warehouse_id, created_at, location, tenant_id) "
+            "VALUES (?, ?, 8, 8, 0, ?, datetime('now'), 'C区-03', 1)",
+            (f"LB-{uuid.uuid4().hex[:8].upper()}", mid, default_warehouse_id),
+        )
+        conn.commit()
+        conn.close()
+        # 直插 SQL 不会失效 fuzzy 缓存，见 TestQueryStockByCodeE2E 同款注释。
+        from app import get_fuzzy_matcher
+        get_fuzzy_matcher().invalidate_cache(entity_type="material")
+        return {"id": mid, "sku": sku, "name": "安全库存告急件"}
+
+    def _provider(self, admin_client):
+        _import_warehouse_mcp()
+        from providers.default import DefaultProvider
+
+        class P(DefaultProvider):
+            def __init__(self):
+                self.max_results = 10
+
+            def http_get(self, path, params=None):
+                r = admin_client.get(f"/api{path}", params=params or {})
+                if r.status_code != 200:
+                    return {"error": r.text}
+                return r.json()
+
+            def http_post(self, path, payload=None):
+                r = admin_client.post(f"/api{path}", json=payload or {})
+                return r.json()
+
+        return P()
+
+    def _tool(self, monkeypatch, admin_client, name):
+        warehouse_mcp = _import_warehouse_mcp()
+        provider = self._provider(admin_client)
+        monkeypatch.setattr(warehouse_mcp, "_get_provider", lambda: provider)
+        monkeypatch.setattr(warehouse_mcp, "_enforce_face", lambda *a, **k: (None, None))
+        return getattr(getattr(warehouse_mcp, name), "fn", getattr(warehouse_mcp, name))
+
+    def test_query_stock_carries_safe_stock_end_to_end(self, monkeypatch, admin_client,
+                                                      low_material):
+        fn = self._tool(monkeypatch, admin_client, "query_stock")
+        wrapped = asyncio.run(fn(low_material["name"]))
+        assert wrapped["ok"] is True
+        assert "注意，库存告急，低于安全库存20个，缺12个。" in wrapped["say"]
+        assert wrapped["data"]["safe_stock"] == 20
+        assert wrapped["data"]["low_stock"] is True
+
+    def test_stock_out_crossing_safe_line_warns(self, monkeypatch, admin_client,
+                                                default_warehouse_id):
+        """入库 30（高于安全线 20），出库 25 后剩 5 —— 播报要当场带提醒。"""
+        from database import get_db_connection
+        sku = f"LO-{uuid.uuid4().hex[:6].upper()}"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO materials (name, sku, category, quantity, unit, "
+            "safe_stock, location, warehouse_id) "
+            "VALUES (?, ?, 'Test', 0, '个', 20, '', ?)",
+            ("出库跌破件", sku, default_warehouse_id),
+        )
+        mid = cur.lastrowid
+        cur.execute(
+            "INSERT INTO batches (batch_no, material_id, quantity, initial_quantity, "
+            "is_exhausted, warehouse_id, created_at, location, tenant_id) "
+            "VALUES (?, ?, 30, 30, 0, ?, datetime('now'), 'C区-04', 1)",
+            (f"LO-{uuid.uuid4().hex[:8].upper()}", mid, default_warehouse_id),
+        )
+        conn.commit()
+        conn.close()
+        from app import get_fuzzy_matcher
+        get_fuzzy_matcher().invalidate_cache(entity_type="material")
+
+        fn = self._tool(monkeypatch, admin_client, "stock_out")
+        wrapped = asyncio.run(fn("出库跌破件", 25, "领用", "", "测试员"))
+        assert wrapped["ok"] is True and wrapped["executed"] is True
+        assert wrapped["data"]["after"] == 5
+        assert "注意，库存告急，低于安全库存20个，缺15个。" in wrapped["say"]
+        assert wrapped["data"]["low_stock"] is True
+
+
 class TestQueryStockByCodeE2E:
     """真链路：真 DB + 真后端路由 + 真 FuzzyMatcher，只把 HTTP 换成 TestClient。"""
 
