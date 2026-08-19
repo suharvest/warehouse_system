@@ -14,15 +14,16 @@
 所以 BaseProvider 采用「绝对导入优先、相对导入兜底」的双路径写法。
 """
 
-import difflib
 import logging
 import re
 from datetime import datetime
 
 try:  # ERP 动态加载路径（spec 名无父包）
     from providers.base import BaseProvider
+    from providers.matching import LocalMatchMixin, MatchConfig
 except ImportError:  # 包内 _discover() 路径
     from ..base import BaseProvider
+    from ..matching import LocalMatchMixin, MatchConfig
 
 logger = logging.getLogger("WarehouseMCP")
 
@@ -32,19 +33,21 @@ _CONFIDENT_SCORE = 0.75
 _CANDIDATE_FLOOR = 0.34
 
 
-def _norm(text) -> str:
-    """归一化：去空白、转小写、全角转半角，提升 ASR 文本的匹配率。"""
-    if not text:
-        return ""
-    s = str(text).strip().lower()
-    s = s.translate(str.maketrans({"－": "-", "–": "-", "—": "-", "　": " "}))
-    return re.sub(r"\s+", "", s)
+class CustomWmsProvider(LocalMatchMixin, BaseProvider):
+    """客户自有 WMS 适配器。
 
-
-class CustomWmsProvider(BaseProvider):
-    """客户自有 WMS 适配器。"""
+    匹配逻辑继承自 LocalMatchMixin，本类只负责取数和字段映射 —— 这正是
+    客户接入新 WMS 时需要写的全部内容。
+    """
 
     PROVIDER_NAME = "custom_wms"
+
+    MATCH = MatchConfig(
+        fields={"name": "name", "code": "code", "spec": "spec"},
+        # 该系统的 spec 是包装规格（"500ml"），区分度低于备品系统的型号串，
+        # 保持重构前的 0.6 权重不变
+        weights={"spec": 0.6},
+    )
 
     def __init__(self, config: dict):
         super().__init__(config)
@@ -67,6 +70,10 @@ class CustomWmsProvider(BaseProvider):
 
     # ── 内部工具 ──
 
+    def _fetch_items(self):
+        """LocalMatchMixin 的取数入口，转调本类既有的 _fetch_products。"""
+        return self._fetch_products()
+
     def _fetch_products(self):
         """拉取全量产品，返回 (products, error_response)。"""
         data = self.http_get("/api/products", params=self._wh_params())
@@ -79,44 +86,6 @@ class CustomWmsProvider(BaseProvider):
             }
         items = data.get("data") or []
         return (items if isinstance(items, list) else []), None
-
-    def _score(self, query: str, product: dict) -> float:
-        """给单个产品打匹配分（0~1）。名称/编码/规格三路取最大值。"""
-        q = _norm(query)
-        if not q:
-            return 0.0
-
-        best = 0.0
-        name = _norm(product.get("name"))
-        code = _norm(product.get("code"))
-        spec = _norm(product.get("spec"))
-
-        # 编码完全一致 → 直接满分（"SP-001"）
-        if code and q == code:
-            return 1.0
-        # 名称完全一致 → 满分
-        if name and q == name:
-            return 1.0
-        # "矿泉水500ml" 这类「名称+规格」连读
-        if name and spec and q == name + spec:
-            return 1.0
-
-        for field, weight in ((name, 1.0), (code, 0.9), (spec, 0.6)):
-            if not field:
-                continue
-            if q in field or field in q:
-                # 子串命中，按长度比例给分，避免单字"水"命中"矿泉水"拿高分
-                ratio = min(len(q), len(field)) / max(len(q), len(field))
-                best = max(best, weight * (0.72 + 0.28 * ratio))
-            best = max(best, weight * difflib.SequenceMatcher(None, q, field).ratio())
-        return best
-
-    def _rank(self, query: str, products: list) -> list:
-        """按匹配分降序返回 [(score, product), ...]，已过滤低分噪声。"""
-        scored = [(self._score(query, p), p) for p in products]
-        scored = [x for x in scored if x[0] >= _CANDIDATE_FLOOR]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return scored
 
     @staticmethod
     def _as_candidate(score: float, p: dict) -> dict:
@@ -147,52 +116,20 @@ class CustomWmsProvider(BaseProvider):
             return "缺货"
         return "库存不足" if stock < min_stock else "正常"
 
-    def _locate(self, product_name: str, fuzzy: bool):
-        """解析产品名 → (product, error_response)。歧义时返回澄清响应。"""
-        products, err = self._fetch_products()
-        if err:
-            return None, err
+    def _not_found(self, query: str) -> dict:
+        return {"success": False, "error": "not_found",
+                "message": f"未找到产品：{query}"}
 
-        ranked = self._rank(product_name, products)
-        if not ranked:
-            return None, {
-                "success": False,
-                "error": "not_found",
-                "message": f"未找到产品：{product_name}",
-            }
-
-        top_score, top = ranked[0]
-
-        # 精确命中直接返回
-        if top_score >= 0.999:
-            return top, None
-
-        if not fuzzy:
-            return None, {
-                "success": False,
-                "error": "not_found",
-                "message": f"未精确匹配到产品：{product_name}",
-            }
-
-        # 同分并列 / 分数不够 → 让用户澄清，不能替用户猜（写操作尤其危险）
-        tied = [x for x in ranked if abs(x[0] - top_score) < 0.02]
-        if top_score < _CONFIDENT_SCORE or len(tied) > 1:
-            cands = [self._as_candidate(s, p) for s, p in ranked[:6]]
-            listed = "、".join(
-                f"{c['name']}（{c['extra']['variant'] or c['extra']['sku']}）" for c in cands
-            )
-            return None, {
-                "success": False,
-                # 工具层按 ambiguous_name 才会把候选转成"我不确定你说的是哪一个"的追问
-                "error": "ambiguous_name",
-                "candidates": cands,
-                "message": (
-                    f"'{product_name}' 匹配到多个产品：{listed}。请告知具体是哪一个"
-                    "（可说规格或产品编码）"
-                ),
-            }
-
-        return top, None
+    def _ambiguous(self, query: str, candidates: list) -> dict:
+        listed = "、".join(self._fmt_candidate(c) for c in candidates)
+        return {
+            "success": False,
+            # 工具层按 ambiguous_name 才会把候选转成"我不确定你说的是哪一个"的追问
+            "error": "ambiguous_name",
+            "candidates": candidates,
+            "message": (f"'{query}' 匹配到多个产品：{listed}。"
+                        "请告知具体是哪一个（可说规格或产品编码）"),
+        }
 
     def _post_movement(self, endpoint: str, product: dict, quantity: int,
                        operator: str, remark: str, qty_key: str) -> dict:
