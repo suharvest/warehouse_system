@@ -344,10 +344,20 @@ class TestLowStockNotice:
         assert "安全库存" not in resp["say"]
         assert "safe_stock" not in resp["data"]
 
-    def test_variant_query_does_not_compare(self):
-        """safe_stock 是整料阈值，拿它比单规格库存会误报。"""
-        resp = self._q(current_stock=3, variant="M3")
+    def test_variant_scoped_query_does_not_compare(self):
+        """safe_stock 是整料阈值，拿它比按规格过滤后的子集会误报。"""
+        resp = self._q(current_stock=3, variant="M3", variant_scoped=True)
         assert "安全库存" not in resp["say"]
+
+    def test_plain_variant_still_compares(self):
+        """外接 ERP 的 variant 是该件型号、库存就是它自己的 —— 必须照常提醒。
+
+        回归点：判据一度写成「有 variant 就跳过」，导致这类 Provider 的低库存
+        提醒全部静默失效。
+        """
+        resp = self._q(current_stock=3, variant="LH-815")
+        assert "注意，库存告急，低于安全库存20个，缺17个。" in resp["say"]
+        assert resp["data"]["low_stock"] is True
 
     def test_stock_out_below_safe_appends_notice(self):
         resp = self._out(new_quantity=5)

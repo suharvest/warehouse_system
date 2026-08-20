@@ -740,10 +740,18 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                     "unit": unit,
                     "batch_count": batch_count,
                 }
-                # 安全库存只在整料维度比：按规格过滤时 current_stock 是该规格的
-                # 量、safe_stock 仍是整料阈值，直接比会把正常库存播成告急。
+                # 安全库存只在整料维度比：默认 Provider 按规格过滤时 current_stock
+                # 是该规格的量、safe_stock 仍是整料阈值，直接比会把正常库存播成
+                # 告急，故由 Provider 打 variant_scoped 标记来跳过。
+                #
+                # 判据不能是「有没有 variant」——外接 ERP 的 product.variant 是该
+                # 备件的型号（如 LH-815），current_stock 就是它自己的库存，本该比；
+                # 按 variant 有无来跳过会让这类 Provider 的低库存提醒全部失效。
                 safe = p.get("safe_stock")
-                low_note = "" if variant else _low_stock_note(qty, safe, unit)
+                low_note = (
+                    "" if p.get("variant_scoped")
+                    else _low_stock_note(qty, safe, unit)
+                )
                 if safe is not None:
                     data["safe_stock"] = safe
                 if low_note:

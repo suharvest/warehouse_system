@@ -302,6 +302,10 @@ class DefaultProvider(BaseProvider):
             # _wrap_response 播报 product.current_stock 时读到全规格总量
             product_data["current_stock"] = quantity
             product_data["variant"] = resolved_variant
+            # 标记「本次 current_stock 是按规格过滤后的子集」。safe_stock 是整料
+            # 阈值，拿它比子集会误报，下游据此跳过低库存提醒。外接 ERP 的
+            # product.variant 只是该件的型号、库存就是它自己的，不设此标记。
+            product_data["variant_scoped"] = True
         if status:
             product_data["status"] = status
         else:
