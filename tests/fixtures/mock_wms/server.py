@@ -44,9 +44,11 @@ USERS = [
 ]
 # 物料主数据（跨仓共用）
 CATALOG = [
-    {"id": "p1", "code": "SP-001", "name": "矿泉水", "spec": "500ml",  "unit": "瓶"},
-    {"id": "p2", "code": "SP-002", "name": "打印纸", "spec": "A4 80g", "unit": "箱"},
-    {"id": "p3", "code": "SP-003", "name": "签字笔", "spec": "黑色",   "unit": "支"},
+    # location 是物理库位，与 spec（规格）是两个维度 —— 参考实现要把两者都演示
+    # 到位，否则接入方会以为「没有库位就拿规格顶上」（曾有客户据此对调二者）。
+    {"id": "p1", "code": "SP-001", "name": "矿泉水", "spec": "500ml",  "unit": "瓶", "location": "A-01-02"},
+    {"id": "p2", "code": "SP-002", "name": "打印纸", "spec": "A4 80g", "unit": "箱", "location": "B-03-01"},
+    {"id": "p3", "code": "SP-003", "name": "签字笔", "spec": "黑色",   "unit": "支", "location": "A-02-05"},
 ]
 # 库存**按仓库独立**：{warehouse_id: {code: {stock, minStock}}}
 STOCK = {

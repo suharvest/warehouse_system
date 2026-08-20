@@ -249,7 +249,11 @@ class CustomWmsProvider(LocalMatchMixin, BaseProvider):
                 "current_stock": stock,
                 "unit": unit,
                 "safe_stock": product.get("minStock", 0),
-                "location": product.get("spec", ""),
+                # 契约见 providers/base.py:query_stock —— location 是物理库位
+                # （播「位于 XXX」），规格/型号一律走 variant（播「名称（XXX）」）。
+                # 这两个填反了不会报错，只会让手表把规格播成库位。
+                "variant": product.get("spec", ""),
+                "location": product.get("location", ""),
                 "status": status_label,
             },
             "message": (
@@ -359,7 +363,8 @@ class CustomWmsProvider(LocalMatchMixin, BaseProvider):
                 "id": p.get("id"),
                 "name": p.get("name", ""),
                 "sku": p.get("code", ""),
-                "spec": p.get("spec", ""),
+                "variant": p.get("spec", ""),
+                "location": p.get("location", ""),
                 "unit": p.get("unit", ""),
                 "current_stock": p.get("stock", 0),
                 "safe_stock": p.get("minStock", 0),

@@ -84,9 +84,21 @@ def _check_product_field_contract(tree: ast.AST) -> list[str]:
     通常意味着作者把库位和规格对调了 —— 这类错误不会抛异常、不会进日志，
     只会让手表把型号播成「位于 XXX」，真实库位则彻底消失，现场极难自查。
     """
+    # 只看「长得像 product / search item」的 dict。Provider 里描述**对方系统**
+    # 字段名的配置（如 fields={"code": "code", "spec": "spec"}、weights=
+    # {"spec": 0.6}）同样含 spec 键，但完全合法 —— 不加这道过滤会满屏误报。
+    # 宁可偶尔多提示一次：这是非致命告警且自带说明，漏报的代价是错误上线。
+    _PRODUCT_MARKERS = {"current_stock", "sku", "safe_stock", "location", "stock"}
+
     warnings: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Dict):
+            continue
+        literal_keys = {
+            k.value for k in node.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        if not (literal_keys & _PRODUCT_MARKERS):
             continue
         for k in node.keys:
             if isinstance(k, ast.Constant) and k.value == "spec":
