@@ -387,6 +387,63 @@ def _face_guard(
         return {"status": "deny", "failure_reason": "transport_error"}
 
 
+# 人脸拒绝原因 → 面向现场操作人的中文话术。
+#
+# 这些 reason 是内部枚举（spoof / no_face_detected / low_confidence …）。以前
+# 兜底分支直接把它拼进播报文案——一个裸英文词扔给中文语音，LLM 只能自己翻译，
+# 于是现场听到的是「实体验证失败」这种系统里根本不存在、也没法检索的说法。
+# 每条都必须写清「发生了什么 + 现在该怎么办」，且不能出现内部枚举名。
+_FACE_DENY_MESSAGES = {
+    # 被动活体：照片、屏幕翻拍会被判为非活体（endpoint_client 里 live=false）。
+    "spoof": (
+        "活体检测未通过，本次操作已阻止。请本人正对摄像头再说一次，"
+        "不要使用照片或屏幕翻拍；若光线过暗或强逆光也会判失败，请换个位置重试。"
+    ),
+    "no_face_detected": (
+        "没有在画面里检测到人脸。请正对摄像头、靠近一些再说一次本次操作。"
+    ),
+    # 设备侧拿不到身份：抓图失败/忙/超时，或没认出是谁。
+    "device_no_identity": (
+        "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
+        "若仍失败，请联系管理员确认人脸是否已录入。"
+    ),
+    "speaker_unresolved": (
+        "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
+        "若仍失败，请联系管理员确认人脸是否已录入。"
+    ),
+    "device_unresolved": (
+        "无法连接到人脸识别设备，出入库已阻止。请联系管理员检查设备在线状态。"
+    ),
+    "endpoint_unreachable": (
+        "人脸识别服务连不上，出入库已阻止。请联系管理员检查服务状态。"
+    ),
+    "endpoint_not_configured": (
+        "尚未配置人脸识别服务，出入库已阻止。请联系管理员完成配置。"
+    ),
+    "no_match": (
+        "没有匹配到已登记的人脸。请确认本人已录入，或联系管理员录入后重试。"
+    ),
+    "low_confidence": (
+        "人脸相似度不够，无法确认身份。请正对摄像头、靠近一些再说一次本次操作。"
+    ),
+    "not_in_allow_list": (
+        "你没有执行该操作的权限。请由有权限的同事操作，或联系管理员调整权限规则。"
+    ),
+}
+
+# 兜底文案里同样不出现 reason 原文，只给管理员一个可追查的方向；具体 reason
+# 仍保留在 error 字段（face_auth_denied:<reason>）和后端 face_auth_logs 里。
+_FACE_DENY_FALLBACK = (
+    "人脸校验未通过，出入库已阻止。请正对摄像头重试；若反复失败，"
+    "请联系管理员查看人脸校验日志。"
+)
+
+
+def _face_deny_message(reason: str) -> str:
+    """把内部 reason 翻成现场能照做的中文，绝不把枚举名塞进播报。"""
+    return _FACE_DENY_MESSAGES.get(reason, _FACE_DENY_FALLBACK)
+
+
 def _enforce_face(
     operation: str,
     warehouse_id: int = None,
@@ -425,27 +482,10 @@ def _enforce_face(
     )
     if decision.get("status") == "deny":
         reason = decision.get("failure_reason") or "denied"
-        # 后端(B)直连设备取身份，LLM 无需也不应自己调 speaker/填参数。设备没认到人时
-        # 引导用户面向摄像头重试即可（而非让 LLM 补调工具）。
-        if reason in ("device_no_identity", "speaker_unresolved"):
-            return {
-                "success": False,
-                "error": f"face_auth_denied:{reason}",
-                "message": (
-                    "没有识别到已登记的操作人。请面向摄像头后再说一次本次操作；"
-                    "若仍失败，请联系管理员确认人脸是否已录入。"
-                ),
-            }, None
-        if reason == "device_unresolved":
-            return {
-                "success": False,
-                "error": f"face_auth_denied:{reason}",
-                "message": "无法连接到人脸识别设备，出入库已阻止。请联系管理员检查设备在线状态。",
-            }, None
         return {
             "success": False,
             "error": f"face_auth_denied:{reason}",
-            "message": f"人脸校验未通过：{reason}。请由本人操作或联系管理员检查权限规则。",
+            "message": _face_deny_message(reason),
         }, None
     face_name = decision.get("matched_subject_name")
     return None, (face_name if isinstance(face_name, str) and face_name else None)
