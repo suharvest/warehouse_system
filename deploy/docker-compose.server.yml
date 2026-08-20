@@ -10,6 +10,11 @@ services:
       - "1025:1025"
     volumes:
       - ../data:/data
+      # 客户通过智控台上传的 ERP Provider（.py）落在这里。必须是卷 ——
+      # 镜像不含它（.dockerignore 排除 mcp/providers/custom/**），不挂卷
+      # 就只能活在容器可写层，换镜像即丢失，系统会静默回退到
+      # DefaultProvider（本地演示数据），查询看着能跑但全是假数据。
+      - ../providers_custom:/app/mcp/providers/custom
     environment:
       - PORT=1025
       - DATABASE_PATH=/data/warehouse.db
