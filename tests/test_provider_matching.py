@@ -10,6 +10,7 @@ rapidfuzz + pypinyin，能力又强一截。同一句话在三条路径上表现
 import os
 import re
 import sys
+import time
 
 import pytest
 
@@ -481,3 +482,258 @@ class TestCaching:
 
         item, err = P()._locate("上钳口")
         assert err is None and item["stockQty"] == 9
+
+
+class TestReviewFindings:
+    """独立审核发现的缺陷，逐条锁死。
+
+    这些用例对应的 bug 全部从原有测试的盲区里逃出来了：原有用例都是单线程、
+    无重复编码、无「缓存有近似项 + 新增精确项」、不覆盖 search 的非默认参数。
+    """
+
+    @staticmethod
+    def _fresh():
+        from providers.matching import _item_cache
+        _item_cache.invalidate()
+
+    # ── P0-1 ──
+
+    @pytest.mark.parametrize("path,cls", [
+        ("mcp/providers/custom/1/parts_wms.py", "PartsWmsProvider"),
+        ("tests/fixtures/mock_wms/provider.py", "CustomWmsProvider"),
+    ])
+    def test_no_dangling_norm_reference(self, path, cls):
+        """删掉模块级 _norm 后，search() 里的引用没跟着改 → NameError。
+
+        MCP 层恒传 fuzzy=True 且 status 在 exclude_args 里，所以线上不可达，
+        但任何非 MCP 调用方（backend、probe 扩展）一碰就崩。
+        """
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, path), encoding="utf-8").read()
+        assert not re.search(r"(?<![\w.])_norm\s*\(", src), \
+            f"{path} 仍引用已删除的 _norm"
+
+    def test_search_with_status_filter_does_not_crash(self):
+        """走 search 的非默认参数路径，这正是 P0-1 逃逸的地方。"""
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location(
+            "pw_status", os.path.join(root, "mcp/providers/custom/1/parts_wms.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        p = m.PartsWmsProvider({"api_base_url": "http://x", "auth": {}})
+        p._fetch_products = lambda: ([
+            {"partName": "上钳口", "partNo": "100201", "partType": "X", "stockQty": 1},
+        ], None)
+        for kwargs in ({"status": "low"}, {"fuzzy": False}, {"status": "正常", "fuzzy": False}):
+            r = p.search(query="上钳口", entity_type="material", category=None,
+                         contact_type=None, include_batches=False, max_results=10,
+                         **{"status": None, "fuzzy": True, **kwargs})
+            assert isinstance(r, dict)
+
+    # ── P0-2 ──
+
+    def test_new_exact_item_beats_stale_near_match(self):
+        """缓存里有 0.9 分的旧近似项时，也必须刷新。
+
+        用户在 ERP 新增「上钳口B」后立刻查它，缓存里只有「上钳口A」——
+        A 能拿到 0.9 分（>= confident 0.75）且唯一，旧判据 `if not ranked`
+        不会触发刷新，于是返回 A。出库就是出错货，而且全程 success。
+        """
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh()
+        items = [{"partName": "上钳口A", "partNo": "A001", "partType": "X"}]
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+            CACHE_TTL = 3600
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "T"}
+
+            def _fetch_items(self):
+                return list(items), None
+
+        p = P()
+        p._locate("上钳口A")                       # 预热缓存
+        items.append({"partName": "上钳口B", "partNo": "B001", "partType": "Y"})
+
+        item, err = p._locate("上钳口B")
+        assert err is None, f"应命中新增的 B，实际: {err}"
+        assert item["partNo"] == "B001", f"命中了旧的近似项 {item['partNo']}，会出错货"
+
+    def test_exact_hit_still_skips_refresh(self):
+        """精确命中不该触发刷新，否则每次查询都多打一次对方接口。"""
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+            CACHE_TTL = 3600
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "T2"}
+                self.n = 0
+
+            def _fetch_items(self):
+                self.n += 1
+                return [{"partName": "上钳口", "partNo": "100201", "partType": "X"}], None
+
+        p = P()
+        for _ in range(4):
+            p._locate("100201")
+        assert p.n == 1, f"精确命中不该刷新，实际拉取 {p.n} 次"
+
+    # ── P0-3 ──
+
+    def test_duplicate_codes_are_deduped(self):
+        """取全量的接口不保证每个物料一行，多仓/多批次会返回同一编码多条。
+
+        不去重的话两条都是 1.0 分 → 并列 → 返回「上钳口（X）、上钳口（X）」
+        这种一模一样的候选，用户报编号也澄清不掉，对话卡死。
+        """
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "T3"}
+
+            def _fetch_items(self):
+                return [
+                    {"partName": "上钳口", "partNo": "100201", "partType": "X", "warehouse": "甲"},
+                    {"partName": "上钳口", "partNo": "100201", "partType": "X", "warehouse": "乙"},
+                ], None
+
+        item, err = P()._locate("100201")
+        assert err is None, f"同编码重复行应去重后命中，实际: {err}"
+        assert item["partNo"] == "100201"
+
+    def test_genuinely_different_items_still_ask(self):
+        """去重不能把真正不同的物料也合并掉。"""
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "T4"}
+
+            def _fetch_items(self):
+                return [
+                    {"partName": "钳口", "partNo": "A1", "partType": "X"},
+                    {"partName": "钳口", "partNo": "A2", "partType": "Y"},
+                ], None
+
+        item, err = P()._locate("钳口")
+        assert item is None and err["error"] == "ambiguous_name"
+        assert len({c["extra"]["sku"] for c in err["candidates"]}) == 2
+
+    # ── P1-4 ──
+
+    def test_concurrent_cold_start_fetches_once(self):
+        """线程池并发下 single-flight：8 线程冷启动只应拉一次。
+
+        MCP 工具走 asyncio.to_thread，并发是常态而非极端。
+        """
+        import threading
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh()
+        calls = []
+        lock = threading.Lock()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+            CACHE_TTL = 3600
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "TC"}
+
+            def _fetch_items(self):
+                with lock:
+                    calls.append(1)
+                time.sleep(0.05)          # 放大竞态窗口
+                return [{"partName": "上钳口", "partNo": "100201", "partType": "X"}], None
+
+        p = P()
+        threads = [threading.Thread(target=lambda: p._locate("100201")) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(calls) == 1, f"并发冷启动拉取了 {len(calls)} 次，single-flight 失效"
+
+    def test_concurrent_misses_respect_debounce(self):
+        """并发的 not_found 不能各自触发一次强制刷新。"""
+        import threading
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh()
+        calls = []
+        lock = threading.Lock()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+            CACHE_TTL = 3600
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "TD"}
+
+            def _fetch_items(self):
+                with lock:
+                    calls.append(1)
+                time.sleep(0.05)
+                return [{"partName": "上钳口", "partNo": "100201", "partType": "X"}], None
+
+        p = P()
+        p._locate("100201")                      # 预热，calls = 1
+        base = len(calls)
+        threads = [threading.Thread(target=lambda: p._locate("库里没有的东西"))
+                   for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(calls) - base <= 1, \
+            f"并发 miss 触发了 {len(calls) - base} 次强制刷新，防抖被绕过"
+
+    # ── P1-5 ──
+
+    def test_cache_key_includes_warehouse_id(self):
+        """parts_wms 用的是 warehouse_id 而非 external_warehouse_id。
+
+        只按后者隔离的话，同一 ERP 地址下绑不同仓库的连接会共用缓存。
+        """
+        from providers.matching import LocalMatchMixin, MatchConfig
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "n", "code": "c", "spec": "s"})
+
+            def __init__(self, wh):
+                self.config = {"api_base_url": "http://same"}
+                self.warehouse_id = wh
+
+            def _fetch_items(self):
+                return [], None
+
+        assert P("WH-BJ")._cache_key() != P("WH-SH")._cache_key()
+
+    def test_cache_key_includes_auth(self):
+        """同一 URL 不同凭据，可见的数据范围可能不同。"""
+        from providers.matching import LocalMatchMixin, MatchConfig
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "n", "code": "c", "spec": "s"})
+
+            def __init__(self, key):
+                self.config = {"api_base_url": "http://same",
+                               "auth": {"type": "api_key", "key": key}}
+
+            def _fetch_items(self):
+                return [], None
+
+        a, b = P("secret-a")._cache_key(), P("secret-b")._cache_key()
+        assert a != b
+        assert not any("secret" in str(x) for x in a), "凭据明文进了缓存 key"

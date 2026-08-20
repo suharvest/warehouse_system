@@ -26,6 +26,7 @@ Provider 只需要回答两个问题：**去哪拉数据**、**哪个字段是�
 用例抓到。
 """
 
+import hashlib
 import logging
 import re
 import threading
@@ -159,6 +160,31 @@ class _CacheEntry:
         # 的 _REFRESH_DEBOUNCE 秒内就不许强制刷新 —— 而「用户新增物料后立刻
         # 查询」恰好落在这个窗口里，正是最需要刷新的时刻。
         self.last_refresh_attempt = fetched_at - _REFRESH_DEBOUNCE
+
+
+class _FetchLocks:
+    """按 key 的取数锁，实现 single-flight。
+
+    MCP 工具跑在 asyncio.to_thread 的线程池里（warehouse_mcp.py 的
+    log_mcp_call），Provider 方法天然被并发调用。没有这把锁时，8 线程同时
+    冷启动会打出 8 次全量拉取，``_REFRESH_DEBOUNCE`` 也会被绕过 —— 实测
+    连续 miss 触发了 8 次强制刷新。_ItemCache 的 RLock 只保护 dict 读写，
+    保护不了「查缓存 → 拉取 → 回填」这整段。
+    """
+
+    def __init__(self):
+        self._locks: dict = {}
+        self._guard = threading.Lock()
+
+    def for_key(self, key) -> threading.Lock:
+        with self._guard:
+            lk = self._locks.get(key)
+            if lk is None:
+                lk = self._locks[key] = threading.Lock()
+            return lk
+
+
+_fetch_locks = _FetchLocks()
 
 
 class _ItemCache:
@@ -402,6 +428,33 @@ class LocalMatchMixin:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored
 
+    def _dedupe(self, ranked: list) -> list:
+        """按编码去重，保留每个编码的最高分。
+
+        取全量的接口未必保证每个物料只有一行 —— parts_wms 的 _fetch_products
+        是拿不带过滤的查询碰运气，多仓 / 多批次会返回同一 partNo 的多行。
+        不去重的话两条同编码记录都是 1.0 分，撞进并列分支返回
+        「上钳口（X）、上钳口（X）」这种完全一样的候选，用户报编号也澄清
+        不掉，对话卡死。
+
+        编码为空的记录按对象身份保留，不与他人合并 —— 没有编码就没有判定
+        重复的依据，宁可多留也不能误并。
+        """
+        code_key = self.MATCH.fields.get("code")
+        if not code_key:
+            return ranked
+        seen = set()
+        out = []
+        for score, item in ranked:           # ranked 已按分降序，先到的即最高分
+            code = item.get(code_key)
+            k = norm_for_match(code) if code else None
+            if k:
+                if k in seen:
+                    continue
+                seen.add(k)
+            out.append((score, item))
+        return out
+
     # ── 候选与响应 ──
 
     def _as_candidate(self, score: float, item: dict) -> dict:
@@ -445,15 +498,31 @@ class LocalMatchMixin:
     def _cache_key(self):
         """缓存隔离键。
 
-        必须包含租户 / 仓库标识：多租户部署下不同连接绑定不同的外部仓库，
-        共用一份缓存会让 A 租户看到 B 租户的物料。
+        隔离维度宁多勿少：漏一个维度就是跨租户 / 跨仓库串数据，而多一个维度
+        最多是缓存命中率低一点。
+
+        ``warehouse_id`` 与 ``external_warehouse_id`` 是两回事，都要算进来 ——
+        parts_wms 用的是前者（parts_wms.py:59），只按后者隔离的话，同一个
+        ERP 地址下绑不同仓库的连接会共用一条缓存。
+
+        ``auth`` 也要算：同一 URL 用不同凭据访问，看到的数据范围可能不同。
+        只取指纹不存明文，避免凭据出现在内存里的 key 结构中。
         """
         cfg = getattr(self, "config", None) or {}
+        auth = cfg.get("auth") or {}
+        auth_fp = ""
+        if auth:
+            secret = str(auth.get("key") or auth.get("token") or auth.get("password") or "")
+            auth_fp = hashlib.sha256(
+                f"{auth.get('type', '')}:{secret}".encode()
+            ).hexdigest()[:16]
         return (
             type(self).__name__,
             cfg.get("api_base_url", ""),
             cfg.get("external_tenant_id", ""),
             cfg.get("external_warehouse_id", ""),
+            str(getattr(self, "warehouse_id", "") or cfg.get("warehouse_id", "")),
+            auth_fp,
         )
 
     def _load_items(self, force: bool = False):
@@ -468,6 +537,27 @@ class LocalMatchMixin:
         if not force and entry is not None and (now - entry.fetched_at) < self.CACHE_TTL:
             return entry.indexed, None, True
 
+        # single-flight：同 key 的并发取数串行化。等锁期间别的线程可能已经拉好，
+        # 拿到锁后复查一次，避免惊群式重复拉取。
+        #
+        # 复查的判据是「缓存在我等锁期间有没有被别人更新过」（fetched_at 变新），
+        # 不能拿 fetched_at 去比防抖间隔 —— 那会把「缓存刚建好」误判成「刚有人
+        # 强制刷新过」，导致 force 请求被自己挡掉，强制刷新永远不发生。
+        before_ts = entry.fetched_at if entry is not None else None
+        with _fetch_locks.for_key(key):
+            cur = _item_cache.get(key)
+            if cur is not None:
+                if not force and (time.monotonic() - cur.fetched_at) < self.CACHE_TTL:
+                    return cur.indexed, None, True
+                if force and (before_ts is None or cur.fetched_at > before_ts):
+                    # 等锁期间别的线程刚拉过，直接复用，别再打一次对方接口
+                    return cur.indexed, None, True
+            return self._do_fetch(key, force)
+
+    def _do_fetch(self, key, force: bool):
+        """真正发起一次拉取并回填缓存。调用方必须已持有该 key 的取数锁。"""
+        now = time.monotonic()
+        entry = _item_cache.get(key)
         items, err = self._fetch_items()
         if err:
             # 拉取失败时宁可用过期数据也不要直接失败 —— 对方 ERP 抖一下不该
@@ -516,14 +606,21 @@ class LocalMatchMixin:
             # 默认不退化（直接返回错误），需要的 Provider 覆盖这个钩子。
             return self._locate_fallback(query, err)
 
-        ranked = self._rank(query, indexed) if indexed else []
+        ranked = self._dedupe(self._rank(query, indexed) if indexed else [])
 
-        # 缓存里找不到 → 可能是刚新增的物料，强制刷新重试一次
-        if not ranked and from_cache and self._may_force_refresh():
-            logger.info("缓存中未匹配到 %r，强制刷新后重试", query)
+        # 缓存里没有**精确**命中 → 强制刷新一次再判。
+        #
+        # 判据是「有没有精确命中」而不是「有没有结果」：缓存里存着一个 0.9 分
+        # 的旧近似项时 ranked 非空，但它可能不是用户要的那个 —— 用户刚在 ERP
+        # 新增「上钳口B」，缓存里只有「上钳口A」，查 B 会以 0.9 分命中 A，
+        # 出库直接出错货，而且全程 success 没有任何异常。
+        # 非精确命中本就不确定，多花一次拉取换最新数据再判是划算的；
+        # 精确命中（1.0）才跳过刷新，那是绝大多数正常查询的路径。
+        if from_cache and (not ranked or ranked[0][0] < 0.999) and self._may_force_refresh():
+            logger.info("缓存中无精确命中 %r，强制刷新后重试", query)
             fresh, err2, _ = self._load_items(force=True)
             if err2 is None and fresh:
-                ranked = self._rank(query, fresh)
+                ranked = self._dedupe(self._rank(query, fresh))
 
         if not ranked:
             return None, self._not_found(query)
@@ -549,8 +646,11 @@ class LocalMatchMixin:
 
         # 到这里说明没有精确命中。写操作不猜，直接告知查不到。
         if not fuzzy:
-            return None, {"success": False, "error": "not_found",
-                          "message": f"未精确匹配到备品：{query}"}
+            # 走 _not_found 而不是硬编码文案 —— 基类默认说「备品」，
+            # custom_wms 覆盖成了「产品」，硬编码会让它对用户说错词。
+            err = self._not_found(query)
+            err["message"] = err.get("message", "").replace("未找到", "未精确匹配到")
+            return None, err
 
         if len(tied) > 1 or top_score < self.MATCH.confident_score:
             return _ask()

@@ -20,10 +20,10 @@ from datetime import datetime
 
 try:  # ERP 动态加载路径（spec 名无父包）
     from providers.base import BaseProvider
-    from providers.matching import LocalMatchMixin, MatchConfig
+    from providers.matching import LocalMatchMixin, MatchConfig, norm_for_match
 except ImportError:  # 包内 _discover() 路径
     from ..base import BaseProvider
-    from ..matching import LocalMatchMixin, MatchConfig
+    from ..matching import LocalMatchMixin, MatchConfig, norm_for_match
 
 logger = logging.getLogger("WarehouseMCP")
 
@@ -338,7 +338,7 @@ class CustomWmsProvider(LocalMatchMixin, BaseProvider):
         if query:
             ranked = self._rank(query, products) if fuzzy else [
                 (1.0, p) for p in products
-                if _norm(query) in _norm(p.get("name")) or _norm(query) == _norm(p.get("code"))
+                if norm_for_match(query) in norm_for_match(p.get("name")) or norm_for_match(query) == norm_for_match(p.get("code"))
             ]
             matched = [p for _, p in ranked]
         else:
@@ -346,7 +346,7 @@ class CustomWmsProvider(LocalMatchMixin, BaseProvider):
 
         # status 过滤：normal / low，兼容中文
         if status:
-            want = _norm(status)
+            want = norm_for_match(status)
             alias = {"low": "库存不足", "库存不足": "库存不足", "不足": "库存不足",
                      "normal": "正常", "正常": "正常", "缺货": "缺货", "out": "缺货"}
             target = alias.get(want)

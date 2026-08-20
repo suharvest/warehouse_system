@@ -207,6 +207,61 @@ backend 启动时会按顺序跑：
 
 ---
 
+## 升级已有部署（含 ERP Provider 迁移）
+
+客户通过智控台上传的 ERP Provider 落在容器内
+`/app/mcp/providers/custom/<租户>/`。**镜像里不含它** —— `.dockerignore`
+排除了 `mcp/providers/custom/**`（该目录会被 `providers/__init__.py` 的
+`_discover()` 自动注册，打进镜像会污染所有部署）。
+
+所以 Provider 只能靠卷持久化。2026-08-20 之前的 compose 没有这个卷，
+Provider 活在容器可写层，`docker compose up -d` 换镜像即丢失。
+
+**丢失后不会报错**：`_load_provider_from_db_or_default` 找不到文件就静默
+回退到 `DefaultProvider`（本地 SQLite 的演示数据），`query_stock` 照常返回
+`success`，只是数据全是假的。不查日志发现不了。
+
+### 升级顺序
+
+命名卷首次挂载只会复制**镜像里**该目录的内容，可写层里已有的 Provider
+不会自动进卷，所以必须先备份、换完再放回。
+
+```bash
+# 1) 备份（必须在换 compose 之前）
+docker cp mcp_warehouse:/app/mcp/providers/custom ./provider-backup
+
+# 2) 换用含 warehouse_providers 卷的 compose
+#      volumes:
+#        - warehouse_data:/data
+#        - warehouse_providers:/app/mcp/providers/custom
+
+# 3) 拉镜像重建
+docker compose pull warehouse && docker compose up -d warehouse
+
+# 4) 恢复
+docker cp ./provider-backup/. mcp_warehouse:/app/mcp/providers/custom/
+docker exec mcp_warehouse sh -c 'rm -rf /app/mcp/providers/custom/*/__pycache__'
+docker restart mcp_warehouse
+
+# 5) 验收 —— 这一步不能省
+docker exec mcp_warehouse sh -c \
+  "grep -E '使用(外部 ERP )?[Pp]rovider' /app/logs/mcp_pipe.log | tail -3"
+```
+
+第 5 步应看到 `使用外部 ERP Provider: <名字>`。
+**看到 `使用 provider: default (DefaultProvider)` 就是没恢复上**，
+此时系统查询照常返回但数据来自演示库，必须排查后再交付。
+
+恢复前确认卷真的挂上了，否则文件仍在可写层，下次换镜像照样丢：
+
+```bash
+docker inspect mcp_warehouse \
+  --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' \
+  | grep providers/custom
+```
+
+---
+
 ## 常见问题
 
 ### 1. 启动报 "no such column: xxx"
