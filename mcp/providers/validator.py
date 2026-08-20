@@ -76,6 +76,29 @@ def _check_dangerous_calls(tree: ast.AST) -> list[str]:
     return errors
 
 
+def _check_product_field_contract(tree: ast.AST) -> list[str]:
+    """非致命告警：Provider 返回的 dict 里出现 ``"spec"`` 键。
+
+    播报层（``_wrap_response``）只认 ``product.location``（物理库位）和
+    ``product.variant``（规格/型号），从不读 ``product.spec``。写了 ``spec``
+    通常意味着作者把库位和规格对调了 —— 这类错误不会抛异常、不会进日志，
+    只会让手表把型号播成「位于 XXX」，真实库位则彻底消失，现场极难自查。
+    """
+    warnings: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k in node.keys:
+            if isinstance(k, ast.Constant) and k.value == "spec":
+                warnings.append(
+                    f"第 {k.lineno} 行返回了 \"spec\" 字段：播报层不读它，会被"
+                    "静默丢弃。规格/型号请填 \"variant\"，物理库位填 "
+                    "\"location\"（播报成「位于 XXX」）。"
+                )
+                break
+    return warnings
+
+
 def _find_provider_class(tree: ast.AST) -> tuple[Optional[ast.ClassDef], list[str]]:
     """在 AST 中查找继承自 BaseProvider 的类。
 
@@ -142,6 +165,7 @@ def validate_provider_file(filepath: str) -> dict:
             "class_name": str | None,      # 类名
             "methods": list[str],          # 已找到的方法列表
             "errors": list[str],           # 所有错误描述（valid=False 时非空）
+            "warnings": list[str],         # 非致命提示，不影响 valid
         }
     """
     errors: list[str] = []
@@ -159,6 +183,7 @@ def validate_provider_file(filepath: str) -> dict:
             "class_name": None,
             "methods": [],
             "errors": [f"无法读取文件: {e}"],
+            "warnings": [],
         }
 
     if file_size > _MAX_FILE_SIZE:
@@ -177,6 +202,7 @@ def validate_provider_file(filepath: str) -> dict:
             "class_name": None,
             "methods": [],
             "errors": [f"读取文件失败: {e}"],
+            "warnings": [],
         }
 
     try:
@@ -188,6 +214,7 @@ def validate_provider_file(filepath: str) -> dict:
             "class_name": None,
             "methods": [],
             "errors": [f"Python 语法错误: {e}"],
+            "warnings": [],
         }
 
     # ── 3. 安全扫描 ──
@@ -220,4 +247,6 @@ def validate_provider_file(filepath: str) -> dict:
         "class_name": class_name,
         "methods": found_methods,
         "errors": errors,
+        # 非致命：不阻断上传，但要让接入者当场看见
+        "warnings": _check_product_field_contract(tree),
     }

@@ -149,6 +149,31 @@ class BaseProvider(ABC):
 
         返回: {success, product, message}
         show_batches=True 时额外返回 batches 列表
+
+        ``product`` 各字段的含义由 MCP 播报层（``_wrap_response``）决定，
+        自写 Provider 必须照此填，填反了不会报错、只会播错：
+
+        ============== ================================================
+        字段            用途（手表/语音端如何呈现）
+        ============== ================================================
+        name           物料名称。播报主语
+        sku            物料编码。用户报编码查询时会被回读
+        current_stock  当前库存数量
+        unit           单位，缺省"个"
+        location       **物理库位**，播报成「位于 XXX」
+        variant        **规格/型号**，播报成「名称（XXX）」
+        safe_stock     安全库存。低于它时追加告警语
+        variant_scoped 可选。仅当 current_stock 是「按规格过滤后的子集」时
+                       置 True —— 此时 safe_stock 若是整料阈值，两者不可比，
+                       播报层会跳过低库存告警。外接系统若 variant 只是该件
+                       的型号、current_stock 就是它自己的库存，**不要设**
+        ============== ================================================
+
+        没有 ``spec`` 字段 —— 播报层从不读它，填进去会被静默丢弃。
+        规格一律用 ``variant``。
+
+        歧义候选走 ``candidates[].extra``，其中 ``extra.variant`` 同样是
+        规格/型号，``extra.location`` 是物理库位。
         """
         ...
 

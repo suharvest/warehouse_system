@@ -238,6 +238,8 @@ async def upload_erp_provider(
         "class_name": class_name,
         "filename": filename,
         "methods": result['methods'],
+        # 非致命的字段契约提示（如误用 product.spec），上传照常成功但要回给用户
+        "warnings": result.get('warnings', []),
     }
 
 
