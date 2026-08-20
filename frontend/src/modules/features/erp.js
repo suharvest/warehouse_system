@@ -546,9 +546,26 @@ export async function switchSystemMode(mode) {
 }
 
 // ============ Provider 操作 ============
+// 激活/停用会顺带重启该租户运行中的 MCP 连接（Provider 在子进程里是常驻单例，
+// 不重启的话 DB 说已生效、手表实际还在用旧的）。把重启结果告诉用户，否则连接
+// 短暂断开会显得莫名其妙。
+function reportRestarts(data) {
+    const list = (data && data.restarted_connections) || [];
+    if (!list.length) return;
+    const failed = list.filter(c => !c.restarted);
+    const names = list.map(c => c.name || c.id).join('、');
+    if (failed.length) {
+        alert(`${t('erpRestartedPartial')}：${names}\n` +
+              failed.map(c => `✗ ${c.name || c.id}`).join('\n'));
+    } else {
+        alert(`${t('erpRestartedOk')}：${names}`);
+    }
+}
+
 export async function activateProvider(providerId) {
     try {
-        await erpFetch(`/erp/providers/${providerId}/activate`, { method: 'POST' });
+        const data = await erpFetch(`/erp/providers/${providerId}/activate`, { method: 'POST' });
+        reportRestarts(data);
         await loadERPStatus();
     } catch (error) {
         console.error('激活 Provider 失败:', error);
@@ -558,7 +575,8 @@ export async function activateProvider(providerId) {
 
 export async function deactivateProvider(providerId) {
     try {
-        await erpFetch(`/erp/providers/${providerId}/deactivate`, { method: 'POST' });
+        const data = await erpFetch(`/erp/providers/${providerId}/deactivate`, { method: 'POST' });
+        reportRestarts(data);
         await loadERPStatus();
     } catch (error) {
         console.error('停用 Provider 失败:', error);

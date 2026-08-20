@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from db import get_engine
 from deps import (
     Action,
+    get_mcp_manager,
     CurrentUser,
     Resource,
     assert_row_in_scope,
@@ -35,6 +36,7 @@ from deps import (
 )
 from metadata import (
     erp_providers as _t_erp_providers,
+    mcp_connections as _t_mcp_connections,
     user_warehouses as _t_user_warehouses,
     system_settings as _t_system_settings,
     users as _t_users,
@@ -225,7 +227,17 @@ async def upload_erp_provider(
                 detail=f"Provider 文件写入失败：{e}") from e
     except IntegrityError:
         # provider_name 在当前租户内唯一约束冲突。dest_path 原封不动。
-        raise HTTPException(status_code=409, detail=f"Provider '{provider_name}' 在当前租户下已存在")
+        # 没有「就地替换文件」的接口（PUT 只改 name/config），所以同名冲突时
+        # 必须把替换步骤说清楚 —— 只说「已存在」的话，用户不知道下一步该干什么，
+        # 常见结果是绕过 UI 直接 docker cp 覆盖文件，那样连自动重启也触发不了。
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Provider '{provider_name}' 在当前租户下已存在。"
+                "如需替换为新版本，请依次：停用 → 删除 → 重新上传 → 激活"
+                "（激活时会自动重启相关智能体连接使其生效）。"
+            ),
+        )
     finally:
         # 只清理自己的临时文件，永远不碰 dest_path
         if tmp_dest and os.path.exists(tmp_dest):
@@ -1134,10 +1146,51 @@ async def test_erp_provider(
     return test_result
 
 
+async def _restart_tenant_mcp_connections(mcp_manager, tenant_id, *, reason: str) -> list[dict]:
+    """重启该租户下正在运行的 MCP 连接，让 Provider 变更立刻生效。
+
+    Provider 在 MCP 子进程里是懒加载单例（mcp/warehouse_mcp.py:_get_provider），
+    首次工具调用时载入后就常驻内存，没有任何失效路径。所以「激活/停用」只改
+    DB 的话，运行中的手表仍在用旧 Provider —— DB 说已生效、实际没有，用户没有
+    任何途径能看出来。现场为此追查过一次库位/规格错乱。
+
+    最佳努力：重启失败不能让激活失败（DB 变更已提交），逐个连接回报结果，由
+    调用方透出给用户。
+    """
+    preds = [_t_mcp_connections.c.tenant_id == tenant_id] if tenant_id is not None \
+        else [_t_mcp_connections.c.tenant_id.is_(None)]
+    with get_engine().connect() as sa_conn:
+        rows = sa_conn.execute(
+            select(
+                _t_mcp_connections.c.id,
+                _t_mcp_connections.c.name,
+                _t_mcp_connections.c.mcp_endpoint,
+                _t_mcp_connections.c.api_key,
+            ).where(and_(*preds))
+        ).fetchall()
+
+    results: list[dict] = []
+    for r in rows:
+        status = mcp_manager.get_connection_status(r.id)
+        if status.get('status') != 'running':
+            # 没跑起来的连接下次启动时自然会加载新 Provider，不用动。
+            continue
+        try:
+            ok = await mcp_manager.restart_connection(r.id, r.mcp_endpoint, r.api_key)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Provider %s 后重启 MCP 连接 %s 失败: %s", reason, r.id, e)
+            results.append({"id": r.id, "name": r.name, "restarted": False, "error": str(e)})
+            continue
+        logger.info("Provider %s 后重启 MCP 连接 %s: %s", reason, r.id, "成功" if ok else "失败")
+        results.append({"id": r.id, "name": r.name, "restarted": bool(ok)})
+    return results
+
+
 @router.post("/api/erp/providers/{provider_id}/activate")
 async def activate_erp_provider(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
+    mcp_manager = Depends(get_mcp_manager),
 ):
     """激活指定 Provider（需先通过 Level 1 测试）"""
     with get_engine().connect() as sa_conn:
@@ -1182,13 +1235,21 @@ async def activate_erp_provider(
         )
 
     logger.info(f"激活 ERP Provider: {row['provider_name']}，操作人: {current_user.display_name}")
-    return {"success": True, "provider_name": row['provider_name']}
+    restarted = await _restart_tenant_mcp_connections(
+        mcp_manager, target_tenant_id, reason="激活"
+    )
+    return {
+        "success": True,
+        "provider_name": row['provider_name'],
+        "restarted_connections": restarted,
+    }
 
 
 @router.post("/api/erp/providers/{provider_id}/deactivate")
 async def deactivate_erp_provider(
     provider_id: int,
-    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN))
+    current_user: CurrentUser = Depends(require_permission(Resource.ERP, Action.ADMIN)),
+    mcp_manager = Depends(get_mcp_manager),
 ):
     """停用指定 Provider"""
     with get_engine().connect() as sa_conn:
@@ -1213,7 +1274,10 @@ async def deactivate_erp_provider(
         )
 
     logger.info(f"停用 ERP Provider: {row.provider_name}，操作人: {current_user.display_name}")
-    return {"success": True}
+    restarted = await _restart_tenant_mcp_connections(
+        mcp_manager, row.tenant_id, reason="停用"
+    )
+    return {"success": True, "restarted_connections": restarted}
 
 
 @router.get("/api/erp/providers/{provider_id}/status")
