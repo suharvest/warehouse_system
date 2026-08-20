@@ -87,6 +87,23 @@ class CustomWmsProvider(LocalMatchMixin, BaseProvider):
         items = data.get("data") or []
         return (items if isinstance(items, list) else []), None
 
+    def _refresh_item(self, item: dict) -> dict:
+        """缓存只用于定位，库存数字必须取实时的。
+
+        该 WMS 没有单条查询接口，重拉一次列表按 code 挑出目标条。开销等同
+        一次全量拉取，但只在真正命中后发生，且拿到的是最新库存。
+        """
+        code = item.get("code")
+        if not code:
+            return item
+        items, err = self._fetch_products()
+        if err or not items:
+            return item
+        for it in items:
+            if it.get("code") == code:
+                return it
+        return item
+
     @staticmethod
     def _as_candidate(score: float, p: dict) -> dict:
         """转成 MCP 工具层认识的候选结构。"""

@@ -45,6 +45,15 @@ class _P(LocalMatchMixin):
         return (None, self._err) if self._err else (self._items, None)
 
 
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    """缓存是进程级的，测试之间必须隔离，否则互相污染。"""
+    from providers.matching import _item_cache
+    _item_cache.invalidate()
+    yield
+    _item_cache.invalidate()
+
+
 @pytest.fixture
 def p():
     return _P()
@@ -268,3 +277,207 @@ class TestRefactoredProvidersUseCommonLayer:
             assert gone not in src, f"{path} 仍保留重复实现: {gone}"
         assert not re.search(r"^import difflib$", src, re.M), \
             f"{path} 仍在 import difflib"
+
+
+class TestCaching:
+    """缓存与实时性。
+
+    缓存最怕「用户新增了物料却搜不到」。方案是「未命中即强制刷新」：命中走
+    缓存拿性能，匹配不上就刷新重试一次，新物料第一次查询就能见到。
+    """
+
+    @staticmethod
+    def _fresh_cache():
+        from providers.matching import _item_cache
+        _item_cache.invalidate()
+
+    def _make(self, items, ttl=60.0):
+        from providers.matching import LocalMatchMixin, MatchConfig
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+            CACHE_TTL = ttl
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": "T1"}
+                self.fetch_count = 0
+                self.items = list(items)
+
+            def _fetch_items(self):
+                self.fetch_count += 1
+                return list(self.items), None
+
+        self._fresh_cache()
+        return P()
+
+    def test_repeated_queries_hit_cache(self):
+        """一轮对话里连调多次工具，只应拉一次全量。"""
+        p = self._make(PARTS)
+        for _ in range(5):
+            p._locate("上钳口")
+        assert p.fetch_count == 1, f"拉取了 {p.fetch_count} 次，应为 1"
+
+    def test_new_item_found_without_waiting_for_ttl(self):
+        """核心场景：用户刚在 ERP 新增物料，立刻查询就要能查到。"""
+        p = self._make(PARTS, ttl=3600)      # TTL 很长，只能靠强制刷新
+        p._locate("上钳口")                   # 预热缓存
+        assert p.fetch_count == 1
+
+        p.items.append({"partName": "新到货扳手", "partNo": "NEW001", "partType": "M8"})
+        item, err = p._locate("新到货扳手")
+
+        assert err is None, f"新增物料应能查到，实际: {err}"
+        assert item["partNo"] == "NEW001"
+        assert p.fetch_count == 2, "未命中时应触发一次强制刷新"
+
+    def test_refresh_is_debounced(self):
+        """连问几个不存在的东西，不能每次都去打对方接口。"""
+        p = self._make(PARTS)
+        p._locate("上钳口")
+        base = p.fetch_count
+        for _ in range(5):
+            p._locate("库里绝对没有的东西")
+        assert p.fetch_count - base == 1, \
+            f"防抖失效，额外拉取了 {p.fetch_count - base} 次"
+
+    def test_ttl_expiry_refetches(self):
+        p = self._make(PARTS, ttl=0.0)       # 立即过期
+        p._locate("上钳口")
+        p._locate("上钳口")
+        assert p.fetch_count == 2
+
+    def test_stale_cache_used_when_fetch_fails(self):
+        """对方接口抖动时用过期数据兜底，而不是让用户完全查不了。"""
+        p = self._make(PARTS, ttl=0.0)
+        p._locate("上钳口")                   # 建立缓存
+
+        boom = {"success": False, "error": "api_error", "message": "对方挂了"}
+        p._fetch_items = lambda: (None, boom)
+
+        item, err = p._locate("上钳口")
+        assert err is None and item["partNo"] == "100201", "应回退到过期缓存"
+
+    def test_first_fetch_failure_propagates(self):
+        """没有任何缓存时，拉取失败必须如实上报。"""
+        p = self._make(PARTS)
+        boom = {"success": False, "error": "api_error", "message": "对方挂了"}
+        p._fetch_items = lambda: (None, boom)
+        item, err = p._locate("上钳口")
+        assert item is None and err is boom
+
+    def test_cache_isolated_by_tenant(self):
+        """多租户不能串数据。"""
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh_cache()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+
+            def __init__(self, tenant, items):
+                self.config = {"api_base_url": "http://t", "external_tenant_id": tenant}
+                self.items = items
+
+            def _fetch_items(self):
+                return self.items, None
+
+        a = P("T1", [{"partName": "液压油缸", "partNo": "A1", "partType": "X"}])
+        b = P("T2", [{"partName": "钨钢铣刀", "partNo": "B1", "partType": "Y"}])
+        assert a._locate("液压油缸")[0]["partNo"] == "A1"
+        assert b._locate("钨钢铣刀")[0]["partNo"] == "B1"
+        assert a._locate("钨钢铣刀")[0] is None, "A 租户不该看到 B 租户的物料"
+        assert b._locate("液压油缸")[0] is None, "B 租户不该看到 A 租户的物料"
+
+    def test_invalidate_cache_forces_refetch(self):
+        p = self._make(PARTS, ttl=3600)
+        p._locate("上钳口")
+        p.invalidate_cache()
+        p._locate("上钳口")
+        assert p.fetch_count == 2
+
+    def test_indexed_scoring_matches_plain_scoring(self):
+        """快慢两条打分路径结果必须一致，否则缓存会悄悄改变匹配行为。"""
+        from providers.matching import _Indexed, _Query
+        p = self._make(PARTS)
+        for q in ["上钳口", "100201", "前口", "电级帽", "4IO-2.0-3.2-12-A", "矿泉水"]:
+            qq = _Query(q)
+            for it in PARTS:
+                plain = p._score(qq, it)
+                fast = p._score_indexed(qq, _Indexed(it, p.MATCH.fields))
+                assert abs(plain - fast) < 1e-9, \
+                    f"{q!r} vs {it['partNo']}: 慢路径 {plain} != 快路径 {fast}"
+
+    def test_custom_score_subclass_uses_slow_path(self):
+        """子类覆盖了 _score 时必须走原始 dict，不能被预计算索引静默绕过。"""
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh_cache()
+        seen = []
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t"}
+
+            def _fetch_items(self):
+                return list(PARTS), None
+
+            def _score(self, query, item):
+                seen.append(item)
+                return 1.0 if item["partNo"] == "LH-815" else 0.0
+
+        item, err = P()._locate("随便什么")
+        assert err is None and item["partNo"] == "LH-815"
+        assert seen and all(isinstance(x, dict) for x in seen), "子类应收到原始 dict"
+
+    def test_stock_number_is_never_served_from_cache(self):
+        """缓存只回答「是哪一条」，不回答「这条现在有多少」。
+
+        用户刚出库 5 件、紧接着问库存，直接返回缓存记录就会报出库前的数字。
+        这个问题实测表现为 e2e 用例 test_connection_binding_beats_provider_
+        stored_config 在全量跑时失败：前一个用例入库 7 件，后一个用例从缓存
+        读到了入库前的库存。
+        """
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh_cache()
+        live = {"partName": "上钳口", "partNo": "100201", "partType": "X", "stockQty": 10}
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+            CACHE_TTL = 3600
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t"}
+
+            def _fetch_items(self):
+                return [dict(live)], None
+
+            def _refresh_item(self, item):
+                return dict(live) if item.get("partNo") == live["partNo"] else item
+
+        p = P()
+        assert p._locate("上钳口")[0]["stockQty"] == 10
+
+        live["stockQty"] = 3           # 出库 7 件，缓存里还是 10
+        item, err = p._locate("上钳口")
+        assert err is None
+        assert item["stockQty"] == 3, "库存数字来自缓存，应取实时值"
+
+    def test_refresh_item_failure_falls_back_to_cached_record(self):
+        """取实时数据失败时用缓存记录兜底，不能让整个查询失败。"""
+        from providers.matching import LocalMatchMixin, MatchConfig
+        self._fresh_cache()
+
+        class P(LocalMatchMixin):
+            MATCH = MatchConfig(fields={"name": "partName", "code": "partNo", "spec": "partType"})
+
+            def __init__(self):
+                self.config = {"api_base_url": "http://t"}
+
+            def _fetch_items(self):
+                return [{"partName": "上钳口", "partNo": "100201", "partType": "X", "stockQty": 9}], None
+
+            def _refresh_item(self, item):
+                return item      # 模拟对方接口取不到，返回原记录
+
+        item, err = P()._locate("上钳口")
+        assert err is None and item["stockQty"] == 9

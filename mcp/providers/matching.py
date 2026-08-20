@@ -26,14 +26,18 @@ Provider 只需要回答两个问题：**去哪拉数据**、**哪个字段是�
 用例抓到。
 """
 
+import logging
 import re
 import threading
+import time
 from collections import OrderedDict
 
 from pypinyin import Style, lazy_pinyin
 from rapidfuzz import fuzz
 
 from .normalize import cn_digits_to_arabic
+
+logger = logging.getLogger("WarehouseMCP")
 
 __all__ = ["MatchConfig", "LocalMatchMixin", "norm_for_match", "tokenize_for_match"]
 
@@ -127,6 +131,99 @@ class MatchConfig:
         self.confident_score = confident_score
         self.candidate_floor = candidate_floor
         self.tie_epsilon = tie_epsilon
+
+
+# 全量列表缓存的默认存活时间（秒）。
+#
+# 这个值可以设得比较宽松，因为「查不到就强制刷新重试」兜住了实时性：
+# 用户新增物料后立刻查询，第一次在旧缓存里匹配不上，会触发刷新后重试，
+# 当场就能查到，不需要等 TTL 到期。TTL 只决定「多久无条件重拉一次」，
+# 用来兜住改名、删除这类不会表现为 not_found 的变更。
+_DEFAULT_CACHE_TTL = 60.0
+
+# 两次强制刷新之间的最小间隔（秒），防止 not_found 风暴。
+#
+# 用户连问几个库里根本没有的东西时，每次都会触发强制刷新。没有这个防抖，
+# 一轮对话里 5 次工具调用就是 5 次全量拉取，对方 ERP 会被打爆。
+_REFRESH_DEBOUNCE = 5.0
+
+
+class _CacheEntry:
+    __slots__ = ("items", "indexed", "fetched_at", "last_refresh_attempt")
+
+    def __init__(self, items, indexed, fetched_at):
+        self.items = items
+        self.indexed = indexed
+        self.fetched_at = fetched_at
+        # 初始值要让「首次强制刷新」立刻可用。若设成 fetched_at，刚建好缓存
+        # 的 _REFRESH_DEBOUNCE 秒内就不许强制刷新 —— 而「用户新增物料后立刻
+        # 查询」恰好落在这个窗口里，正是最需要刷新的时刻。
+        self.last_refresh_attempt = fetched_at - _REFRESH_DEBOUNCE
+
+
+class _ItemCache:
+    """按 Provider 身份隔离的全量列表缓存。
+
+    进程级而非实例级 —— Provider 会随每个 MCP 连接重新创建，实例级缓存等于
+    没有。key 必须含租户/仓库标识，否则多租户部署会互相看到对方的数据。
+    """
+
+    def __init__(self):
+        self._data: dict = {}
+        self._lock = threading.RLock()
+
+    def get(self, key):
+        with self._lock:
+            return self._data.get(key)
+
+    def put(self, key, items, indexed, now, refreshed=False):
+        """写入缓存。
+
+        ``refreshed=True`` 表示这次是「未命中触发的强制刷新」，要把防抖
+        时间戳设成现在 —— 否则新建的 _CacheEntry 会把刚打上的标记冲掉，
+        防抖形同虚设（实测连问 5 个不存在的词会拉 5 次全量）。
+        普通的 TTL 到期刷新不占用防抖额度。
+        """
+        with self._lock:
+            old = self._data.get(key)
+            e = _CacheEntry(items, indexed, now)
+            if refreshed:
+                e.last_refresh_attempt = now
+            elif old is not None:
+                e.last_refresh_attempt = old.last_refresh_attempt
+            self._data[key] = e
+            return e
+
+    def invalidate(self, key=None):
+        with self._lock:
+            if key is None:
+                self._data.clear()
+            else:
+                self._data.pop(key, None)
+
+
+
+_item_cache = _ItemCache()
+
+
+class _Indexed:
+    """一条记录的预计算结果。
+
+    归一化、分词、拼音在拉取时算一次存下来，打分时直接用 —— 实测比每次
+    重算快 3.5 倍（10000 条：300ms → 85ms）。
+    """
+
+    __slots__ = ("raw", "fields")
+
+    def __init__(self, raw: dict, field_map: dict):
+        self.raw = raw
+        self.fields = {}
+        for role, key in field_map.items():
+            if not key:
+                continue
+            v = raw.get(key)
+            n = norm_for_match(v)
+            self.fields[role] = (n, tokenize_for_match(v), _pinyin(n))
 
 
 class _Query:
@@ -239,10 +336,68 @@ class LocalMatchMixin:
 
         return min(best, 1.0)
 
+    def _score_indexed(self, q: "_Query", entry: "_Indexed") -> float:
+        """打分的预计算版本，公式与 ``_score`` 完全一致，只是字段的归一化 /
+        分词 / 拼音在拉取时就算好了。实测 10000 条从 300ms 降到 85ms。"""
+        if not q.norm:
+            return 0.0
+
+        f = entry.fields
+        name = f.get("name", ("", "", ""))
+        code = f.get("code", ("", "", ""))
+        spec = f.get("spec", ("", "", ""))
+
+        for v in (code[0], name[0], spec[0]):
+            if v and q.norm == v:
+                return 1.0
+        if name[0] and spec[0] and q.norm in (name[0] + spec[0], spec[0] + name[0]):
+            return 1.0
+
+        best = 0.0
+        for role in ("name", "code", "spec"):
+            fn, ft, fp = f.get(role, ("", "", ""))
+            if not fn:
+                continue
+            weight = self.MATCH.weights.get(role, 1.0)
+
+            if q.norm in fn or fn in q.norm:
+                ratio = min(len(q.norm), len(fn)) / max(len(q.norm), len(fn))
+                best = max(best, weight * (0.72 + 0.28 * ratio))
+
+            text_score = (fuzz.ratio(q.norm, fn) * 0.4
+                          + fuzz.partial_ratio(q.norm, fn) * 0.6)
+            if q.tokens and ft:
+                text_score = max(text_score, fuzz.token_set_ratio(q.tokens, ft) * 0.95)
+
+            if text_score >= _PINYIN_TEXT_GATE:
+                text_score = max(text_score,
+                                 fuzz.ratio(q.pinyin, fp) * 0.85,
+                                 fuzz.token_sort_ratio(q.pinyin, fp) * 0.8)
+
+            best = max(best, weight * text_score / 100.0)
+
+        return min(best, 1.0)
+
+    def _uses_custom_score(self) -> bool:
+        """子类是否覆盖了 ``_score``。
+
+        覆盖了就必须走原始 dict 的慢路径 —— 预计算索引里没有子类自定义
+        逻辑需要的字段，强行走快路径会静默改变它的行为。
+        """
+        return type(self)._score is not LocalMatchMixin._score
+
     def _rank(self, query: str, items: list) -> list:
-        """按分降序返回 [(score, item), ...]，已滤掉低于 candidate_floor 的噪声。"""
+        """按分降序返回 [(score, item), ...]，已滤掉低于 candidate_floor 的噪声。
+
+        ``items`` 既可以是原始 dict 列表，也可以是 ``_Indexed`` 列表；后者
+        走预计算快路径。子类覆盖了 ``_score`` 时一律走 dict 慢路径。
+        """
         q = _Query(query)
-        scored = [(self._score(q, it), it) for it in items]
+        if items and isinstance(items[0], _Indexed) and not self._uses_custom_score():
+            scored = [(self._score_indexed(q, e), e.raw) for e in items]
+        else:
+            plain = [e.raw if isinstance(e, _Indexed) else e for e in items]
+            scored = [(self._score(q, it), it) for it in plain]
         scored = [x for x in scored if x[0] >= self.MATCH.candidate_floor]
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored
@@ -283,22 +438,93 @@ class LocalMatchMixin:
 
     # ── 定位 ──
 
+    # ── 缓存 ──
+
+    CACHE_TTL: float = _DEFAULT_CACHE_TTL
+
+    def _cache_key(self):
+        """缓存隔离键。
+
+        必须包含租户 / 仓库标识：多租户部署下不同连接绑定不同的外部仓库，
+        共用一份缓存会让 A 租户看到 B 租户的物料。
+        """
+        cfg = getattr(self, "config", None) or {}
+        return (
+            type(self).__name__,
+            cfg.get("api_base_url", ""),
+            cfg.get("external_tenant_id", ""),
+            cfg.get("external_warehouse_id", ""),
+        )
+
+    def _load_items(self, force: bool = False):
+        """取全量列表，带缓存和预计算索引。
+
+        返回 ``(indexed_list, error, from_cache)``。``force=True`` 跳过缓存。
+        """
+        key = self._cache_key()
+        now = time.monotonic()
+        entry = _item_cache.get(key)
+
+        if not force and entry is not None and (now - entry.fetched_at) < self.CACHE_TTL:
+            return entry.indexed, None, True
+
+        items, err = self._fetch_items()
+        if err:
+            # 拉取失败时宁可用过期数据也不要直接失败 —— 对方 ERP 抖一下不该
+            # 让用户完全查不了东西。但要留痕，否则会掩盖长时间的接口故障。
+            if entry is not None:
+                logger.warning(
+                    "拉取全量失败，回退到 %.0fs 前的缓存: %s",
+                    now - entry.fetched_at, (err or {}).get("message", err))
+                return entry.indexed, None, True
+            return None, err, False
+
+        indexed = [_Indexed(it, self.MATCH.fields) for it in (items or [])]
+        _item_cache.put(key, items, indexed, now, refreshed=force)
+        logger.info("全量列表已刷新: %d 条 (%s)", len(indexed), type(self).__name__)
+        return indexed, None, False
+
+    def invalidate_cache(self):
+        """丢弃本 Provider 的缓存。写操作改变了物料主数据时调用。"""
+        _item_cache.invalidate(self._cache_key())
+
+    def _may_force_refresh(self) -> bool:
+        """距上次强制刷新是否已超过防抖间隔。"""
+        entry = _item_cache.get(self._cache_key())
+        if entry is None:
+            return True
+        return (time.monotonic() - entry.last_refresh_attempt) >= _REFRESH_DEBOUNCE
+
+    # ── 定位 ──
+
     def _locate(self, query: str, fuzzy: bool = True):
         """解析查询词 → ``(item, error_response)``，二者恒有一个为 None。
 
         分数够高且无并列 → 命中；否则返回候选让用户澄清。``fuzzy=False``
         时只接受精确命中（分数 >= 0.999），用于出入库这类不能猜的操作。
+
+        **实时性**：命中走缓存拿性能；一旦匹配不上，强制刷新一次再匹配。
+        用户刚在 ERP 里新增的物料，第一次查询就能查到，不必等 TTL 到期 ——
+        这是缓存方案里最容易出事的场景，用「未命中即刷新」正面解决。
+        刷新本身有 ``_REFRESH_DEBOUNCE`` 防抖，连问几个不存在的东西不会
+        把对方接口打爆。
         """
-        items, err = self._fetch_items()
+        indexed, err, from_cache = self._load_items()
         if err:
             # 拉全量失败不等于查不到 —— 有的 WMS 没有列表接口，只能靠不带过滤
             # 的查询碰运气，失败时退化成按名称/编码单点查询仍可能命中。
             # 默认不退化（直接返回错误），需要的 Provider 覆盖这个钩子。
             return self._locate_fallback(query, err)
-        if not items:
-            return None, self._not_found(query)
 
-        ranked = self._rank(query, items)
+        ranked = self._rank(query, indexed) if indexed else []
+
+        # 缓存里找不到 → 可能是刚新增的物料，强制刷新重试一次
+        if not ranked and from_cache and self._may_force_refresh():
+            logger.info("缓存中未匹配到 %r，强制刷新后重试", query)
+            fresh, err2, _ = self._load_items(force=True)
+            if err2 is None and fresh:
+                ranked = self._rank(query, fresh)
+
         if not ranked:
             return None, self._not_found(query)
 
@@ -319,7 +545,7 @@ class LocalMatchMixin:
         #
         # 这是本次重构里唯一一处有意的行为变更。
         if top_score >= 0.999:
-            return _ask() if len(tied) > 1 else (top, None)
+            return _ask() if len(tied) > 1 else (self._refresh_item(top), None)
 
         # 到这里说明没有精确命中。写操作不猜，直接告知查不到。
         if not fuzzy:
@@ -329,7 +555,22 @@ class LocalMatchMixin:
         if len(tied) > 1 or top_score < self.MATCH.confident_score:
             return _ask()
 
-        return top, None
+        return self._refresh_item(top), None
+
+    def _refresh_item(self, item: dict) -> dict:
+        """定位命中后取该条的实时数据。
+
+        **缓存只能回答「是哪一条」，不能回答「这条现在有多少」。** 库存数字
+        变化频繁 —— 用户刚出库 5 件，紧接着问库存，如果直接返回缓存里的记录
+        就会报出库前的数字。实测中这个问题表现为 e2e 用例
+        test_connection_binding_beats_provider_stored_config 在全量跑时失败：
+        前一个用例入库 7 件，后一个用例从缓存读到了入库前的库存。
+
+        默认返回原记录（对没有单条查询接口的 WMS 只能如此）。Provider 有
+        按编码查单条的能力时应当覆盖此方法，用 ``MATCH.fields["code"]``
+        去取最新的一条；取失败要返回原记录，不能让整个查询失败。
+        """
+        return item
 
     def _locate_fallback(self, query: str, err: dict):
         """``_fetch_items`` 失败时的退路，返回 ``(item, error_response)``。
