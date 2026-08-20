@@ -1159,23 +1159,35 @@ async def _restart_tenant_mcp_connections(mcp_manager, tenant_id, *, reason: str
     """
     preds = [_t_mcp_connections.c.tenant_id == tenant_id] if tenant_id is not None \
         else [_t_mcp_connections.c.tenant_id.is_(None)]
-    with get_engine().connect() as sa_conn:
-        rows = sa_conn.execute(
-            select(
-                _t_mcp_connections.c.id,
-                _t_mcp_connections.c.name,
-                _t_mcp_connections.c.mcp_endpoint,
-                _t_mcp_connections.c.api_key,
-            ).where(and_(*preds))
-        ).fetchall()
+    try:
+        with get_engine().connect() as sa_conn:
+            rows = sa_conn.execute(
+                select(
+                    _t_mcp_connections.c.id,
+                    _t_mcp_connections.c.name,
+                    _t_mcp_connections.c.mcp_endpoint,
+                    _t_mcp_connections.c.api_key,
+                ).where(and_(*preds))
+            ).fetchall()
+    except Exception as e:  # noqa: BLE001
+        # 连接枚举失败也不能往外抛：DB 的激活变更已经提交，这里再炸只会让接口
+        # 返回 500，用户以为激活失败而重试，实际状态早已改变。如实回报，让前端
+        # 提示手动重启。
+        logger.warning("Provider %s 后枚举 MCP 连接失败: %s", reason, e)
+        return [{
+            "id": "", "name": "(连接列表读取失败)",
+            "restarted": False, "error": str(e),
+        }]
 
     results: list[dict] = []
     for r in rows:
-        status = mcp_manager.get_connection_status(r.id)
-        if status.get('status') != 'running':
-            # 没跑起来的连接下次启动时自然会加载新 Provider，不用动。
-            continue
         try:
+            # get_connection_status 也放进 try：它同样可能抛，抛出去就会中断
+            # 后面所有连接的重启。
+            status = mcp_manager.get_connection_status(r.id)
+            if status.get('status') != 'running':
+                # 没跑起来的连接下次启动时自然会加载新 Provider，不用动。
+                continue
             ok = await mcp_manager.restart_connection(r.id, r.mcp_endpoint, r.api_key)
         except Exception as e:  # noqa: BLE001
             logger.warning("Provider %s 后重启 MCP 连接 %s 失败: %s", reason, r.id, e)

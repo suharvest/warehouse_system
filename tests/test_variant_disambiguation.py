@@ -450,6 +450,78 @@ class TestFallbackVariantScoped:
         assert by_no[m['b3']]['quantity'] == 50
 
 
+class TestVariantScopedMarker:
+    """variant_scoped 只能在「规格过滤真的发生」时打。
+
+    它的作用是让播报层跳过低库存提醒（safe_stock 是整料阈值，拿它比规格子集会
+    误报）。但批次接口报错或该料无批次时，过滤那段根本不执行、current_stock
+    仍是可比的整料总量 —— 此时打标记会把真实的低库存提醒静默吃掉。
+    """
+
+    def _provider(self, batches):
+        _import_warehouse_mcp()
+        from providers.default import DefaultProvider
+
+        class P(DefaultProvider):
+            def __init__(self):
+                pass
+
+            def http_get(self, path, params=None):
+                params = params or {}
+                if path == "/materials/product-stats":
+                    if params.get("material_id") == 7:
+                        return {"name": "螺丝", "sku": "SKU-S",
+                                "current_stock": 3, "unit": "个",
+                                "safe_stock": 20, "location": ""}
+                    return {"error": "not found"}
+                if path == "/fuzzy-match":
+                    return {
+                        "confident": True,
+                        "best_match": {
+                            "name": "螺丝 M3", "score": 95.0,
+                            "entity_type": "material", "entity_id": 7,
+                            "extra": {"sku": "SKU-S", "canonical_name": "螺丝",
+                                      "variant": "M3"},
+                        },
+                        "candidates": [],
+                    }
+                if path == "/materials/batches":
+                    return batches
+                return {"error": "unexpected path"}
+
+        return P()
+
+    def test_marked_when_filter_actually_ran(self):
+        p = self._provider({"batches": [
+            {"batch_no": "B1", "quantity": 2, "location": "A1", "variant": "M3"},
+            {"batch_no": "B2", "quantity": 9, "location": "A2", "variant": "M4"},
+        ]})
+        prod = p.query_stock("螺丝 M3", show_batches=True)["product"]
+        assert prod["variant"] == "M3"
+        assert prod["current_stock"] == 2, "应是 M3 规格过滤后的量"
+        assert prod.get("variant_scoped") is True
+
+    @pytest.mark.parametrize("batches", [
+        {"batches": []},              # 该料没有活跃批次
+        {"error": "boom"},            # 批次接口报错
+    ])
+    def test_not_marked_when_filter_did_not_run(self, batches):
+        """回归点：这两种情况下 current_stock 没被重算，与 safe_stock 同维度。"""
+        p = self._provider(batches)
+        prod = p.query_stock("螺丝 M3", show_batches=True)["product"]
+        assert prod["variant"] == "M3"
+        assert prod["current_stock"] == 3, "未过滤，仍是整料总量"
+        assert "variant_scoped" not in prod
+
+    def test_unmarked_product_still_triggers_low_stock_notice(self):
+        """端到端确认：没打标记 → 播报层会照常提醒。"""
+        warehouse_mcp = _import_warehouse_mcp()
+        p = self._provider({"batches": []})
+        wrapped = warehouse_mcp._wrap_response("query_stock", p.query_stock("螺丝 M3"))
+        assert "注意，库存告急，低于安全库存20个，缺17个。" in wrapped["say"]
+        assert wrapped["data"]["low_stock"] is True
+
+
 class TestQueryStockVariantFiltered:
     """query_stock 命中 name+variant 组合时，product.current_stock 必须是规格过滤后库存。"""
 

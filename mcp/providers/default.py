@@ -257,7 +257,11 @@ class DefaultProvider(BaseProvider):
             batches_list = batches_data.get("batches", [])
 
         # 按 variant 过滤批次并重算库存
-        if resolved_variant and batches_list:
+        # variant_filtered 记录「过滤是否真的发生」：批次接口报错或该料无批次时
+        # batches_list 为空，下面这段不执行，quantity 仍是整料总量 —— 此时它与
+        # safe_stock 同维度、可以比较，不能按「已按规格过滤」对待。
+        variant_filtered = bool(resolved_variant and batches_list)
+        if variant_filtered:
             batches_list = [b for b in batches_list if b.get("variant") == resolved_variant]
             quantity = sum(b["quantity"] for b in batches_list)
 
@@ -302,9 +306,14 @@ class DefaultProvider(BaseProvider):
             # _wrap_response 播报 product.current_stock 时读到全规格总量
             product_data["current_stock"] = quantity
             product_data["variant"] = resolved_variant
+        if variant_filtered:
             # 标记「本次 current_stock 是按规格过滤后的子集」。safe_stock 是整料
-            # 阈值，拿它比子集会误报，下游据此跳过低库存提醒。外接 ERP 的
-            # product.variant 只是该件的型号、库存就是它自己的，不设此标记。
+            # 阈值，拿它比子集会误报，下游据此跳过低库存提醒。
+            #
+            # 只在过滤真的发生时才打：解析出了规格但批次列表为空（接口报错/无
+            # 批次）时 quantity 没被重算，仍是可比的整料总量，打了标记会把真实
+            # 的低库存提醒静默吃掉。外接 ERP 的 product.variant 只是该件型号、
+            # 库存就是它自己的，同样不设此标记。
             product_data["variant_scoped"] = True
         if status:
             product_data["status"] = status
