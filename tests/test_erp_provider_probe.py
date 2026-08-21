@@ -221,3 +221,37 @@ def test_probe_requires_auth(client, healthy_provider):
 def test_probe_on_unknown_provider_returns_404(admin_client):
     resp = admin_client.post("/api/erp/providers/999999/probe", json={"sample": "x"})
     assert resp.status_code == 404
+
+
+class TestNullRefDetection:
+    """对端抛空引用时，体检要给出「key 必须存在」这条可执行的方向。
+
+    现场：整套 ERP 接口因为我们省略了「可选」字段的 key 而全线不可用，症状只是
+    列表拉不到。泛泛报一句「对端不支持列表拉取」会把人引向错误方向。
+    """
+
+    def _probe_catalog(self, message):
+        from providers.probe import _probe_catalog
+
+        class P:
+            def search(self, *a, **k):
+                return {"success": False, "message": message}
+
+        return _probe_catalog(P())
+
+    @pytest.mark.parametrize("msg", [
+        "未将对象引用设置到对象的实例。",
+        "System.NullReferenceException: at Parts.Query()",
+        "Object reference not set to an instance of an object",
+    ])
+    def test_null_ref_is_fail_with_actionable_hint(self, msg):
+        r = self._probe_catalog(msg)
+        assert r["status"] == "fail", "空引用是硬故障，不该只报 warn"
+        assert "key" in r["detail"], "必须点出 key 必须存在这条线索"
+        assert "逐个删 key" in r["detail"], "必须给出自查方法"
+
+    def test_ordinary_business_error_stays_warn(self):
+        """普通业务错误不该被误升级成 fail。"""
+        r = self._probe_catalog("该接口未开放")
+        assert r["status"] == "warn"
+        assert "key" not in r["detail"]

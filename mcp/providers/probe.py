@@ -56,6 +56,21 @@ def _timed(fn):
         return None, f"{type(e).__name__}: {e}", round((time.perf_counter() - start) * 1000, 2)
 
 
+# 空引用类报错的特征串。对端（尤其 .NET/EF）常对**缺失的 key**直接做字符串
+# 操作而抛 NullReferenceException —— 现场遇到过一整套接口因此全线不可用，而
+# 表面症状只是"列表拉不到"。识别出来就能把泛泛的告警变成可执行的排查方向。
+_NULL_REF_SIGNS = (
+    "未将对象引用设置到对象的实例",
+    "nullreferenceexception",
+    "object reference not set",
+)
+
+
+def _looks_like_null_ref(text) -> bool:
+    t = str(text or "").lower()
+    return any(sign.lower() in t for sign in _NULL_REF_SIGNS)
+
+
 def _probe_catalog(provider):
     """P1 目录探测：不带查询词拉一次列表，检查有没有空壳记录。"""
     resp, err, ms = _timed(
@@ -67,9 +82,21 @@ def _probe_catalog(provider):
         return _check("P1", "目录探测", "fail",
                       f"search 返回了 {type(resp).__name__}，不是 dict", latency_ms=ms)
     if not resp.get("success"):
+        detail = resp.get("message") or resp.get("error")
+        if _looks_like_null_ref(detail):
+            return _check(
+                "P1", "目录探测", "fail",
+                "对端抛了空引用异常，而不是业务错误。这类系统通常要求**请求里的 key "
+                "必须存在**（值可以是空字符串），缺 key 就会在参数校验之前崩掉——"
+                "按「可选字段没值就不发」的写法必然踩中。\n"
+                "自查：给对端发一个只有空字符串、但字段齐全的请求试试；再逐个删 key "
+                "看删到哪个开始报错。别照着对方文档的「选填」想当然。\n"
+                f"对端返回：{detail}",
+                raw=resp, latency_ms=ms,
+            )
         return _check("P1", "目录探测", "warn",
                       "对端不支持不带查询词的列表拉取。模糊匹配将只能依赖单点查询，"
-                      f"同名多规格消歧会受限。返回：{resp.get('message') or resp.get('error')}",
+                      f"同名多规格消歧会受限。返回：{detail}",
                       raw=resp, latency_ms=ms)
 
     items = resp.get("items") or []

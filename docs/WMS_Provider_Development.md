@@ -857,6 +857,69 @@ warehouse_id: "WH-SHENZHEN-01"
 完整的上传 → L1/L2 测试 → 激活 → 切模式流程见 [mcp/README.md §3.3](../mcp/README.md)。
 外部作用域绑定、身份导入、人脸作用域这几步见同文档 §3.5–§3.8。
 
+## 对接真实 ERP 时的两个坑
+
+这两条都来自现场事故，代价是客户停用一天、以及一笔货入到了错误的型号上。
+
+### 1. 对方可能要求「key 必须存在」，而不是「有值才发」
+
+写请求时的常见习惯是「这个字段可选、没值就不放进 params」。有的 ERP（尤其
+.NET/EF 那一挂）会对缺失的 key 直接做字符串操作，于是抛
+`NullReferenceException` —— 中文环境下报文是「未将对象引用设置到对象的实例」。
+
+现场那套备品系统的实测契约与它自己的接口文档并不一致：
+
+| 接口 | 实测要求 |
+|---|---|
+| `parts_query_stock` | `partType` / `partNo` / `partName` **三个 key 都必须存在**，值可以是空字符串；三个全空即「拉全量」 |
+| `parts_stock_in` | 除文档必填项外还要带 `location` 与 `UnitPrice` |
+
+排查特征：**同一个错误串出现在所有接口上**，且响应极快（几毫秒，说明没走到
+数据库）。给写接口发**空 params** 时如果回的不是「缺少必填字段」而是同一个
+空引用异常，基本可以断定异常发生在参数校验之前。
+
+写法上的建议是构造一个恒定形状的 params，只填要查的那个：
+
+```python
+@staticmethod
+def _query_params(**kw) -> dict:
+    params = {"partType": "", "partNo": "", "partName": ""}
+    params.update({k: v for k, v in kw.items() if v is not None})
+    return params
+```
+
+**对接新 ERP 时务必先手工探一遍参数矩阵**（逐个删 key、逐个改空值），别照着
+对方文档想当然。文档说"选填"不等于实现能容忍缺失。
+
+### 2. 同名不同规格：精确命中也必须先看有没有并列
+
+`LocalMatchMixin` 已经处理好了，**自己写匹配逻辑时才需要当心**。错误写法：
+
+```python
+top_score, top = ranked[0]
+if top_score >= 0.999:      # ← 跳过了下面的并列检查
+    return top, None
+tied = [x for x in ranked if abs(x[0] - top_score) < 0.02]
+if len(tied) > 1:
+    return ask_user(...)
+```
+
+现场一个「探针」对应 4 个型号，按名称查时每条都是名称精确匹配、都得 1.0 分，
+于是静默取排第一的那条。**用户说型号 A 入库 5 个，货记到了型号 B 上。**
+写操作尤其危险 —— 查询错了用户还能听出来，入库错了要盘点才发现。
+
+正确顺序是并列判断在前：
+
+```python
+tied = [x for x in ranked if abs(x[0] - top_score) < 0.02]
+if top_score >= 0.999 and len(tied) == 1:   # 精确命中「且唯一」才直达
+    return top, None
+```
+
+**优先直接继承 `LocalMatchMixin`**（见 `mcp/providers/matching.py` 与参考实现
+`tests/fixtures/mock_wms/provider.py`），它同时给你缓存、预计算索引、并列澄清
+和「未命中即刷新」，不用自己踩一遍。
+
 ## 调试技巧
 
 ### 单独测试 Provider
