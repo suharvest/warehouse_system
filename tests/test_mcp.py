@@ -301,6 +301,52 @@ class TestQueryStockByCode:
         assert resp["say"] == "watcher主控板当前库存12个，位于A区-01。"
 
 
+class TestCandidateTruncationHint:
+    """候选念不完时必须告诉用户，不能静默丢掉。
+
+    现场事故：一个「探针」对应 4 个型号，播报只念前 3 个且不作任何提示。用户
+    要的那个正好没被念到，他会以为系统里就这几个，然后卡在一个死循环里 ——
+    三个都不对，又不知道还能怎么说。
+    """
+
+    @staticmethod
+    def _cands(n):
+        return [
+            {"name": "探针", "score": 1.0 - i * 0.001,
+             "extra": {"sku": f"SKU{i}", "variant": f"型号{i}", "stock": 10 + i}}
+            for i in range(n)
+        ]
+
+    def _say(self, operation, n, **extra):
+        warehouse_mcp = _import_warehouse_mcp()
+        resp = {"success": False, "candidates": self._cands(n)}
+        resp.update(extra)
+        return warehouse_mcp._wrap_response(operation, resp)["say"]
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_no_hint_when_all_are_spoken(self, n):
+        say = self._say("query_stock", n)
+        assert "没念到" not in say
+        assert say.endswith("请告诉我具体是哪个。")
+
+    @pytest.mark.parametrize("n", [4, 6, 20])
+    def test_hint_appears_when_truncated(self, n):
+        """回归点：不提示的话用户无从知道还有别的选项。"""
+        say = self._say("query_stock", n)
+        assert "还有其他同名的没念到" in say
+        assert "请直接说型号或编码" in say, "必须给出缩小范围的办法"
+
+    def test_write_ops_get_the_same_hint(self):
+        say = self._say("stock_in", 4, error="ambiguous_name")
+        assert "还有其他同名的没念到" in say
+
+    def test_hint_never_claims_a_count(self):
+        """Provider 侧通常也截断过（如 ranked[:6]），报数量会报小、更误导。"""
+        say = self._say("query_stock", 20)
+        import re
+        assert not re.search(r"还有\s*\d+\s*个", say)
+
+
 class TestLowStockNotice:
     """库存低于安全线时，查询和出库的播报都要带一句提醒。"""
 

@@ -538,6 +538,21 @@ def _fmt_candidate_say(c: dict) -> str:
     return n
 
 
+def _clarify_tail(shown: int, total: int) -> str:
+    """候选念不完时的收尾话术。
+
+    语音场景一次只念 3 个（念多了用户记不住），但**不能静默丢掉剩下的**——
+    用户要的那个可能正好没被念到，他会以为系统里就这几个，然后卡住。
+    现场就有过：一个「探针」对应 4 个型号，只念 3 个。
+
+    不报剩余个数：Provider 侧通常也做了截断（如 ranked[:6]），我们手上的
+    数量未必是真实总数，报一个偏小的数字比不报更误导。
+    """
+    if total > shown:
+        return "，还有其他同名的没念到。请直接说型号或编码。"
+    return "。请告诉我具体是哪个。"
+
+
 def _norm_code(s: str) -> str:
     """物料编码归一化：去掉分隔符/空白后大写，用于判断用户是不是在报编码。
 
@@ -585,6 +600,10 @@ def _wrap_response(operation: str, resp: dict) -> dict:
     say_kind = "tell" if success else "fail"
     data = {}
     awaiting_confirm = None
+
+    def _cand_total():
+        """Provider 实际给了多少候选（可能已被它自己截断，见 _clarify_tail）。"""
+        return len(resp.get("candidates") or [])
 
     def _candidates(limit=3):
         out = []
@@ -651,7 +670,8 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                 data["candidates"] = candidates
             if err in ("ambiguous_name", "location_ambiguous", "variant_ambiguous"):
                 names = "、".join(_fmt_candidate_say(c) for c in candidates)
-                say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+                say = ("我不确定你说的是哪一个，候选有："
+                       f"{names}{_clarify_tail(len(candidates), _cand_total())}")
                 say_kind = "ask"
             elif err == "batch_insufficient_stock":
                 bn = resp.get("batch_no_requested") or "该批次"
@@ -707,7 +727,8 @@ def _wrap_response(operation: str, resp: dict) -> dict:
                 awaiting_confirm = {"patch": {"allow_new_variant": True}}
             elif candidates:
                 names = "、".join(_fmt_candidate_say(c) for c in candidates)
-                say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+                say = ("我不确定你说的是哪一个，候选有："
+                       f"{names}{_clarify_tail(len(candidates), _cand_total())}")
                 say_kind = "ask"
             else:
                 say = f"本次没有入库。{_fail_text('入库失败')}"
@@ -808,7 +829,8 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             if candidates:
                 data["candidates"] = candidates
                 names = "、".join(_fmt_candidate_say(c) for c in candidates)
-                say = f"找到多个相似产品：{names}。请告诉我具体是哪个。"
+                say = ("找到多个相似产品："
+                       f"{names}{_clarify_tail(len(candidates), _cand_total())}")
                 say_kind = "ask"
             else:
                 say = _fail_text("查询失败，未找到该产品。")
@@ -843,7 +865,8 @@ def _wrap_response(operation: str, resp: dict) -> dict:
             candidates = _candidates()
             data["candidates"] = candidates
             names = "、".join(_fmt_candidate_say(c) for c in candidates)
-            say = f"我不确定你说的是哪一个，候选有：{names}。请告诉我具体是哪个。"
+            say = ("我不确定你说的是哪一个，候选有："
+                   f"{names}{_clarify_tail(len(candidates), _cand_total())}")
             say_kind = "ask"
         else:
             say = _fail_text("没有找到匹配的名称。")
