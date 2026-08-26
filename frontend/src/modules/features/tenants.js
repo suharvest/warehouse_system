@@ -1,6 +1,6 @@
 // ============ 租户管理模块 ============
 import { t } from '../../../i18n.js';
-import { getDeployMode, setDeployMode, setFaceEnabled, getCurrentUser } from '../state.js';
+import { getDeployMode, setDeployMode, setFaceEnabled, setDbFileOps, getCurrentUser } from '../state.js';
 import { showToast, showModalSuccessState } from '../ui-components.js';
 import { warehousesApi, usersApi } from '../api.js';
 import { switchTab } from '../ui/tabs.js';
@@ -35,7 +35,9 @@ function getTotalPages() {
 }
 
 function getErrorMessage(error, fallbackKey, fallbackText) {
-    return error.detail || error.message || (error.data && error.data.detail) || tt(fallbackKey, fallbackText);
+    return error.error || error.detail || error.message
+        || (error.data && (error.data.error || error.data.detail))
+        || tt(fallbackKey, fallbackText);
 }
 
 // ============ 部署模式 ============
@@ -51,6 +53,8 @@ export async function fetchDeployMode() {
             setDeployMode(mode);
             // 部署级人脸开关：缺省（旧后端不返回该字段）当 true，只有显式 false 才关。
             setFaceEnabled(data.face_enabled !== false);
+            // 整库文件操作（导出/导入/整库清空）是否可用，同样缺省当 true。
+            setDbFileOps(data.db_file_ops !== false);
             return mode;
         }
         console.warn('获取部署模式失败: HTTP', response.status);

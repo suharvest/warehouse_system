@@ -744,6 +744,17 @@ class DatabaseClearRequest(BaseModel):
     target_tenant_id: Optional[int] = None  # 全局 admin 必须显式指定目标租户
 
 
+class InventoryResetRequest(BaseModel):
+    """清空库存数据请求。
+
+    与 DatabaseClearRequest 的区别：只删业务数据（物料/批次/出入库记录/批次消耗），
+    不动仓库、联系方、用户、API Key 与 MCP 连接的仓库绑定。
+    """
+    confirm: bool
+    warehouse_id: Optional[int] = None      # 不传 = 目标租户下的所有仓库
+    target_tenant_id: Optional[int] = None  # 全局 admin 必须显式指定目标租户
+
+
 class DatabaseOperationResponse(BaseModel):
     """数据库操作响应"""
     success: bool

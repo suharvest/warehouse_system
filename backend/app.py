@@ -57,7 +57,7 @@ from models import (
     # Operator model
     OperatorListItem,
     # Database management models
-    DatabaseClearRequest, DatabaseOperationResponse,
+    DatabaseClearRequest, DatabaseOperationResponse, InventoryResetRequest,
     # MCP models
     CreateMCPConnectionRequest, UpdateMCPConnectionRequest,
     MCPConnectionItem, MCPConnectionResponse,
@@ -6952,6 +6952,104 @@ async def add_inventory_record(
         )
 
 
+
+@app.post("/api/inventory/reset", response_model=DatabaseOperationResponse)
+async def reset_inventory(
+    request: InventoryResetRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.SYSTEM, Action.ADMIN))
+):
+    """清空库存数据：物料、批次、出入库记录、批次消耗（仅管理员）。
+
+    存在的理由 —— /api/database/clear 有两个硬伤，导错单子想重导的客户用不了它：
+
+    1. 它是 sqlite-only（直接操作 .db 文件语义），MySQL 部署下直接 400；
+    2. 它的作用域远超"重导库存"：连 warehouses 一起删掉重建，并把 api_keys 和
+       mcp_connections 的 warehouse_id 置 NULL。仓库换了新 id、智能体的 key 失去
+       仓库绑定后查不到任何物料（2026-08 现场踩过），语音链路当场哑掉。
+
+    本接口只删业务数据，保留仓库、联系方、用户、API Key 与 MCP 绑定，且全程走
+    SQLAlchemy Core，SQLite / MySQL 都能用。
+
+    作用域：租户管理员固定为本租户；全局管理员必须显式给 target_tenant_id。
+    warehouse_id 不传表示该租户下的所有仓库。
+    """
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="请确认清空操作")
+
+    if current_user.tenant_id is None:
+        if request.target_tenant_id is None:
+            raise HTTPException(status_code=400, detail="全局管理员必须显式指定 target_tenant_id")
+        tenant_id = request.target_tenant_id
+    else:
+        if request.target_tenant_id is not None and request.target_tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="无权清空其他租户的数据")
+        tenant_id = current_user.tenant_id
+
+    warehouse_id = request.warehouse_id
+    if warehouse_id is not None:
+        # check_warehouse_access 只保证"能访问"，全局 admin 对任意仓库都放行，
+        # 所以还要校验仓库确实属于 target_tenant_id，否则参数搭配错了会跨租户删。
+        check_warehouse_access(None, current_user, warehouse_id)
+        with get_engine().connect() as sa_conn:
+            wh_row = sa_conn.execute(
+                select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == warehouse_id)
+            ).first()
+        if wh_row is None or wh_row.tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"warehouse_id={warehouse_id} 不存在或不属于目标租户"
+            )
+
+    def _scope(table):
+        return build_scope_predicates(table, tenant_id, warehouse_id)
+
+    details = {}
+    with get_engine().begin() as sa_conn:
+        record_ids = select(_t_inventory_records.c.id).where(and_(*_scope(_t_inventory_records)))
+        batch_ids = select(_t_batches.c.id).where(and_(*_scope(_t_batches)))
+        # batch_consumptions 早期没有 tenant_id/warehouse_id，老库里这两列可能为空，
+        # 只按自身作用域删会留下孤儿行；所以同时按父记录/父批次删。
+        consumption_where = or_(
+            _t_batch_consumptions.c.record_id.in_(record_ids),
+            _t_batch_consumptions.c.batch_id.in_(batch_ids),
+            and_(*_scope(_t_batch_consumptions)),
+        )
+
+        for table, where in (
+            (_t_batch_consumptions, consumption_where),
+            (_t_inventory_records, and_(*_scope(_t_inventory_records))),
+            (_t_batches, and_(*_scope(_t_batches))),
+            (_t_materials, and_(*_scope(_t_materials))),
+        ):
+            details[table.name] = sa_conn.execute(
+                select(_sa_func.count()).select_from(table).where(where)
+            ).scalar_one()
+
+        # 删除顺序按外键依赖自底向上，MySQL(InnoDB) 下顺序错了会被 FK 拒绝。
+        sa_conn.execute(delete(_t_batch_consumptions).where(consumption_where))
+        sa_conn.execute(delete(_t_inventory_records).where(and_(*_scope(_t_inventory_records))))
+        sa_conn.execute(delete(_t_batches).where(and_(*_scope(_t_batches))))
+        sa_conn.execute(delete(_t_materials).where(and_(*_scope(_t_materials))))
+
+    # 物料没了，常驻内存的模糊索引必须失效，否则语音/智能体仍能匹配到已删物料的 id。
+    # 联系方未被删除，contact 索引保持不变。
+    get_fuzzy_matcher().invalidate_cache(entity_type="material")
+
+    if ENABLE_AUDIT_LOG:
+        logger.info(
+            f"[AUDIT] 用户 {current_user.username or 'unknown'} 清空了库存数据 "
+            f"tenant={tenant_id} warehouse={warehouse_id or 'ALL'} details={details}"
+        )
+
+    scope_desc = f"仓库 {warehouse_id}" if warehouse_id is not None else "全部仓库"
+    message = (
+        f"已清空{scope_desc}的库存数据：{details.get('materials', 0)} 物料，"
+        f"{details.get('inventory_records', 0)} 记录，{details.get('batches', 0)} 批次。"
+        f"仓库、联系方、用户与 API 密钥绑定均已保留。"
+    )
+    return DatabaseOperationResponse(success=True, message=message, details=details)
+
+
 # ============ MCP 连接管理 ============
 
 # MCP process manager singleton lives on ``app.state.mcp_manager`` (one per
@@ -7469,7 +7567,15 @@ async def get_system_mode():
             select(_t_system_settings.c.value).where(_t_system_settings.c.key == 'system_mode')
         ).first()
     mode = row.value if row else 'self_owned'
-    return {"mode": mode, "deploy_mode": get_deploy_mode(), "face_enabled": get_face_enabled()}
+    # db_file_ops：整库导出/导入/清空这三个接口直接操作 .db 文件与 sqlite_master，
+    # 只在 SQLite 部署上可用（见各自的 dialect 闸门）。MySQL 部署下它们恒返回 400，
+    # 前端据此隐藏入口——否则按钮照常显示、点了才失败。
+    return {
+        "mode": mode,
+        "deploy_mode": get_deploy_mode(),
+        "face_enabled": get_face_enabled(),
+        "db_file_ops": get_engine().dialect.name == 'sqlite',
+    }
 
 
 @app.put("/api/system/mode")

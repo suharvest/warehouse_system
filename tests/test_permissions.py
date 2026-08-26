@@ -316,6 +316,19 @@ class TestSystemModeViaRequirePermission:
         assert "deploy_mode" in body
         assert "mode" in body
 
+    def test_system_mode_reports_db_file_ops_capability(self, client):
+        """db_file_ops 告诉前端整库导出/导入/清空能不能用。
+
+        这三个接口直接操作 .db 文件，非 SQLite 部署下恒返回 400；前端据此隐藏入口，
+        否则按钮照常显示、点了才失败（现场就是这么撞上的）。
+        """
+        from fastapi.testclient import TestClient
+        from db import get_engine
+
+        guest = TestClient(client.app)
+        body = guest.get("/api/system/mode").json()
+        assert body["db_file_ops"] is (get_engine().dialect.name == "sqlite")
+
     def test_system_mode_put_still_requires_auth(self, client):
         """PUT remains guarded — only GET was opened up."""
         from fastapi.testclient import TestClient

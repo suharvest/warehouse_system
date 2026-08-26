@@ -25,7 +25,7 @@ import { exportInventory, exportRecords, exportProductRecords, showImportModal, 
 import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEditUserModal, closeEditUserModal, handleEditUser, toggleUserStatus, setUsersCallbacks, loadTenantInfo } from './features/users.js';
 import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
-import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase } from './features/database.js';
+import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase, applyDbFileOpsVisibility } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
 import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
 import { erpProbeUsers, erpPasteJson, erpDoImport, loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults, runProviderProbe, probeContinue } from './features/erp.js';
@@ -686,6 +686,10 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // 获取部署模式（鉴权渲染会依赖它决定多租户入口显隐）；同时拿到部署级人脸开关
     await fetchDeployMode();
+
+    // 非 SQLite 部署（线上 MySQL）→ 隐藏整库导出/导入与"先导出再清空"，这三条路径
+    // 后端恒返回 400。
+    applyDbFileOpsVisibility();
 
     // 部署级人脸开关：FACE_ENABLED=false（线上/云端版）→ 隐藏「人脸识别」设置 tab 与面板，
     // 该部署不支持人脸识别功能。默认 true 不影响本地/私有部署。

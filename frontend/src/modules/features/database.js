@@ -2,11 +2,40 @@
 
 import { API_BASE_URL } from '../api.js';
 import { t } from '../../../i18n.js';
+import { getDbFileOps } from '../state.js';
+
+// MySQL 部署下整库导出/导入恒返回 400（它们直接操作 .db 文件），入口留着只会让人
+// 点了才知道不行。「清空库存数据」与「先导出再清空」不受影响——前者走
+// /api/inventory/reset，后者走两个 Excel 导出，都是方言无关的。
+export function applyDbFileOpsVisibility() {
+    if (getDbFileOps()) return;
+    ['db-export-card', 'db-import-card'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    });
+}
 
 // ============ Export Database ============
 export function exportDatabase() {
     // 直接跳转到导出 URL，浏览器会自动下载
     window.location.href = `${API_BASE_URL}/database/export`;
+}
+
+// 后端的全局异常处理器（backend/app.py 的 http_exception_handler）把所有 HTTPException
+// 改写成 {"error": ...}，不是 FastAPI 默认的 {"detail": ...}。只读 detail 会让每一种失败
+// 都退化成通配文案——现场表现是客户点"清空"只看到"操作失败，请重试"，而真实原因
+// （MySQL 部署不支持该接口 / 库只读 / 老库缺表）一个都看不到。带上 HTTP status 是为了
+// 让现场无需翻服务端日志就能区分 4xx（用错了）和 5xx（服务端炸了）。
+function extractApiError(data, response, fallback) {
+    let msg = '';
+    if (data) {
+        if (typeof data.error === 'string') msg = data.error;
+        else if (typeof data.detail === 'string') msg = data.detail;
+        else if (Array.isArray(data.detail)) msg = data.detail.map(i => i.msg || JSON.stringify(i)).join('\n');
+        else if (typeof data.message === 'string') msg = data.message;
+    }
+    if (!msg) msg = fallback;
+    return (response && !response.ok) ? `${msg}（HTTP ${response.status}）` : msg;
 }
 
 // ============ Import Database Modal ============
@@ -62,15 +91,18 @@ export async function confirmImportDatabase() {
             return;
         }
 
-        const data = await response.json();
+        // 用 catch(() => null) 兜底：未捕获异常时 Starlette 返回的是 text/plain 的
+        // "Internal Server Error"，反向代理的 502/504 是 HTML，两者都会让 .json() 抛错
+        // 而落进下面的 catch 分支——那里没有 response，status 就丢了。
+        const data = await response.json().catch(() => null);
 
-        if (data.success) {
+        if (data && data.success) {
             alert(data.message);
             closeImportDatabaseModal();
             // 刷新页面以重新加载所有数据
             window.location.reload();
         } else {
-            errorDiv.textContent = data.detail || data.message || t('importDatabaseFailed') || '导入失败';
+            errorDiv.textContent = extractApiError(data, response, t('importDatabaseFailed') || '导入失败');
             errorDiv.style.display = 'block';
         }
     } catch (error) {
@@ -94,14 +126,55 @@ export function closeClearDatabaseModal() {
     document.getElementById('clear-database-modal').classList.remove('show');
 }
 
-export async function exportThenClearDatabase() {
-    // 先导出
-    exportDatabase();
+// 从 Content-Disposition 取文件名，取不到就用调用方给的兜底名。
+function filenameFromResponse(response, fallback) {
+    const cd = response.headers.get('Content-Disposition') || '';
+    const match = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(cd);
+    return match ? decodeURIComponent(match[1].trim()) : fallback;
+}
 
-    // 等待一小段时间让下载开始，然后清空
-    setTimeout(async () => {
-        await executeClearDatabase();
-    }, 1000);
+async function downloadExport(path, fallbackName) {
+    const response = await fetch(`${API_BASE_URL}${path}`, { credentials: 'include' });
+    if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(extractApiError(data, response, t('exportFailed') || '导出失败'));
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filenameFromResponse(response, fallbackName);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+}
+
+export async function exportThenClearDatabase() {
+    const errorDiv = document.getElementById('clear-database-error');
+
+    // 备份走两个 Excel 导出而不是整库 .db 导出：后者是 sqlite-only，MySQL 部署下
+    // 恒 400，"先导出再清空"在线上等于没有备份就清空。这两个导出都走 SA Core，
+    // 方言无关，且合起来正好覆盖 reset 会删掉的东西——库存快照（一行一批次）
+    // 加出入库流水。
+    try {
+        // status 必须显式列全四种：该导出默认只给未禁用物料（status 里没有 'disabled'
+        // 就会加 is_disabled = 0 的谓词），而 reset 不区分状态、禁用物料照删，
+        // 不带这个参数的备份会缺掉它们。
+        await downloadExport(
+            '/materials/export-excel?status=normal,warning,danger,disabled',
+            'inventory_snapshot.xlsx',
+        );
+        await downloadExport('/inventory/export-excel', 'inventory_records.xlsx');
+    } catch (error) {
+        console.error('Export before clear failed:', error);
+        // 导出失败就不清空。原实现是 setTimeout 1s 后无条件清空，导出成没成功都照删。
+        errorDiv.textContent = `${t('exportBeforeClearFailed') || '导出失败，已取消清空'}：${error.message}`;
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    await executeClearDatabase();
 }
 
 export async function directClearDatabase() {
@@ -116,7 +189,10 @@ async function executeClearDatabase() {
     const errorDiv = document.getElementById('clear-database-error');
 
     try {
-        const response = await fetch(`${API_BASE_URL}/database/clear`, {
+        // 打的是 /inventory/reset 而不是 /database/clear：后者是 sqlite-only（MySQL 部署
+        // 直接 400），且会删掉仓库并把 API Key / MCP 连接的 warehouse_id 置 NULL，
+        // 智能体的密钥失去仓库绑定后查不到任何物料。reset 只删业务数据。
+        const response = await fetch(`${API_BASE_URL}/inventory/reset`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -129,15 +205,18 @@ async function executeClearDatabase() {
             return;
         }
 
-        const data = await response.json();
+        // 用 catch(() => null) 兜底：未捕获异常时 Starlette 返回的是 text/plain 的
+        // "Internal Server Error"，反向代理的 502/504 是 HTML，两者都会让 .json() 抛错
+        // 而落进下面的 catch 分支——那里没有 response，status 就丢了。
+        const data = await response.json().catch(() => null);
 
-        if (data.success) {
+        if (data && data.success) {
             alert(data.message);
             closeClearDatabaseModal();
             // 刷新页面以重新加载所有数据
             window.location.reload();
         } else {
-            errorDiv.textContent = data.detail || data.message || t('databaseOperationFailed') || '操作失败';
+            errorDiv.textContent = extractApiError(data, response, t('databaseOperationFailed') || '操作失败');
             errorDiv.style.display = 'block';
         }
     } catch (error) {

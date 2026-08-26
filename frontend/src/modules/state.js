@@ -152,3 +152,14 @@ export function setFaceEnabled(enabled) {
     localStorage.setItem('face_enabled', faceEnabled ? 'true' : 'false');
 }
 
+// dbFileOps 表示这套部署支不支持整库导出/导入/清空——它们直接操作 .db 文件，
+// 只有 SQLite 后端可用，MySQL 部署下后端恒返回 400。来自 /api/system/mode 的
+// db_file_ops 字段，缺省（旧后端不返回）当 true。与"清空库存数据"无关，后者走
+// /api/inventory/reset，方言无关。
+export let dbFileOps = localStorage.getItem('db_file_ops') !== 'false';
+export const getDbFileOps = () => dbFileOps;
+export function setDbFileOps(enabled) {
+    dbFileOps = !!enabled;
+    localStorage.setItem('db_file_ops', dbFileOps ? 'true' : 'false');
+}
+
