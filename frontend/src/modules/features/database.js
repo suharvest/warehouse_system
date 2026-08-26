@@ -4,12 +4,12 @@ import { API_BASE_URL } from '../api.js';
 import { t } from '../../../i18n.js';
 import { getDbFileOps } from '../state.js';
 
-// MySQL 部署下整库导出/导入/整库清空恒返回 400（它们直接操作 .db 文件），
-// 入口留着只会让人点了才知道不行。清空库存数据不受影响——它走
-// /api/inventory/reset，方言无关。
+// MySQL 部署下整库导出/导入恒返回 400（它们直接操作 .db 文件），入口留着只会让人
+// 点了才知道不行。「清空库存数据」与「先导出再清空」不受影响——前者走
+// /api/inventory/reset，后者走两个 Excel 导出，都是方言无关的。
 export function applyDbFileOpsVisibility() {
     if (getDbFileOps()) return;
-    ['db-export-card', 'db-import-card', 'export-then-clear-btn'].forEach(id => {
+    ['db-export-card', 'db-import-card'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
@@ -126,14 +126,49 @@ export function closeClearDatabaseModal() {
     document.getElementById('clear-database-modal').classList.remove('show');
 }
 
-export async function exportThenClearDatabase() {
-    // 先导出
-    exportDatabase();
+// 从 Content-Disposition 取文件名，取不到就用调用方给的兜底名。
+function filenameFromResponse(response, fallback) {
+    const cd = response.headers.get('Content-Disposition') || '';
+    const match = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(cd);
+    return match ? decodeURIComponent(match[1].trim()) : fallback;
+}
 
-    // 等待一小段时间让下载开始，然后清空
-    setTimeout(async () => {
-        await executeClearDatabase();
-    }, 1000);
+async function downloadExport(path, fallbackName) {
+    const response = await fetch(`${API_BASE_URL}${path}`, { credentials: 'include' });
+    if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(extractApiError(data, response, t('exportFailed') || '导出失败'));
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filenameFromResponse(response, fallbackName);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+}
+
+export async function exportThenClearDatabase() {
+    const errorDiv = document.getElementById('clear-database-error');
+
+    // 备份走两个 Excel 导出而不是整库 .db 导出：后者是 sqlite-only，MySQL 部署下
+    // 恒 400，"先导出再清空"在线上等于没有备份就清空。这两个导出都走 SA Core，
+    // 方言无关，且合起来正好覆盖 reset 会删掉的东西——库存快照（一行一批次）
+    // 加出入库流水。
+    try {
+        await downloadExport('/materials/export-excel', 'inventory_snapshot.xlsx');
+        await downloadExport('/inventory/export-excel', 'inventory_records.xlsx');
+    } catch (error) {
+        console.error('Export before clear failed:', error);
+        // 导出失败就不清空。原实现是 setTimeout 1s 后无条件清空，导出成没成功都照删。
+        errorDiv.textContent = `${t('exportBeforeClearFailed') || '导出失败，已取消清空'}：${error.message}`;
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    await executeClearDatabase();
 }
 
 export async function directClearDatabase() {
