@@ -544,6 +544,14 @@
     "tags": []
   },
   {
+    "method": "POST",
+    "name": "reset_inventory",
+    "path": "/api/inventory/reset",
+    "response_model": "DatabaseOperationResponse",
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "GET",
     "name": "get_all_materials",
     "path": "/api/materials/all",
