@@ -108,7 +108,13 @@ def _login(app_instance, username):
 
 
 @pytest.fixture(autouse=True)
-def _multi_tenant(monkeypatch):
+def _multi_tenant(monkeypatch, admin_client):
+    """admin_client 不是给用例用的，是为了强制 session 级 _admin_setup 先跑完。
+
+    _seed() 直接往 users 插行，一旦它先于 /api/auth/setup 执行，setup 就会撞上
+    "系统已初始化，无法重复设置"，让同一批次里所有依赖 admin_client 的用例集体
+    ERROR（全量跑因为字母序在前的文件已建好 admin 而看不到，单独挑几个文件跑才炸）。
+    """
     monkeypatch.setenv("DEPLOY_MODE", "multi_tenant")
 
 
