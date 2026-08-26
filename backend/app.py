@@ -7567,7 +7567,15 @@ async def get_system_mode():
             select(_t_system_settings.c.value).where(_t_system_settings.c.key == 'system_mode')
         ).first()
     mode = row.value if row else 'self_owned'
-    return {"mode": mode, "deploy_mode": get_deploy_mode(), "face_enabled": get_face_enabled()}
+    # db_file_ops：整库导出/导入/清空这三个接口直接操作 .db 文件与 sqlite_master，
+    # 只在 SQLite 部署上可用（见各自的 dialect 闸门）。MySQL 部署下它们恒返回 400，
+    # 前端据此隐藏入口——否则按钮照常显示、点了才失败。
+    return {
+        "mode": mode,
+        "deploy_mode": get_deploy_mode(),
+        "face_enabled": get_face_enabled(),
+        "db_file_ops": get_engine().dialect.name == 'sqlite',
+    }
 
 
 @app.put("/api/system/mode")

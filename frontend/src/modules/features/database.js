@@ -2,6 +2,18 @@
 
 import { API_BASE_URL } from '../api.js';
 import { t } from '../../../i18n.js';
+import { getDbFileOps } from '../state.js';
+
+// MySQL 部署下整库导出/导入/整库清空恒返回 400（它们直接操作 .db 文件），
+// 入口留着只会让人点了才知道不行。清空库存数据不受影响——它走
+// /api/inventory/reset，方言无关。
+export function applyDbFileOpsVisibility() {
+    if (getDbFileOps()) return;
+    ['db-export-card', 'db-import-card', 'export-then-clear-btn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    });
+}
 
 // ============ Export Database ============
 export function exportDatabase() {

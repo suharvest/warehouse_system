@@ -1093,7 +1093,7 @@
                             <div class="p-4">
                                 <p class="text-sm text-gray-500 mb-4" data-i18n="databaseManagementDesc">管理仓库数据的导出、导入和清空操作。用户账户和API密钥不受影响。</p>
                                 <div class="flex flex-wrap gap-4">
-                                    <div class="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 flex-1 min-w-[280px]">
+                                    <div id="db-export-card" class="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 flex-1 min-w-[280px]">
                                         <div class="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-lg bg-blue-50 text-blue-600">
                                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -1114,7 +1114,7 @@
                                             <span data-i18n="export">导出</span>
                                         </button>
                                     </div>
-                                    <div class="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 flex-1 min-w-[280px]">
+                                    <div id="db-import-card" class="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 flex-1 min-w-[280px]">
                                         <div class="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-lg bg-green-50 text-green-600">
                                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -2062,7 +2062,7 @@
             </div>
             <div class="modal-footer flex-wrap gap-2 justify-end">
                 <button class="btn cancel-btn" data-action="closeClearDatabaseModal" data-i18n="cancel">取消</button>
-                <button class="btn confirm-btn" data-action="exportThenClearDatabase" data-i18n="exportThenClear">先导出再清空</button>
+                <button id="export-then-clear-btn" class="btn confirm-btn" data-action="exportThenClearDatabase" data-i18n="exportThenClear">先导出再清空</button>
                 <button class="btn confirm-btn delete-btn" data-action="directClearDatabase" data-i18n="directClear">直接清空</button>
             </div>
         </div>
