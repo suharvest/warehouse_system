@@ -136,7 +136,10 @@ async function executeClearDatabase() {
     const errorDiv = document.getElementById('clear-database-error');
 
     try {
-        const response = await fetch(`${API_BASE_URL}/database/clear`, {
+        // 打的是 /inventory/reset 而不是 /database/clear：后者是 sqlite-only（MySQL 部署
+        // 直接 400），且会删掉仓库并把 API Key / MCP 连接的 warehouse_id 置 NULL，
+        // 智能体的密钥失去仓库绑定后查不到任何物料。reset 只删业务数据。
+        const response = await fetch(`${API_BASE_URL}/inventory/reset`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',

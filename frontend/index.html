@@ -1145,8 +1145,8 @@
                                             </svg>
                                         </div>
                                         <div class="flex-1">
-                                            <h4 class="text-sm font-medium text-gray-900 mb-1" data-i18n="clearDatabase">清空数据库</h4>
-                                            <p class="text-xs text-gray-500" data-i18n="clearDatabaseDesc">删除所有仓库数据（用户不受影响）</p>
+                                            <h4 class="text-sm font-medium text-gray-900 mb-1" data-i18n="clearDatabase">清空库存数据</h4>
+                                            <p class="text-xs text-gray-500" data-i18n="clearDatabaseDesc">删除当前范围的物料、批次与出入库记录（仓库和联系方保留）</p>
                                         </div>
                                         <button class="action-btn delete-btn" data-action="showClearDatabaseModal">
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2046,7 +2046,7 @@
     <div id="clear-database-modal" class="modal">
         <div class="modal-content modal-small">
             <div class="modal-header">
-                <h3 data-i18n="clearDatabase">清空数据库</h3>
+                <h3 data-i18n="clearDatabase">清空库存数据</h3>
                 <button class="close-btn" data-action="closeClearDatabaseModal">&times;</button>
             </div>
             <div class="modal-body">
@@ -2055,7 +2055,7 @@
                         <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
                         <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                     </svg>
-                    <p class="text-sm text-red-800" data-i18n="clearDatabaseWarning">这将永久删除所有仓库数据（物料、出入库记录、批次、联系方）。用户账户和API密钥不受影响。</p>
+                    <p class="text-sm text-red-800" data-i18n="clearDatabaseWarning">这将永久删除当前范围内的物料、批次、出入库记录与批次消耗，用于重新导入库存。仓库、联系方、用户账户、API密钥与智能体的仓库绑定均保留。</p>
                 </div>
                 <p class="text-sm text-gray-700 text-center" data-i18n="clearDatabaseQuestion">是否要在清空前先导出现有数据？</p>
                 <div class="form-error" id="clear-database-error" style="display:none;"></div>
