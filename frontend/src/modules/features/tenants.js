@@ -35,7 +35,9 @@ function getTotalPages() {
 }
 
 function getErrorMessage(error, fallbackKey, fallbackText) {
-    return error.detail || error.message || (error.data && error.data.detail) || tt(fallbackKey, fallbackText);
+    return error.error || error.detail || error.message
+        || (error.data && (error.data.error || error.data.detail))
+        || tt(fallbackKey, fallbackText);
 }
 
 // ============ 部署模式 ============

@@ -46,6 +46,8 @@ function _collectRowReasonCategories() {
 
 function _formatApiError(data, fallback) {
     if (!data) return fallback;
+    // error 放在最前：后端的 HTTPException 处理器统一输出 {"error": ...}，只认 detail 会丢原因。
+    if (typeof data.error === 'string') return data.error;
     if (typeof data.detail === 'string') return data.detail;
     if (Array.isArray(data.detail)) {
         return data.detail.map(item => item.msg || JSON.stringify(item)).join('\n');

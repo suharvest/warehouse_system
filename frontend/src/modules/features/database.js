@@ -9,6 +9,23 @@ export function exportDatabase() {
     window.location.href = `${API_BASE_URL}/database/export`;
 }
 
+// 后端的全局异常处理器（backend/app.py 的 http_exception_handler）把所有 HTTPException
+// 改写成 {"error": ...}，不是 FastAPI 默认的 {"detail": ...}。只读 detail 会让每一种失败
+// 都退化成通配文案——现场表现是客户点"清空"只看到"操作失败，请重试"，而真实原因
+// （MySQL 部署不支持该接口 / 库只读 / 老库缺表）一个都看不到。带上 HTTP status 是为了
+// 让现场无需翻服务端日志就能区分 4xx（用错了）和 5xx（服务端炸了）。
+function extractApiError(data, response, fallback) {
+    let msg = '';
+    if (data) {
+        if (typeof data.error === 'string') msg = data.error;
+        else if (typeof data.detail === 'string') msg = data.detail;
+        else if (Array.isArray(data.detail)) msg = data.detail.map(i => i.msg || JSON.stringify(i)).join('\n');
+        else if (typeof data.message === 'string') msg = data.message;
+    }
+    if (!msg) msg = fallback;
+    return (response && !response.ok) ? `${msg}（HTTP ${response.status}）` : msg;
+}
+
 // ============ Import Database Modal ============
 export function showImportDatabaseModal() {
     const modal = document.getElementById('import-database-modal');
@@ -62,15 +79,18 @@ export async function confirmImportDatabase() {
             return;
         }
 
-        const data = await response.json();
+        // 用 catch(() => null) 兜底：未捕获异常时 Starlette 返回的是 text/plain 的
+        // "Internal Server Error"，反向代理的 502/504 是 HTML，两者都会让 .json() 抛错
+        // 而落进下面的 catch 分支——那里没有 response，status 就丢了。
+        const data = await response.json().catch(() => null);
 
-        if (data.success) {
+        if (data && data.success) {
             alert(data.message);
             closeImportDatabaseModal();
             // 刷新页面以重新加载所有数据
             window.location.reload();
         } else {
-            errorDiv.textContent = data.detail || data.message || t('importDatabaseFailed') || '导入失败';
+            errorDiv.textContent = extractApiError(data, response, t('importDatabaseFailed') || '导入失败');
             errorDiv.style.display = 'block';
         }
     } catch (error) {
@@ -129,15 +149,18 @@ async function executeClearDatabase() {
             return;
         }
 
-        const data = await response.json();
+        // 用 catch(() => null) 兜底：未捕获异常时 Starlette 返回的是 text/plain 的
+        // "Internal Server Error"，反向代理的 502/504 是 HTML，两者都会让 .json() 抛错
+        // 而落进下面的 catch 分支——那里没有 response，status 就丢了。
+        const data = await response.json().catch(() => null);
 
-        if (data.success) {
+        if (data && data.success) {
             alert(data.message);
             closeClearDatabaseModal();
             // 刷新页面以重新加载所有数据
             window.location.reload();
         } else {
-            errorDiv.textContent = data.detail || data.message || t('databaseOperationFailed') || '操作失败';
+            errorDiv.textContent = extractApiError(data, response, t('databaseOperationFailed') || '操作失败');
             errorDiv.style.display = 'block';
         }
     } catch (error) {
