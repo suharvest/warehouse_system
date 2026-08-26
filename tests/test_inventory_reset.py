@@ -232,3 +232,106 @@ def test_reset_invalidates_fuzzy_index(app_instance):
     assert sku in _skus(), "precondition: 物料已进索引"
     assert client.post("/api/inventory/reset", json={"confirm": True}).status_code == 200
     assert sku not in _skus(), "索引未失效，已删物料仍可被匹配"
+
+
+def _seed_global_admin(suffix):
+    """建一个 tenant_id 为 NULL 的全局管理员（多租户部署里的运维账号）。"""
+    from db import get_engine
+    from database import hash_password
+    from metadata import users
+
+    username = f"globaladmin-{suffix}"
+    with get_engine().begin() as conn:
+        conn.execute(insert(users).values(
+            username=username, password_hash=hash_password("Admin123!"),
+            role="admin", display_name="Global Admin", tenant_id=None,
+        ))
+    return username
+
+
+def test_global_admin_must_name_target_tenant(app_instance):
+    """全局管理员没有"自己的租户"，不显式指定就无从判断该删谁的数据 —— 必须 400。"""
+    from metadata import materials
+    seeded = _seed(uuid.uuid4().hex[:8])
+    client = _login(app_instance, _seed_global_admin(uuid.uuid4().hex[:8]))
+
+    resp = client.post("/api/inventory/reset", json={"confirm": True})
+    assert resp.status_code == 400, resp.text
+    assert _count(materials, tenant_id=seeded["tenant_id"]) == 1
+
+
+def test_global_admin_clears_only_named_tenant(app_instance):
+    from metadata import materials
+    target = _seed(uuid.uuid4().hex[:8])
+    bystander = _seed(uuid.uuid4().hex[:8])
+    client = _login(app_instance, _seed_global_admin(uuid.uuid4().hex[:8]))
+
+    resp = client.post("/api/inventory/reset", json={
+        "confirm": True, "target_tenant_id": target["tenant_id"],
+    })
+    assert resp.status_code == 200, resp.text
+    assert _count(materials, tenant_id=target["tenant_id"]) == 0
+    assert _count(materials, tenant_id=bystander["tenant_id"]) == 1
+
+
+def test_global_admin_rejects_warehouse_of_another_tenant(app_instance):
+    """target_tenant_id 与 warehouse_id 搭配错了必须拒绝，否则会删到别的租户。"""
+    from metadata import materials
+    target = _seed(uuid.uuid4().hex[:8])
+    other = _seed(uuid.uuid4().hex[:8])
+    client = _login(app_instance, _seed_global_admin(uuid.uuid4().hex[:8]))
+
+    resp = client.post("/api/inventory/reset", json={
+        "confirm": True,
+        "target_tenant_id": target["tenant_id"],
+        "warehouse_id": other["warehouses"][0],
+    })
+    assert resp.status_code == 400, resp.text
+    for seeded in (target, other):
+        assert _count(materials, tenant_id=seeded["tenant_id"]) == 1
+
+
+def test_reset_deletes_legacy_consumption_rows_without_scope_columns(app_instance):
+    """老库里的 batch_consumptions 可能 tenant_id/warehouse_id 为空。
+
+    这类行只按自身作用域删会成为孤儿（父记录已删、它还在），所以删除条件里带了
+    按父记录/父批次的分支。夹具三列一致时验证不到这一支，这里显式把它们置空。
+    """
+    from db import get_engine
+    from sqlalchemy import update
+    from metadata import batch_consumptions
+
+    seeded = _seed(uuid.uuid4().hex[:8])
+    with get_engine().begin() as conn:
+        conn.execute(update(batch_consumptions)
+                     .where(batch_consumptions.c.tenant_id == seeded["tenant_id"])
+                     .values(tenant_id=None, warehouse_id=None))
+    client = _login(app_instance, seeded["username"])
+
+    resp = client.post("/api/inventory/reset", json={"confirm": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["details"]["batch_consumptions"] == 1
+    with get_engine().connect() as conn:
+        left = conn.execute(
+            select(func.count()).select_from(batch_consumptions)
+            .where(batch_consumptions.c.tenant_id.is_(None))
+        ).scalar_one()
+    assert left == 0, "作用域列为空的历史消耗行没被删掉"
+
+
+def test_reset_deletes_disabled_materials(app_instance):
+    """reset 不区分启用/禁用 —— 这也是"先导出再清空"必须显式带上 disabled 状态
+    才算完整备份的原因（见 database.js 的导出参数）。"""
+    from db import get_engine
+    from sqlalchemy import update
+    from metadata import materials
+
+    seeded = _seed(uuid.uuid4().hex[:8])
+    with get_engine().begin() as conn:
+        conn.execute(update(materials)
+                     .where(materials.c.tenant_id == seeded["tenant_id"])
+                     .values(is_disabled=1))
+    client = _login(app_instance, seeded["username"])
+
+    assert client.post("/api/inventory/reset", json={"confirm": True}).status_code == 200
+    assert _count(materials, tenant_id=seeded["tenant_id"]) == 0

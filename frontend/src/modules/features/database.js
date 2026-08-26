@@ -158,7 +158,13 @@ export async function exportThenClearDatabase() {
     // 方言无关，且合起来正好覆盖 reset 会删掉的东西——库存快照（一行一批次）
     // 加出入库流水。
     try {
-        await downloadExport('/materials/export-excel', 'inventory_snapshot.xlsx');
+        // status 必须显式列全四种：该导出默认只给未禁用物料（status 里没有 'disabled'
+        // 就会加 is_disabled = 0 的谓词），而 reset 不区分状态、禁用物料照删，
+        // 不带这个参数的备份会缺掉它们。
+        await downloadExport(
+            '/materials/export-excel?status=normal,warning,danger,disabled',
+            'inventory_snapshot.xlsx',
+        );
         await downloadExport('/inventory/export-excel', 'inventory_records.xlsx');
     } catch (error) {
         console.error('Export before clear failed:', error);
