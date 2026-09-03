@@ -84,10 +84,6 @@ function renderWarehousesTable(warehouses) {
                         data-action="toggleWarehouseStatus" data-wh-id="${wh.id}" data-is-disabled="${wh.is_disabled}">
                         ${wh.is_disabled ? t('enable') : t('disable')}
                     </button>
-                    <button class="action-btn-small danger" data-action="deleteWarehouse"
-                        data-wh-id="${wh.id}" data-wh-name="${wh.name}">
-                        ${t('delete')}
-                    </button>
                 ` : ''}
             </td>
         </tr>
@@ -294,19 +290,5 @@ export async function toggleWarehouseStatus(id, isDisabled) {
         if (refreshSwitcherFn) refreshSwitcherFn();
     } catch (error) {
         alert(error.detail || error.message || '操作失败');
-    }
-}
-
-// ============ 删除仓库 ============
-export async function deleteWarehouse(id, name) {
-    if (!confirm(`${t('confirmDeleteWarehouse') || '确定删除仓库'}「${name}」？\n${t('deleteWarehouseWarning') || '若仓库内仍有物料，需先在物料管理中禁用或转移后才能删除。'}`)) {
-        return;
-    }
-    try {
-        await warehousesApi.delete(id);
-        loadWarehouses();
-        if (refreshSwitcherFn) refreshSwitcherFn();
-    } catch (error) {
-        alert(error.detail || error.message || '删除失败');
     }
 }

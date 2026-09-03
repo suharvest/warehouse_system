@@ -27,7 +27,7 @@ import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, 
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase, applyDbFileOpsVisibility } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
-import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, deleteWarehouse, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
+import { loadWarehouses as loadWarehousesList, showAddWarehouseModal, showEditWarehouseModal, closeWarehouseModal, handleSaveWarehouse, toggleWarehouseStatus, setWarehousesCallbacks, toggleWarehouseGroup } from './features/warehouses.js';
 import { erpProbeUsers, erpPasteJson, erpDoImport, loadERPStatus, startERPRefresh, stopERPRefresh, showUploadWizard, closeUploadWizard, handleProviderUpload, saveProviderConfig, runProviderTest, activateProvider, deactivateProvider, deleteProvider, editProviderConfig, wizardNextStep, wizardPrevStep, switchSystemMode, wizardActivate, wizardRunLevel2, wizardGoToResults, runProviderProbe, probeContinue } from './features/erp.js';
 import { fetchDeployMode, renderTenantsPanel, showAddTenantModal, closeAddTenantModal, handleAddTenant, showEditTenantModal, closeEditTenantModal, handleEditTenant, handleDeleteTenant, tenantsPrevPage, tenantsNextPage, getTenantModalsHTML, setTenantsPage } from './features/tenants.js';
 import {
@@ -427,7 +427,6 @@ const actionHandlers = {
     'closeWarehouseModal': closeWarehouseModal,
     'handleSaveWarehouse': handleSaveWarehouse,
     'toggleWarehouseStatus': (el) => toggleWarehouseStatus(el.dataset.whId, el.dataset.isDisabled === 'true'),
-    'deleteWarehouse': (el) => deleteWarehouse(el.dataset.whId, el.dataset.whName),
     'toggleWarehouseGroup': (el) => toggleWarehouseGroup(el),
 
     // 筛选器
