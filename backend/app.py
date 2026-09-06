@@ -2,6 +2,7 @@
 仓库管理系统 FastAPI 后端
 """
 import asyncio
+import hashlib
 import os
 import logging
 import secrets
@@ -161,6 +162,42 @@ logger = logging.getLogger('warehouse')
 # 速率限制配置
 # ============================================
 limiter = Limiter(key_func=get_remote_address, enabled=os.environ.get('DISABLE_RATE_LIMIT', '0') != '1')
+
+
+def business_rate_limit_key(request: Request) -> str:
+    """业务接口的限流分桶键：先按调用方身份，取不到才退回来源 IP。
+
+    2026-09-05 harvest-pi 压测：stock-out 挂的是 60/minute + key_func=IP，
+    单一来源 IP 的有效吞吐被钉死在 ~1 req/s，96%+ 的请求返回 429
+    （results.md §库存更新 stock-out）。现场部署里多台手持终端／多个语音网关
+    共用一个出口 IP（NAT）是常态，按 IP 计数会让一个终端的正常操作把同事全部挡住。
+
+    分桶顺序对齐 deps.get_current_user 的认证优先级（X-API-Key > session
+    cookie），凭据只取哈希用于分桶，不落日志、不做 DB 查询（限流要在业务逻辑
+    之前判完）。同一用户的不同会话会各自计数，这是可接受的偏松方向——限流在这里
+    防的是失控循环，不是鉴权。
+
+    注意：注册 / 找回 / device_id 枚举那几个 5/hour、10/hour 是**防枚举**的安全
+    限速，天然必须按 IP（攻击者没有合法身份可言），不走这个 key_func。
+    """
+    api_key = request.headers.get('X-API-Key')
+    if api_key:
+        return 'ak:' + hashlib.sha256(api_key.encode('utf-8')).hexdigest()[:32]
+    session_token = request.cookies.get('session_token')
+    if session_token:
+        return 'sess:' + hashlib.sha256(session_token.encode('utf-8')).hexdigest()[:32]
+    device_id = request.headers.get('X-Device-Id')
+    if device_id:
+        return 'dev:' + device_id.strip()[:64]
+    return 'ip:' + get_remote_address(request)
+
+
+# 业务接口限速阈值。默认 600/minute = 10 req/s，对齐 2026-09-05 压测的持续负载口径
+# （results.md 里查询与出库都按 ~10 req/s 打），单个终端的正常出入库远低于此；
+# 保留上限是为了挡住失控重试循环，不是为了限业务。
+BUSINESS_RATE_LIMIT = os.environ.get('BUSINESS_RATE_LIMIT', '600/minute')
+# Excel 导入是重操作（解析 + 批量写），单独一档；同样按身份而不是 IP 计数。
+IMPORT_RATE_LIMIT = os.environ.get('IMPORT_RATE_LIMIT', '10/minute')
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -4688,7 +4725,9 @@ async def stock_in(
 
 
 @app.post("/api/materials/stock-out", response_model=StockOutResponse)
-@limiter.limit("60/minute")
+# 按调用方身份计数（见 business_rate_limit_key）。原来是 60/minute + 按来源 IP，
+# 多台终端共用出口 IP 时会互相挤掉，压测里 96%+ 的出库请求被 429。
+@limiter.limit(BUSINESS_RATE_LIMIT, key_func=business_rate_limit_key)
 async def stock_out(
     request: Request,
     stock_data: StockOperationRequest,
@@ -5743,7 +5782,7 @@ def extract_variants(names: list) -> tuple:
 
 
 @app.post("/api/materials/import-excel/preview", response_model=ExcelImportPreviewResponse)
-@limiter.limit("10/minute")  # Excel导入速率限制
+@limiter.limit(IMPORT_RATE_LIMIT, key_func=business_rate_limit_key)  # Excel导入速率限制（按身份计数）
 async def preview_import_excel(
     request: Request,
     file: UploadFile = File(...),
