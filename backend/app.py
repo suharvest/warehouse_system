@@ -6320,16 +6320,16 @@ async def confirm_import_excel(
         wh_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
         batch_scope_preds = list(build_scope_predicates(_t_batches, wh_tenant_id, wh_id))
 
-        # 批次号取号：走本事务内的 batch_no_sequences 原子自增。
-        # 必须传 sa_conn —— 一是另开连接写取号表会撞上本事务持有的 SQLite 写锁，
-        # 二是同一事务内连续取号才能看到自己刚占的号。原来的"进程内序号 + 去重
-        # 集合"只在单个导入请求内自洽，挡不住并发的 stock-in / 另一个导入。
-        def _alloc_batch_no(material_id):
-            return generate_batch_no(material_id, warehouse_id=wh_id, sa_conn=sa_conn)
-
         def _create_batch(material_id, quantity, location, contact_id, variant=None, batch_no=None):
-            """创建新批次并返回 batch_id"""
-            bn = batch_no or _alloc_batch_no(material_id)
+            """创建新批次并返回 batch_id
+
+            批次号取号走本事务内的 batch_no_sequences 原子自增。必须传 sa_conn ——
+            一是另开连接写取号表会撞上本事务持有的 SQLite 写锁，二是同一事务内连续
+            取号才能看到自己刚占的号。原来的"进程内序号 + 去重集合"只在单个导入
+            请求内自洽，挡不住并发的 stock-in / 另一个导入。
+            """
+            bn = batch_no or generate_batch_no(
+                material_id, warehouse_id=wh_id, sa_conn=sa_conn)
             ins_res = sa_conn.execute(
                 insert(_t_batches).values(
                     batch_no=bn, material_id=material_id, quantity=quantity,

@@ -1059,6 +1059,9 @@ def _allocate_batch_seq(sa_conn, day: str, warehouse_id: int) -> int:
     seq = int(sa_conn.execute(select(_t_seq.c.last_seq).where(pk)).scalar_one())
 
     # 计数器落后于实际数据（存量行 / 直接 SQL 写入）时抬到实际最大值之上。
+    # 每次取号都要重算：测试用例 test_sequence_crosses_999_without_colliding /
+    # test_malformed_suffixes_are_ignored 要求序列行建出来之后再直接写进 batches
+    # 的行也能被跨过去，所以这个下限不能只在播种时算一次。
     floor = _batch_seq_floor(sa_conn, day, warehouse_id)
     if floor >= seq:
         seq = floor + 1
@@ -1066,8 +1069,7 @@ def _allocate_batch_seq(sa_conn, day: str, warehouse_id: int) -> int:
     return seq
 
 
-def generate_batch_no(material_id: int, warehouse_id: int, cursor=None,
-                      sa_conn=None) -> str:
+def generate_batch_no(material_id: int, warehouse_id: int, sa_conn=None) -> str:
     """生成批次号: YYYYMMDD-XXX (warehouse-scoped unique)
 
     取号走 ``batch_no_sequences`` 表的原子自增，不再是"读当天最大值 + 1"。
@@ -1092,8 +1094,6 @@ def generate_batch_no(material_id: int, warehouse_id: int, cursor=None,
     sa_conn: 调用方已经打开的 SQLAlchemy Connection（事务内）。**在写事务里调用
         时必须传**：SQLite 下另开一条连接写 batch_no_sequences 会撞上调用方持有的
         写锁而超时。事务外调用留空即可，函数自己开一个短事务。
-    cursor: 历史参数（sqlite3 cursor），取号已经不需要看未提交行，保留只为兼容
-        既有签名，不再使用。
     """
     if not isinstance(warehouse_id, int) or warehouse_id <= 0:
         raise ValueError(
