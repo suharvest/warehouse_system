@@ -1,0 +1,3 @@
+=== scenario=stock_out concurrency=10 duration=60s ===
+{"scenario": "stock_out", "concurrency": 10, "duration_s": 60, "requests_total": 321, "throughput_rps": 5.35, "error_count": 0, "error_rate_pct": 0.0, "p50_ms": 1540.8, "p95_ms": 3627.2, "p99_ms": 8922.0, "status_codes": {"200": 321}, "ts": "2026-09-06T05:46:05.452289+00:00"}
+written: evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c20_user1/stock_out_summary.json

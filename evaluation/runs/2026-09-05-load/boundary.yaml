@@ -1,0 +1,115 @@
+status: complete
+note: >
+  目标设备 harvest-pi（Raspberry Pi 5）已完成全部用例。Mac 本地数据（非目标
+  设备）作为压测脚本验证参考保留在 raw-mac-local/，不计入正式边界结论。
+  orin-nano 上的部署已在设备变更后清理干净（见 results.md 清理段）。
+
+metrics:
+  - metric: inventory_query_latency
+    endpoint: GET /api/materials/list
+    device:
+      model: "Raspberry Pi 5 (harvest-pi)"
+      os: "arm64 Linux, Docker (no memory cgroup support)"
+    software:
+      commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+      image_tag: "sensecraft-missionpack.seeed.cn/solution/warehouse:latest (cached image id c594a6be7abd, arm64 manifest)"
+    network_env: "Mac (client) -> Tailscale -> harvest-pi, real WAN hop, not loopback"
+    data_scale: "50 seeded materials, 1 warehouse, 1 tenant, SQLite"
+    duration: "60s per concurrency level"
+    tiers:
+      stable: "concurrency 1/5/10 — p95 75-404ms, 0% error (p99 tail already 0.7-2.7s due to WAN jitter)"
+      degrading: "concurrency 20 — p95 824ms (>2x tier-10's 404ms), 0% error; concurrency 50 — p95 5551ms, p99 8690ms, still 0% error but unusable latency"
+      failure: "not reached (0% HTTP error at any level); latency-only degradation caps out at ~5.5s p95 by concurrency 50"
+    raw_refs:
+      - evaluation/runs/2026-09-05-load/raw-harvest-pi/query_summary.json
+
+  - metric: inventory_update_stock_in_concurrency_limit
+    endpoint: POST /api/materials/stock-in
+    device:
+      model: "Raspberry Pi 5 (harvest-pi)"
+      os: "arm64 Linux, Docker (no memory cgroup support)"
+    software:
+      commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+      image_tag: "sensecraft-missionpack.seeed.cn/solution/warehouse:latest (cached image id c594a6be7abd, arm64 manifest)"
+    network_env: "Mac (client) -> Tailscale -> harvest-pi, real WAN hop, not loopback"
+    data_scale: "50 seeded materials, 1 warehouse, 1 tenant, SQLite; all requests target the same material_id (seed-material-2), which is what triggers the collision"
+    duration: "60s per concurrency level"
+    tiers:
+      stable: "concurrency 1 — p95 106ms, 0% error"
+      degrading: "concurrency 5 — 77.4% error rate (409 batch_no conflict), already past the 1%-error degrading threshold"
+      failure: "concurrency 10/20/50 — 100% error rate, all HTTP 409"
+    raw_refs:
+      - evaluation/runs/2026-09-05-load/raw-harvest-pi/stock_in_summary.json
+    note: >
+      真实系统边界，非网络/限流噪音。根因（backend/app.py ~4611-4626）：系统生成的
+      batch_no 撞 (batch_no, warehouse_id) 唯一约束时固定 retry 5 次，与并发数无关；
+      RPi5 上单请求延迟比 Mac 本地高一个数量级，并发窗口变宽后 5 次重试预算在多个
+      并发请求同时写同一 material_id 时大概率耗尽，对外表现为 409。Mac 本地回环网络
+      下该问题几乎不出现（见 raw-mac-local/stock_in_summary.json 全程 0 错误），说明
+      这个边界只有在目标设备的真实延迟量级下才会暴露。
+      系统本身没有独立的"任务"资源，本条以 stock-in（创建入库记录）代表任务书里的
+      "任务创建"，为压测方法学假设，非系统固有概念。
+
+  - metric: inventory_update_stock_out_rate_limit_and_capacity
+    endpoint: POST /api/materials/stock-out
+    device:
+      model: "Raspberry Pi 5 (harvest-pi)"
+      os: "arm64 Linux, Docker (no memory cgroup support)"
+    software:
+      commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+      image_tag: "sensecraft-missionpack.seeed.cn/solution/warehouse:latest (cached image id c594a6be7abd, arm64 manifest)"
+    network_env: "Mac (client) -> Tailscale -> harvest-pi, real WAN hop, not loopback"
+    data_scale: "50 seeded materials (2M+ units topped up on seed-material-1), 1 warehouse, 1 tenant, SQLite"
+    duration: "60s per concurrency level"
+    tiers:
+      stable: "not reached — slowapi rate limit (60/min per source IP, backend/app.py stock_out handler) caps successful requests to ~60/min at every concurrency level tested, by design, not a capacity failure"
+      degrading: "concurrency 1/5/10/20 — 95-98% error rate, all HTTP 429 (rate limit), p95 56ms-738ms, p99 up to 3.3s from WAN+queueing jitter"
+      failure: "concurrency 50 — p95 8142ms, p99 10052ms, plus 50 client-side connect exceptions (EXC) in addition to 429s; this tier mixes rate-limit rejections with a genuine device capacity edge (connection queueing/timeout under 50 concurrent connections on RPi5)"
+    raw_refs:
+      - evaluation/runs/2026-09-05-load/raw-harvest-pi/stock_out_summary.json
+    note: >
+      限流按来源 IP 计数，与并发数无关；60/min 上限本身是设计行为，照实记录 429，
+      未修改业务代码绕过。并发=50 时叠加出现的 EXC + 8-10s 延迟才是设备真实容量边界，
+      两种成因需分开看。多终端共享同一出口 IP 部署时会共享这 60/min 额度，是需要
+      在架构层面关注的点。
+
+  - metric: offline_network_interruption
+    endpoint: GET /api/materials/list (during simulated outage)
+    device:
+      model: "Raspberry Pi 5 (harvest-pi)"
+      os: "arm64 Linux, Docker (no memory cgroup support)"
+    software:
+      commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+      image_tag: "sensecraft-missionpack.seeed.cn/solution/warehouse:latest (cached image id c594a6be7abd, arm64 manifest)"
+    network_env: "Mac (client) -> Tailscale -> harvest-pi; outage simulated by `docker stop`/`docker start` on the test container (iptables/nft unavailable on this device, both command-not-found; container-stop is the task's documented fallback method)"
+    data_scale: "50 seeded materials, 1 warehouse, 1 tenant, SQLite"
+    duration: "60s total run, ~34s outage window (t=15.8s stop to t=49.9s fully recovered — longer than the nominal 30s because container restart re-runs the alembic/schema invariant checks on boot)"
+    tiers:
+      stable: "pre-outage (t<15.8s) and post-recovery (t>50.9s) — 0% error, ~10 req/s sustained"
+      degrading: "not applicable — binary behavior"
+      failure: "during outage — 100% request failure (httpx.ConnectError), zero requests queued or retried by the backend or by any client-side buffering; recovery is a single ~1s transitional bucket then immediate full recovery, no backlog"
+    raw_refs:
+      - evaluation/runs/2026-09-05-load/raw-harvest-pi/offline_summary.json
+    note: >
+      与源码确认一致（backend/deps.py, backend/app.py 全文 grep 无 REST 层重试/队列
+      命中）：mcp/mcp_pipe.py 与 backend/mcp_shared_runtime.py 的 reconnect/backoff
+      只服务 MCP 语音 WebSocket 通道，不覆盖 HTTP 请求丢失。停服务比断网线多出的
+      恢复时间，在真实运维场景（容器 OOM-kill 后被 restart policy 拉起）里需要
+      纳入考虑，不只是纯网络层的 30 秒。
+
+  - metric: permission_isolation
+    endpoint: "POST /api/materials/stock-in (role check), GET/POST with cross-tenant warehouse_id"
+    device:
+      model: "Raspberry Pi 5 (harvest-pi)"
+      os: "arm64 Linux, Docker (no memory cgroup support)"
+    software:
+      commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+      image_tag: "sensecraft-missionpack.seeed.cn/solution/warehouse:latest (cached image id c594a6be7abd, arm64 manifest)"
+    network_env: "Mac (control-plane, via fleet exec) -> Tailscale -> harvest-pi, in-container curl to localhost"
+    data_scale: "2 tenants, 2 warehouses, view/operate/admin api keys"
+    duration: "single-shot checks, not sustained load"
+    tiers:
+      stable: "all 4 boundary checks (role write/read, cross-tenant write/read) returned expected 403/200 — no privilege escalation found"
+      degrading: "n/a"
+      failure: "n/a — no failure observed"
+    raw_refs: []

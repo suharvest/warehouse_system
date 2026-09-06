@@ -1,0 +1,7 @@
+=== stock_out bucket test total_concurrency=10 half=5 ===
+=== done total_concurrency=10 ===
+=== stock_out bucket test total_concurrency=20 half=10 ===
+=== done total_concurrency=20 ===
+=== stock_out bucket test total_concurrency=50 half=25 ===
+=== done total_concurrency=50 ===
+ALL_STOCK_OUT_DONE

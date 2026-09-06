@@ -1,0 +1,424 @@
+{
+  "total_duration_s": 60,
+  "buckets": [
+    {
+      "t": 1.1,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 2.1,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 3.1,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 4.2,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 5.2,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 6.3,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 7.4,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 8.4,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 9.5,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 10.5,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 11.5,
+      "ok": 8,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 12.6,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 13.6,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 14.7,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 15.8,
+      "ok": 5,
+      "fail": 8,
+      "fail_reasons": {
+        "ConnectError": 8
+      }
+    },
+    {
+      "t": 16.8,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 17.9,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 18.9,
+      "ok": 0,
+      "fail": 18,
+      "fail_reasons": {
+        "ConnectError": 18
+      }
+    },
+    {
+      "t": 20.0,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 21.1,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 22.1,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 23.2,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 24.2,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 25.2,
+      "ok": 0,
+      "fail": 16,
+      "fail_reasons": {
+        "ConnectError": 16
+      }
+    },
+    {
+      "t": 26.2,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 27.3,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 28.3,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 29.3,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 30.3,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 31.3,
+      "ok": 0,
+      "fail": 16,
+      "fail_reasons": {
+        "ConnectError": 16
+      }
+    },
+    {
+      "t": 32.3,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 33.3,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 34.4,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 35.4,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 36.4,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 37.4,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 38.5,
+      "ok": 0,
+      "fail": 16,
+      "fail_reasons": {
+        "ConnectError": 16
+      }
+    },
+    {
+      "t": 39.5,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 40.6,
+      "ok": 0,
+      "fail": 18,
+      "fail_reasons": {
+        "ConnectError": 18
+      }
+    },
+    {
+      "t": 41.6,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 42.6,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 43.7,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 44.7,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 45.7,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 46.7,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 47.8,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 48.8,
+      "ok": 0,
+      "fail": 17,
+      "fail_reasons": {
+        "ConnectError": 17
+      }
+    },
+    {
+      "t": 49.9,
+      "ok": 6,
+      "fail": 7,
+      "fail_reasons": {
+        "ConnectError": 7
+      }
+    },
+    {
+      "t": 50.9,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 51.9,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 52.9,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 54.0,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 55.1,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 56.2,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 57.3,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 58.3,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 59.3,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 60.4,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    }
+  ],
+  "total_ok": 252,
+  "total_fail": 558,
+  "ts": "2026-09-05T04:52:59.360023+00:00"
+}

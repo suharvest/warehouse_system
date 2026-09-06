@@ -1,0 +1,19 @@
+[
+  {
+    "scenario": "stock_out",
+    "concurrency": 25,
+    "duration_s": 60,
+    "requests_total": 346,
+    "throughput_rps": 5.77,
+    "error_count": 25,
+    "error_rate_pct": 7.23,
+    "p50_ms": 3767.6,
+    "p95_ms": 10022.8,
+    "p99_ms": 10075.9,
+    "status_codes": {
+      "200": 321,
+      "EXC": 25
+    },
+    "ts": "2026-09-06T05:47:11.481533+00:00"
+  }
+]

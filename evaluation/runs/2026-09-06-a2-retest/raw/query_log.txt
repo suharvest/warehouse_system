@@ -1,0 +1,7 @@
+=== scenario=query concurrency=10 duration=60s ===
+{"scenario": "query", "concurrency": 10, "duration_s": 60, "requests_total": 1560, "throughput_rps": 26.0, "error_count": 3, "error_rate_pct": 0.19, "p50_ms": 308.5, "p95_ms": 397.7, "p99_ms": 2907.7, "status_codes": {"200": 1557, "EXC": 3}, "ts": "2026-09-06T05:38:01.430531+00:00"}
+=== scenario=query concurrency=20 duration=60s ===
+{"scenario": "query", "concurrency": 20, "duration_s": 60, "requests_total": 1623, "throughput_rps": 27.05, "error_count": 1, "error_rate_pct": 0.06, "p50_ms": 607.9, "p95_ms": 850.8, "p99_ms": 7167.0, "status_codes": {"200": 1622, "EXC": 1}, "ts": "2026-09-06T05:39:04.696184+00:00"}
+=== scenario=query concurrency=50 duration=60s ===
+{"scenario": "query", "concurrency": 50, "duration_s": 60, "requests_total": 1441, "throughput_rps": 24.02, "error_count": 50, "error_rate_pct": 3.47, "p50_ms": 1560.2, "p95_ms": 8780.6, "p99_ms": 10128.9, "status_codes": {"200": 1391, "EXC": 50}, "ts": "2026-09-06T05:40:08.169568+00:00"}
+written: evaluation/runs/2026-09-06-a2-retest/raw/query_summary.json

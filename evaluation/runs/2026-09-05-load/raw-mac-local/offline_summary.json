@@ -1,0 +1,411 @@
+{
+  "total_duration_s": 60,
+  "buckets": [
+    {
+      "t": 1.3,
+      "ok": 7,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 2.3,
+      "ok": 8,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 3.4,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 4.4,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 5.4,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 6.5,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 7.6,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 8.7,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 9.8,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 10.9,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 12.0,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 13.0,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 14.2,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 15.2,
+      "ok": 7,
+      "fail": 6,
+      "fail_reasons": {
+        "RemoteProtocolError": 1,
+        "ReadError": 5
+      }
+    },
+    {
+      "t": 16.2,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 17.3,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 18.3,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 19.3,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 20.3,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 21.4,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 22.4,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 23.4,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 24.5,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 25.5,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 26.5,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 27.5,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 28.6,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 29.6,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 30.6,
+      "ok": 0,
+      "fail": 18,
+      "fail_reasons": {
+        "ReadError": 18
+      }
+    },
+    {
+      "t": 31.7,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 32.7,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 33.7,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 34.7,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 35.8,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 36.8,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 37.9,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 38.9,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 39.9,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 41.0,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 42.0,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 43.1,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 44.1,
+      "ok": 0,
+      "fail": 19,
+      "fail_reasons": {
+        "ReadError": 19
+      }
+    },
+    {
+      "t": 45.3,
+      "ok": 1,
+      "fail": 18,
+      "fail_reasons": {
+        "ReadError": 18
+      }
+    },
+    {
+      "t": 46.3,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 47.5,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 48.5,
+      "ok": 8,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 49.5,
+      "ok": 8,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 50.6,
+      "ok": 9,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 51.6,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 52.7,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 53.7,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 54.7,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 55.9,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 57.0,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 58.0,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 59.1,
+      "ok": 11,
+      "fail": 0,
+      "fail_reasons": {}
+    },
+    {
+      "t": 60.1,
+      "ok": 10,
+      "fail": 0,
+      "fail_reasons": {}
+    }
+  ],
+  "total_ok": 264,
+  "total_fail": 555,
+  "ts": "2026-09-05T04:07:36.844256+00:00"
+}

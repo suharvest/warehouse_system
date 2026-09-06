@@ -1,0 +1,54 @@
+status: complete
+note: >
+  A2 复测 — 106c2db 批次号原子取号器修复验证。09-05 发现的边界：并发 5
+  时 77.4% 409，并发 >=10 时 100% 409。本轮验证已修复。
+
+metric: inventory_update_stock_in_concurrency
+endpoint: POST /api/materials/stock-in
+device:
+  model: "Raspberry Pi 5 (harvest-pi)"
+  os: "arm64 Linux, Docker (no memory cgroup support)"
+software:
+  commit: 116d5170b39e889750361aa8baea239088ec096e
+  branch: fix/a2-concurrency
+  image: "a2-warehouse-retest:116d517 (layered overlay on cached warehouse:latest base, backend/mcp/run_backend.py replaced with fix branch source; no dependency/frontend changes between 94b7e1d and 116d517)"
+network_env: "Mac (client) -> Tailscale -> harvest-pi, real WAN hop"
+data_scale: "1 material (seed-material-1, 5,000,000 initial qty), 1 warehouse, single_tenant deploy, SQLite"
+duration: "60s per concurrency level"
+before_after:
+  before_commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+  before_error_rate:
+    concurrency_5: "77.4% (409)"
+    concurrency_10: "100% (409)"
+    concurrency_20: "100% (409)"
+  after_commit: 116d5170b39e889750361aa8baea239088ec096e
+  after_error_rate:
+    concurrency_5: "0%"
+    concurrency_10: "0%"
+    concurrency_20: "0%"
+tiers:
+  stable: "concurrency 5/10/20 — 0% error, all HTTP 200, p95 634ms-4962ms (latency rises with concurrency due to serialization on the atomic sequence UPDATE, but no failures)"
+  degrading: "not reached in this range"
+  failure: "not reached — the 409 failure mode from 09-05 did not reproduce at any tested level"
+verification:
+  method: "direct SQLite query inside the container after all 3 levels (1481 batches created total)"
+  duplicate_batch_no_rows: []
+  distinct_batch_no_count: 1481
+  total_batches: 1481
+raw_refs:
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_in_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_in_log.txt
+root_cause_fixed: >
+  106c2db: generate_batch_no changed from "SELECT max seq committed -> +1"
+  (racy under concurrent uncommitted transactions) to an atomic UPDATE on a
+  new batch_no_sequences(warehouse_id, day_key, last_seq) table, serialized
+  by the database. Verified no regression in batch_no format (YYYYMMDD-NNN)
+  and no duplicate batch numbers across 1481 concurrently-created batches.
+second_cause_hypothesis_from_09_05_results_md: >
+  results.md 09-05 提到过一个"第二成因假设：多 worker 进程各自取号"。
+  已核实：容器启动命令是 `.venv/bin/python run_backend.py`，单进程
+  uvicorn（未见 gunicorn/多 worker 配置，`grep -n "workers"
+  backend/*.py run_backend.py` 无命中），本次复测环境是单进程，这个
+  假设在当前部署形态下不适用；若未来改用多进程/多副本部署，
+  batch_no_sequences 的原子 UPDATE 仍能保证跨进程/跨副本正确
+  （单一 DB 表做串行点），但尚未在多副本环境下实测，标记为**需核实**。

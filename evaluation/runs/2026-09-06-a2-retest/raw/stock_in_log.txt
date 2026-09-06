@@ -1,0 +1,7 @@
+=== scenario=stock_in concurrency=5 duration=60s ===
+{"scenario": "stock_in", "concurrency": 5, "duration_s": 60, "requests_total": 516, "throughput_rps": 8.6, "error_count": 0, "error_rate_pct": 0.0, "p50_ms": 500.9, "p95_ms": 633.9, "p99_ms": 3053.3, "status_codes": {"200": 516}, "ts": "2026-09-06T05:41:26.265443+00:00"}
+=== scenario=stock_in concurrency=10 duration=60s ===
+{"scenario": "stock_in", "concurrency": 10, "duration_s": 60, "requests_total": 473, "throughput_rps": 7.88, "error_count": 0, "error_rate_pct": 0.0, "p50_ms": 1013.3, "p95_ms": 4617.6, "p99_ms": 5739.8, "status_codes": {"200": 473}, "ts": "2026-09-06T05:42:30.223580+00:00"}
+=== scenario=stock_in concurrency=20 duration=60s ===
+{"scenario": "stock_in", "concurrency": 20, "duration_s": 60, "requests_total": 490, "throughput_rps": 8.17, "error_count": 0, "error_rate_pct": 0.0, "p50_ms": 2051.1, "p95_ms": 4961.3, "p99_ms": 8267.7, "status_codes": {"200": 490}, "ts": "2026-09-06T05:43:34.632928+00:00"}
+written: evaluation/runs/2026-09-06-a2-retest/raw/stock_in_summary.json

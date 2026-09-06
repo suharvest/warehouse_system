@@ -1,0 +1,74 @@
+status: complete
+note: >
+  A2 复测 — 868e941 限流分桶键修复验证（IP -> 调用方身份）。09-05 发现
+  的边界：单一来源 IP 的出库吞吐固定 ~60/min，96-98% 请求 429，与并发
+  数无关。本轮验证：两个不同身份共用同一出口 IP，各自独立计数。
+
+metric: inventory_update_stock_out_rate_limit_bucketing
+endpoint: POST /api/materials/stock-out
+device:
+  model: "Raspberry Pi 5 (harvest-pi)"
+  os: "arm64 Linux, Docker (no memory cgroup support)"
+software:
+  commit: 116d5170b39e889750361aa8baea239088ec096e
+  branch: fix/a2-concurrency
+  image: "a2-warehouse-retest:116d517 (layered overlay, see stock_in boundary file for build method)"
+network_env: "Mac (client, single Tailscale exit IP) -> harvest-pi; two API keys used from the same client IP to simulate two field devices behind one NAT"
+data_scale: "1 material (seed-material-1, 5,000,000 initial qty), 2 operate-role API keys bound to warehouse_id=1, single_tenant, SQLite"
+duration: "60s per level, default load; separate short burst test for isolation proof"
+
+default_config_load_test:
+  business_rate_limit_env: "BUSINESS_RATE_LIMIT=600/minute (default, unset)"
+  levels:
+    - total_concurrency: 10
+      split: "5+5"
+      user1: {requests: 365, error_rate_pct: 0, status_codes: {"200": 365}}
+      user2: {requests: 365, error_rate_pct: 0, status_codes: {"200": 365}}
+      combined_429_count: 0
+    - total_concurrency: 20
+      split: "10+10"
+      user1: {requests: 321, error_rate_pct: 0, status_codes: {"200": 321}}
+      user2: {requests: 321, error_rate_pct: 0, status_codes: {"200": 321}}
+      combined_429_count: 0
+    - total_concurrency: 50
+      split: "25+25"
+      user1: {requests: 341, error_rate_pct: 7.33, status_codes: {"200": 316, "EXC": 25}}
+      user2: {requests: 346, error_rate_pct: 7.23, status_codes: {"200": 321, "EXC": 25}}
+      combined_429_count: 0
+  interpretation: >
+    默认阈值 600/min 远高于本设备在真实 FIFO 消耗逻辑下能压出的吞吐
+    （各身份实测 5.3-6.1 req/s ≈ 320-370/min），三档均未触发 429。
+    c=50 出现的 50 个 EXC（双方各 25 个）是连接超时/被拒，与
+    09-05 报告 c=50 档的 "EXC + 8-10s 延迟" 现象一致，判定为设备真实
+    容量边界，不是限流回归。
+
+isolation_proof_tightened_threshold:
+  method: >
+    临时把容器 BUSINESS_RATE_LIMIT 改为 5/minute 重启（仅用于本项隔离
+    验证，验证后立即改回默认值 600/minute 并重启，同一容器/同一份数据，
+    未产生额外副作用），用两个 API Key 分别打 8 次连续请求。
+  key1_burst_status_codes: ["200","200","200","200","200","429","429","429"]
+  key2_burst_status_codes_immediately_after_key1_exhausted: ["200","200","200","200","200","429","429","429"]
+  key1_retry_after_key2_burst: "429"
+  conclusion: >
+    key2 拿到完整独立的 5 次配额，不受 key1 已耗尽配额影响；key1 在
+    key2 打完之后依然是 429（配额未因 key2 的流量被"救回"或共享）。
+    证明 business_rate_limit_key 按 'ak:sha256(api_key)[:32]' 分桶，
+    两个身份的桶完全独立，即使共用同一来源 IP。
+before_after:
+  before_commit: 94b7e1d088b7e93b1880150b9911cf8327164952
+  before_behavior: "单一来源 IP 计数，60/min，96.71%-97.77% 429（与并发数无关）"
+  after_commit: 116d5170b39e889750361aa8baea239088ec096e
+  after_behavior: "按身份分桶（X-API-Key > session > X-Device-Id > IP），默认阈值 600/min；本轮真实负载下 0 次 429，隔离测试证明分桶独立"
+tiers:
+  stable: "concurrency 10/20 (5+5, 10+10 per identity) — 0% error"
+  degrading: "not applicable — no 429 observed at default config"
+  failure: "concurrency 50 (25+25) — 7.2-7.3% error, all client-side EXC (connect timeout/refused), device capacity edge consistent with 09-05, not rate-limit related"
+raw_refs:
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c10_user1/stock_out_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c10_user2/stock_out_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c20_user1/stock_out_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c20_user2/stock_out_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c50_user1/stock_out_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_c50_user2/stock_out_summary.json
+  - evaluation/runs/2026-09-06-a2-retest/raw/stock_out_bucket_log.txt
