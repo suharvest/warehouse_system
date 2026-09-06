@@ -493,6 +493,20 @@ def init_database():
         )
     ''')
 
+    # 批次号序列分配器（见 generate_batch_no）
+    # 每个 (warehouse_id, day_key) 一行，记录当天已经**发出去**的最大序号。
+    # 取号靠一条 UPDATE last_seq = last_seq + 1 原子占位，替代原来的
+    # "SELECT 当天最大值 → +1 → INSERT"，后者在并发下所有连接读到同一个
+    # 已提交最大值，必然撞 (batch_no, warehouse_id) 唯一约束。
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS batch_no_sequences (
+            warehouse_id INTEGER NOT NULL,
+            day_key TEXT NOT NULL,
+            last_seq INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (warehouse_id, day_key)
+        )
+    ''')
+
     # 检查并添加 batch_id 字段到 inventory_records（用于入库记录关联批次）
     try:
         cursor.execute('SELECT batch_id FROM inventory_records LIMIT 1')
@@ -991,21 +1005,95 @@ def get_materials_quantity_map(material_ids):
         return {int(r.material_id): int(r.qty or 0) for r in conn.execute(stmt).fetchall()}
 
 
-def generate_batch_no(material_id: int, warehouse_id: int, cursor=None) -> str:
+def _batch_seq_floor(sa_conn, day: str, warehouse_id: int) -> int:
+    """当天该仓库 batches 里已有的最大数字后缀（取号下限）。
+
+    序号必须在 **Python 侧按整数比较**：后缀只补零到 3 位，单日超过 999 之后就
+    出现 4 位号（-1000），SQL 的字符串排序会把 '20260807-999' 判为大于
+    '20260807-1000'（2026-08-07 现场故障）。
+
+    这个下限让取号器对"绕过取号器写进来的行"（历史数据、直接 SQL 导入、
+    batch_no_sequences 建表之前的存量）保持正确，不需要数据回填迁移。
+    """
+    from sqlalchemy import select, and_
+    from metadata import batches as _t_batches
+    rows = sa_conn.execute(
+        select(_t_batches.c.batch_no).where(and_(
+            _t_batches.c.batch_no.like(f'{day}-%'),
+            _t_batches.c.warehouse_id == warehouse_id,
+        ))
+    ).fetchall()
+    best = 0
+    for row in rows:
+        try:
+            best = max(best, int(str(row[0]).split('-')[-1]))
+        except (ValueError, IndexError):
+            continue
+    return best
+
+
+def _allocate_batch_seq(sa_conn, day: str, warehouse_id: int) -> int:
+    """在 sa_conn 的事务里原子占用一个序号并返回它。
+
+    关键是那条 ``UPDATE last_seq = last_seq + 1``：读改写发生在数据库内部一条
+    语句里，由行锁（MySQL）/写锁（SQLite）串行化，两个并发请求不可能拿到同一个号。
+    """
+    from sqlalchemy import and_, insert, select, update
+    from sqlalchemy.exc import IntegrityError
+    from metadata import batch_no_sequences as _t_seq
+
+    pk = and_(_t_seq.c.warehouse_id == warehouse_id, _t_seq.c.day_key == day)
+    bump = update(_t_seq).where(pk).values(last_seq=_t_seq.c.last_seq + 1)
+
+    if sa_conn.execute(bump).rowcount == 0:
+        # 该 (仓库, 日期) 今天第一次取号。并发下可能有人同时建行，靠主键兜底；
+        # 用 SAVEPOINT 包住失败的 INSERT，避免污染调用方的事务。
+        try:
+            with sa_conn.begin_nested():
+                sa_conn.execute(insert(_t_seq).values(
+                    warehouse_id=warehouse_id, day_key=day, last_seq=0))
+        except IntegrityError:
+            pass
+        sa_conn.execute(bump)
+
+    seq = int(sa_conn.execute(select(_t_seq.c.last_seq).where(pk)).scalar_one())
+
+    # 计数器落后于实际数据（存量行 / 直接 SQL 写入）时抬到实际最大值之上。
+    floor = _batch_seq_floor(sa_conn, day, warehouse_id)
+    if floor >= seq:
+        seq = floor + 1
+        sa_conn.execute(update(_t_seq).where(pk).values(last_seq=seq))
+    return seq
+
+
+def generate_batch_no(material_id: int, warehouse_id: int, cursor=None,
+                      sa_conn=None) -> str:
     """生成批次号: YYYYMMDD-XXX (warehouse-scoped unique)
 
-    传入 cursor 可在同一事务内看到未提交的批次（避免批量创建时序号冲突）。
-    无 cursor 时：dialect-portable 路径走 SA Core。
+    取号走 ``batch_no_sequences`` 表的原子自增，不再是"读当天最大值 + 1"。
 
-    序号取当天最大值 + 1，且**必须在 Python 侧按整数比较**：序号只补零到 3 位，
-    单日超过 999 之后就出现 4 位号（-1000），此时 SQL 的字符串排序会把
-    '20260807-999' 判为大于 '20260807-1000'，导致每次都重新生成已存在的
-    -1000，撞 (batch_no, warehouse_id) 唯一约束。
+    为什么保留 YYYYMMDD-NNN 而不是换成随机后缀：批次号会被语音链路念出来、也会
+    被用户口述回来（``mcp/warehouse_mcp.py`` 的出库播报 / ``query_batch``），
+    随机 base32 后缀不可听写。格式不变，老数据与前端展示都不受影响。
+
+    并发正确性（2026-09-05 harvest-pi 压测暴露的 409）：旧实现下并发请求读到的
+    是同一份**已提交**状态——竞争者的 INSERT 还在各自未提交的事务里看不见——
+    所以每个请求都算出同一个号，调用方那 5 次重试只是把同一次读重复 5 遍。
+    换成 ``UPDATE last_seq = last_seq + 1`` 之后，取号由数据库串行化，
+    并发请求必然拿到不同的号。
 
     warehouse_id 是**必填**：批次号在迁移 a1b2c3d4e5f6 后改为
     (batch_no, warehouse_id) 复合唯一，而 NULL 不参与复合唯一约束。
     若调用者拿不到 warehouse_id（例如全局 admin 写入路径），上游应当先用
     require_warehouse_id() 解析或显式拒绝，避免跨租户碰撞静默通过。
+
+    参数
+    ----
+    sa_conn: 调用方已经打开的 SQLAlchemy Connection（事务内）。**在写事务里调用
+        时必须传**：SQLite 下另开一条连接写 batch_no_sequences 会撞上调用方持有的
+        写锁而超时。事务外调用留空即可，函数自己开一个短事务。
+    cursor: 历史参数（sqlite3 cursor），取号已经不需要看未提交行，保留只为兼容
+        既有签名，不再使用。
     """
     if not isinstance(warehouse_id, int) or warehouse_id <= 0:
         raise ValueError(
@@ -1013,37 +1101,14 @@ def generate_batch_no(material_id: int, warehouse_id: int, cursor=None) -> str:
             "(batch_no, warehouse_id) 是复合唯一约束，NULL/0/非整型会绕过 DB 层保护，"
             "可能导致跨租户批次号碰撞。请在调用前通过 require_warehouse_id() 解析。"
         )
-    today = datetime.now().strftime('%Y%m%d')
-    like_pat = f'{today}-%'
-
-    if cursor is not None:
-        cursor.execute(
-            "SELECT batch_no FROM batches WHERE batch_no LIKE ? AND warehouse_id = ?",
-            (like_pat, warehouse_id),
-        )
-        existing = [row['batch_no'] for row in cursor.fetchall()]
+    day = datetime.now().strftime('%Y%m%d')
+    if sa_conn is not None:
+        seq = _allocate_batch_seq(sa_conn, day, warehouse_id)
     else:
-        from sqlalchemy import select, and_
         from db import get_engine
-        from metadata import batches as _t_batches
-        with get_engine().connect() as conn:
-            existing = [
-                row[0] for row in conn.execute(
-                    select(_t_batches.c.batch_no)
-                    .where(and_(
-                        _t_batches.c.batch_no.like(like_pat),
-                        _t_batches.c.warehouse_id == warehouse_id,
-                    ))
-                ).fetchall()
-            ]
-
-    last_seq = 0
-    for batch_no in existing:
-        try:
-            last_seq = max(last_seq, int(batch_no.split('-')[-1]))
-        except (ValueError, IndexError):
-            continue
-    return f'{today}-{last_seq + 1:03d}'
+        with get_engine().begin() as conn:
+            seq = _allocate_batch_seq(conn, day, warehouse_id)
+    return f'{day}-{seq:03d}'
 
 
 def has_admin_user():

@@ -238,6 +238,23 @@ batches = Table(
 
 
 # ---------------------------------------------------------------------------
+# batch_no_sequences —— 批次号取号器
+# ---------------------------------------------------------------------------
+# 每个 (warehouse_id, day_key) 一行，last_seq 是当天已发出的最大序号。
+# generate_batch_no 用一条 UPDATE last_seq = last_seq + 1 原子占号，避免并发
+# 入库时多个连接读到同一个"当天最大值"、生成同一个 batch_no 撞唯一约束。
+# 无 FK 到 warehouses：取号是热路径，且 batches.warehouse_id 已经有外键约束。
+batch_no_sequences = Table(
+    "batch_no_sequences",
+    metadata,
+    Column("warehouse_id", Integer, primary_key=True, autoincrement=False),
+    Column("day_key", String(8), primary_key=True),
+    Column("last_seq", Integer, nullable=False, server_default="0"),
+    **MYSQL_TABLE_KW,
+)
+
+
+# ---------------------------------------------------------------------------
 # inventory_records
 # ---------------------------------------------------------------------------
 inventory_records = Table(

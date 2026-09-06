@@ -4618,8 +4618,9 @@ async def stock_in(
 
         # batch_no 撞 unique (batch_no, warehouse_id) 时：
         # - 用户显式传入的 batch_no 直接 409，让前端报错（用户输错了）
-        # - 系统生成的 batch_no（同 date+wh 高并发可能撞）retry 最多 5 次（参考
-        #   move_batch_location 的同款保护）
+        # - 系统生成的 batch_no 由 batch_no_sequences 原子取号，正常不会撞；
+        #   retry 只作兜底（例如有人绕过取号器直接写库）。重试必须传 sa_conn，
+        #   在本事务内取号——另开连接写取号表会撞上本事务持有的 SQLite 写锁。
         batch_id = None
         for _attempt in range(5):
             try:
@@ -4639,8 +4640,9 @@ async def stock_in(
                         status_code=409,
                         detail=f"批次号 '{batch_no}' 在该仓库已存在，请换一个"
                     )
-                # 系统生成的：重新分配一个再试
-                batch_no = generate_batch_no(material_id, warehouse_id=wh_id)
+                # 系统生成的：在本事务内重新取一个号再试
+                batch_no = generate_batch_no(material_id, warehouse_id=wh_id,
+                                             sa_conn=sa_conn)
         if batch_id is None:
             raise HTTPException(status_code=409, detail="批次号生成冲突，请重试")
 
@@ -5463,12 +5465,13 @@ async def move_batch_location(
             if upd.rowcount != 1:
                 raise HTTPException(status_code=409, detail="批次并发冲突，请重试")
 
-            # generate_batch_no 走独立连接看不到未提交行，拆分 INSERT 撞 unique
-            # (batches.batch_no UNIQUE) 时重试，最多 5 次。
+            # 取号走本事务内的 batch_no_sequences 原子自增（必须传 sa_conn：
+            # 另开连接写取号表会撞上本事务持有的 SQLite 写锁）。retry 作兜底。
             target_batch_id = None
             target_batch_no = None
             for _attempt in range(5):
-                candidate_no = generate_batch_no(batch.material_id, warehouse_id=wh_id)
+                candidate_no = generate_batch_no(batch.material_id, warehouse_id=wh_id,
+                                                 sa_conn=sa_conn)
                 try:
                     ins = sa_conn.execute(
                         insert(_t_batches).values(
@@ -6278,31 +6281,12 @@ async def confirm_import_excel(
         wh_tenant_id = resolve_tenant_id_for_write(current_user, wh_id)
         batch_scope_preds = list(build_scope_predicates(_t_batches, wh_tenant_id, wh_id))
 
-        # In-session batch_no allocator. generate_batch_no(material_id) without a
-        # cursor only sees committed rows, so consecutive calls inside one txn
-        # would collide. Track allocated numbers in-memory and bump the suffix
-        # until unique.
-        today_prefix = datetime.now().strftime('%Y%m%d')
-        allocated_batch_nos = set()
-        _next_batch_seq = None  # lazily seeded from the committed max on first use
-
+        # 批次号取号：走本事务内的 batch_no_sequences 原子自增。
+        # 必须传 sa_conn —— 一是另开连接写取号表会撞上本事务持有的 SQLite 写锁，
+        # 二是同一事务内连续取号才能看到自己刚占的号。原来的"进程内序号 + 去重
+        # 集合"只在单个导入请求内自洽，挡不住并发的 stock-in / 另一个导入。
         def _alloc_batch_no(material_id):
-            # Seed once: generate_batch_no opens its own connection, so calling it
-            # per row would re-scan today's batches N times and always return the
-            # same committed-max + 1 anyway.
-            nonlocal _next_batch_seq
-            if _next_batch_seq is None:
-                base = generate_batch_no(material_id, warehouse_id=wh_id)
-                try:
-                    _next_batch_seq = int(base.split('-')[-1])
-                except (ValueError, IndexError):
-                    _next_batch_seq = 1
-            while True:
-                candidate = f'{today_prefix}-{_next_batch_seq:03d}'
-                _next_batch_seq += 1
-                if candidate not in allocated_batch_nos:
-                    allocated_batch_nos.add(candidate)
-                    return candidate
+            return generate_batch_no(material_id, warehouse_id=wh_id, sa_conn=sa_conn)
 
         def _create_batch(material_id, quantity, location, contact_id, variant=None, batch_no=None):
             """创建新批次并返回 batch_id"""
