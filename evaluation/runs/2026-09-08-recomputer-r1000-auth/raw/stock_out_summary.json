@@ -1,0 +1,36 @@
+[
+  {
+    "scenario": "stock_out",
+    "concurrency": 5,
+    "duration_s": 30,
+    "requests_total": 853,
+    "throughput_rps": 28.43,
+    "error_count": 793,
+    "error_rate_pct": 92.97,
+    "p50_ms": 159.1,
+    "p95_ms": 327.0,
+    "p99_ms": 428.8,
+    "status_codes": {
+      "200": 60,
+      "429": 793
+    },
+    "ts": "2026-09-07T23:55:45.688333+00:00"
+  },
+  {
+    "scenario": "stock_out",
+    "concurrency": 10,
+    "duration_s": 30,
+    "requests_total": 1344,
+    "throughput_rps": 44.8,
+    "error_count": 1304,
+    "error_rate_pct": 97.02,
+    "p50_ms": 202.9,
+    "p95_ms": 323.9,
+    "p99_ms": 664.1,
+    "status_codes": {
+      "429": 1304,
+      "200": 40
+    },
+    "ts": "2026-09-07T23:56:18.887524+00:00"
+  }
+]

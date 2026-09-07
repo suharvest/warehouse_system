@@ -1,0 +1,34 @@
+[
+  {
+    "scenario": "query",
+    "concurrency": 5,
+    "duration_s": 30,
+    "requests_total": 818,
+    "throughput_rps": 27.27,
+    "error_count": 0,
+    "error_rate_pct": 0.0,
+    "p50_ms": 177.0,
+    "p95_ms": 267.1,
+    "p99_ms": 334.6,
+    "status_codes": {
+      "200": 818
+    },
+    "ts": "2026-09-07T23:53:02.284477+00:00"
+  },
+  {
+    "scenario": "query",
+    "concurrency": 10,
+    "duration_s": 30,
+    "requests_total": 1163,
+    "throughput_rps": 38.77,
+    "error_count": 0,
+    "error_rate_pct": 0.0,
+    "p50_ms": 255.9,
+    "p95_ms": 360.2,
+    "p99_ms": 608.9,
+    "status_codes": {
+      "200": 1163
+    },
+    "ts": "2026-09-07T23:53:35.437016+00:00"
+  }
+]
