@@ -519,6 +519,18 @@ class CreateApiKeyRequest(BaseModel):
     warehouse_id: Optional[int] = None  # 仓库ID（NULL=全局）
 
 
+class UpdateApiKeyRequest(BaseModel):
+    """API密钥修改请求（PATCH）。
+
+    只允许改仓库绑定与启停：name / role / key_hash 一律不可改（改角色等于
+    权限提升，改 key_hash 等于换密钥，两者都应重新建 Key）。
+    ``enabled`` 与 ``disabled`` 是同一个开关的两种写法，二选一。
+    """
+    warehouse_id: Optional[int] = None
+    enabled: Optional[bool] = None
+    disabled: Optional[bool] = None
+
+
 class ApiKeyStatusRequest(BaseModel):
     """API密钥状态请求"""
     disabled: bool
