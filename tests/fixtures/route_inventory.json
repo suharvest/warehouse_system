@@ -32,6 +32,14 @@
     "tags": []
   },
   {
+    "method": "PATCH",
+    "name": "update_api_key",
+    "path": "/api/api-keys/{key_id}",
+    "response_model": "ApiKeyListItem",
+    "status_code": null,
+    "tags": []
+  },
+  {
     "method": "PUT",
     "name": "toggle_api_key_status",
     "path": "/api/api-keys/{key_id}/status",

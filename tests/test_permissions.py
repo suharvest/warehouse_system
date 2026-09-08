@@ -112,11 +112,19 @@ class TestAuditFindings:
 
 # --------------------------- Contacts integration via new code path ---------------------------
 
-def _create_view_api_key(admin_client):
+def _create_view_api_key(admin_client, warehouse_id=None):
+    """非 admin 角色的 Key 必须带 warehouse_id（见 app._apikey_before_create）。"""
     import uuid
+    if warehouse_id is None:
+        warehouses = admin_client.get("/api/warehouses").json()
+        warehouse_id = warehouses[0]["id"]
     resp = admin_client.post(
         "/api/api-keys",
-        json={"name": f"view-{uuid.uuid4().hex[:6]}", "role": "view"},
+        json={
+            "name": f"view-{uuid.uuid4().hex[:6]}",
+            "role": "view",
+            "warehouse_id": warehouse_id,
+        },
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["key"]

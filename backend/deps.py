@@ -497,6 +497,25 @@ def audit_log(action: str, user_id: int = None, username: str = None, details: d
     logger.info(f"AUDIT: {action} | user={username}({user_id}) | {details}")
 
 
+def _warehouse_forbidden_detail(current_user: CurrentUser) -> str:
+    """403 文案：把「Key 没绑仓库」和「Key 绑了别的仓库」区分开。
+
+    未绑仓库的非 admin API Key 走 can_access_warehouse 的兜底分支（按
+    key.user_id 查 user_warehouses），创建它的管理员在该表通常没有行，于是
+    任何仓库都判 false。旧文案「无权访问该仓库」会把人引向查仓库 ID / 租户，
+    而真正的原因是这枚 Key 从来没有仓库绑定。
+    """
+    if (
+        current_user.source == 'api_key'
+        and current_user.role != RoleName.ADMIN
+        and current_user.warehouse_id is None
+    ):
+        return ('该 API Key 未绑定仓库，无法访问任何仓库数据；'
+                '请在「系统设置 → 用户与密钥」为它指定仓库'
+                '（PATCH /api/api-keys/{id} {"warehouse_id": N}）')
+    return '无权访问该仓库'
+
+
 def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] = None) -> Optional[int]:
     """
     解析仓库ID：
@@ -515,7 +534,7 @@ def resolve_warehouse_id(current_user: CurrentUser, warehouse_id: Optional[int] 
             if wh.tenant_id != current_user.tenant_id:
                 raise HTTPException(status_code=403, detail='无权访问该仓库')
         if current_user.role != RoleName.ADMIN and not current_user.can_access_warehouse(None, warehouse_id):
-            raise HTTPException(status_code=403, detail='无权访问该仓库')
+            raise HTTPException(status_code=403, detail=_warehouse_forbidden_detail(current_user))
         return warehouse_id
     if current_user.warehouse_id is not None:
         return current_user.warehouse_id
@@ -527,7 +546,7 @@ def check_warehouse_access(conn, current_user: CurrentUser, warehouse_id: int):
     if current_user.role == RoleName.ADMIN and current_user.tenant_id is None:
         return
     if not current_user.can_access_warehouse(conn, warehouse_id):
-        raise HTTPException(status_code=403, detail="无权访问该仓库")
+        raise HTTPException(status_code=403, detail=_warehouse_forbidden_detail(current_user))
 
 
 def assert_row_in_scope(

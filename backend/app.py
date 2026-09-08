@@ -46,7 +46,7 @@ from models import (
     CreateUserRequest, UpdateUserRequest, UserListItem,
     # Registration models
     VerifyDeviceRequest, VerifyDeviceResponse, RegisterRequest, ResetPasswordRequest,
-    CreateApiKeyRequest, ApiKeyStatusRequest, ApiKeyResponse, ApiKeyListItem,
+    CreateApiKeyRequest, UpdateApiKeyRequest, ApiKeyStatusRequest, ApiKeyResponse, ApiKeyListItem,
     # Contact models
     CreateContactRequest, UpdateContactRequest, ContactItem, ContactListItem,
     PaginatedContactsResponse,
@@ -1881,6 +1881,16 @@ async def list_api_keys(current_user: CurrentUser = Depends(require_permission(R
 def _apikey_before_create(sa_conn, current_user, request: CreateApiKeyRequest):
     if request.role not in _VALID_ROLE_VALUES:
         raise HTTPException(status_code=400, detail="无效的角色")
+    # 非 admin 角色的 Key 必须绑定仓库。deps.can_access_warehouse 对
+    # source='api_key' 且 warehouse_id 为空的非 admin Key，会回落到
+    # user_warehouses 表按 key.user_id（=创建它的管理员）查授权，管理员在该表
+    # 通常没有行，于是任何写接口都 403「无权访问该仓库」。这里改成建号时就拒绝，
+    # 而不是建出一枚只能读、写全挂的 Key。
+    if request.role != RoleName.ADMIN.value and request.warehouse_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="非管理员角色的 API Key 必须指定 warehouse_id（绑定仓库）",
+        )
 
 
 def _apikey_values_for_create(sa_conn, current_user, request: CreateApiKeyRequest) -> dict:
@@ -2001,6 +2011,117 @@ async def toggle_api_key_status(
 
         status_text = "已禁用" if request.disabled else "已启用"
         return {"success": True, "message": f"API密钥{status_text}"}
+
+
+@app.patch("/api/api-keys/{key_id}", response_model=ApiKeyListItem)
+async def update_api_key(
+    key_id: int,
+    request: UpdateApiKeyRequest,
+    current_user: CurrentUser = Depends(require_permission(Resource.API_KEYS, Action.ADMIN))
+):
+    """修改API密钥的仓库绑定 / 启停状态（仅管理员）。
+
+    只接受 warehouse_id 与 enabled/disabled 两类字段，用来给存量 Key 补绑仓库
+    ——在此之前没有任何接口能事后改绑定（POST 建号、DELETE 删除、
+    PUT /{id}/status 只切启停），只能删了重建。
+    """
+    fields = request.model_fields_set
+    if request.enabled is not None and request.disabled is not None:
+        raise HTTPException(status_code=400, detail="enabled 与 disabled 不能同时指定")
+    if not ({"warehouse_id", "enabled", "disabled"} & fields):
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+
+    values = {}
+    with get_engine().begin() as sa_conn:
+        row = load_or_404(
+            sa_conn, _t_api_keys, key_id,
+            columns=[
+                _t_api_keys.c.id, _t_api_keys.c.tenant_id,
+                _t_api_keys.c.role, _t_api_keys.c.warehouse_id,
+                _t_api_keys.c.is_system,
+            ],
+            not_found="API密钥不存在",
+            tenant_id=current_user.tenant_id,
+            forbidden="无权操作其他租户的API密钥",
+        )
+
+        # is_system 的 Agent Key 与 mcp_connections 是一对，仓库绑定必须两边
+        # 同步（backend/routers/mcp_admin.py 的 update 路径会同时写两张表）。
+        # 从这里单改 api_keys 会让智能体的仓库作用域与它的 Key 对不上，所以
+        # 挡住——这类 Key 也不在 GET /api/api-keys 的返回里（is_system == 0 过滤）。
+        if row.is_system:
+            raise HTTPException(
+                status_code=400,
+                detail="系统 Key（智能体）请在「智能体配置」里修改，不能从此接口改绑定",
+            )
+
+        if "warehouse_id" in fields:
+            wh_id = request.warehouse_id
+            if wh_id is not None:
+                # 复用创建路径的校验：仓库存在、同租户、调用者对该仓库有授权。
+                wh_id = resolve_warehouse_id(current_user, wh_id)
+                # 全局管理员（tenant_id 为 None）不受上面的同租户校验约束，
+                # 这里再按 Key 自己的租户校验一次，避免把 A 租户的 Key 绑到
+                # B 租户的仓库上。
+                wh_tenant = sa_conn.execute(
+                    select(_t_warehouses.c.tenant_id).where(_t_warehouses.c.id == wh_id)
+                ).first()
+                if wh_tenant is None:
+                    raise HTTPException(status_code=404, detail='仓库不存在')
+                if row.tenant_id is not None and wh_tenant.tenant_id != row.tenant_id:
+                    raise HTTPException(status_code=403, detail='无权访问该仓库')
+            elif row.role != RoleName.ADMIN.value:
+                raise HTTPException(
+                    status_code=400,
+                    detail="非管理员角色的 API Key 不能解绑仓库（warehouse_id 不可为空）",
+                )
+            values["warehouse_id"] = wh_id
+
+        if request.disabled is not None:
+            values["is_disabled"] = 1 if request.disabled else 0
+        elif request.enabled is not None:
+            values["is_disabled"] = 0 if request.enabled else 1
+
+        # enabled/disabled 传 null 会落到这里：字段在 model_fields_set 里，
+        # 但没有任何可写的值，values() 空参数会让 SQLAlchemy 生成非法 UPDATE。
+        if not values:
+            raise HTTPException(status_code=400, detail="没有可更新的字段")
+
+        # UPDATE 再带一次 tenant_id：load_or_404 与 UPDATE 之间理论上存在
+        # 迁租户的窗口，多这一个谓词就不会写到已经换了租户的行上。
+        upd = update(_t_api_keys).where(_t_api_keys.c.id == key_id)
+        if row.tenant_id is None:
+            upd = upd.where(_t_api_keys.c.tenant_id.is_(None))
+        else:
+            upd = upd.where(_t_api_keys.c.tenant_id == row.tenant_id)
+        sa_conn.execute(upd.values(**values))
+
+        out_stmt = (
+            select(
+                _t_api_keys.c.id, _t_api_keys.c.name, _t_api_keys.c.role,
+                _t_api_keys.c.is_disabled, _t_api_keys.c.created_at,
+                _t_api_keys.c.last_used_at, _t_api_keys.c.warehouse_id,
+                _t_warehouses.c.name.label('warehouse_name'),
+            )
+            .select_from(
+                _t_api_keys.outerjoin(_t_warehouses, _t_api_keys.c.warehouse_id == _t_warehouses.c.id)
+            )
+            .where(_t_api_keys.c.id == key_id)
+        )
+        out = sa_conn.execute(out_stmt).first()
+
+    return ApiKeyListItem(
+        id=out.id,
+        name=out.name,
+        role=out.role,
+        is_disabled=bool(out.is_disabled),
+        created_at=(out.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                    if isinstance(out.created_at, datetime) else out.created_at),
+        last_used_at=(out.last_used_at.strftime('%Y-%m-%d %H:%M:%S')
+                      if isinstance(out.last_used_at, datetime) else out.last_used_at),
+        warehouse_id=out.warehouse_id,
+        warehouse_name=out.warehouse_name,
+    )
 
 
 # ============ Database Management APIs ============

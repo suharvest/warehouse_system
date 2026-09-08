@@ -300,6 +300,14 @@ export const apiKeysApi = {
     });
   },
 
+  // 修改密钥（只支持 warehouse_id / enabled）
+  async update(keyId, data) {
+    return fetchJson(`/api-keys/${keyId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data)
+    });
+  },
+
   // 切换密钥状态
   async toggleStatus(keyId, disabled) {
     return fetchJson(`/api-keys/${keyId}/status`, {
