@@ -2038,11 +2038,22 @@ async def update_api_key(
             columns=[
                 _t_api_keys.c.id, _t_api_keys.c.tenant_id,
                 _t_api_keys.c.role, _t_api_keys.c.warehouse_id,
+                _t_api_keys.c.is_system,
             ],
             not_found="API密钥不存在",
             tenant_id=current_user.tenant_id,
             forbidden="无权操作其他租户的API密钥",
         )
+
+        # is_system 的 Agent Key 与 mcp_connections 是一对，仓库绑定必须两边
+        # 同步（backend/routers/mcp_admin.py 的 update 路径会同时写两张表）。
+        # 从这里单改 api_keys 会让智能体的仓库作用域与它的 Key 对不上，所以
+        # 挡住——这类 Key 也不在 GET /api/api-keys 的返回里（is_system == 0 过滤）。
+        if row.is_system:
+            raise HTTPException(
+                status_code=400,
+                detail="系统 Key（智能体）请在「智能体配置」里修改，不能从此接口改绑定",
+            )
 
         if "warehouse_id" in fields:
             wh_id = request.warehouse_id
@@ -2071,9 +2082,19 @@ async def update_api_key(
         elif request.enabled is not None:
             values["is_disabled"] = 0 if request.enabled else 1
 
-        sa_conn.execute(
-            update(_t_api_keys).where(_t_api_keys.c.id == key_id).values(**values)
-        )
+        # enabled/disabled 传 null 会落到这里：字段在 model_fields_set 里，
+        # 但没有任何可写的值，values() 空参数会让 SQLAlchemy 生成非法 UPDATE。
+        if not values:
+            raise HTTPException(status_code=400, detail="没有可更新的字段")
+
+        # UPDATE 再带一次 tenant_id：load_or_404 与 UPDATE 之间理论上存在
+        # 迁租户的窗口，多这一个谓词就不会写到已经换了租户的行上。
+        upd = update(_t_api_keys).where(_t_api_keys.c.id == key_id)
+        if row.tenant_id is None:
+            upd = upd.where(_t_api_keys.c.tenant_id.is_(None))
+        else:
+            upd = upd.where(_t_api_keys.c.tenant_id == row.tenant_id)
+        sa_conn.execute(upd.values(**values))
 
         out_stmt = (
             select(

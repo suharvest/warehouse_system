@@ -239,3 +239,44 @@ def test_patch_rejects_cross_tenant_warehouse(admin_client, default_warehouse_id
     with get_engine().begin() as conn:
         conn.execute(text("UPDATE warehouses SET is_disabled = 1 WHERE id = :i"),
                      {"i": other_wh})
+
+
+def test_patch_null_toggle_is_rejected_not_500(admin_client, default_warehouse_id):
+    """``{"enabled": null}`` 曾能通过"有字段"检查却生成空 UPDATE（SQL 报错）。"""
+    resp = _create_key(admin_client, role='operate',
+                       warehouse_id=default_warehouse_id)
+    info = resp.json()
+    r = admin_client.patch(f"/api/api-keys/{info['id']}", json={"enabled": None})
+    assert r.status_code == 400, r.text
+
+
+def test_patch_rejects_both_switches(admin_client, default_warehouse_id):
+    resp = _create_key(admin_client, role='operate',
+                       warehouse_id=default_warehouse_id)
+    info = resp.json()
+    r = admin_client.patch(f"/api/api-keys/{info['id']}",
+                           json={"enabled": True, "disabled": True})
+    assert r.status_code == 400, r.text
+
+
+def test_patch_rejects_system_agent_key(admin_client, default_warehouse_id):
+    """系统 Key 的仓库绑定与 mcp_connections 成对，只能从智能体配置改。"""
+    from db import get_engine
+    from sqlalchemy import text
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO api_keys (key_hash, name, role, user_id, is_system, "
+            "warehouse_id, tenant_id, created_at) "
+            "VALUES (:h, 'Agent: sys', 'operate', 1, 1, :w, 1, '2026-09-08 00:00:00')"),
+            {"h": f"sys-{uuid.uuid4().hex}", "w": default_warehouse_id})
+        kid = conn.execute(text(
+            "SELECT id FROM api_keys WHERE name = 'Agent: sys' ORDER BY id DESC")).scalar()
+
+    r = admin_client.patch(f"/api/api-keys/{kid}",
+                           json={"warehouse_id": default_warehouse_id})
+    assert r.status_code == 400, r.text
+    assert "智能体" in r.text
+
+    from sqlalchemy import text as _t
+    with get_engine().begin() as conn:
+        conn.execute(_t("DELETE FROM api_keys WHERE id = :i"), {"i": kid})
