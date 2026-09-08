@@ -135,8 +135,10 @@ def test_admin_api_key_can_list_users(admin_client, app_instance):
     assert isinstance(resp.json(), list)
 
 
-def test_operate_api_key_cannot_list_users(admin_client, app_instance):
-    info = _create_api_key(admin_client, role='operate')
+def test_operate_api_key_cannot_list_users(admin_client, app_instance,
+                                          default_warehouse_id):
+    info = _create_api_key(admin_client, role='operate',
+                           warehouse_id=default_warehouse_id)
     c = _new_client(app_instance)
     resp = c.get("/api/users", headers=_key_headers(info['key']))
     assert resp.status_code == 403

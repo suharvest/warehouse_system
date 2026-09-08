@@ -174,22 +174,24 @@ class TestApiKeys:
         data = resp.json()
         assert isinstance(data, list)
 
-    def test_create_api_key(self, admin_client):
+    def test_create_api_key(self, admin_client, default_warehouse_id):
         """Admin can create an API key."""
         resp = admin_client.post("/api/api-keys", json={
             "name": "Test Terminal",
-            "role": "operate"
+            "role": "operate",
+            "warehouse_id": default_warehouse_id
         })
         assert resp.status_code == 200
         data = resp.json()
         assert 'key' in data
         assert data['key'].startswith('wh_')
 
-    def test_delete_api_key(self, admin_client):
+    def test_delete_api_key(self, admin_client, default_warehouse_id):
         """Admin can delete an API key."""
         create_resp = admin_client.post("/api/api-keys", json={
             "name": "To Delete Key",
-            "role": "view"
+            "role": "view",
+            "warehouse_id": default_warehouse_id
         })
         assert create_resp.status_code == 200
 
@@ -199,13 +201,14 @@ class TestApiKeys:
             resp = admin_client.delete(f"/api/api-keys/{target['id']}")
             assert resp.status_code == 200
 
-    def test_toggle_api_key_status(self, admin_client):
+    def test_toggle_api_key_status(self, admin_client, default_warehouse_id):
         """Admin can disable/enable an API key."""
         import uuid
         key_name = f"Toggle_{uuid.uuid4().hex[:6]}"
         create_resp = admin_client.post("/api/api-keys", json={
             "name": key_name,
-            "role": "operate"
+            "role": "operate",
+            "warehouse_id": default_warehouse_id
         })
         assert create_resp.status_code == 200
 
