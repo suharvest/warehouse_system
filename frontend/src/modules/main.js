@@ -23,7 +23,7 @@ import { loadRecords, recordsGoToPage, changeRecordsPageSize, applyRecordsFilter
 import { onProductSelect, initDetailCharts, loadProductDetail, loadProductTrend, loadDetailPieChart, loadProductRecords, detailGoToPage, changeDetailPageSize, refreshProductDetailForLanguage } from './features/product-detail.js';
 import { exportInventory, exportRecords, exportProductRecords, showImportModal, closeImportModal, handleFileSelect, confirmImport, closeNewSkuModal, skipNewSkus, confirmNewSkus, setImportExportCallbacks, downloadSampleExcel } from './features/import-export.js';
 import { loadUsers, showAddUserModal, closeAddUserModal, handleAddUser, showEditUserModal, closeEditUserModal, handleEditUser, toggleUserStatus, setUsersCallbacks, loadTenantInfo } from './features/users.js';
-import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey } from './features/api-keys.js';
+import { loadApiKeys, showAddApiKeyModal, closeAddApiKeyModal, handleAddApiKey, closeShowApiKeyModal, copyApiKey, disableApiKey, toggleApiKeyStatus, deleteApiKey, showEditApiKeyModal, closeEditApiKeyModal, handleEditApiKey } from './features/api-keys.js';
 import { loadContacts, contactsGoToPage, changeContactsPageSize, applyContactsFilter, resetContactsFilter, showAddContactModal, closeContactModal, editContact, handleSaveContact, toggleContactStatus } from './features/contacts.js';
 import { exportDatabase, showImportDatabaseModal, closeImportDatabaseModal, handleDatabaseFileSelect, confirmImportDatabase, showClearDatabaseModal, closeClearDatabaseModal, exportThenClearDatabase, directClearDatabase, applyDbFileOpsVisibility } from './features/database.js';
 import { loadMCPConnections, showAddMCPModal, closeMCPModal, handleSaveMCP, editMCPConnection, startMCPConnection, stopMCPConnection, restartMCPConnection, deleteMCPConnection, startMCPRefresh, stopMCPRefresh, showMCPLogs, toggleMCPDebug, toggleMCPDevices, showAddMCPDeviceModal, closeMCPDeviceModal, saveMCPDevice, editMCPDevice, deleteMCPDevice, pushFacesToDevice } from './features/mcp.js';
@@ -368,6 +368,14 @@ const actionHandlers = {
     'toggleApiKeyStatus': (el) => toggleApiKeyStatus(el.dataset.keyId, el.dataset.isDisabled === 'true'),
     'disableApiKey': (el) => disableApiKey(el.dataset.keyId),
     'deleteApiKey': (el) => deleteApiKey(el.dataset.keyId, el.dataset.keyName),
+    'showEditApiKeyModal': (el) => showEditApiKeyModal(
+        el.dataset.keyId,
+        el.dataset.keyName,
+        el.dataset.keyRole,
+        el.dataset.warehouseId
+    ),
+    'closeEditApiKeyModal': closeEditApiKeyModal,
+    'handleEditApiKey': handleEditApiKey,
 
     // 系统设置子 Tab 切换
     'switchSettingsSubTab': (el) => {
