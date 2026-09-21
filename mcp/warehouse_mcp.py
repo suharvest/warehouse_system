@@ -123,7 +123,11 @@ _config = load_config()
 # 确保能找到 providers 包（直接运行 warehouse_mcp.py 时需要）
 sys.path.insert(0, os.path.dirname(__file__))
 from providers import load_provider  # noqa: E402
-from providers.normalize import normalize_query  # noqa: E402
+from providers.normalize import configure_synonyms, normalize_query  # noqa: E402
+
+# ASR 同音/误听词表走配置（config.yml 的 asr_synonyms），缺省空表 ——
+# 同音错法跟声学模型和口音绑定，不同现场不一样，不该硬编码在代码里。
+configure_synonyms(_config.get('asr_synonyms'))
 
 
 def _load_provider_from_db_or_default(default_config: dict):

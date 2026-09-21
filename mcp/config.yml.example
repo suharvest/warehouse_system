@@ -41,3 +41,9 @@ auth:
 
 # ── 请求超时（秒） ──
 # timeout: 10
+# connect_timeout: 5
+
+# ── ASR 同音/误听词表（可选，默认空） ──
+# 左边是 ASR 的错误转写，右边是 WMS 里的正确写法。按现场实际错法补充。
+# asr_synonyms:
+#   丝通: 四通
