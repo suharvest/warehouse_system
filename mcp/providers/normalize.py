@@ -142,12 +142,12 @@ def cn_digits_in_code_context(text: str) -> str:
 # 用户念编号里的 '-' 有好几种读法，ASR 如实转写成汉字。长词优先，
 # 否则 "斜杠" 会被 "杠" 抢先吃掉半个词。
 #
-# 只在**至少一侧是编号字符**（ASCII 字母数字或中文数字字）时才替换：
-# "杠" 在普通句子里是常用字（"杠上开花"、"抬杠"），无条件替换会毁掉
-# 正常的物料名。
+# 只在**两侧都是编号字符**（ASCII 字母数字或中文数字字）时才替换：
+# "杠"、"减号" 在普通句子里都是常用词（"杠上开花"、"三减号通"、"减号键"），
+# 只看一侧会把这些词里的字也换成 '-'，毁掉正常的物料名。
 _DASH_WORDS = ('横杠', '斜杠', '破折号', '减号', '杠')
 _DASH_WORD_RE = re.compile('|'.join(sorted(_DASH_WORDS, key=len, reverse=True)))
-_CODE_CHAR_RE = re.compile(r'[A-Za-z0-9零〇一幺二三四五六七八九]')
+_CODE_CHAR_RE = re.compile(r'[A-Za-z0-9零〇一幺二两三四五六七八九]')
 
 
 def dash_words_to_hyphen(text: str) -> str:
@@ -159,25 +159,22 @@ def dash_words_to_hyphen(text: str) -> str:
     'BCL-02'
     >>> dash_words_to_hyphen('杠上开花')
     '杠上开花'
+    >>> dash_words_to_hyphen('三减号通')
+    '三减号通'
     """
     if not text:
         return text
-    hit = [False]
 
     def _sub(m):
         prev = text[m.start() - 1] if m.start() > 0 else ''
         nxt = text[m.end()] if m.end() < len(text) else ''
-        if not (_CODE_CHAR_RE.match(prev or '') or _CODE_CHAR_RE.match(nxt or '')):
+        if not (_CODE_CHAR_RE.match(prev or '') and _CODE_CHAR_RE.match(nxt or '')):
             return m.group()
-        hit[0] = True
         return '-'
 
-    out = _DASH_WORD_RE.sub(_sub, text)
-    if hit[0]:
-        # "横杠杠" 这类重复读法会连出多个 '-'，收敛成一个；
-        # 没发生替换时不动原文，避免改写字面值里本来就有的 "--"。
-        out = re.sub(r'-{2,}', '-', out)
-    return out
+    # 只替换符号词本身，不做任何 '-' 的去重/合并 —— 字面值里本来就有的
+    # "--"（如 "A--B"）必须原样留着，它是编号的一部分。
+    return _DASH_WORD_RE.sub(_sub, text)
 
 
 # ── 同音/误听词表 ──
@@ -217,17 +214,21 @@ def apply_synonyms(text: str, table: dict = None) -> str:
     '四通阀'
     >>> apply_synonyms('四通阀', {'丝通': '四通'})
     '四通阀'
+    >>> apply_synonyms('甲乙', {'甲': '乙', '乙': '丙'})
+    '乙丙'
     """
     if not text:
         return text
     tbl = _SYNONYMS if table is None else table
     if not tbl:
         return text
-    for wrong in sorted(tbl, key=len, reverse=True):
-        right = tbl[wrong]
-        if wrong and wrong in text:
-            text = text.replace(wrong, right)
-    return text
+    keys = [k for k in tbl if k]
+    if not keys:
+        return text
+    # 一次性扫描替换（长键优先），替换产物不再参与后续匹配：串行
+    # ``str.replace`` 会级联（表 {"甲":"乙","乙":"丙"} 把 "甲" 变成 "丙"）。
+    pattern = '|'.join(re.escape(k) for k in sorted(keys, key=len, reverse=True))
+    return re.sub(pattern, lambda m: tbl[m.group(0)], text)
 
 
 # ── 剥离提示性前缀 ──

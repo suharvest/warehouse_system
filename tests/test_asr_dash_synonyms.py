@@ -51,6 +51,9 @@ class TestDashWords:
     @pytest.mark.parametrize("src", [
         "杠上开花",          # 「杠」是普通句子里的常用字
         "抬杠",
+        "三减号通",          # 一侧是汉字：符号词是物料名的一部分
+        "减号键",            # 开头没有编号字符
+        "4IO-2.0-3.2-12-A",  # 没有符号词，字面值原样
     ])
     def test_leaves_plain_text_alone(self, src):
         assert dash_words_to_hyphen(src) == src
@@ -59,6 +62,17 @@ class TestDashWords:
         """「斜杠」不能被「杠」抢先吃掉半个词。"""
         assert dash_words_to_hyphen("A斜杠B") == "A-B"
         assert dash_words_to_hyphen("A破折号B") == "A-B"
+
+    def test_existing_hyphens_are_never_touched(self):
+        """只替换符号词本身，原有的 '--' 是编号的一部分，不做去重/合并。"""
+        assert dash_words_to_hyphen("A--B杠C") == "A--B-C"
+
+    @pytest.mark.parametrize("src,want", [
+        ("一零杠八四通", "一零-八四通"),   # 两侧都是中文数字字
+        ("ABC杠12", "ABC-12"),
+    ])
+    def test_both_sides_code_chars(self, src, want):
+        assert dash_words_to_hyphen(src) == want
 
 
 class TestSynonyms:
@@ -72,6 +86,10 @@ class TestSynonyms:
 
     def test_empty_table_is_noop(self):
         assert apply_synonyms("丝通阀", {}) == "丝通阀"
+
+    def test_no_cascade(self):
+        """一次性替换：替换产物不再参与匹配，否则 甲→乙→丙 会级联。"""
+        assert apply_synonyms("甲乙", {"甲": "乙", "乙": "丙"}) == "乙丙"
 
     def test_default_table_is_empty_until_configured(self):
         configure_synonyms({})
