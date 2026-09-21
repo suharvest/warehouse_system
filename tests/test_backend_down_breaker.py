@@ -85,9 +85,9 @@ def _counting_post(exc=None, response=None):
 @pytest.mark.parametrize("exc", [
     requests.exceptions.ConnectionError("connection refused"),
     requests.exceptions.ConnectTimeout("connect timeout"),
-    requests.exceptions.ReadTimeout("read timeout"),
 ])
-def test_transport_error_returns_speakable_failure(provider, clock, monkeypatch, exc):
+def test_unreachable_error_returns_speakable_failure(provider, clock, monkeypatch, exc):
+    """请求没送达：可以断言后端没动过。"""
     post, calls = _counting_post(exc=exc)
     monkeypatch.setattr(requests, "post", post)
 
@@ -96,7 +96,88 @@ def test_transport_error_returns_speakable_failure(provider, clock, monkeypatch,
     assert resp["success"] is False
     assert resp["error"] == "backend_unreachable"
     assert resp["message"]          # 可直接播报的中文
+    assert "executed" not in resp
     assert len(calls) == 1
+
+
+def test_read_timeout_is_execution_unknown(provider, clock, monkeypatch):
+    """读超时：请求已送达，写操作可能已生效，不能断言"未执行"。"""
+    post, calls = _counting_post(exc=requests.exceptions.ReadTimeout("read timeout"))
+    monkeypatch.setattr(requests, "post", post)
+
+    resp = provider.http_post("/stock-out", {"q": 1})
+
+    assert resp["success"] is False
+    assert resp["error"] == "backend_timeout"
+    assert resp["executed"] == "unknown"
+    assert "执行结果未知" in resp["message"]
+    assert len(calls) == 1
+
+
+def test_read_timeout_also_trips_breaker(provider, clock, monkeypatch):
+    post, calls = _counting_post(exc=requests.exceptions.ReadTimeout("read timeout"))
+    monkeypatch.setattr(requests, "post", post)
+
+    provider.http_post("/stock", {})
+    clock["now"] += 5
+    resp = provider.http_post("/stock", {})
+
+    assert len(calls) == 1, "冷却期内不应再发请求"
+    # 短路时请求确实没发出去，语义回到"明确未发送"
+    assert resp["error"] == "backend_unreachable"
+    assert "executed" not in resp
+
+
+def test_concurrent_failures_send_one_real_request(provider, monkeypatch):
+    """8 线程并发：第一个真实请求失败后，其余全部短路，不再打后端。
+
+    熔断状态是跨线程共享的（FastMCP 用 to_thread 跑同步工具），
+    读-改-写不加锁时「过期清零」会抹掉刚写入的截止时刻。
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls = []
+    calls_lock = threading.Lock()
+    tripped = threading.Event()
+
+    def _post(url, **kwargs):
+        with calls_lock:
+            calls.append(url)
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(requests, "post", _post)
+
+    start = threading.Barrier(8)
+
+    def _worker(idx):
+        start.wait(timeout=5)
+        if idx != 0:
+            # 其余线程等第一次真实失败落地后再并发进来
+            tripped.wait(timeout=5)
+        try:
+            return provider.http_post("/stock", {})
+        finally:
+            if idx == 0:
+                tripped.set()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_worker, range(8)))
+
+    assert len(calls) == 1, f"只应发出 1 次真实请求，实际 {len(calls)}"
+    assert all(r["error"] == "backend_unreachable" for r in results)
+    assert provider._backend_down_remaining() > 0
+
+
+def test_expired_clear_does_not_clobber_fresh_trip(provider, clock, monkeypatch):
+    """过期清零只能清自己看到的那个值，不能抹掉别的线程刚设的熔断。"""
+    post, _ = _counting_post(exc=requests.exceptions.ConnectionError("down"))
+    monkeypatch.setattr(requests, "post", post)
+
+    provider.http_post("/stock", {})
+    clock["now"] += 25                      # 旧窗口已过期
+    provider._backend_down_until = clock["now"] + 20   # 新线程刚设的熔断
+    assert provider._backend_down_remaining() == 20
 
 
 def test_no_request_during_cooldown(provider, clock, monkeypatch):
@@ -168,3 +249,55 @@ def test_cooldown_is_configurable(clock, monkeypatch):
     provider.http_post("/stock", {})
 
     assert len(calls) == 2
+
+
+class TestSpeakableSemantics:
+    """播报层必须把两类失败说成不同的话。
+
+    「没连上」可以告诉用户库存没动；「发出去了但没回音」不行 —— 后端
+    可能已经扣了，说"没扣"会让用户重复出库。
+    """
+
+    @staticmethod
+    def _wrap(operation, resp):
+        import importlib
+        mcp_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp"
+        )
+        if mcp_dir not in sys.path:
+            sys.path.insert(0, mcp_dir)
+        return importlib.import_module("warehouse_mcp")._wrap_response(
+            operation, resp
+        )
+
+    def _stock_out_via_provider(self, provider, monkeypatch, exc):
+        """走真实 http_post → Provider 失败结构 → 播报层，不手搓 dict。"""
+        post, _ = _counting_post(exc=exc)
+        monkeypatch.setattr(requests, "post", post)
+
+        class _MockProvider(type(provider)):
+            def stock_out(self, *a, **k):
+                return self.http_post("/stock-out", {"name": "四通阀", "qty": 3})
+
+        p = _MockProvider(provider.config)
+        return self._wrap("stock_out", p.stock_out())
+
+    def test_read_timeout_say_is_execution_unknown(self, provider, monkeypatch):
+        out = self._stock_out_via_provider(
+            provider, monkeypatch, requests.exceptions.ReadTimeout("read timeout")
+        )
+        assert out["ok"] is False
+        assert out["executed"] == "unknown"
+        assert "执行结果未知" in out["say"]
+        assert "没有扣任何库存" not in out["say"]
+        assert "未执行" not in out["say"]
+        assert "库存没有任何变化" not in out.get("notice", "")
+
+    def test_unreachable_say_states_not_executed(self, provider, monkeypatch):
+        out = self._stock_out_via_provider(
+            provider, monkeypatch, requests.exceptions.ConnectTimeout("connect")
+        )
+        assert out["ok"] is False
+        assert out["executed"] is False
+        assert "未执行" in out["say"]
+        assert "连不上" in out["say"]

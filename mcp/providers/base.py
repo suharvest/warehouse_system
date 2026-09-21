@@ -14,6 +14,7 @@ connect_timeout 才失败，语音侧表现为长时间无响应。
 
 import base64
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 
@@ -51,7 +52,12 @@ class BaseProvider(ABC):
         # monotonic 时钟的截止时刻；0 表示当前没在熔断中。
         # 用 monotonic 而不是 time.time()：系统时钟被 NTP 回拨时不会把冷却
         # 期拉成几个小时。
+        #
+        # Provider 实例被多个工具调用线程共享（FastMCP 用 to_thread 跑同步
+        # 工具），读-改-写必须加锁：无锁时「过期清零」可能覆盖另一线程刚
+        # 写进去的新熔断截止时刻，冷却期直接失效。
         self._backend_down_until = 0.0
+        self._backend_lock = threading.Lock()
 
     # ── 通用 Auth ──
 
@@ -92,8 +98,17 @@ class BaseProvider(ABC):
     # success=false / code!=0）不熔断：对方是活的，只是这一次请求不成立，
     # 换个参数下一次可能就成功。
 
+    # 两类传输层失败对用户的含义完全不同，不能混成一句话：
+    #   - 连不上（ConnectionError / ConnectTimeout）：请求**没发出去**，
+    #     后端一定没动过，可以放心重试。
+    #   - 读超时（ReadTimeout）：请求已经送达，只是没等到响应。写操作可能
+    #     已经在后端执行完了，此时说"未执行"是在撒谎，必须让用户去核对。
     BACKEND_UNREACHABLE_ERROR = "backend_unreachable"
     BACKEND_UNREACHABLE_SAY = "外部系统暂时连不上，请稍后再试或联系管理员"
+    BACKEND_TIMEOUT_ERROR = "backend_timeout"
+    BACKEND_TIMEOUT_SAY = (
+        "外部系统响应超时，执行结果未知，请到系统里核对后再决定是否重试"
+    )
 
     def _backend_unreachable_response(self) -> dict:
         """统一的不可达失败结构。``message`` 会被播报层当作 say 念出去。"""
@@ -103,13 +118,30 @@ class BaseProvider(ABC):
             "message": self.BACKEND_UNREACHABLE_SAY,
         }
 
+    def _backend_timeout_response(self) -> dict:
+        """读超时失败结构。``executed="unknown"`` 让播报层别说"未执行"。"""
+        return {
+            "success": False,
+            "error": self.BACKEND_TIMEOUT_ERROR,
+            "message": self.BACKEND_TIMEOUT_SAY,
+            "executed": "unknown",
+        }
+
     def _backend_down_remaining(self) -> float:
         """还剩多少秒冷却；不在熔断中返回 0。"""
-        if not self._backend_down_until:
+        with self._backend_lock:
+            return self._backend_down_remaining_locked()
+
+    def _backend_down_remaining_locked(self) -> float:
+        """``_backend_lock`` 已持有时的实现。"""
+        until = self._backend_down_until
+        if not until:
             return 0.0
-        remaining = self._backend_down_until - time.monotonic()
+        remaining = until - time.monotonic()
         if remaining <= 0:
-            self._backend_down_until = 0.0
+            # 只在值没被别的线程改过时清零，否则会抹掉刚写进去的新熔断。
+            if self._backend_down_until == until:
+                self._backend_down_until = 0.0
             return 0.0
         return remaining
 
@@ -122,17 +154,25 @@ class BaseProvider(ABC):
             f"后端不可达熔断中，跳过请求 {self.base_url}{endpoint}"
             f"（剩余 {remaining:.1f}s）"
         )
+        # 短路时请求确实没发出去，沿用 unreachable 语义（明确未执行）。
         return self._backend_unreachable_response()
 
     def _trip_backend_down(self, endpoint: str, exc: Exception) -> dict:
-        """记录熔断截止时刻并返回失败结构。"""
+        """记录熔断截止时刻并返回对应语义的失败结构。"""
         cooldown = self.backend_down_cooldown_sec
         if cooldown > 0:
-            self._backend_down_until = time.monotonic() + cooldown
+            with self._backend_lock:
+                until = time.monotonic() + cooldown
+                # 取较晚的截止时刻：并发失败时不让先写的短冷却被覆盖掉。
+                if until > self._backend_down_until:
+                    self._backend_down_until = until
+        read_timeout = isinstance(exc, requests.exceptions.ReadTimeout)
         logger.warning(
-            f"后端不可达：{self.base_url}{endpoint} ({exc})，"
-            f"熔断 {cooldown:.0f}s"
+            f"后端{'响应超时' if read_timeout else '不可达'}："
+            f"{self.base_url}{endpoint} ({exc})，熔断 {cooldown:.0f}s"
         )
+        if read_timeout:
+            return self._backend_timeout_response()
         return self._backend_unreachable_response()
 
     # ── 通用 HTTP ──
