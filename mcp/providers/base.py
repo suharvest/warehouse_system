@@ -5,10 +5,16 @@
 
 内建 Auth 支持：api_key / bearer / basic，
 自定义签名类 auth 通过 override get_auth_headers() 或 http_get/http_post 实现。
+
+内建「后端不可达熔断」：http_get / http_post 遇到传输层错误（连接被拒、
+超时、DNS 解析失败）时记一个冷却截止时间，冷却期内的调用不再发请求，直接
+返回同一个可播报的失败结构。不熔断时后端整个挂掉，每次工具调用都要先卡满
+connect_timeout 才失败，语音侧表现为长时间无响应。
 """
 
 import base64
 import logging
+import time
 from abc import ABC, abstractmethod
 
 import requests
@@ -35,6 +41,17 @@ class BaseProvider(ABC):
         connect_timeout = config.get("connect_timeout", 5)
         read_timeout = config.get("timeout", 10)
         self.timeout = (connect_timeout, read_timeout)
+        # 后端不可达熔断：冷却秒数可配，0 或负数表示关闭熔断。
+        try:
+            self.backend_down_cooldown_sec = float(
+                config.get("backend_down_cooldown_sec", 20)
+            )
+        except (TypeError, ValueError):
+            self.backend_down_cooldown_sec = 20.0
+        # monotonic 时钟的截止时刻；0 表示当前没在熔断中。
+        # 用 monotonic 而不是 time.time()：系统时钟被 NTP 回拨时不会把冷却
+        # 期拉成几个小时。
+        self._backend_down_until = 0.0
 
     # ── 通用 Auth ──
 
@@ -68,10 +85,66 @@ class BaseProvider(ABC):
 
         return {}
 
+    # ── 后端不可达熔断 ──
+    #
+    # 只有**传输层**错误才熔断：连接被拒、超时、DNS 解析失败 —— 这些说明
+    # 对方整个不在，重试没有意义。HTTP 4xx/5xx 和业务失败（返回体里
+    # success=false / code!=0）不熔断：对方是活的，只是这一次请求不成立，
+    # 换个参数下一次可能就成功。
+
+    BACKEND_UNREACHABLE_ERROR = "backend_unreachable"
+    BACKEND_UNREACHABLE_SAY = "外部系统暂时连不上，请稍后再试或联系管理员"
+
+    def _backend_unreachable_response(self) -> dict:
+        """统一的不可达失败结构。``message`` 会被播报层当作 say 念出去。"""
+        return {
+            "success": False,
+            "error": self.BACKEND_UNREACHABLE_ERROR,
+            "message": self.BACKEND_UNREACHABLE_SAY,
+        }
+
+    def _backend_down_remaining(self) -> float:
+        """还剩多少秒冷却；不在熔断中返回 0。"""
+        if not self._backend_down_until:
+            return 0.0
+        remaining = self._backend_down_until - time.monotonic()
+        if remaining <= 0:
+            self._backend_down_until = 0.0
+            return 0.0
+        return remaining
+
+    def _short_circuit(self, endpoint: str) -> dict | None:
+        """冷却期内返回失败结构（调用方据此跳过请求），否则返回 None。"""
+        remaining = self._backend_down_remaining()
+        if remaining <= 0:
+            return None
+        logger.warning(
+            f"后端不可达熔断中，跳过请求 {self.base_url}{endpoint}"
+            f"（剩余 {remaining:.1f}s）"
+        )
+        return self._backend_unreachable_response()
+
+    def _trip_backend_down(self, endpoint: str, exc: Exception) -> dict:
+        """记录熔断截止时刻并返回失败结构。"""
+        cooldown = self.backend_down_cooldown_sec
+        if cooldown > 0:
+            self._backend_down_until = time.monotonic() + cooldown
+        logger.warning(
+            f"后端不可达：{self.base_url}{endpoint} ({exc})，"
+            f"熔断 {cooldown:.0f}s"
+        )
+        return self._backend_unreachable_response()
+
     # ── 通用 HTTP ──
 
     def http_get(self, endpoint: str, params: dict = None) -> dict:
-        """GET 请求，自动拼接 base_url、注入 auth headers、处理错误。"""
+        """GET 请求，自动拼接 base_url、注入 auth headers、处理错误。
+
+        后端处于不可达冷却期时直接返回失败结构，不发请求。
+        """
+        short = self._short_circuit(endpoint)
+        if short is not None:
+            return short
         try:
             headers = self.get_auth_headers()
             response = requests.get(
@@ -88,12 +161,9 @@ class BaseProvider(ABC):
                     "message": f"API 返回错误 ({response.status_code})",
                 }
             return data
-        except requests.exceptions.ConnectionError:
-            return {
-                "success": False,
-                "error": "无法连接到后端服务",
-                "message": f"请确保后端服务已启动: {self.base_url}",
-            }
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            return self._trip_backend_down(endpoint, e)
         except Exception as e:
             return {
                 "success": False,
@@ -102,7 +172,13 @@ class BaseProvider(ABC):
             }
 
     def http_post(self, endpoint: str, data: dict = None) -> dict:
-        """POST 请求，自动拼接 base_url、注入 auth headers、处理错误。"""
+        """POST 请求，自动拼接 base_url、注入 auth headers、处理错误。
+
+        后端处于不可达冷却期时直接返回失败结构，不发请求。
+        """
+        short = self._short_circuit(endpoint)
+        if short is not None:
+            return short
         try:
             headers = self.get_auth_headers()
             response = requests.post(
@@ -120,12 +196,9 @@ class BaseProvider(ABC):
                     "message": f"API 返回错误 ({response.status_code})",
                 }
             return resp_data
-        except requests.exceptions.ConnectionError:
-            return {
-                "success": False,
-                "error": "无法连接到后端服务",
-                "message": f"请确保后端服务已启动: {self.base_url}",
-            }
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            return self._trip_backend_down(endpoint, e)
         except Exception as e:
             return {
                 "success": False,

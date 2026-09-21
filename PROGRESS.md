@@ -5,6 +5,14 @@ Each entry: short title + date + context + takeaway.
 
 ---
 
+## 2026-09-22 — 外部后端不可达时熔断，别让语音端等满超时
+
+`BaseProvider.http_get/http_post` 原来对 `ConnectionError` 的处理是返回 `error="无法连接到后端服务"`，每次调用都要先卡满 `connect_timeout` 才失败。外部后端整个挂掉时，一轮对话里连着几个工具调用就是十几秒无响应，用户侧看不出是对方挂了还是设备卡了。
+
+改成：传输层错误（连接被拒、超时、DNS 失败）记 `_backend_down_until = monotonic() + backend_down_cooldown_sec`（默认 20，可配），冷却期内的调用不再发请求，直接返回 `{"success": false, "error": "backend_unreachable", "message": "外部系统暂时连不上，请稍后再试或联系管理员"}`。`message` 被 `_wrap_response` 的失败分支原样取成 `say`，所以播报层不用改。
+
+只有传输层错误熔断。HTTP 4xx/5xx 和业务失败（返回体 `success=false`）不熔断 —— 对方是活的，换个参数下一次可能就成功，误熔断会把 20 秒内所有正常查询也打死。截止时刻用 `time.monotonic()` 而不是 `time.time()`：系统时钟被 NTP 回拨时不会把冷却期拉成几个小时。
+
 ## 2026-09-22 — ASR 口播符号词与同音表进共用归一化层
 
 语音链路里编号的 `-` 会被念成「横杠/斜杠/破折号/减号/杠」，ASR 如实转写成汉字。连字符一丢，`cn_digits_to_arabic` 的「连续 >=3 个中文数字字才转」门槛就够不着了：「一零杠八」两段各只有 2 个和 1 个字，结果整串原样送给 Provider，两边都查不到。
