@@ -5,6 +5,22 @@ Each entry: short title + date + context + takeaway.
 
 ---
 
+## 2026-09-22 — 外部后端不可达时熔断，别让语音端等满超时
+
+`BaseProvider.http_get/http_post` 原来对 `ConnectionError` 的处理是返回 `error="无法连接到后端服务"`，每次调用都要先卡满 `connect_timeout` 才失败。外部后端整个挂掉时，一轮对话里连着几个工具调用就是十几秒无响应，用户侧看不出是对方挂了还是设备卡了。
+
+改成：传输层错误（连接被拒、超时、DNS 失败）记 `_backend_down_until = monotonic() + backend_down_cooldown_sec`（默认 20，可配），冷却期内的调用不再发请求，直接返回 `{"success": false, "error": "backend_unreachable", "message": "外部系统暂时连不上，请稍后再试或联系管理员"}`。`message` 被 `_wrap_response` 的失败分支原样取成 `say`，所以播报层不用改。
+
+只有传输层错误熔断。HTTP 4xx/5xx 和业务失败（返回体 `success=false`）不熔断 —— 对方是活的，换个参数下一次可能就成功，误熔断会把 20 秒内所有正常查询也打死。截止时刻用 `time.monotonic()` 而不是 `time.time()`：系统时钟被 NTP 回拨时不会把冷却期拉成几个小时。
+
+## 2026-09-22 — ASR 口播符号词与同音表进共用归一化层
+
+语音链路里编号的 `-` 会被念成「横杠/斜杠/破折号/减号/杠」，ASR 如实转写成汉字。连字符一丢，`cn_digits_to_arabic` 的「连续 >=3 个中文数字字才转」门槛就够不着了：「一零杠八」两段各只有 2 个和 1 个字，结果整串原样送给 Provider，两边都查不到。
+
+`mcp/providers/normalize.py` 补三个纯函数：`dash_words_to_hyphen`（只在至少一侧是 ASCII 字母数字或中文数字字时替换，否则「杠上开花」会被毁掉）、`cn_digits_in_code_context`（短数字串只有紧挨 `-`/ASCII 字母才转；前一个字符是 ASCII **数字**不触发，因为「10-8四通」的「四」属于后面的物料名）、`apply_synonyms`（同音/误听词表）。被转数字串后面紧跟汉字时最后一个字留着不转，这条保护住了「一零杠八四通 → 10-8四通」。
+
+同音表不硬编码：错法跟声学模型和口音绑定，换现场就是另一套，所以走 `config.yml` 的 `asr_synonyms`，默认空表、不配置就完全不生效。`cn_digits_to_arabic` 本身一个字没改 —— 它和 `backend/fuzzy_match.py` 有一致性测试锁着，改了本地模式和外部 ERP 模式对同一句话的理解就会分叉。
+
 ## 2026-07-20 — 智能体配置页的偶发 401 是失效会话处理漏网
 
 线上复现到：页面右上角仍保留全局管理员信息，但 `/api/mcp/connections` 每 10 秒持续返回 401，表格显示“加载数据失败…HTTP 401”。无 Cookie 直连线上接口确认 401 body 是应用返回的 `{"error":"请先登录"}`，不是 CDN/反向代理故障。会话失效的常规触发包括登录 session/Cookie 固定 24 小时，以及任一同账号客户端调用 logout 时当前实现会删除该用户的全部 sessions；失效后，已打开页面内存里的 `currentUser` 不会自行变化。仅凭截图和当前日志无法区分这两种触发。

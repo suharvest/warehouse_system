@@ -123,7 +123,11 @@ _config = load_config()
 # 确保能找到 providers 包（直接运行 warehouse_mcp.py 时需要）
 sys.path.insert(0, os.path.dirname(__file__))
 from providers import load_provider  # noqa: E402
-from providers.normalize import normalize_query  # noqa: E402
+from providers.normalize import configure_synonyms, normalize_query  # noqa: E402
+
+# ASR 同音/误听词表走配置（config.yml 的 asr_synonyms），缺省空表 ——
+# 同音错法跟声学模型和口音绑定，不同现场不一样，不该硬编码在代码里。
+configure_synonyms(_config.get('asr_synonyms'))
 
 
 def _load_provider_from_db_or_default(default_config: dict):
@@ -499,9 +503,11 @@ def _enforce_face(
 # LLM 仍口播"已出库3个，库存4个"，实际数据库零扣减。
 #
 # 闸门策略（两个硬字段）：
-#   1. facts.executed  : 布尔。是否真的改了数据库。
+#   1. facts.executed  : 是否真的改了数据库。
 #                        写工具（stock_in/out）成功才为 true；查询类永远 false。
-#                        失败时一定为 false，LLM 据此可判断"没扣"。
+#                        失败时为 false，LLM 据此可判断"没扣"。
+#                        例外："unknown" —— 请求已送达后端但读超时，执行
+#                        结果不可知，此时说"没扣"和说"已扣"一样是幻觉。
 #   2. speak/speak_ask/speak_failed : 三选一非空。LLM 必须照搬原文不许改写。
 #                        所有数字都已嵌入文本，LLM 无机会自己算。
 #
@@ -512,7 +518,7 @@ _RULES_FOOTER = """\
 反幻觉硬规则（七条）：
 1. 数字只能来自响应字段，不许口算或推测。
 2. say 必须照搬原文，不许改写/合并/增减数字。回复=say。禁止在前面加"好的/Okay/让我看看"，禁止在后面加"大概/左右/估计"。
-3. executed=false 时禁止说"已/完成/成功/出库了/入库了"。
+3. executed=false 时禁止说"已/完成/成功/出库了/入库了"；executed="unknown" 时两边都不许说，只照 say 播报。
 4. say_kind=ask → 念候选、等用户选；say_kind=fail → 仅播报，禁止重试。
 5. awaiting_confirm 非空 → 先问用户，用户同意后才用 patch 重发；拒绝则结束。
 6. 用户问"现在/还剩/最新"必须重新调工具，不许引用历史结果。
@@ -595,7 +601,13 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         return resp
 
     success = bool(resp.get("success"))
-    executed = success and (operation in _WRITE_OPS)
+    # 读超时：请求已送达后端、没等到响应，写操作可能已经执行完了。
+    # Provider 用 executed="unknown" 标记这种状态（见 BaseProvider
+    # ._backend_timeout_response），播报层此时绝不能说"未执行"。
+    executed_unknown = resp.get("executed") == "unknown"
+    executed = "unknown" if executed_unknown else (
+        success and (operation in _WRITE_OPS)
+    )
     say = None
     say_kind = "tell" if success else "fail"
     data = {}
@@ -961,6 +973,12 @@ def _wrap_response(operation: str, resp: dict) -> dict:
         say = _fail_text("操作失败。")
         say_kind = "fail"
 
+    if executed_unknown:
+        # 各写操作分支的失败话术都以「本次没有扣任何库存」/「本次没有入库」
+        # 开头 —— 那是在断言未执行，读超时下是假话。直接用 Provider 的原文。
+        say = _fail_text("外部系统响应超时，执行结果未知，请到系统里核对。")
+        say_kind = "fail"
+
     out = {
         "ok": success,
         "executed": executed,
@@ -974,12 +992,21 @@ def _wrap_response(operation: str, resp: dict) -> dict:
     # ——LLM 对返回体内自然语言指令的服从度远高于布尔字段。仅 say_kind='fail'
     # 时注入；'ask'（歧义追问/确认）不是失败，不加。
     if operation in _WRITE_OPS and not success and say_kind == "fail":
-        out["say"] = f"【操作失败，未执行】{say}"
-        out["notice"] = (
-            f"重要：本次{operation}没有执行，库存没有任何变化。"
-            "你必须如实告知用户操作失败及原因（照 say 内容播报），"
-            "严禁告诉用户操作已完成或已出库/已入库。"
-        )
+        if executed_unknown:
+            # 执行结果未知：既不能说"已完成"，也不能说"未执行"。
+            out["say"] = f"【执行结果未知】{say}"
+            out["notice"] = (
+                f"重要：本次{operation}是否生效未知，请求已发出但没收到后端响应。"
+                "你必须照 say 内容播报，严禁告诉用户操作已完成，"
+                "也严禁告诉用户库存没有变化。"
+            )
+        else:
+            out["say"] = f"【操作失败，未执行】{say}"
+            out["notice"] = (
+                f"重要：本次{operation}没有执行，库存没有任何变化。"
+                "你必须如实告知用户操作失败及原因（照 say 内容播报），"
+                "严禁告诉用户操作已完成或已出库/已入库。"
+            )
     return out
 
 
