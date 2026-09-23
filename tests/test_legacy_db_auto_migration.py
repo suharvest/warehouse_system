@@ -1269,6 +1269,86 @@ def test_missing_warehouses_table_recovers_at_startup(legacy_db):
     assert _default_wh_id(path) == 1
 
 
+def _strip_warehouses_tenant_id(path: Path) -> None:
+    """Rebuild ``warehouses`` in its pre-tenant shape: table present, no tenant_id.
+
+    Seen on a field device (2026-09-04): the warehouse split had landed but the
+    tenants work had not, so the bridge's equivalence check refused with
+    "columns missing locally: warehouses.tenant_id".
+    """
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='warehouses' AND name NOT LIKE 'sqlite_autoindex%'"
+        ).fetchall():
+            conn.execute(f'DROP INDEX "{name}"')
+        _rebuild_legacy_shape(conn, "warehouses", ["tenant_id"], "slug")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _warehouse_rows(path: Path) -> list[tuple]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return conn.execute(
+            "SELECT id, slug, name, is_default FROM warehouses ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_warehouses_without_tenant_id_is_patched(legacy_db):
+    path, before = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executemany(
+            "INSERT INTO warehouses (id, slug, name, is_default) VALUES (?, ?, ?, ?)",
+            [(1, "default", "默认仓库", 1), (2, "wh-legacy-2", "旧二号仓", 0)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _strip_warehouses_tenant_id(path)
+    assert "tenant_id" not in _cols(path, "warehouses")
+    wh_before = _warehouse_rows(path)
+    assert len(wh_before) == 2
+
+    import legacy_db_migration as mod
+
+    result = mod.migrate(path, log=lambda _m: None)
+
+    assert result.changed
+    assert "tenant_id" in _cols(path, "warehouses")
+    assert _warehouse_rows(path) == wh_before, "warehouse rows must survive"
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        tenant_ids = {
+            r[0] for r in conn.execute("SELECT tenant_id FROM warehouses")
+        }
+    finally:
+        conn.close()
+    assert tenant_ids == {1}
+    assert _default_wh_id(path) == 1
+    assert _counts(path) == before, "no business rows may be lost"
+
+    # The rest of the chain must still apply on top of the patched table.
+    alembic_command.upgrade(_alembic_cfg(), "head")
+    assert _counts(path) == before
+
+
+def test_warehouses_without_tenant_id_recovers_at_startup(legacy_db):
+    path, _ = legacy_db
+    _strip_warehouses_tenant_id(path)
+
+    _recover(path)
+
+    assert "tenant_id" in _cols(path, "warehouses")
+    assert _default_wh_id(path) == 1
+
+
 def test_orphan_warehouse_ids_still_refuse(legacy_db):
     """Recreating the table must not paper over rows pointing at lost warehouses.
 
