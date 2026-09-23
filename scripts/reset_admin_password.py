@@ -220,10 +220,15 @@ def main(argv: list[str] | None = None) -> None:
             f"该账号所属租户（#{target['tenant_id']}）已停用，登录会被拒绝"
             "（租户已停用）。本脚本不修改租户状态。"
         )
-    if len(all_same_name) > 1:
-        others = ", ".join(
-            f"#{m['tenant_id']}" for m in all_same_name if m["id"] != target["id"]
-        )
+    # 登录只在「启用账号 + 启用租户」里判同名冲突，禁用账号或停用租户的同名账号不算。
+    conflicting = [
+        m for m in all_same_name
+        if m["id"] != target["id"] and not m["is_disabled"]
+        and (m.get("tenant_id") is None or m.get("tenant_is_active") is None
+             or m["tenant_is_active"])
+    ]
+    if conflicting:
+        others = ", ".join(f"#{m['tenant_id']}" for m in conflicting)
         warnings.append(
             f"同名账号在多个租户存在（其它租户：{others}），若密码相同登录会被拒绝"
             "（同名账号存在于多个租户）。请为该账号设一个与其它同名账号不同的密码。"
@@ -277,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         + f"，吊销会话 {revoked} 个。未重启容器，新密码对下一次登录生效。"
     )
     if warnings:
-        print(f"登录前请处理上方 {len(warnings)} 条警告，否则登录仍会被拒绝。")
+        print(f"登录前请先查看上方 {len(warnings)} 条警告。")
     print(
         "RESET-RECORD: user_id=%s username=%s tenant_id=%s enabled=%s "
         "revoked_sessions=%s (本脚本不写应用审计日志，请自行留档)"
