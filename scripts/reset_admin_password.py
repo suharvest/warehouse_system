@@ -76,7 +76,7 @@ sys.path.insert(0, str(_BACKEND))
 try:
     from database import hash_password, validate_password_strength  # noqa: E402
     from db import get_engine  # noqa: E402
-    from sqlalchemy import text  # noqa: E402
+    from sqlalchemy import inspect, text  # noqa: E402
     from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 except ImportError as exc:  # pragma: no cover - 环境问题，给人看的提示
     sys.exit(
@@ -96,32 +96,35 @@ ROLE_HINT = {"admin": "管理员", "operate": "操作员", "view": "只读"}
 
 
 def _fetch_users(username: str | None = None) -> list[dict]:
-    """列出用户。带上租户名便于区分同名账号；tenants 表缺失时降级为只查 users。"""
+    """列出用户。带上租户名/租户启用状态便于区分同名账号。
+
+    只有 ``tenants`` 表不存在时才降级为只查 users；其它查询错误原样抛出，
+    不做静默降级。
+    """
     sql_with_tenant = """
         SELECT u.id, u.username, u.role, u.is_disabled, u.tenant_id,
-               t.name AS tenant_name
+               t.name AS tenant_name, t.is_active AS tenant_is_active
         FROM users u
         LEFT JOIN tenants t ON t.id = u.tenant_id
         {where}
         ORDER BY u.tenant_id, u.username
     """
     sql_plain = """
-        SELECT id, username, role, is_disabled, tenant_id, NULL AS tenant_name
+        SELECT id, username, role, is_disabled, tenant_id,
+               NULL AS tenant_name, NULL AS tenant_is_active
         FROM users {where} ORDER BY username
     """
-    where = "WHERE u.username = :u" if username else ""
     params = {"u": username} if username else {}
 
-    with get_engine().connect() as conn:
-        try:
-            rows = conn.execute(
-                text(sql_with_tenant.format(where=where)), params
-            ).mappings().all()
-        except Exception:
-            where_plain = "WHERE username = :u" if username else ""
-            rows = conn.execute(
-                text(sql_plain.format(where=where_plain)), params
-            ).mappings().all()
+    engine = get_engine()
+    with engine.connect() as conn:
+        if inspect(conn).has_table("tenants"):
+            where = "WHERE u.username = :u" if username else ""
+            sql = sql_with_tenant.format(where=where)
+        else:
+            where = "WHERE username = :u" if username else ""
+            sql = sql_plain.format(where=where)
+        rows = conn.execute(text(sql), params).mappings().all()
     return [dict(r) for r in rows]
 
 
@@ -192,6 +195,7 @@ def main(argv: list[str] | None = None) -> None:
         _print_users(_fetch_users())
         sys.exit(1)
 
+    all_same_name = matches
     if args.tenant_id is not None:
         matches = [m for m in matches if m.get("tenant_id") == args.tenant_id]
         if not matches:
@@ -204,10 +208,28 @@ def main(argv: list[str] | None = None) -> None:
 
     target = matches[0]
     _print_users([target])
+    # 以下几条对应登录流程（backend/app.py login）里会拒绝登录的情况。
+    warnings: list[str] = []
     if target["role"] != "admin":
         print(f"\n注意：该账号角色是 {target['role']}，不是 admin。")
     if target["is_disabled"] and not args.enable:
-        print("\n注意：该账号处于**禁用**状态，改了密码也登录不了。加 --enable 一并启用。")
+        warnings.append("该账号处于禁用状态，登录会被拒绝（用户已被禁用）。加 --enable 一并启用。")
+    if target.get("tenant_id") is not None and target.get("tenant_is_active") is not None \
+            and not target["tenant_is_active"]:
+        warnings.append(
+            f"该账号所属租户（#{target['tenant_id']}）已停用，登录会被拒绝"
+            "（租户已停用）。本脚本不修改租户状态。"
+        )
+    if len(all_same_name) > 1:
+        others = ", ".join(
+            f"#{m['tenant_id']}" for m in all_same_name if m["id"] != target["id"]
+        )
+        warnings.append(
+            f"同名账号在多个租户存在（其它租户：{others}），若密码相同登录会被拒绝"
+            "（同名账号存在于多个租户）。请为该账号设一个与其它同名账号不同的密码。"
+        )
+    for w in warnings:
+        print(f"\n警告：{w}")
 
     pw = args.password or _prompt_password()
     err = validate_password_strength(pw)
@@ -249,7 +271,13 @@ def main(argv: list[str] | None = None) -> None:
             f"异常：本次 UPDATE 影响了 {exc.n} 行（预期 1 行），已回滚，请人工核查数据库。"
         )
 
-    print(f"\n完成。{target['username']} 的密码已重置，直接用新密码登录即可，不用重启容器。")
+    print(
+        f"\n完成。{target['username']}(id={target['id']}) 的密码已更新"
+        + ("，账号已启用" if args.enable else "")
+        + f"，吊销会话 {revoked} 个。未重启容器，新密码对下一次登录生效。"
+    )
+    if warnings:
+        print(f"登录前请处理上方 {len(warnings)} 条警告，否则登录仍会被拒绝。")
     print(
         "RESET-RECORD: user_id=%s username=%s tenant_id=%s enabled=%s "
         "revoked_sessions=%s (本脚本不写应用审计日志，请自行留档)"

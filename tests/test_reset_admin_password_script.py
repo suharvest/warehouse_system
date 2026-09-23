@@ -154,3 +154,62 @@ def test_reset_revokes_only_target_users_sessions(db_path):
     after = _sessions(db_path)
     assert after[1][1] is not None and after[2][1] is not None
     assert after[3] == (103, None)
+
+
+def _user_flags(path: Path, uid: int) -> int:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return conn.execute(
+            "SELECT is_disabled FROM users WHERE id = ?", (uid,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_enable_clears_is_disabled(db_path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("UPDATE users SET is_disabled = 1 WHERE id = 103")
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = _run(db_path, "ops", "--password", NEW_PW, "--enable", "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _user_flags(db_path, 103) == 0
+    assert "enabled=True" in r.stdout
+
+
+def test_inactive_tenant_is_warned(db_path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("UPDATE tenants SET is_active = 0 WHERE id = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = _run(db_path, "ops", "--password", NEW_PW, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "租户已停用" in r.stdout
+    assert "直接用新密码登录即可" not in r.stdout
+
+
+def test_same_username_in_other_tenant_is_warned(db_path):
+    r = _run(db_path, "admin", "--tenant-id", "1", "--password", NEW_PW, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "同名账号在多个租户存在" in r.stdout
+
+
+def test_fetch_users_propagates_non_missing_table_errors(db_path):
+    """Only a missing tenants table may trigger the fallback query."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        # tenants 表在，但缺 name 列：带租户的查询失败，降级查询本可成功。
+        # 这不是"缺表"，错误必须原样暴露，而不是被降级吞掉。
+        conn.execute("ALTER TABLE tenants RENAME COLUMN name TO name_x")
+        conn.commit()
+    finally:
+        conn.close()
+    r = _run(db_path, "--list")
+    assert r.returncode != 0
+    assert "t.name" in (r.stdout + r.stderr)
