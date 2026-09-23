@@ -287,6 +287,16 @@ docker inspect mcp_warehouse \
 
 确认 `docker manifest inspect sensecraft-missionpack.seeed.cn/solution/warehouse:latest` 含 `linux/arm64`。若 manifest list 完整但仍拉不到，检查 docker 版本（需 ≥ 20.10）和网络访问 registry 的能力。
 
+### 6. 管理员忘了密码
+
+先 `curl http://<host>:2125/api/system/mode` 确认部署模式：
+
+- 还有别的 admin 能登录 → 用户管理里直接改
+- `multi_tenant` → 登录页「找回密码」，凭设备 ID + 管理员用户名自助重置（限速 5 次/小时）
+- `single_tenant` 或设备 ID 也丢了 → 把 `scripts/reset_admin_password.py` 拷进容器跑
+
+完整步骤见 [docs/密码重置说明.md](docs/密码重置说明.md)。
+
 ---
 
 ## 镜像构建（仅维护者）
