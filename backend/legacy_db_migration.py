@@ -917,6 +917,85 @@ def assert_schema_matches_revision(
     raise LegacySchemaMismatch("".join(parts))
 
 
+# Indexes 1826e23835b6 declares on a column that LEGACY_TABLE_PATCHES adds.
+#
+# Scope matches what the other tenant_id patches do: they add the column only
+# (no index, no FK), and assert_schema_matches_revision compares columns, types,
+# NOT NULL and orphan FK rows — not index or FK presence. ``warehouses`` is the
+# one table here where the index is also added, per review of the
+# warehouses.tenant_id patch; ``IF NOT EXISTS`` keeps it a no-op on re-runs and
+# on DBs that already have it.
+#
+# The matching FK (fk_warehouses_tenant_id_tenants) is not added: SQLite can
+# only add a FK by rebuilding the table, and the bridge's only rebuild
+# (_rebuild_with_named_unique) exists to rename UNIQUE constraints and refuses
+# if the FK list changes. No other tenant_id patch adds its FK either, so the
+# warehouses patch stays consistent with them. The missing-default-tenant
+# refusal (_assert_default_tenant_available) covers the dangling-row case a FK
+# would otherwise guard against.
+LEGACY_PATCH_INDEXES: list[tuple[str, str, str]] = [
+    ("warehouses", "tenant_id", "idx_warehouses_tenant"),
+]
+
+
+def _add_legacy_tenant_indexes(
+    conn: sqlite3.Connection, changes: list[str], log: Callable[[str], None]
+) -> None:
+    for table, col, name in LEGACY_PATCH_INDEXES:
+        if not _table_exists(conn, table) or col not in _table_cols(conn, table):
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(f'CREATE INDEX IF NOT EXISTS "{name}" ON "{table}" ("{col}")')
+        changes.append(f"{table}: create index {name}")
+        log(f"[ok] {table}: create index {name}")
+
+
+def _assert_default_tenant_available(conn: sqlite3.Connection) -> None:
+    """Refuse when rows are about to be assigned to a tenant id=1 that is absent."""
+    if not _table_exists(conn, "tenants"):
+        return
+    if conn.execute("SELECT 1 FROM tenants WHERE id = 1").fetchone():
+        return
+
+    pending: list[tuple[str, int]] = []
+    for table, patches in LEGACY_TABLE_PATCHES.items():
+        if not any(c == "tenant_id" for c, _ in patches):
+            continue
+        if not _table_exists(conn, table):
+            continue
+        if "tenant_id" in _table_cols(conn, table):
+            # Column already present: only rows the seed step just pointed at
+            # tenant 1 (the default warehouse) are this run's doing.
+            if table != "warehouses":
+                continue
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM warehouses WHERE tenant_id = 1"
+            ).fetchone()
+        else:
+            (n,) = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        if n:
+            pending.append((table, n))
+    if not pending:
+        return
+
+    tenant_ids = [r[0] for r in conn.execute("SELECT id FROM tenants ORDER BY id")]
+    raise LegacyMigrationAmbiguity(
+        "Refusing to migrate: 'tenants' has rows (ids "
+        + ", ".join(str(t) for t in tenant_ids[:10])
+        + (", ..." if len(tenant_ids) > 10 else "")
+        + ") but no tenant id=1, and "
+        + ", ".join(f"{t} ({n} row(s))" for t, n in pending)
+        + " would be assigned tenant_id=1, a tenant that does not exist.\n"
+        "Either insert the tenant these rows belong to as id=1, or add the "
+        "tenant_id column to those tables by hand with the correct tenant "
+        "value, then re-run. Nothing was written."
+    )
+
+
 def needs_legacy_migration(db_path: Path) -> bool:
     """True when ``users`` exists but has no ``tenant_id`` column.
 
@@ -1184,6 +1263,15 @@ def migrate(
             changes.append(f"seeded default {table[:-1]} id=1")
             log(f"[ok] seeded default {table[:-1]} id=1")
 
+        # Every tenant_id patch below backfills 1, and a freshly seeded
+        # warehouse also points at tenant 1. The seed step only creates
+        # tenant id=1 when ``tenants`` is empty, so a legacy DB whose tenants
+        # table has rows but no id=1 would end up with tenant_id values that
+        # reference nothing. The patched columns carry no FK (see
+        # _add_legacy_tenant_indexes), so PRAGMA foreign_key_check in the
+        # equivalence gate would not catch it either. Refuse instead.
+        _assert_default_tenant_available(conn)
+
         for table, patches in LEGACY_TABLE_PATCHES.items():
             if not _table_exists(conn, table):
                 continue
@@ -1200,6 +1288,8 @@ def migrate(
                         f"UPDATE {table} SET {col} = ? WHERE {col} IS NULL",
                         (fill,),
                     )
+
+        _add_legacy_tenant_indexes(conn, changes, log)
 
         # Backfill ``warehouse_id``. Adding the column alone leaves every
         # legacy row NULL, and NULL matches neither ``warehouse_id = <id>``
