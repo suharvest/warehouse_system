@@ -14,7 +14,8 @@
 决定），SQLite 和 MySQL 两种后端都适用 —— 连哪个库由容器里现成的
 ``DATABASE_URL`` / ``DATABASE_PATH`` 环境变量决定，脚本不自己猜。
 
-改完**不需要重启容器**：登录每次都现查库。
+改完**不需要重启容器**：登录每次都现查库。该用户已有的登录会话会一并吊销
+（与应用内改密行为一致）。
 
 用法
 ====
@@ -40,6 +41,7 @@ import argparse
 import getpass
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -82,6 +84,12 @@ except ImportError as exc:  # pragma: no cover - 环境问题，给人看的提�
         "本脚本必须用应用自己的解释器运行（容器内是 /app/.venv/bin/python），"
         "系统 python 缺 sqlalchemy/bcrypt。"
     )
+
+
+class _UnexpectedRowcount(Exception):
+    def __init__(self, n: int) -> None:
+        super().__init__(n)
+        self.n = n
 
 
 ROLE_HINT = {"admin": "管理员", "operate": "操作员", "view": "只读"}
@@ -219,19 +227,34 @@ def main(argv: list[str] | None = None) -> None:
     params = {"h": hash_password(pw), "id": target["id"]}
     if args.enable:
         sets.append("is_disabled = 0")
-    with get_engine().begin() as conn:
-        n = conn.execute(
-            text(f"UPDATE users SET {', '.join(sets)} WHERE id = :id"), params
-        ).rowcount
-
-    if n != 1:
-        sys.exit(f"异常：本次 UPDATE 影响了 {n} 行（预期 1 行），请人工核查数据库。")
+    try:
+        with get_engine().begin() as conn:
+            n = conn.execute(
+                text(f"UPDATE users SET {', '.join(sets)} WHERE id = :id"), params
+            ).rowcount
+            if n != 1:
+                # 抛异常让 begin() 回滚，不留半截修改。
+                raise _UnexpectedRowcount(n)
+            # 与应用自身改密一致（backend/app.py 更新用户时的会话吊销）：
+            # 旧密码下已登录的会话全部作废，与改密在同一事务内完成。
+            revoked = conn.execute(
+                text(
+                    "UPDATE sessions SET revoked_at = :now "
+                    "WHERE user_id = :id AND revoked_at IS NULL"
+                ),
+                {"now": datetime.now(), "id": target["id"]},
+            ).rowcount
+    except _UnexpectedRowcount as exc:
+        sys.exit(
+            f"异常：本次 UPDATE 影响了 {exc.n} 行（预期 1 行），已回滚，请人工核查数据库。"
+        )
 
     print(f"\n完成。{target['username']} 的密码已重置，直接用新密码登录即可，不用重启容器。")
     print(
         "RESET-RECORD: user_id=%s username=%s tenant_id=%s enabled=%s "
-        "(本脚本不写应用审计日志，请自行留档)"
-        % (target["id"], target["username"], target.get("tenant_id"), bool(args.enable))
+        "revoked_sessions=%s (本脚本不写应用审计日志，请自行留档)"
+        % (target["id"], target["username"], target.get("tenant_id"),
+           bool(args.enable), revoked)
     )
 
 
