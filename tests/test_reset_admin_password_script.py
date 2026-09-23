@@ -213,3 +213,18 @@ def test_fetch_users_propagates_non_missing_table_errors(db_path):
     r = _run(db_path, "--list")
     assert r.returncode != 0
     assert "t.name" in (r.stdout + r.stderr)
+
+
+def test_same_username_in_disabled_account_is_not_warned(db_path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "UPDATE users SET is_disabled = 1 WHERE username = 'admin' AND tenant_id != 1"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = _run(db_path, "admin", "--tenant-id", "1", "--password", NEW_PW, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "同名账号在多个租户存在" not in r.stdout
