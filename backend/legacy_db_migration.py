@@ -141,6 +141,13 @@ LEGACY_TABLE_PATCHES: dict[str, list[tuple[str, str]]] = {
         ("warehouse_id", "INTEGER"),
     ],
     "erp_providers": [("tenant_id", "INTEGER DEFAULT 1")],
+    # A legacy DB may already carry ``warehouses`` from the pre-tenant era
+    # (single-warehouse split, no tenants table yet). 1826e23835b6 declares
+    # ``warehouses.tenant_id`` and no incremental migration adds it, so
+    # without this patch the equivalence check refuses to stamp with
+    # "columns missing locally: warehouses.tenant_id". When the table is
+    # absent entirely the bridge creates it with tenant_id already set.
+    "warehouses": [("tenant_id", "INTEGER DEFAULT 1")],
     # NOTE: ``batch_consumptions`` is deliberately absent. At revision
     # 1826e23835b6 it has no tenant_id/warehouse_id — those are added later by
     # b2c3d4e5f6a7. Pre-adding them here makes that migration fail with
