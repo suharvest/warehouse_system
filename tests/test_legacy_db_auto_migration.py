@@ -1333,10 +1333,61 @@ def test_warehouses_without_tenant_id_is_patched(legacy_db):
     assert tenant_ids == {1}
     assert _default_wh_id(path) == 1
     assert _counts(path) == before, "no business rows may be lost"
+    # 1826e23835b6 declares idx_warehouses_tenant; the patch must add it too.
+    # The FK is not added (same as every other tenant_id patch, see the
+    # comment in LEGACY_TABLE_PATCHES).
+    assert "idx_warehouses_tenant" in _index_names(path, "warehouses")
 
     # The rest of the chain must still apply on top of the patched table.
     alembic_command.upgrade(_alembic_cfg(), "head")
     assert _counts(path) == before
+
+
+def _index_names(path: Path, table: str) -> set[str]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {r[1] for r in conn.execute(f'PRAGMA index_list("{table}")')}
+    finally:
+        conn.close()
+
+
+def test_missing_default_tenant_refuses(legacy_db):
+    """tenants has rows but no id=1: backfilling tenant_id=1 would dangle."""
+    path, _ = legacy_db
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "INSERT INTO warehouses (id, slug, name, is_default) "
+            "VALUES (1, 'default', '默认仓库', 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _strip_warehouses_tenant_id(path)
+
+    import legacy_db_migration as mod
+
+    conn = sqlite3.connect(str(path))
+    try:
+        if not mod._table_exists(conn, "tenants"):
+            for stmt in mod.reference_table_ddl()["tenants"]:
+                conn.execute(stmt)
+        conn.execute("DELETE FROM tenants")
+        conn.execute("INSERT INTO tenants (id, slug, name) VALUES (2, 't2', 't2')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(mod.LegacyMigrationAmbiguity) as exc:
+        mod.migrate(path, log=lambda _m: None)
+
+    msg = str(exc.value)
+    assert "tenant id=1" in msg
+    assert "warehouses" in msg
+    assert "Nothing was written" in msg
+    # Whole migration rolled back.
+    assert "tenant_id" not in _cols(path, "warehouses")
+    assert "tenant_id" not in _cols(path, "users")
 
 
 def test_warehouses_without_tenant_id_recovers_at_startup(legacy_db):
