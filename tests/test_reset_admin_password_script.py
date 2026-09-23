@@ -120,3 +120,37 @@ def test_unknown_user_exits_nonzero(db_path):
     r = _run(db_path, "nobody", "--password", NEW_PW, "--yes")
     assert r.returncode == 1
     assert _hashes(db_path) == before
+
+
+def _sessions(path: Path) -> dict[int, tuple[int, object]]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {
+            sid: (uid, revoked)
+            for sid, uid, revoked in conn.execute(
+                "SELECT id, user_id, revoked_at FROM sessions"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def test_reset_revokes_only_target_users_sessions(db_path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executemany(
+            "INSERT INTO sessions (id, user_id, token, expires_at) "
+            "VALUES (?, ?, ?, '2099-01-01 00:00:00')",
+            [(1, 102, "tok-a"), (2, 102, "tok-b"), (3, 103, "tok-c")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = _run(db_path, "admin", "--tenant-id", "2", "--password", NEW_PW, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "revoked_sessions=2" in r.stdout
+
+    after = _sessions(db_path)
+    assert after[1][1] is not None and after[2][1] is not None
+    assert after[3] == (103, None)
