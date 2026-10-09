@@ -2,6 +2,11 @@
 
 [English](README_EN.md) | 中文
 
+> [!TIP]
+> **寻找即插即用的工业级边缘网关与仓储硬件套件？**  
+> 本系统与 MCP 语音交互已在 Seeed Studio 工业边缘控制器与网关设备上完成实机验证与调优。  
+> 🛒 **[获取 reComputer 工业边缘控制器](https://www.seeedstudio.com/reComputer-R1000-Edge-Controller-powered-by-Raspberry-Pi-CM4-p-5900.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hero_banner)** | 📖 **[探索智能仓储解决方案与 BOM 配置器](https://www.seeed.cc/solutions/smart-warehouse-management?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hero_banner)**
+
 基于 FastAPI + SQLite 的仓库管理系统，支持语音控制（MCP）。
 
 ## 演示视频
@@ -79,6 +84,16 @@ irm https://astral.sh/uv/install.ps1 | iex
    ./start_mcp.sh  # 或 Windows: .\start_mcp.ps1
    ```
 
+## 推荐运行硬件 (Verified Hardware)
+
+本系统与 MCP 语音服务支持跨平台部署，已在以下 Seeed Studio 工业级边缘网关上完成 7×24 小时长期稳定性验证：
+
+| 推荐设备型号 | 计算与核心规格 | 工业接口与特性 | 典型部署角色 | 采购样机 / 套件 |
+|---|---|---|---|---|
+| **reComputer R1000** | Raspberry Pi CM4, 4-Core 1.5GHz | 导轨式安装, 双千兆网口, 隔离 RS485, UPS 扩展 | 本地 WMS 主机与 MCP 语音网关一体机 | [🛒 立即选购](https://www.seeedstudio.com/reComputer-R1000-Edge-Controller-powered-by-Raspberry-Pi-CM4-p-5900.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hw_table) |
+| **reComputer Industrial J4012** | NVIDIA Jetson Orin NX 16GB, 100 TOPS | IP40 无风扇, -20~60°C 宽温, 光耦隔离 DI/DO | 托盘垛位视觉盘点、条码 OCR 与多路视频聚合 | [🛒 立即选购](https://www.seeedstudio.com/reComputer-Industrial-J4012-p-5586.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hw_table) |
+| **SenseCAP T1000-A** | LoRaWAN / BLE 高精度人员资产工牌 | IP65 防护, 温湿度/光照/加速度传感, SOS 按键 | 叉车室内外轨迹追踪与贵重货物垛位定位 | [🛒 立即选购](https://www.seeedstudio.com/SenseCAP-Card-Tracker-T1000-A-p-5696.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hw_table) |
+
 ## 文档
 
 - [MCP 集成总览](mcp/README.md) — **两条集成路径的入口**：把自己的系统封装成 MCP，或把第三方系统桥接进来
@@ -90,6 +105,16 @@ irm https://astral.sh/uv/install.ps1 | iex
 ## API 文档
 
 启动后访问 http://localhost:2124/docs 查看完整 API 文档。
+
+## 💼 企业级方案与商业定制 (Enterprise & Commercial Deployment)
+
+如需在多区域物流中心、大型工厂仓库批量部署或对接现有企业系统：
+
+- **硬件批量集采**：支持 100+ 台规模化部署的阶梯采购价格与供货保障。
+- **工业网关 ODM/OEM 定制**：提供专属外壳丝印、载板接口客制化、预装出厂 Golden 系统镜像及 CE/FCC 全球合规认证。
+- **现有 ERP / WMS 快速桥接**：通过标准化 MCP 协议与 REST API 快速对接 SAP、金蝶、用友或自研 WMS。
+
+👉 **[联系 Seeed 企业解决方案团队](https://www.seeed.cc/customization?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=footer_enterprise)** 或访问 [智能仓储数字化方案页](https://www.seeed.cc/solutions/smart-warehouse-management?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=footer_solution) 提交项目需求。
 
 ## 许可证
 
