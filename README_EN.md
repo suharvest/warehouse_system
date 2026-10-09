@@ -2,6 +2,11 @@
 
 English | [中文](README.md)
 
+> [!TIP]
+> **Looking for Industrial Turnkey Hardware & Edge Gateways?**  
+> This warehouse management system and MCP voice integration are verified on Seeed Studio industrial edge controllers.  
+> 🛒 **[Get reComputer Industrial Edge Gateway](https://www.seeedstudio.com/reComputer-R1000-Edge-Controller-powered-by-Raspberry-Pi-CM4-p-5900.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hero_banner)** | 📖 **[Explore Smart Warehouse Solution & BOM](https://www.seeed.cc/solutions/smart-warehouse-management?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hero_banner)**
+
 A warehouse management system based on FastAPI + SQLite, with voice control support (MCP).
 
 ## Demo Video
@@ -79,6 +84,16 @@ irm https://astral.sh/uv/install.ps1 | iex
    ./start_mcp.sh  # or Windows: .\start_mcp.ps1
    ```
 
+## Verified Hardware & Deployment Platforms
+
+This WMS and MCP voice hub are tested for 24/7 industrial deployment on official Seeed Studio hardware:
+
+| Device Model | Compute / Form Factor | Industrial Features | Deployment Role | Buy Sample / Kit |
+|---|---|---|---|---|
+| **reComputer R1000** | Raspberry Pi CM4 Industrial Controller | DIN-rail, Isolated RS485, Dual GbE, UPS Slot | Primary local WMS server & MCP voice gateway | [🛒 Buy Now](https://www.seeedstudio.com/reComputer-R1000-Edge-Controller-powered-by-Raspberry-Pi-CM4-p-5900.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hw_table) |
+| **reComputer Industrial J4012** | NVIDIA Jetson Orin NX 16GB | 100 TOPS, Fanless -20~60°C, Isolated DI/DO | Vision-based pallet inspection & multi-stream OCR | [🛒 Buy Now](https://www.seeedstudio.com/reComputer-Industrial-J4012-p-5586.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hw_table) |
+| **SenseCAP T1000-A** | LoRaWAN / BLE Asset Tracker | IP65, Light/Temp/Acc Sensor, SOS Button | Forklift & high-value pallet location tracking | [🛒 Buy Now](https://www.seeedstudio.com/SenseCAP-Card-Tracker-T1000-A-p-5696.html?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=hw_table) |
+
 ## Documentation
 
 - [MCP Integration Overview](mcp/README_EN.md) — **entry point for both integration paths**: wrap your own system as MCP, or bridge a third-party system in
@@ -90,6 +105,16 @@ irm https://astral.sh/uv/install.ps1 | iex
 ## API Documentation
 
 After starting, visit http://localhost:2124/docs for complete API documentation.
+
+## 💼 Enterprise & Commercial Deployment
+
+Deploying smart warehouse tracking or voice-driven picking across enterprise logistics hubs?
+
+- **Volume Hardware Pricing**: Tiered pricing available for regional distribution centers and 100+ warehouse deployments.
+- **Custom Industrial Gateways**: Custom DIN-rail carriers, pre-loaded golden OS images, dual 4G/5G failover, and international certifications (CE/FCC/RoHS).
+- **ERP / WMS System Integration**: Seamless integration with SAP, Kingdee, Yonyou, and custom ERPs via standard MCP & REST APIs.
+
+👉 **[Contact Seeed Enterprise Solution Team](https://www.seeed.cc/customization?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=footer_enterprise)** or submit your project requirements at the [Smart Warehouse Solution Page](https://www.seeed.cc/solutions/smart-warehouse-management?utm_source=github&utm_medium=readme&utm_campaign=warehouse_system&utm_content=footer_solution).
 
 ## License
 
