@@ -2207,7 +2207,15 @@ def _count_rows_for_scope(cursor, table: str, tenant_id: Optional[int]) -> int:
     return cursor.fetchone()['count']
 
 
-def _clear_database_scope(cursor, tenant_id: Optional[int]) -> dict:
+def _clear_database_scope(cursor, tenant_id: Optional[int], ensure_default: bool = True) -> dict:
+    """删除作用域内的仓库业务数据。
+
+    ``ensure_default=False`` 时不补建默认仓库：整库导入（``_import_tenant_database``）
+    紧接着就会把备份里的 warehouses 行插回来，先建一个占位仓库只会让备份里那行撞名
+    被改名（``default`` → ``default-t1``），最后多出一个空的重复仓库，并把租户变成
+    多仓库状态 —— 之后任何未显式带 ``warehouse_id`` 的写操作（Excel 导入、语音入库）
+    都会 400「写操作必须指定仓库」（issue #24）。
+    """
     details = {table: _count_rows_for_scope(cursor, table, tenant_id) for table in WAREHOUSE_TABLES}
 
     if tenant_id is None:
@@ -2220,9 +2228,10 @@ def _clear_database_scope(cursor, tenant_id: Optional[int]) -> dict:
         cursor.execute('UPDATE api_keys SET warehouse_id = NULL')
         cursor.execute('UPDATE mcp_connections SET warehouse_id = NULL')
         cursor.execute('DELETE FROM warehouses')
-        cursor.execute('SELECT id FROM tenants WHERE is_active = 1 ORDER BY id')
-        for row in cursor.fetchall():
-            _ensure_default_warehouse_for_tenant(cursor, row['id'])
+        if ensure_default:
+            cursor.execute('SELECT id FROM tenants WHERE is_active = 1 ORDER BY id')
+            for row in cursor.fetchall():
+                _ensure_default_warehouse_for_tenant(cursor, row['id'])
         return details
 
     cursor.execute('SELECT id FROM warehouses WHERE tenant_id = ?', (tenant_id,))
@@ -2243,7 +2252,8 @@ def _clear_database_scope(cursor, tenant_id: Optional[int]) -> dict:
         cursor.execute(f'UPDATE api_keys SET warehouse_id = NULL WHERE warehouse_id IN ({placeholders})', wh_ids)
         cursor.execute(f'UPDATE mcp_connections SET warehouse_id = NULL WHERE warehouse_id IN ({placeholders})', wh_ids)
     cursor.execute('DELETE FROM warehouses WHERE tenant_id = ?', (tenant_id,))
-    _ensure_default_warehouse_for_tenant(cursor, tenant_id)
+    if ensure_default:
+        _ensure_default_warehouse_for_tenant(cursor, tenant_id)
     return details
 
 
@@ -2281,7 +2291,10 @@ def _insert_row_with_overrides(cursor, table: str, row, target_columns: set, ove
 
 def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant_id: int) -> dict:
     details = {}
-    _clear_database_scope(cursor, tenant_id)
+    # 不补建默认仓库：备份里的 warehouses 行马上就会插进来，先建占位仓库会让它撞名
+    # 被改名，最后多出一个空的重复仓库（issue #24）。备份确实没有 warehouses 表时，
+    # 由下面的 `if not warehouse_map` 分支兜底补一个。
+    _clear_database_scope(cursor, tenant_id, ensure_default=False)
 
     target_columns = {}
     for table in WAREHOUSE_TABLES:
@@ -2300,6 +2313,7 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
         wh_rows = import_cursor.fetchall()
     else:
         wh_rows = []
+    imported_default_id = None
     for row in wh_rows:
         old_id = row['id'] if 'id' in row.keys() else None
         slug = row['slug'] if 'slug' in row.keys() and row['slug'] else f'tenant-{tenant_id}-warehouse'
@@ -2313,10 +2327,23 @@ def _import_tenant_database(cursor, import_cursor, available_tables: set, tenant
         )
         if old_id is not None:
             warehouse_map[old_id] = new_id
+            # 备份里标了 is_default 的那一行优先当默认仓库；老备份可能一行都没标，
+            # 此时退回第一个导入的仓库（见下方归一）。
+            source_is_default = row['is_default'] if 'is_default' in row.keys() else 0
+            if imported_default_id is None and source_is_default:
+                imported_default_id = new_id
     if not warehouse_map:
         default_id = _ensure_default_warehouse_for_tenant(cursor, tenant_id)
     else:
-        default_id = next(iter(warehouse_map.values()))
+        default_id = imported_default_id or next(iter(warehouse_map.values()))
+        # 归一：该租户恰好一行 is_default=1。备份里可能一行都没标（老库），也可能
+        # 因为历史版本的重复导入标了多行；留着多行会让仓库下拉出现多个 ★，也会让
+        # api_keys/mcp_connections 的默认仓库回填在多个候选里挑。
+        cursor.execute(
+            'UPDATE warehouses SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END'
+            ' WHERE tenant_id = ?',
+            (default_id, tenant_id),
+        )
 
     if 'contacts' in available_tables:
         import_cursor.execute('SELECT * FROM contacts')

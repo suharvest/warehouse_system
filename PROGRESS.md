@@ -5,6 +5,22 @@ Each entry: short title + date + context + takeaway.
 
 ---
 
+## 2026-10-21 — 整库导入先建了占位仓库，导入完就多一个空的重复仓库
+
+现场报障「想清除所有数据，重新导入，报错」。走的是界面上的「导入数据库 / 从备份文件恢复仓库数据」（= 清空 + 重新导入），之后**再也导不进库存**，`POST /api/materials/import-excel/confirm` 400 `写操作必须指定仓库 (warehouse_id)`。
+
+链路是两步前后打架：`_clear_database_scope()` 删完该租户的仓库后**无条件**调 `_ensure_default_warehouse_for_tenant()` 建一个占位仓库；紧接着 `_import_tenant_database()` 又把备份里的 `warehouses` 行插回来，slug 撞名 → `_unique_warehouse_slug()` 改名（`default` → `default-t1`）。结果是占位仓库 + 导入仓库并存，且两行的 `is_default` 都是 1（`_insert_row_with_overrides` 原样从备份拷贝）。每导入一次多一个；备份本身含多个仓库时继续累积。
+
+真正致命的不是列表里多一行，而是**仓库数 > 1 之后 `infer_single_writable_warehouse_id()` 不再自动选仓**：UI 在「全部仓库」视图下发的 `warehouse_id` 是 `null`，于是所有没显式带仓库的写操作（Excel 导入、语音入库）全部 400。叠加前端按 **slug** 记住所选仓库（`localStorage` + `/w/<slug>/`），导入后 slug `default` 命中的是那个空占位仓库，数据其实在 `default-t1` 里 —— 用户看到「提示导入成功但库存是空的」，以为数据丢了。
+
+修法：`_clear_database_scope(cursor, tenant_id, ensure_default=True)` 加开关，整库导入传 `ensure_default=False`，不再预建占位仓库；导入循环里记住备份中标了 `is_default` 的那一行当默认仓库，循环后 `UPDATE ... CASE WHEN id = ? THEN 1 ELSE 0 END` 归一，保证该租户恰好一行 `is_default=1`；备份确实没有 `warehouses` 表（老库/精简备份）时才走 `_ensure_default_warehouse_for_tenant()` 兜底。`/api/database/clear` 仍用默认的 `ensure_default=True`，行为不变。
+
+回归测试 `tests/test_database_import_warehouse_dedup.py` 四条：不重复建仓、`is_default` 归一、无 `warehouses` 表的备份仍兜底、以及**报障原文那条**（整库导入后 Excel 导入必须 200）。去掉 `backend/app.py` 的改动后前三条必挂。
+
+排查时注意：`uv sync/uv run` 会把 `uv.lock` 的所有 index URL 改写成本地镜像（aliyun），每次跑完记得 `git checkout -- uv.lock`，否则 diff 是 2150 行噪音。
+
+---
+
 ## 2026-09-22 — 外部后端不可达时熔断，别让语音端等满超时
 
 `BaseProvider.http_get/http_post` 原来对 `ConnectionError` 的处理是返回 `error="无法连接到后端服务"`，每次调用都要先卡满 `connect_timeout` 才失败。外部后端整个挂掉时，一轮对话里连着几个工具调用就是十几秒无响应，用户侧看不出是对方挂了还是设备卡了。
